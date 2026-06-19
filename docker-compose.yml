@@ -1,0 +1,54 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: tickety
+      POSTGRES_PASSWORD: tickety
+      POSTGRES_DB: tickety
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tickety"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build: .
+    command: uvicorn app.backend.main:app --host 0.0.0.0 --port 8000
+    volumes:
+      - ./app:/app/app
+    env_file: .env
+    environment:
+      - DATABASE_URL=postgresql+psycopg2://tickety:tickety@postgres:5432/tickety
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build: .
+    command: npm run start -- --port 3000
+    workdir: /app/app/frontend-next
+    volumes:
+      - ./app/frontend-next:/app/app/frontend-next
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_WS_URL=ws://localhost:8000
+      # Server-only (non-NEXT_PUBLIC) backend address for the /api and /ws
+      # proxies in server.js. NEXT_PUBLIC_* vars are inlined at build time and
+      # ignored at runtime; the frontend container reaches the backend via the
+      # compose service name, not localhost.
+      - BACKEND_URL=http://backend:8000
+      - PORT=3000
+      - HOSTNAME=0.0.0.0
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:

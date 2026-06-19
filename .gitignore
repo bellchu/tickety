@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Secrets & env
+.env
+*.secret
+secrets.yaml
+k8s/secrets.yaml
+
+# Build artifacts
+.next/
+dist/
+build/
+*.egg-info/
+
+# Docker
+*.tar
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Database
+*.db
+*.sqlite

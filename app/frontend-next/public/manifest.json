@@ -1,0 +1,36 @@
+{
+  "platform-version": "3.0",
+  "product": {
+    "freshservice": {
+      "location": {
+        "ticket_sidebar": {
+          "url": "tickety.html",
+          "icon": "tickety.svg"
+        }
+      }
+    }
+  },
+  "features": {
+    "oauth": {
+      "client_id": "{{FRESHSERVICE_OAUTH_CLIENT_ID}}",
+      "client_secret": "{{FRESHSERVICE_OAUTH_CLIENT_SECRET}}",
+      "redirect_uri": "{{FRESHSERVICE_OAUTH_REDIRECT_URI}}",
+      "scopes": [
+        "freshservice.tickets.view",
+        "freshservice.tickets.edit",
+        "freshservice.agents.manage",
+        "freshservice.requesters.view"
+      ]
+    },
+    "request": {
+      "methods": ["GET", "POST", "PUT"],
+      "domains": ["*"]
+    },
+    "dataStorage": {
+      "enabled": true
+    }
+  },
+  "engines": {
+    "node": "20"
+  }
+}

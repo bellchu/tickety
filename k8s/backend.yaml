@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: tickety
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      initContainers:
+      - name: wait-for-postgres
+        image: tickety-backend:latest
+        imagePullPolicy: Never
+        envFrom:
+        - secretRef:
+            name: tickety-secrets
+        command:
+          - python
+          - -c
+          - |
+            import time, psycopg2, os
+            url = os.getenv("DATABASE_URL","").replace("postgresql+psycopg2://","postgresql://")
+            print(f"Connecting to: {url}")
+            for i in range(60):
+                try:
+                    conn = psycopg2.connect(url)
+                    conn.close()
+                    print("Postgres is ready")
+                    break
+                except Exception as e:
+                    print(f"Waiting for postgres... ({e})")
+                    time.sleep(2)
+            else:
+                raise SystemExit("Postgres did not become ready")
+      containers:
+      - name: backend
+        image: tickety-backend:latest
+        imagePullPolicy: Never
+        command: ["uvicorn", "app.backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+        ports:
+        - containerPort: 8000
+        envFrom:
+        - secretRef:
+            name: tickety-secrets
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-service
+  namespace: tickety
+spec:
+  selector:
+    app: backend
+  ports:
+    - protocol: TCP
+      port: 8000
+      targetPort: 8000
