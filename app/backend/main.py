@@ -34,7 +34,7 @@ from . import settings as settings_module
 
 # Single source of truth for the backend version. Bump when shipping user-visible
 # changes. Build SHA/time are injected at image build time (see Dockerfile).
-VERSION = "2.2.0"
+VERSION = "0.18.0"
 BUILD_SHA = os.getenv("TICKETY_BUILD_SHA", "local")
 BUILD_TIME = os.getenv("TICKETY_BUILD_TIME", "")
 
