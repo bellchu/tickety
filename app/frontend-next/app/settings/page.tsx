@@ -672,14 +672,11 @@ function ToggleRow({ label, desc, value, onChange }: { label: string; desc: stri
         type="button"
         onClick={() => onChange(!value)}
         className={cn(
-          "relative shrink-0 w-10 h-5 rounded-full transition-colors ml-3",
-          value ? "bg-moss-500" : "bg-linen-400"
+          "relative shrink-0 w-10 h-5 rounded-full transition-colors ml-3 flex items-center",
+          value ? "bg-moss-500 justify-end" : "bg-linen-400 justify-start"
         )}
       >
-        <span className={cn(
-          "absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform",
-          value ? "translate-x-5" : "translate-x-0.5"
-        )} />
+        <span className="w-4 h-4 rounded-full bg-white shadow-sm transition-all mx-0.5" />
       </button>
     </div>
   );
@@ -865,14 +862,11 @@ function NotificationSection() {
                 type="button"
                 onClick={() => updateMut.mutate({ event: n.event, enabled: !n.enabled, channels: n.channels })}
                 className={cn(
-                  "relative shrink-0 w-10 h-5 rounded-full transition-colors",
-                  n.enabled ? "bg-moss-500" : "bg-linen-400"
+                  "relative shrink-0 w-10 h-5 rounded-full transition-colors flex items-center",
+                  n.enabled ? "bg-moss-500 justify-end" : "bg-linen-400 justify-start"
                 )}
               >
-                <span className={cn(
-                  "absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform",
-                  n.enabled ? "translate-x-5" : "translate-x-0.5"
-                )} />
+                <span className="w-4 h-4 rounded-full bg-white shadow-sm transition-all mx-0.5" />
               </button>
             </div>
           ))}
