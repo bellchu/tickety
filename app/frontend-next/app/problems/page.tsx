@@ -99,7 +99,7 @@ export default function ProblemsPage() {
             <select
               value={statusFilter}
               onChange={(e) => setStatusFilter(e.target.value)}
-              className="input-base pl-9 text-xs w-44"
+              className="input-base input-search text-xs w-44"
             >
               {PROBLEM_STATUS_FILTERS.map((f) => (
                 <option key={f.value} value={f.value}>
@@ -115,7 +115,7 @@ export default function ProblemsPage() {
               placeholder="Search problems…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="input-base pl-9 text-xs w-48"
+              className="input-base input-search text-xs w-48"
             />
           </div>
           <button

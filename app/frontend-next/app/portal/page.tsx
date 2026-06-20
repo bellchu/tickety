@@ -94,7 +94,7 @@ export default function PortalPage() {
                 value={reporter}
                 onChange={(e) => setReporter(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && handleLookup()}
-                className="input-base pl-9 text-xs"
+                className="input-base input-search text-xs"
                 placeholder="you@company.com"
               />
             </div>

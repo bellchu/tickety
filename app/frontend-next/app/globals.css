@@ -102,6 +102,11 @@ body {
   border: 1px solid var(--border);
   color: var(--fg);
 }
+
+/* Search input — space on the left for the magnifying glass icon. */
+.input-search {
+  @apply !pl-9 pr-3;
+}
 .input-base::placeholder {
   color: var(--fg-muted);
 }

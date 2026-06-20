@@ -53,7 +53,7 @@ export function TicketList() {
             placeholder="Search tickets…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="input-base pl-10"
+            className="input-base input-search"
           />
         </div>
         <div className="flex items-center gap-2">

@@ -112,7 +112,7 @@ export default function TimePage() {
           <select
             value={filterTicket}
             onChange={(e) => setFilterTicket(e.target.value)}
-            className="input-base pl-9 text-xs"
+            className="input-base input-search text-xs"
           >
             <option value="">All Tickets</option>
             {(tickets || []).map((t) => (

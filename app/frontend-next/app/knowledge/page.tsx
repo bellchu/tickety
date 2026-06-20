@@ -80,7 +80,7 @@ export default function KnowledgeBasePage() {
             placeholder="Search articles…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="input-base pl-10"
+            className="input-base input-search"
           />
         </div>
         <select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)} className="input-base w-48">

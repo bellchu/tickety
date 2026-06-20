@@ -109,7 +109,7 @@ export function SearchableSelect({
           onFocus={() => { setOpen(true); setQuery(""); }}
           onKeyDown={handleKeyDown}
           placeholder={placeholder}
-          className="input-base pl-9 pr-8"
+          className="input-base input-search pr-8"
           disabled={disabled}
         />
         <button

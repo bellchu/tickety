@@ -65,7 +65,7 @@ export default function ServicesPage() {
               placeholder="Search services…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="input-base pl-9 text-xs w-48"
+              className="input-base input-search text-xs w-48"
             />
           </div>
           <select value={category} onChange={(e) => setCategory(e.target.value)} className="input-base text-xs w-40">

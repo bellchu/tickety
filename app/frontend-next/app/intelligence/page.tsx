@@ -371,7 +371,7 @@ function HealthPanel() {
               value={reporter}
               onChange={(e) => setReporter(e.target.value)}
               placeholder="reporter / customer"
-              className="input-base pl-8 py-1.5 text-sm w-44"
+              className="input-base input-search py-1.5 text-sm w-44"
             />
           </div>
           <button type="submit" className="px-3 rounded-lg bg-ink-700 text-white text-sm hover:bg-ink-800">

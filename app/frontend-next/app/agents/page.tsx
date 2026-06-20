@@ -72,7 +72,7 @@ export default function AgentsPage() {
               placeholder="Search agents…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="input-base pl-9 text-xs w-48"
+              className="input-base input-search text-xs w-48"
             />
           </div>
           <button onClick={() => setShowForm(true)} className="btn-primary text-xs">

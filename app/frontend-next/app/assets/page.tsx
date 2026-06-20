@@ -169,7 +169,7 @@ export default function AssetsPage() {
             placeholder="Search assets…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="input-base pl-9 text-xs"
+            className="input-base input-search text-xs"
           />
         </div>
       </div>
