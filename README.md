@@ -29,7 +29,7 @@ Tickety — ITSM platform with built-in AI. Runs standalone or connects to an ex
 |---|---|
 | Backend | Python 3.11 · FastAPI · SQLAlchemy · APScheduler |
 | Frontend | Next.js 14 · Tailwind CSS · TanStack Query · Recharts |
-| AI | LiteLLM (DeepSeek · OpenAI · OpenRouter · Azure) |
+| AI | LiteLLM (DeepSeek · OpenAI · OpenRouter · Azure · Custom) |
 | Database | PostgreSQL |
 | Infra | Docker · Kubernetes · OrbStack |
 
@@ -43,7 +43,36 @@ open http://localhost:3000
 
 > **Demo mode is on by default.** No login required — the app auto-signs you in as the first active user (Alice Chen, admin). To require authentication, go to **Settings → Security & Auth** and enable **"Require Login"**. See [Production mode](#production-mode) below.
 
-Demo accounts (when login is required): `alice@company.com` / `bob@company.com` / `carol@company.com` — password `tickety123`
+**Default demo accounts** (when login is required):
+`alice@company.com` / `bob@company.com` / `carol@company.com` — password `tickety123`
+
+## LLM Providers
+
+Tickety supports **5 built-in providers** plus a **custom provider** for any OpenAI-compatible endpoint:
+
+| Provider | Model format | Notes |
+|---|---|---|
+| **DeepSeek** | `deepseek-v4-flash`, `deepseek-v4-pro` | Default provider — needs `DEEPSEEK_API_KEY` |
+| **OpenAI** | `openai/gpt-4o`, `openai/gpt-4o-mini` | Needs `OPENAI_API_KEY`, optional `OPENAI_API_BASE` for proxies |
+| **OpenRouter** | `openrouter/<model-id>` | Aggregates 200+ models — `OPENROUTER_API_KEY` |
+| **Azure** | `azure/<deployment-name>` | Azure OpenAI — `AZURE_API_KEY` + `AZURE_API_BASE` + `AZURE_API_VERSION` |
+| **Azure AI** | `azure_ai/<model-id>` | Models as a Service — `AZURE_AI_API_KEY` + `AZURE_AI_API_BASE` |
+| **Custom** | `custom/<any-model>` | Any OpenAI-compatible API (vLLM, Ollama, Groq, Together AI, etc.) |
+
+### Custom Provider
+
+Configure any OpenAI-compatible endpoint via **Settings → LLM Configuration → Custom (OpenAI-compatible)**:
+
+| Setting | Description |
+|---|---|
+| Custom API Key | Your provider's API key |
+| Custom API Base URL | Endpoint URL (e.g. `https://api.groq.com/openai/v1`) |
+| LiteLLM Provider Type | Default `openai` — also supports `anthropic`, `gemini`, `groq`, `together_ai` etc. |
+| API Version | Optional (e.g. `2024-10-21`) |
+| Temperature | Optional 0–2 (e.g. `0.7`) |
+| Max Tokens | Optional (e.g. `4096`) |
+| Default Model | Free-text — type any model name your provider supports |
+| **Fetch Latest Models** | Auto-discovers available models from your custom endpoint |
 
 ## Production mode
 
@@ -127,7 +156,7 @@ Tickety ships in **demo mode** — no authentication needed. For production:
 
 | Section | What you configure |
 |---|---|
-| LLM | Provider (DeepSeek/OpenAI/OpenRouter/Azure), default model, API keys, live model catalogue fetching |
+| LLM | Provider (DeepSeek/OpenAI/OpenRouter/Azure/Custom), default model, API keys, live model fetching |
 | Ticketing mode | Standalone (built-in) or external ITSM provider |
 | SLA targets | Resolution-time targets per priority (P1/P2/P3 hours) |
 | Agents | Create and manage accounts, assign admin/supervisor/agent roles |
