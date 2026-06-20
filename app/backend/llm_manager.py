@@ -29,7 +29,7 @@ load_dotenv()
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_MODELS = {"deepseek-v4-flash", "deepseek-v4-pro"}
-DEFAULT_MODEL = "deepseek-v4-flash"
+DEFAULT_MODEL = ""
 
 # A provider entry:
 #   label            : human label for the UI
@@ -202,8 +202,8 @@ def resolve_provider(model_name: str) -> str:
         cfg = PROVIDERS.get(pid)
         if cfg and cfg["match"](m):
             return pid
-    # Bare OpenAI-style names (gpt-4o, gpt-4.1-mini, ...) → OpenAI.
-    return "openai"
+    # Fallback: show DeepSeek as the recommended provider when no model is set.
+    return "deepseek"
 
 
 def get_llm_catalog() -> dict:

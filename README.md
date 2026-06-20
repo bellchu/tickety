@@ -36,7 +36,7 @@ Tickety — ITSM platform with built-in AI. Runs standalone or connects to an ex
 ## Quick start
 
 ```bash
-cp .env.example .env   # set DEEPSEEK_API_KEY and DATABASE_URL
+cp .env.example .env   # configure DATABASE_URL (and your preferred LLM keys)
 docker compose up -d    # or ./deploy.sh for K8s
 open http://localhost:3000
 ```
@@ -48,11 +48,13 @@ open http://localhost:3000
 
 ## LLM Providers
 
-Tickety supports **5 built-in providers** plus a **custom provider** for any OpenAI-compatible endpoint:
+Tickety supports **5 built-in providers** plus a **custom provider** for any OpenAI-compatible endpoint.
+
+> **Recommended:** [DeepSeek](https://deepseek.com) offers the best price/performance ratio — ~10× cheaper than GPT-4o with comparable quality for triage and summarization tasks.
 
 | Provider | Model format | Notes |
 |---|---|---|
-| **DeepSeek** | `deepseek-v4-flash`, `deepseek-v4-pro` | Default provider — needs `DEEPSEEK_API_KEY` |
+| **DeepSeek** | `deepseek-v4-flash`, `deepseek-v4-pro` | Best value — needs `DEEPSEEK_API_KEY` |
 | **OpenAI** | `openai/gpt-4o`, `openai/gpt-4o-mini` | Needs `OPENAI_API_KEY`, optional `OPENAI_API_BASE` for proxies |
 | **OpenRouter** | `openrouter/<model-id>` | Aggregates 200+ models — `OPENROUTER_API_KEY` |
 | **Azure** | `azure/<deployment-name>` | Azure OpenAI — `AZURE_API_KEY` + `AZURE_API_BASE` + `AZURE_API_VERSION` |
