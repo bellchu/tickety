@@ -290,6 +290,14 @@ export default function SettingsPage() {
             onChange={(v) => handleChange("LOGIN_REQUIRED", v ? "true" : "false")}
           />
 
+          {(form.LOGIN_REQUIRED as string) === "true" && (
+            <div className="rounded border border-amber-400/40 bg-amber-400/5 p-3 text-xs text-ink-600">
+              <p className="font-medium mb-1">Default demo accounts (seeded on first start):</p>
+              <p>alice@company.com · bob@company.com · carol@company.com</p>
+              <p>Password: <code className="bg-linen-200 px-1 rounded">tickety123</code></p>
+            </div>
+          )}
+
           <div className="border-t border-linen-300 my-2" />
 
           <ToggleRow
