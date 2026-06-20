@@ -1,0 +1,30 @@
+{
+  "platform-version": "2.3",
+  "product": {
+    "tickety": {
+      "location": {
+        "full_page_app": {
+          "url": "index.html"
+        }
+      },
+      "events": {
+        "onTicketCreate": {
+          "handler": "onTicketCreate"
+        }
+      }
+    }
+  },
+  "engines": {
+    "node": "20"
+  },
+  "modules": {
+    "support_ticket": {
+      "location": {
+        "ticket_sidebar": {
+          "url": "index.html",
+          "icon": "icon.svg"
+        }
+      }
+    }
+  }
+}
