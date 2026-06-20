@@ -1,0 +1,140 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url("https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500;1,6..72,600&family=Geist+Mono:wght@400;500;600&display=swap");
+
+:root {
+  --background: #F3EBE2;
+  --foreground: #2B2620;
+  --surface: #FBF8F3;
+  --surface-2: #F3EBE2;
+  --surface-3: #EAE3D9;
+  --border: #E0D8CE;
+  --border-subtle: #EAE3D9;
+  --accent: #B5704A;
+  --accent-dark: #9A5A36;
+  --fg: #2B2620;
+  --fg-2: #5C554B;
+  --fg-muted: #8A8276;
+  --fg-inverse: #FBF8F3;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: "Geist", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.font-serif {
+  font-family: "Newsreader", Georgia, serif;
+}
+
+/* ═══ Card surface — warm, soft ═══ */
+.card-surface {
+  @apply bg-linen-50 rounded-2xl;
+  border: 1px solid var(--border-subtle);
+}
+
+/* ═══ KPI display ═══ */
+.kpi-value {
+  @apply text-[1.75rem] leading-none tracking-tight text-ink-700;
+  font-family: "Newsreader", Georgia, serif;
+  font-weight: 400;
+}
+
+.kpi-label {
+  @apply text-[11px] font-medium text-ink-400;
+  letter-spacing: 0.03em;
+}
+
+/* ═══ Badge — soft pill ═══ */
+.badge {
+  @apply inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium leading-none border;
+}
+
+/* ═══ Buttons — refined ═══ */
+.btn-primary {
+  @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-full text-sm font-medium transition-all;
+  background: var(--fg);
+  color: var(--fg-inverse);
+}
+.btn-primary:hover {
+  background: #1C1814;
+}
+.btn-primary:active {
+  @apply scale-[0.98];
+}
+.btn-primary:disabled {
+  @apply opacity-40 cursor-not-allowed;
+  transform: none;
+}
+
+.btn-secondary {
+  @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-full text-sm font-medium transition-colors;
+  background: var(--surface);
+  color: var(--fg-2);
+  border: 1px solid var(--border);
+}
+.btn-secondary:hover {
+  background: var(--surface-3);
+  color: var(--fg);
+}
+
+/* ═══ Skeleton loader ═══ */
+.skeleton {
+  @apply bg-gradient-to-r from-linen-200 via-linen-300 to-linen-200 bg-[length:200%_100%] animate-shimmer rounded-lg;
+}
+
+/* ═══ Form inputs ═══ */
+.input-base {
+  @apply w-full px-3 py-2 rounded-lg text-sm transition-colors;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--fg);
+}
+.input-base::placeholder {
+  color: var(--fg-muted);
+}
+.input-base:focus {
+  @apply outline-none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(181, 112, 74, 0.12);
+}
+
+/* ═══ Select ═══ */
+select.input-base {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='none'%3E%3Cpath d='M3 4.5l3 3 3-3' stroke='%238A8276' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 2rem;
+}
+
+/* ═══ Checkbox ═══ */
+input[type="checkbox"] {
+  @apply rounded;
+  accent-color: #B5704A;
+}
+
+/* ═══ Scrollbar ═══ */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #C5BEB6;
+  border-radius: 3px;
+}
