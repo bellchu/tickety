@@ -32,7 +32,6 @@ services:
   frontend:
     build: .
     command: npm run start -- --port 3000
-    workdir: /app/app/frontend-next
     volumes:
       - ./app/frontend-next:/app/app/frontend-next
     ports:
