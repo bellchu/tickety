@@ -50,7 +50,7 @@ open http://localhost:3000
 
 Tickety supports **5 built-in providers** plus a **custom provider** for any OpenAI-compatible endpoint.
 
-> **Recommended:** [DeepSeek](https://deepseek.com) offers the best price/performance ratio — ~10× cheaper than GPT-4o with comparable quality for triage and summarization tasks.
+> **Recommended:** [DeepSeek](https://deepseek.com) offers the best price/performance ratio among all major providers — excellent triage and summarization quality at a fraction of the cost.
 
 | Provider | Model format | Notes |
 |---|---|---|
