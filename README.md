@@ -8,6 +8,21 @@
 
 Tickety — ITSM platform with built-in AI. Runs standalone or connects to an external provider.
 
+## Screenshots
+
+<p align="center">
+  <img src="docs/screenshots/dashboard.png" width="48%" alt="Dashboard">
+  <img src="docs/screenshots/tickets.png" width="48%" alt="Tickets">
+  <img src="docs/screenshots/ticket-detail.png" width="48%" alt="Ticket Detail">
+  <img src="docs/screenshots/services.png" width="48%" alt="Service Catalog">
+  <img src="docs/screenshots/problems.png" width="48%" alt="Problem Management">
+  <img src="docs/screenshots/changes.png" width="48%" alt="Change Management">
+  <img src="docs/screenshots/assets.png" width="48%" alt="Asset Management">
+  <img src="docs/screenshots/knowledge.png" width="48%" alt="Knowledge Base">
+  <img src="docs/screenshots/reports.png" width="48%" alt="Reports">
+  <img src="docs/screenshots/settings.png" width="48%" alt="Settings">
+</p>
+
 ## Stack
 
 | Layer | Tech |
