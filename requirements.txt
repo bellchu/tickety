@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+pydantic
+langchain
+langchain-openai
+litellm
+chromadb
+pandas
+requests
+python-dotenv
+sqlalchemy
+psycopg2-binary
+apscheduler
+httpx
+websockets
