@@ -17,7 +17,7 @@ const PROVIDER_OPTIONS = [
   { value: "none", label: "None (disabled)" },
 ];
 
-const PROVIDER_IDS = ["deepseek", "openai", "openrouter", "azure", "azure_ai"] as const;
+const PROVIDER_IDS = ["deepseek", "openai", "openrouter", "azure", "azure_ai", "custom"] as const;
 
 const CATEGORY_COLORS = [
   { value: "slate", label: "Slate", className: "bg-linen-500" },
@@ -82,6 +82,7 @@ export default function SettingsPage() {
     if (model.startsWith("azure_ai/")) return "azure_ai";
     if (model.startsWith("azure/")) return "azure";
     if (model.startsWith("openai/")) return "openai";
+    if (model.startsWith("custom/")) return "custom";
     if (model.startsWith("deepseek")) return "deepseek";
     return (catalog.current_provider as string) || "deepseek";
   }, [form.DEFAULT_MODEL, catalog]);
@@ -278,6 +279,51 @@ export default function SettingsPage() {
               />
             ))}
           </div>
+        </SettingsSection>
+
+        {/* ═══ Security & Auth ═══ */}
+        <SettingsSection title="Security &amp; Authentication" subtitle="Require login and configure Single Sign-On (OIDC) for production deployments">
+          <ToggleRow
+            label="Require Login"
+            desc="When enabled, users must sign in. When disabled (default), the app runs in demo mode — no login needed."
+            value={(form.LOGIN_REQUIRED as string) === "true"}
+            onChange={(v) => handleChange("LOGIN_REQUIRED", v ? "true" : "false")}
+          />
+
+          <div className="border-t border-linen-300 my-2" />
+
+          <ToggleRow
+            label="Enable SSO (OIDC)"
+            desc="Allow users to sign in via an OpenID Connect provider (Google, Azure AD, Okta, etc.)"
+            value={(form.SSO_ENABLED as string) === "true"}
+            onChange={(v) => handleChange("SSO_ENABLED", v ? "true" : "false")}
+          />
+
+          {(form.SSO_ENABLED as string) === "true" && (
+            <div className="space-y-4 pt-2">
+              <Field label="SSO Provider Name">
+                <input type="text" value={form.SSO_PROVIDER || ""} onChange={(e) => handleChange("SSO_PROVIDER", e.target.value)} placeholder="e.g. Google, Azure AD, Okta" className="input-base" />
+              </Field>
+              <Field label="Client ID">
+                <input type="text" value={form.SSO_CLIENT_ID || ""} onChange={(e) => handleChange("SSO_CLIENT_ID", e.target.value)} placeholder="OIDC client ID" className="input-base" />
+              </Field>
+              <Field label="Client Secret">
+                <SecretInput value={form.SSO_CLIENT_SECRET || ""} onChange={(v) => handleChange("SSO_CLIENT_SECRET", v)} placeholder="OIDC client secret" />
+              </Field>
+              <Field label="Discovery URL">
+                <input type="text" value={form.SSO_DISCOVERY_URL || ""} onChange={(e) => handleChange("SSO_DISCOVERY_URL", e.target.value)} placeholder="https://accounts.google.com/.well-known/openid-configuration" className="input-base" />
+              </Field>
+              <Field label="Redirect URI">
+                <input type="text" value={form.SSO_REDIRECT_URI || ""} onChange={(e) => handleChange("SSO_REDIRECT_URI", e.target.value)} placeholder="http://localhost:3000/api/auth/sso/callback" className="input-base" />
+              </Field>
+              <p className="text-xs text-ink-400">
+                Use the well-known URL for your provider. Common ones:<br />
+                Google: <code className="bg-linen-200 px-1">https://accounts.google.com/.well-known/openid-configuration</code><br />
+                Azure AD: <code className="bg-linen-200 px-1">https://login.microsoftonline.com/&#123;tenant&#125;/v2.0/.well-known/openid-configuration</code><br />
+                Okta: <code className="bg-linen-200 px-1">https://&#123;your-domain&#125;/.well-known/openid-configuration</code>
+              </p>
+            </div>
+          )}
         </SettingsSection>
 
         {/* ═══ Custom Statuses ═══ */}

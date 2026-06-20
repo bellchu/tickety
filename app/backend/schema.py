@@ -161,6 +161,12 @@ class Settings(BaseModel):
     AZURE_API_VERSION: Optional[str] = None
     AZURE_AI_API_KEY: Optional[str] = None
     AZURE_AI_API_BASE: Optional[str] = None
+    CUSTOM_API_KEY: Optional[str] = None
+    CUSTOM_API_BASE: Optional[str] = None
+    CUSTOM_PROVIDER_TYPE: Optional[str] = None
+    CUSTOM_API_VERSION: Optional[str] = None
+    CUSTOM_TEMPERATURE: Optional[str] = None
+    CUSTOM_MAX_TOKENS: Optional[str] = None
     DEFAULT_MODEL: Optional[str] = None
     DATABASE_URL: Optional[str] = None
     ITSM_PROVIDER: Optional[str] = None
@@ -191,6 +197,15 @@ class Settings(BaseModel):
     AUTO_ROUTE_ENABLED: Optional[str] = None
     AUTO_RESOLVE_ENABLED: Optional[str] = None
     AUTO_SYSTEMIC_ENABLED: Optional[str] = None
+
+    # Auth / Security
+    LOGIN_REQUIRED: Optional[str] = None
+    SSO_ENABLED: Optional[str] = None
+    SSO_PROVIDER: Optional[str] = None
+    SSO_CLIENT_ID: Optional[str] = None
+    SSO_CLIENT_SECRET: Optional[str] = None
+    SSO_DISCOVERY_URL: Optional[str] = None
+    SSO_REDIRECT_URI: Optional[str] = None
 
     # Allow any provider-specific key from the catalog without re-declaring.
     model_config = {"extra": "allow"}

@@ -3,12 +3,15 @@ import json
 import asyncio
 import secrets
 import hashlib
+import urllib.parse
 from datetime import datetime, timedelta
 from typing import List, Optional
 
+import httpx
+
 from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query, Request, Response, Cookie
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, func
 
@@ -442,6 +445,7 @@ async def trigger_triage(ticket_id: str, db: Session = Depends(get_db)):
 
 SESSION_COOKIE = "tickety_session"
 SESSION_TTL_DAYS = 14
+SSO_STATE_COOKIE = "tickety_sso_state"
 
 
 def _hash_password(password: str) -> str:
@@ -474,8 +478,9 @@ def get_current_user(
 ) -> UserRecord:
     """Dependency: resolve the logged-in user from the session cookie.
 
-    Falls back to the first user (demo/single-user mode) when no session exists,
-    so existing deployments keep working without a login step."""
+    Falls back to the first user (demo/single-user mode) when no session exists
+    and LOGIN_REQUIRED is not enabled. Set LOGIN_REQUIRED=true in settings for
+    production deployments that need mandatory authentication."""
     token = request.cookies.get(SESSION_COOKIE)
     if token:
         session = db.query(SessionRecord).filter(SessionRecord.token == token).first()
@@ -483,10 +488,11 @@ def get_current_user(
             user = db.query(UserRecord).filter(UserRecord.id == session.user_id).first()
             if user and user.is_active:
                 return user
-    # Fallback: first active user (single-user/demo mode)
-    user = db.query(UserRecord).filter(UserRecord.is_active.is_(True)).first()
-    if user:
-        return user
+    # Fallback: first active user (single-user/demo mode) — only when login is not required
+    if os.getenv("LOGIN_REQUIRED", "").lower() != "true":
+        user = db.query(UserRecord).filter(UserRecord.is_active.is_(True)).first()
+        if user:
+            return user
     raise HTTPException(status_code=401, detail="Not authenticated")
 
 
@@ -530,6 +536,159 @@ async def logout(request: Request, db: Session = Depends(get_db)):
 @app.get("/auth/me", response_model=UserOut)
 async def auth_me(user: UserRecord = Depends(get_current_user)):
     return user
+
+
+# ── SSO (OIDC) ──────────────────────────────────────────────────
+
+@app.get("/auth/sso/config")
+async def sso_config():
+    return {
+        "enabled": os.getenv("SSO_ENABLED", "").lower() == "true",
+        "provider": os.getenv("SSO_PROVIDER", ""),
+    }
+
+
+@app.get("/auth/sso/login")
+async def sso_login():
+    if os.getenv("SSO_ENABLED", "").lower() != "true":
+        raise HTTPException(status_code=400, detail="SSO is not enabled")
+
+    client_id = os.getenv("SSO_CLIENT_ID", "")
+    redirect_uri = os.getenv("SSO_REDIRECT_URI", "")
+    discovery_url = os.getenv("SSO_DISCOVERY_URL", "")
+
+    if not client_id or not redirect_uri or not discovery_url:
+        raise HTTPException(status_code=400, detail="SSO is not fully configured")
+
+    try:
+        async with httpx.AsyncClient() as hc:
+            resp = await hc.get(discovery_url)
+            resp.raise_for_status()
+            config = resp.json()
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to fetch OIDC discovery document")
+
+    auth_endpoint = config.get("authorization_endpoint")
+    if not auth_endpoint:
+        raise HTTPException(status_code=500, detail="OIDC provider missing authorization_endpoint")
+
+    state = secrets.token_urlsafe(32)
+    params = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "state": state,
+    }
+    url = f"{auth_endpoint}?{urllib.parse.urlencode(params)}"
+
+    resp = RedirectResponse(url=url, status_code=302)
+    resp.set_cookie(SSO_STATE_COOKIE, state, max_age=600, httponly=True, samesite="lax")
+    return resp
+
+
+@app.get("/auth/sso/callback")
+async def sso_callback(
+    code: str, state: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    if os.getenv("SSO_ENABLED", "").lower() != "true":
+        raise HTTPException(status_code=400, detail="SSO is not enabled")
+
+    saved_state = request.cookies.get(SSO_STATE_COOKIE)
+    if not saved_state or saved_state != state:
+        raise HTTPException(status_code=400, detail="Invalid state parameter")
+
+    client_id = os.getenv("SSO_CLIENT_ID", "")
+    client_secret = os.getenv("SSO_CLIENT_SECRET", "")
+    redirect_uri = os.getenv("SSO_REDIRECT_URI", "")
+    discovery_url = os.getenv("SSO_DISCOVERY_URL", "")
+
+    try:
+        async with httpx.AsyncClient() as hc:
+            resp = await hc.get(discovery_url)
+            resp.raise_for_status()
+            config = resp.json()
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to fetch OIDC discovery document")
+
+    token_endpoint = config.get("token_endpoint")
+    userinfo_endpoint = config.get("userinfo_endpoint")
+    if not token_endpoint:
+        raise HTTPException(status_code=500, detail="OIDC provider missing token_endpoint")
+
+    # Exchange code for tokens
+    token_data = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "client_id": client_id,
+        "client_secret": client_secret,
+    }
+    try:
+        async with httpx.AsyncClient() as hc:
+            token_resp = await hc.post(token_endpoint, data=token_data)
+            token_resp.raise_for_status()
+            token_json = token_resp.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Failed to exchange authorization code")
+
+    access_token = token_json.get("access_token")
+    if not access_token:
+        raise HTTPException(status_code=400, detail="No access_token in token response")
+
+    # Fetch userinfo
+    email = None
+    name = None
+    if userinfo_endpoint:
+        try:
+            async with httpx.AsyncClient() as hc:
+                ui_resp = await hc.get(
+                    userinfo_endpoint,
+                    headers={"Authorization": f"Bearer {access_token}"},
+                )
+                ui_resp.raise_for_status()
+                userinfo = ui_resp.json()
+                email = userinfo.get("email")
+                name = userinfo.get("name") or userinfo.get("preferred_username")
+        except Exception:
+            raise HTTPException(status_code=400, detail="Failed to fetch userinfo")
+
+    if not email:
+        raise HTTPException(status_code=400, detail="SSO provider did not return an email address")
+
+    # Find or create user
+    user = db.query(UserRecord).filter(UserRecord.email == email).first()
+    if not user:
+        user = UserRecord(
+            email=email,
+            name=name or email,
+            role="agent",
+            is_active=True,
+            password_hash="",
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    elif not user.is_active:
+        raise HTTPException(status_code=403, detail="Account is deactivated")
+
+    token = _create_session(db, user.id, request)
+    user.last_login_at = datetime.utcnow()
+    db.commit()
+
+    frontend_origin = os.getenv("NEXT_PUBLIC_API_URL", "")
+    # Strip trailing /api and / path
+    redirect_to = "/"
+    if frontend_origin:
+        parsed = urllib.parse.urlparse(frontend_origin)
+        redirect_to = f"{parsed.scheme}://{parsed.netloc}/"
+
+    resp = RedirectResponse(url=redirect_to, status_code=302)
+    resp.set_cookie(SESSION_COOKIE, token, max_age=SESSION_TTL_DAYS * 86400, httponly=True, samesite="lax")
+    resp.delete_cookie(SSO_STATE_COOKIE)
+    return resp
 
 
 # ── Users / Agents CRUD (standalone) ───────────────────────────

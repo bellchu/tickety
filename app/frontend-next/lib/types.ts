@@ -123,6 +123,12 @@ export interface Settings {
   AZURE_API_VERSION: string;
   AZURE_AI_API_KEY: string;
   AZURE_AI_API_BASE: string;
+  CUSTOM_API_KEY: string;
+  CUSTOM_API_BASE: string;
+  CUSTOM_PROVIDER_TYPE: string;
+  CUSTOM_API_VERSION: string;
+  CUSTOM_TEMPERATURE: string;
+  CUSTOM_MAX_TOKENS: string;
   DEFAULT_MODEL: string;
   DATABASE_URL: string;
   ITSM_PROVIDER: string;
@@ -146,6 +152,13 @@ export interface Settings {
   AUTO_ROUTE_ENABLED: string;
   AUTO_RESOLVE_ENABLED: string;
   AUTO_SYSTEMIC_ENABLED: string;
+  LOGIN_REQUIRED: string;
+  SSO_ENABLED: string;
+  SSO_PROVIDER: string;
+  SSO_CLIENT_ID: string;
+  SSO_CLIENT_SECRET: string;
+  SSO_DISCOVERY_URL: string;
+  SSO_REDIRECT_URI: string;
   [key: string]: string | boolean;
 }
 

@@ -41,7 +41,26 @@ docker compose up -d    # or ./deploy.sh for K8s
 open http://localhost:3000
 ```
 
-Demo accounts: `alice@company.com` / `bob@company.com` / `carol@company.com` — password `tickety123`
+> **Demo mode is on by default.** No login required — the app auto-signs you in as the first active user (Alice Chen, admin). To require authentication, go to **Settings → Security & Auth** and enable **"Require Login"**. See [Production mode](#production-mode) below.
+
+Demo accounts (when login is required): `alice@company.com` / `bob@company.com` / `carol@company.com` — password `tickety123`
+
+## Production mode
+
+Tickety ships in **demo mode** — no authentication needed. For production:
+
+1. Go to **Settings → Security & Auth**
+2. Enable **"Require Login"** — all API endpoints will require a valid session
+3. Optionally enable **SSO (OIDC)** — supports Google, Azure AD, Okta, and any OpenID Connect provider
+
+| Setting | What it does |
+|---|---|
+| Require Login | Toggle on/off. When off (default), any visitor is auto-signed in as the first active user. When on, users must sign in via email/password or SSO. |
+| Enable SSO | Enable OIDC-based Single Sign-On. Users see a "Sign in with SSO" button on the login page. |
+| SSO Provider Name | Display name shown on the SSO login button (e.g. "Google", "Okta"). |
+| Client ID / Secret | OIDC credentials from your identity provider. |
+| Discovery URL | Provider's `.well-known/openid-configuration` endpoint. |
+| Redirect URI | Must match the callback URL registered with your provider (e.g. `https://yourdomain.com/api/auth/sso/callback`). |
 
 ## Modules
 
@@ -60,7 +79,7 @@ Demo accounts: `alice@company.com` / `bob@company.com` / `carol@company.com` —
 | AI Pipeline | Auto-triage (sentiment/category/priority/mood/complexity) &rarr; auto-summarisation &rarr; auto-routing &rarr; auto-resolution plans |
 | SLA | Per-priority clocks, breach detection, escalation risk scoring, compliance reports |
 | Engagement | Impact points, tier promotions (T1&ndash;T8), momentum streaks, recognition badges, leaderboard |
-| Auth / RBAC | Cookie-based sessions, admin / supervisor / agent roles, login page |
+| Auth / RBAC | Cookie-based sessions, admin / supervisor / agent roles, login page, SSO (OIDC) |
 
 ## API
 
@@ -97,6 +116,10 @@ Demo accounts: `alice@company.com` / `bob@company.com` / `carol@company.com` —
 | `GET /intelligence/systemic` | Systemic issue clusters |
 | `GET /leaderboard` | Agent leaderboard (points, tier, rank) |
 | `POST /auth/login` | Session login (cookie) |
+| `POST /auth/logout` | Clear session |
+| `GET /auth/sso/config` | Check if SSO is enabled |
+| `GET /auth/sso/login` | Initiate OIDC login flow |
+| `GET /auth/sso/callback` | OIDC provider callback |
 | `GET /admin/settings` | List configuration keys |
 | `PUT /admin/settings` | Update configuration |
 
@@ -113,6 +136,7 @@ Demo accounts: `alice@company.com` / `bob@company.com` / `carol@company.com` —
 | Priorities | Custom priority levels with per-priority SLA hours and sort weights |
 | Organisation | Workspace name, logo URL, primary colour |
 | AI Automation | Toggle: auto-triage, auto-summarisation, auto-routing, auto-resolution, systemic detection |
+| Security & Auth | Require Login (production mode), SSO/OIDC (Google, Azure AD, Okta, generic) |
 | Notifications | Enable/disable alert events (new ticket, SLA breach, escalation, assignment, comment) per channel (in-app/email/webhook) |
 | Maintenance | Repair AI data gaps, retroactively triage untriaged tickets |
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { TicketyLogo } from "@/components/layout/TicketyLogo";
@@ -12,6 +12,16 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [ssoEnabled, setSsoEnabled] = useState(false);
+  const [ssoProvider, setSsoProvider] = useState("");
+  const [ssoLoading, setSsoLoading] = useState(false);
+
+  useEffect(() => {
+    api.getSsoConfig().then((cfg) => {
+      setSsoEnabled(cfg.enabled);
+      setSsoProvider(cfg.provider);
+    }).catch(() => {});
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -28,6 +38,11 @@ export default function LoginPage() {
     }
   };
 
+  const handleSsoLogin = () => {
+    setSsoLoading(true);
+    window.location.href = "/api/auth/sso/login";
+  };
+
   return (
     <div className="min-h-screen flex items-center justify-center bg-linen-100 px-4">
       <div className="w-full max-w-sm space-y-6">
@@ -39,6 +54,24 @@ export default function LoginPage() {
             <h1 className="font-serif text-2xl text-ink-700">Welcome back</h1>
             <p className="text-sm text-ink-500">Sign in to your IT support workspace</p>
           </div>
+
+          {ssoEnabled && (
+            <button
+              type="button"
+              onClick={handleSsoLogin}
+              disabled={ssoLoading}
+              className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg border-2 border-ink-700 text-ink-700 text-sm font-semibold hover:bg-ink-700 hover:text-white disabled:opacity-50 transition-colors"
+            >
+              {ssoLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />}
+              Sign in with {ssoProvider || "SSO"}
+            </button>
+          )}
+
+          <div className="relative">
+            <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-linen-400" /></div>
+            <div className="relative flex justify-center text-xs"><span className="bg-white px-2 text-ink-400">or</span></div>
+          </div>
+
           <form onSubmit={handleSubmit} className="space-y-4">
             <label className="block space-y-1.5">
               <span className="text-xs font-medium text-ink-500">Email</span>

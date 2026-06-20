@@ -20,6 +20,8 @@ load_dotenv()
 #   azure/<deployment-name>        -> Azure OpenAI (AI Foundry)
 #   azure_ai/<model>               -> Azure AI Foundry "models as a service"
 #                                     (Llama, Mistral, etc. via Foundry)
+#   custom/<model>                  -> Any OpenAI-compatible endpoint
+#                                     (vLLM, Ollama, Groq, Together, etc.)
 #
 # Adding a new provider = add an entry to PROVIDERS + register its env keys in
 # settings.py / schema.py. No other code changes required.
@@ -135,10 +137,34 @@ PROVIDERS = {
             "api_base": os.getenv("AZURE_AI_API_BASE"),
         },
     },
+    "custom": {
+        "label": "Custom (OpenAI-compatible)",
+        "models": [],
+        "free_text_model": True,
+        "model_hint": "Enter model name (e.g., gpt-4o, llama-3-70b, qwen-plus)",
+        "env_keys": [
+            {"key": "CUSTOM_API_KEY", "label": "Custom API Key", "secret": True, "placeholder": "sk-…"},
+            {"key": "CUSTOM_API_BASE", "label": "Custom API Base URL", "secret": False, "placeholder": "https://api.example.com/v1"},
+            {"key": "CUSTOM_PROVIDER_TYPE", "label": "LiteLLM Provider Type", "secret": False, "placeholder": "openai (default) | anthropic | gemini | groq | together_ai | …"},
+            {"key": "CUSTOM_API_VERSION", "label": "API Version (optional)", "secret": False, "placeholder": "2024-10-21"},
+            {"key": "CUSTOM_TEMPERATURE", "label": "Temperature (optional, 0–2)", "secret": False, "placeholder": "0.7"},
+            {"key": "CUSTOM_MAX_TOKENS", "label": "Max Tokens (optional)", "secret": False, "placeholder": "4096"},
+        ],
+        "match": lambda m: m.startswith("custom/"),
+        "build": lambda self, model: _filter_none({
+            "model": model[7:],
+            "api_key": os.getenv("CUSTOM_API_KEY"),
+            "custom_llm_provider": os.getenv("CUSTOM_PROVIDER_TYPE") or "openai",
+            "api_base": os.getenv("CUSTOM_API_BASE") or None,
+            "api_version": os.getenv("CUSTOM_API_VERSION") or None,
+            "temperature": _parse_float(os.getenv("CUSTOM_TEMPERATURE")),
+            "max_tokens": _parse_int(os.getenv("CUSTOM_MAX_TOKENS")),
+        }),
+    },
 }
 
 # Order in which prefix resolution is attempted. Most specific first.
-_PROVIDER_ORDER = ["openrouter", "azure_ai", "azure", "openai", "deepseek"]
+_PROVIDER_ORDER = ["openrouter", "azure_ai", "azure", "openai", "deepseek", "custom"]
 
 _PLACEHOLDER_VALUES = {"", None, "sk-your-key-here", "your-key-here"}
 
@@ -149,6 +175,24 @@ _MAX_RETRIES = 3
 
 def _filter_none(d: dict) -> dict:
     return {k: v for k, v in d.items() if v is not None}
+
+
+def _parse_float(raw: str | None) -> float | None:
+    if not raw:
+        return None
+    try:
+        return float(raw.strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_int(raw: str | None) -> int | None:
+    if not raw:
+        return None
+    try:
+        return int(raw.strip())
+    except (TypeError, ValueError):
+        return None
 
 
 def resolve_provider(model_name: str) -> str:
@@ -302,6 +346,15 @@ async def fetch_live_models() -> dict:
             results["openrouter"] = sorted(or_models, key=lambda x: x["label"].lower())
         except Exception as e:
             print(f"[llm] fetch openrouter models error: {e}")
+
+    # ── Custom (OpenAI-compatible) ──
+    custom_key = os.getenv("CUSTOM_API_KEY")
+    custom_base = os.getenv("CUSTOM_API_BASE")
+    if custom_key and custom_key not in _PLACEHOLDER_KEYS and custom_base:
+        try:
+            results["custom"] = await _fetch_openai_models(custom_key, custom_base)
+        except Exception as e:
+            print(f"[llm] fetch custom models error: {e}")
 
     # Persist
     if results:
