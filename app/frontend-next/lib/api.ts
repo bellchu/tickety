@@ -208,6 +208,16 @@ export const api = {
     fetchAPI<import("./types").ServiceRequest>("/service-requests", {
       method: "POST", body: JSON.stringify({ ticket_id: ticketId, service_item_id: serviceItemId, quantity, justification }),
     }),
+  decideServiceRequestApproval: (requestId: string, decision: "approved" | "rejected", comment = "") =>
+    fetchAPI<import("./types").ServiceRequest>(`/service-requests/${requestId}/approval`, {
+      method: "PATCH",
+      body: JSON.stringify({ decision, comment }),
+    }),
+  updateServiceRequestFulfillment: (requestId: string, status: "fulfilled" | "cancelled", deliveryNotes = "") =>
+    fetchAPI<import("./types").ServiceRequest>(`/service-requests/${requestId}/fulfillment`, {
+      method: "PATCH",
+      body: JSON.stringify({ status, delivery_notes: deliveryNotes }),
+    }),
   // Problem Management
   getProblems: (status?: string) => {
     const params = new URLSearchParams();
@@ -241,7 +251,10 @@ export const api = {
   addChangeApproval: (changeId: string, approverId: string) =>
     fetchAPI<import("./types").ChangeApproval>(`/changes/${changeId}/approvals`, { method: "POST", body: JSON.stringify({ approver_id: approverId }) }),
   decideApproval: (changeId: string, approverId: string, decision: string, comment?: string) =>
-    fetchAPI<{ status: string }>(`/changes/${changeId}/approvals/${approverId}?decision=${decision}${comment ? `&comment=${encodeURIComponent(comment)}` : ""}`, { method: "PATCH" }),
+    fetchAPI<{ status: string }>(`/changes/${changeId}/approvals/${approverId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ decision, comment: comment || "" }),
+    }),
   // Assets
   getAssets: (assetType?: string, status?: string, search?: string) => {
     const params = new URLSearchParams();
@@ -276,8 +289,13 @@ export const api = {
   getTicketTimeEntries: (ticketId: string) => fetchAPI<import("./types").TimeEntry[]>(`/time-entries/ticket/${ticketId}`),
   getTimeSummary: () => fetchAPI<{ total_hours: number; today_hours: number }>("/time-entries/summary"),
   // Self-Service Portal
-  portalCreateTicket: (subject: string, description: string, reporter: string) =>
-    fetchAPI<import("./types").PortalTicket>("/portal/tickets", { method: "POST", body: JSON.stringify({ subject, description, reporter }) }),
-  portalListTickets: (reporter: string) =>
-    fetchAPI<import("./types").PortalTicket[]>(`/portal/tickets?reporter=${encodeURIComponent(reporter)}`),
+  portalCreateTicket: (subject: string, description: string, reporter: string, priority = "P3") =>
+    fetchAPI<import("./types").PortalTicket>("/portal/tickets", {
+      method: "POST",
+      body: JSON.stringify({ subject, description, reporter, priority }),
+    }),
+  portalListTickets: (reporter: string, ticketId: string) =>
+    fetchAPI<import("./types").PortalTicket[]>(
+      `/portal/tickets?reporter=${encodeURIComponent(reporter)}&ticket_id=${encodeURIComponent(ticketId)}`
+    ),
 };

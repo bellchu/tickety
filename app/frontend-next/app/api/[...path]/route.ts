@@ -26,10 +26,11 @@ const BACKEND =
   process.env.NEXT_PUBLIC_API_URL ||
   "http://localhost:8000";
 
-type Ctx = { params: { path: string[] } };
+type Ctx = { params: Promise<{ path: string[] }> };
 
 async function proxy(req: NextRequest, ctx: Ctx) {
-  const path = (ctx.params.path || []).map(encodeURIComponent).join("/");
+  const params = await ctx.params;
+  const path = (params.path || []).map(encodeURIComponent).join("/");
   const search = req.nextUrl.search; // includes leading "?" or ""
   const url = `${BACKEND}/${path}${search}`;
 

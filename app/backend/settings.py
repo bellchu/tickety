@@ -42,6 +42,12 @@ _PLACEHOLDER_VALUES = {
 }
 
 _ALL_KEYS = [
+    # Runtime mode / security
+    "APP_MODE",
+    "SEED_DEMO_DATA",
+    "CORS_ALLOW_ORIGINS",
+    "COOKIE_SECURE",
+    "COOKIE_SAMESITE",
     # LLM provider keys (multi-provider; see llm_manager.PROVIDERS)
     "DEEPSEEK_API_KEY",
     "OPENAI_API_KEY",
@@ -63,20 +69,24 @@ _ALL_KEYS = [
     "DATABASE_URL",
     "ITSM_PROVIDER",
     "FRESHSERVICE_DOMAIN",
+    "FRESHWORKS_ORG_DOMAIN",
     "FRESHSERVICE_API_KEY",
     "FRESHSERVICE_OAUTH_CLIENT_ID",
     "FRESHSERVICE_OAUTH_CLIENT_SECRET",
     "FRESHSERVICE_OAUTH_REDIRECT_URI",
+    "FRESHSERVICE_OAUTH_SCOPES",
     "FRESHSERVICE_OAUTH_ACCESS_TOKEN",
     "FRESHSERVICE_OAUTH_REFRESH_TOKEN",
     "WEBHOOK_SECRET",
     "SYNC_INTERVAL_SECONDS",
     "NEXT_PUBLIC_API_URL",
     "NEXT_PUBLIC_WS_URL",
+    "FRONTEND_URL",
     # AI automation toggles
     "SLA_P1_HOURS",
     "SLA_P2_HOURS",
     "SLA_P3_HOURS",
+    "SLA_P4_HOURS",
     # Organization / branding
     "ORG_NAME",
     "ORG_LOGO_URL",
@@ -95,6 +105,8 @@ _ALL_KEYS = [
     "SSO_CLIENT_SECRET",
     "SSO_DISCOVERY_URL",
     "SSO_REDIRECT_URI",
+    "SSO_ALLOWED_DOMAINS",
+    "SSO_AUTO_PROVISION",
 ]
 
 # Keys that are static infra config
@@ -106,6 +118,38 @@ _READONLY_KEYS = {
 
 _lock = threading.Lock()
 _loaded = False
+
+
+def _truthy(value: Optional[str]) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def get_bool(key: str, default: bool = False, aliases: tuple[str, ...] = ()) -> bool:
+    """Read an env-style boolean with optional legacy aliases."""
+    for candidate in (key, *aliases):
+        value = os.getenv(candidate)
+        if value is not None and value != "":
+            return _truthy(value)
+    return default
+
+
+def app_mode() -> str:
+    mode = os.getenv("APP_MODE", "demo").strip().lower()
+    return mode if mode in {"demo", "production"} else "demo"
+
+
+def is_demo_mode() -> bool:
+    return app_mode() == "demo"
+
+
+def is_production_mode() -> bool:
+    return app_mode() == "production"
+
+
+def automation_enabled(key: str, legacy_alias: Optional[str] = None) -> bool:
+    """AI automation defaults on in demo, off in production unless enabled."""
+    aliases = (legacy_alias,) if legacy_alias else ()
+    return get_bool(key, default=is_demo_mode(), aliases=aliases)
 
 
 def _mask(value: Optional[str]) -> str:

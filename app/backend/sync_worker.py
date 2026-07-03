@@ -8,6 +8,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from .database import SessionLocal, SyncStateRecord, TicketRecord
 from .integrations.sync import sync_tickets_from_external
 from .integrations.registry import get_adapter
+from . import settings as settings_module
 
 _scheduler: BackgroundScheduler = None
 _lock = threading.Lock()
@@ -19,19 +20,29 @@ def _auto_triage_job():
     to 10 tickets per 30‑second sweep."""
     try:
         db = SessionLocal()
+        auto_triage = settings_module.automation_enabled("AUTO_TRIAGE_ENABLED", "AUTO_TRIAGE")
+        auto_summary = settings_module.automation_enabled("AUTO_SUMMARIZE_ENABLED")
+        auto_resolution = settings_module.automation_enabled("AUTO_RESOLVE_ENABLED")
         # Find tickets missing ANY AI data (prioritize untriaged first)
-        untriaged = db.query(TicketRecord).filter(
-            TicketRecord.ai_reasoning.is_(None)
-        ).limit(5).all()
-        no_summary = db.query(TicketRecord).filter(
-            TicketRecord.ai_reasoning.isnot(None),
-            TicketRecord.summary.is_(None)
-        ).limit(5).all()
-        no_resolution = db.query(TicketRecord).filter(
-            TicketRecord.ai_reasoning.isnot(None),
-            TicketRecord.summary.isnot(None),
-            TicketRecord.recommended_solution.is_(None)
-        ).limit(5).all()
+        untriaged = (
+            db.query(TicketRecord).filter(TicketRecord.ai_reasoning.is_(None)).limit(5).all()
+            if auto_triage else []
+        )
+        no_summary = (
+            db.query(TicketRecord).filter(
+                TicketRecord.ai_reasoning.isnot(None),
+                TicketRecord.summary.is_(None)
+            ).limit(5).all()
+            if auto_summary else []
+        )
+        no_resolution = (
+            db.query(TicketRecord).filter(
+                TicketRecord.ai_reasoning.isnot(None),
+                TicketRecord.summary.isnot(None),
+                TicketRecord.recommended_solution.is_(None)
+            ).limit(5).all()
+            if auto_resolution else []
+        )
 
         if untriaged or no_summary or no_resolution:
             print(f"[auto-triage] gaps: {len(untriaged)} untriaged, {len(no_summary)} no-summary, {len(no_resolution)} no-plan")
@@ -111,6 +122,8 @@ def _auto_triage_job():
 
 def _sync_job():
     provider = os.getenv("ITSM_PROVIDER", "standalone")
+    if provider == "external":
+        provider = "freshservice"
     if provider in ("standalone", "none", ""):
         return  # No external sync in standalone mode
     try:
@@ -148,7 +161,11 @@ def get_sync_status() -> dict:
         # Always reflect the CURRENTLY configured provider from env, not the
         # stale DB record that may still hold the previous provider's name.
         current_provider = os.getenv("ITSM_PROVIDER", "standalone")
-        state = db.query(SyncStateRecord).first()
+        if current_provider == "external":
+            current_provider = "freshservice"
+        state = db.query(SyncStateRecord).filter(
+            SyncStateRecord.provider == current_provider
+        ).first()
         if not state:
             return {"provider": current_provider, "last_synced_at": None, "last_synced": 0,
                     "last_status": "idle", "last_error": None, "total_synced": 0}

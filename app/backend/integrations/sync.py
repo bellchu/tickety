@@ -2,10 +2,12 @@ import uuid
 from datetime import datetime, timedelta
 from typing import List, Optional
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..database import (
     SessionLocal, TicketRecord, UserMappingRecord, SyncStateRecord,
+    UserRecord,
 )
 from ..schema import ExternalTicket, WebhookEvent
 from .registry import get_adapter
@@ -24,6 +26,9 @@ def _upsert_ticket(db: Session, ext: ExternalTicket, provider: str, overwrite: b
     if existing and not overwrite:
         return "skipped", None
 
+    assignee_id = _resolve_assignee_id(db, provider, ext.assignee_id)
+    workflow_status = "Closed" if ext.status.lower() in ("closed", "resolved") else ext.status
+
     if existing:
         changed = (
             existing.subject != ext.subject
@@ -33,6 +38,11 @@ def _upsert_ticket(db: Session, ext: ExternalTicket, provider: str, overwrite: b
             or existing.external_status != ext.status
             or existing.external_assignee_id != ext.assignee_id
             or existing.external_updated_at != ext.updated_at
+            or existing.external_created_at != ext.created_at
+            or existing.external_resolved_at != ext.resolved_at
+            or existing.external_due_by != ext.due_by
+            or existing.external_fr_due_by != ext.fr_due_by
+            or existing.assignee_id != assignee_id
             or (ext.url and existing.external_url != ext.url)
         )
         if not changed:
@@ -46,12 +56,23 @@ def _upsert_ticket(db: Session, ext: ExternalTicket, provider: str, overwrite: b
         existing.external_status = ext.status
         existing.external_assignee_id = ext.assignee_id
         existing.external_updated_at = ext.updated_at
+        existing.external_created_at = ext.created_at
+        existing.external_resolved_at = ext.resolved_at
+        existing.external_due_by = ext.due_by
+        existing.external_fr_due_by = ext.fr_due_by
         existing.external_url = ext.url or existing.external_url
+        existing.assignee_id = assignee_id
+        existing.workflow_status = workflow_status
+        existing.ticket_type = (ext.ticket_type or existing.ticket_type or "incident").lower()
+        existing.due_by = ext.due_by or existing.due_by
+        existing.resolution_due_at = ext.due_by or existing.resolution_due_at
+        existing.response_due_at = ext.fr_due_by or existing.response_due_at
         existing.updated_at = datetime.utcnow()
         if ext.status.lower() in ("closed", "resolved"):
             existing.status = "Closed"
+            existing.resolved_at = ext.resolved_at or existing.resolved_at or datetime.utcnow()
         else:
-            existing.status = ext.status
+            existing.status = existing.workflow_status or ext.status
         db.commit()
         db.refresh(existing)
         return "updated", existing
@@ -61,19 +82,41 @@ def _upsert_ticket(db: Session, ext: ExternalTicket, provider: str, overwrite: b
         subject=ext.subject,
         description=ext.description,
         reporter=ext.reporter,
-        status=ext.status,
+        status=workflow_status,
+        workflow_status=workflow_status,
         priority=ext.priority,
+        ticket_type=(ext.ticket_type or "incident").lower(),
+        assignee_id=assignee_id,
+        due_by=ext.due_by,
+        response_due_at=ext.fr_due_by,
+        resolution_due_at=ext.due_by,
         external_source=provider,
         external_id=ext.external_id,
         external_url=ext.url,
         external_status=ext.status,
         external_assignee_id=ext.assignee_id,
         external_updated_at=ext.updated_at,
+        external_created_at=ext.created_at,
+        external_resolved_at=ext.resolved_at,
+        external_due_by=ext.due_by,
+        external_fr_due_by=ext.fr_due_by,
+        created_at=ext.created_at or datetime.utcnow(),
+        resolved_at=ext.resolved_at if ext.status.lower() in ("closed", "resolved") else None,
     )
     db.add(new_ticket)
     db.commit()
     db.refresh(new_ticket)
     return "new", new_ticket
+
+
+def _resolve_assignee_id(db: Session, provider: str, external_assignee_id: Optional[str]) -> Optional[str]:
+    if not external_assignee_id:
+        return None
+    mapping = db.query(UserMappingRecord).filter(
+        UserMappingRecord.external_source == provider,
+        UserMappingRecord.external_assignee_id == str(external_assignee_id),
+    ).first()
+    return mapping.tickety_user_id if mapping else None
 
 
 def _existing_external_ids(db: Session, provider: str) -> set:
@@ -114,6 +157,7 @@ def sync_tickets_from_external(adapter=None) -> dict:
             adapter.fetch_new_tickets(since=since)
         )
 
+        max_persisted_updated_at = None
         for ext in tickets:
             try:
                 action, ticket = _upsert_ticket(db, ext, adapter.provider_name, overwrite=True)
@@ -121,13 +165,23 @@ def sync_tickets_from_external(adapter=None) -> dict:
                     result["new"] += 1
                 elif action == "updated":
                     result["updated"] += 1
+                if ticket and ext.updated_at:
+                    max_persisted_updated_at = max(max_persisted_updated_at or ext.updated_at, ext.updated_at)
             except Exception as e:
                 print(f"[sync] error upserting ticket {ext.external_id}: {e}")
                 result["errors"] += 1
 
-        sync_state.last_synced_at = datetime.utcnow()
-        sync_state.last_status = "success"
-        sync_state.total_synced += len(tickets)
+        if result["errors"]:
+            sync_state.last_status = "error"
+            sync_state.last_error = "One or more tickets failed to persist; cursor not advanced"
+        else:
+            if max_persisted_updated_at:
+                sync_state.last_synced_at = max_persisted_updated_at - timedelta(seconds=5)
+            elif not tickets:
+                sync_state.last_synced_at = datetime.utcnow()
+            sync_state.last_status = "success"
+            sync_state.last_error = None
+        sync_state.total_synced += result["new"] + result["updated"]
         db.commit()
 
     except Exception as e:
@@ -172,10 +226,13 @@ def fetch_tickets_by_days(adapter=None, days: int = 7, overwrite: bool = False) 
         # Pre-load existing external ids once to avoid N queries.
         existing_ids = _existing_external_ids(db, adapter.provider_name)
 
-        import os as _os
-        auto_triage = _os.getenv("AUTO_TRIAGE", "").lower() == "true"
+        from .. import settings as settings_module
+        auto_triage = settings_module.automation_enabled("AUTO_TRIAGE_ENABLED", "AUTO_TRIAGE")
+        auto_summary = settings_module.automation_enabled("AUTO_SUMMARIZE_ENABLED")
+        auto_resolution = settings_module.automation_enabled("AUTO_RESOLVE_ENABLED")
         new_tickets: list = []  # collect for auto-triage
 
+        max_persisted_updated_at = None
         for ext in tickets:
             try:
                 if ext.external_id in existing_ids and not overwrite:
@@ -191,6 +248,8 @@ def fetch_tickets_by_days(adapter=None, days: int = 7, overwrite: bool = False) 
                     result["updated"] += 1
                 elif action == "skipped":
                     result["skipped"] += 1
+                if ticket and ext.updated_at:
+                    max_persisted_updated_at = max(max_persisted_updated_at or ext.updated_at, ext.updated_at)
             except Exception as e:
                 print(f"[fetch] error upserting ticket {ext.external_id}: {e}")
                 result["errors"] += 1
@@ -207,11 +266,17 @@ def fetch_tickets_by_days(adapter=None, days: int = 7, overwrite: bool = False) 
         # before the current cursor — i.e. it covers the gap the worker would
         # otherwise pick up. If the window starts *after* the cursor there's an
         # uncovered gap in between, so we must not advance (the worker will fill it).
-        if not sync_state.last_synced_at or since <= sync_state.last_synced_at:
-            sync_state.last_synced_at = datetime.utcnow()
-        sync_state.last_status = "success"
-        sync_state.last_error = None
-        sync_state.total_synced += len(tickets)
+        if result["errors"]:
+            sync_state.last_status = "error"
+            sync_state.last_error = "One or more fetched tickets failed to persist; cursor not advanced"
+        else:
+            if max_persisted_updated_at and (not sync_state.last_synced_at or since <= sync_state.last_synced_at):
+                sync_state.last_synced_at = max_persisted_updated_at - timedelta(seconds=5)
+            elif not tickets and (not sync_state.last_synced_at or since <= sync_state.last_synced_at):
+                sync_state.last_synced_at = datetime.utcnow()
+            sync_state.last_status = "success"
+            sync_state.last_error = None
+        sync_state.total_synced += result["new"] + result["updated"]
         db.commit()
 
         # Auto-triage newly imported tickets
@@ -239,34 +304,39 @@ def fetch_tickets_by_days(adapter=None, days: int = 7, overwrite: bool = False) 
                         t2.escalation_risk = intel.escalation_risk(t2)
                         if analysis.get("suggested_response"):
                             t2.suggested_response = analysis.get("suggested_response")
-                            t2.status = "Awaiting Review"
+                            t2.ai_review_state = "Awaiting Review"
+                            if (t2.workflow_status or t2.status or "New").lower() in {"new", "open", "processed"}:
+                                t2.workflow_status = "Awaiting Review"
                         elif analysis.get("action") == "escalate":
-                            t2.status = "Escalated"
+                            t2.ai_review_state = "Escalated"
+                            t2.workflow_status = "Escalated"
                         else:
-                            t2.status = "Processed"
+                            t2.ai_review_state = "Processed"
+                            t2.workflow_status = t2.workflow_status or t2.status or "Open"
+                        t2.status = t2.workflow_status or t2.status
                         db2.commit()
                         print(f"[fetch] auto-triaged {t2.id[:8]}")
 
-                        # Full pipeline: summarization
-                        try:
-                            summary = asyncio.run(intel.summarize_ticket(
-                                engine.llm, t2
-                            ))
-                            if summary:
-                                t2.summary = summary
-                                db2.commit()
-                        except Exception as se:
-                            print(f"[fetch] summary error on {t2.id[:8]}: {se}")
+                        if auto_summary:
+                            try:
+                                summary = asyncio.run(intel.summarize_ticket(
+                                    engine.llm, t2
+                                ))
+                                if summary:
+                                    t2.summary = summary
+                                    db2.commit()
+                            except Exception as se:
+                                print(f"[fetch] summary error on {t2.id[:8]}: {se}")
 
-                        # Full pipeline: resolution plan
-                        try:
-                            plan = asyncio.run(intel.recommend_resolution(
-                                engine.llm, t2
-                            ))
-                            t2.recommended_solution = __import__("json").dumps(plan)
-                            db2.commit()
-                        except Exception as re:
-                            print(f"[fetch] resolution error on {t2.id[:8]}: {re}")
+                        if auto_resolution:
+                            try:
+                                plan = asyncio.run(intel.recommend_resolution(
+                                    engine.llm, t2
+                                ))
+                                t2.recommended_solution = __import__("json").dumps(plan)
+                                db2.commit()
+                            except Exception as re:
+                                print(f"[fetch] resolution error on {t2.id[:8]}: {re}")
                 except Exception as e:
                     print(f"[fetch] auto-triage error on {t.id}: {e}")
                     db2.rollback()
@@ -301,7 +371,14 @@ def handle_webhook_event(event: WebhookEvent, adapter=None) -> Optional[TicketRe
             priority=adapter.map_priority(raw.get("priority", 3)),
             status=adapter.map_status(raw.get("status", 2)),
             assignee_id=str(raw.get("responder_id")) if raw.get("responder_id") else None,
-            updated_at=datetime.fromisoformat(raw["updated_at"]) if raw.get("updated_at") else None,
+            updated_at=adapter._parse_datetime(raw.get("updated_at")) if hasattr(adapter, "_parse_datetime") else (
+                datetime.fromisoformat(raw["updated_at"]) if raw.get("updated_at") else None
+            ),
+            created_at=adapter._parse_datetime(raw.get("created_at")) if hasattr(adapter, "_parse_datetime") else None,
+            resolved_at=adapter._parse_datetime(raw.get("resolved_at") or raw.get("closed_at")) if hasattr(adapter, "_parse_datetime") else None,
+            due_by=adapter._parse_datetime(raw.get("due_by")) if hasattr(adapter, "_parse_datetime") else None,
+            fr_due_by=adapter._parse_datetime(raw.get("fr_due_by")) if hasattr(adapter, "_parse_datetime") else None,
+            ticket_type=str(raw.get("type") or raw.get("ticket_type") or ""),
             url=adapter.build_ticket_url(event.external_id),
         )
         _action, ticket = _upsert_ticket(db, ext, adapter.provider_name, overwrite=True)
@@ -367,27 +444,38 @@ def sync_agents_from_external(adapter=None) -> dict:
                     ).first()
                     if user:
                         user.name = name or user.name
-                        user.email = email or user.email
+                        user.email = email.strip().lower() if email else user.email
                         user.title = title or user.title
                         db.commit()
                         result["updated"] += 1
                 else:
-                    uid = str(_uuid.uuid4())
-                    user = UserRecord(
-                        id=uid,
-                        name=name or email or f"Agent {ext_id}",
-                        email=email,
-                        title=title,
-                    )
-                    db.add(user)
-                    db.flush()
+                    user = None
+                    if email:
+                        user = db.query(UserRecord).filter(
+                            func.lower(UserRecord.email) == email.strip().lower()
+                        ).first()
+                    if user:
+                        uid = user.id
+                        user.name = name or user.name
+                        user.title = title or user.title
+                        result["updated"] += 1
+                    else:
+                        uid = str(_uuid.uuid4())
+                        user = UserRecord(
+                            id=uid,
+                            name=name or email or f"Agent {ext_id}",
+                            email=email.strip().lower() if email else email,
+                            title=title,
+                        )
+                        db.add(user)
+                        db.flush()
+                        result["created"] += 1
                     db.add(UserMappingRecord(
                         tickety_user_id=uid,
                         external_source=adapter.provider_name,
                         external_assignee_id=ext_id,
                     ))
                     db.commit()
-                    result["created"] += 1
 
             except Exception as e:
                 print(f"[agents] error processing agent {a.get('id')}: {e}")

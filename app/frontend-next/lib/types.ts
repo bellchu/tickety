@@ -11,9 +11,20 @@ export interface Ticket {
   complexity: number;
   ai_reasoning: string | null;
   suggested_response: string | null;
+  ticket_type: string;
+  impact: string | null;
+  urgency: string | null;
+  workflow_status: string | null;
+  ai_review_state: string | null;
   assignee_id: string | null;
   assignee_name: string | null;
+  service_id: string | null;
+  asset_id: string | null;
+  response_due_at: string | null;
+  resolution_due_at: string | null;
   due_by: string | null;
+  sla_paused_at: string | null;
+  sla_paused_seconds: number;
   tags: string | null;
   external_source: string | null;
   external_id: string | null;
@@ -21,6 +32,10 @@ export interface Ticket {
   external_status: string | null;
   external_assignee_id: string | null;
   external_updated_at: string | null;
+  external_created_at: string | null;
+  external_resolved_at: string | null;
+  external_due_by: string | null;
+  external_fr_due_by: string | null;
   resolved_by: string | null;
   resolved_at: string | null;
   points_awarded: number;
@@ -36,6 +51,11 @@ export interface TicketCreateInput {
   description: string;
   reporter: string;
   priority: string;
+  ticket_type?: "incident" | "request";
+  impact?: string | null;
+  urgency?: string | null;
+  service_id?: string | null;
+  asset_id?: string | null;
 }
 
 export interface User {
@@ -113,6 +133,11 @@ export interface TriageStep {
 }
 
 export interface Settings {
+  APP_MODE: string;
+  SEED_DEMO_DATA: string;
+  CORS_ALLOW_ORIGINS: string;
+  COOKIE_SECURE: string;
+  COOKIE_SAMESITE: string;
   DEEPSEEK_API_KEY: string;
   OPENAI_API_KEY: string;
   OPENAI_API_BASE: string;
@@ -133,17 +158,21 @@ export interface Settings {
   DATABASE_URL: string;
   ITSM_PROVIDER: string;
   FRESHSERVICE_DOMAIN: string;
+  FRESHWORKS_ORG_DOMAIN: string;
   FRESHSERVICE_API_KEY: string;
   FRESHSERVICE_OAUTH_CLIENT_ID: string;
   FRESHSERVICE_OAUTH_CLIENT_SECRET: string;
   FRESHSERVICE_OAUTH_REDIRECT_URI: string;
+  FRESHSERVICE_OAUTH_SCOPES: string;
   WEBHOOK_SECRET: string;
   SYNC_INTERVAL_SECONDS: string;
   NEXT_PUBLIC_API_URL: string;
   NEXT_PUBLIC_WS_URL: string;
+  FRONTEND_URL: string;
   SLA_P1_HOURS: string;
   SLA_P2_HOURS: string;
   SLA_P3_HOURS: string;
+  SLA_P4_HOURS: string;
   ORG_NAME: string;
   ORG_LOGO_URL: string;
   ORG_PRIMARY_COLOR: string;
@@ -159,6 +188,8 @@ export interface Settings {
   SSO_CLIENT_SECRET: string;
   SSO_DISCOVERY_URL: string;
   SSO_REDIRECT_URI: string;
+  SSO_ALLOWED_DOMAINS: string;
+  SSO_AUTO_PROVISION: string;
   [key: string]: string | boolean;
 }
 
@@ -413,7 +444,7 @@ export interface UserOut {
 }
 
 export interface AuthResponse {
-  token: string;
+  token?: string | null;
   user: UserOut;
 }
 
@@ -445,7 +476,11 @@ export interface KbArticle {
   tags: string | null;
   author_id: string | null;
   author_name: string | null;
+  reviewer_id: string | null;
   status: string;
+  version: number;
+  published_at: string | null;
+  review_due_at: string | null;
   views: number;
   helpful: number;
   not_helpful: number;
@@ -459,6 +494,8 @@ export interface KbArticleCreateInput {
   category?: string;
   tags?: string;
   status: string;
+  reviewer_id?: string | null;
+  review_due_at?: string | null;
 }
 
 // ── Config (statuses, priorities, notifications) ───────────────
@@ -539,6 +576,10 @@ export interface ServiceRequest {
   service_name: string | null;
   quantity: number;
   justification: string;
+  approval_status: string;
+  fulfillment_status: string;
+  approved_by: string | null;
+  approved_at: string | null;
   delivery_notes: string | null;
   fulfilled_by: string | null;
   fulfilled_at: string | null;
@@ -661,7 +702,7 @@ export interface PortalTicket {
   subject: string;
   status: string;
   priority: string;
-  reporter: string;
+  reporter: string | null;
   created_at: string | null;
   updated_at: string | null;
 }

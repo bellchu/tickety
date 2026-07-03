@@ -358,6 +358,7 @@ function ChangeFormModal({
   const [title, setTitle] = useState(change?.title || "");
   const [description, setDescription] = useState(change?.description || "");
   const [changeType, setChangeType] = useState(change?.change_type || "Normal");
+  const [status, setStatus] = useState(change?.status || "Draft");
   const [priority, setPriority] = useState(change?.priority || "");
   const [riskLevel, setRiskLevel] = useState(change?.risk_level || "Low");
   const [impact, setImpact] = useState(change?.impact || "");
@@ -420,6 +421,20 @@ function ChangeFormModal({
             />
           </label>
           <div className="grid grid-cols-2 gap-3">
+            <label className="block space-y-1">
+              <span className="text-xs font-medium text-ink-500">Status</span>
+              <select
+                value={status}
+                onChange={(e) => setStatus(e.target.value)}
+                className="input-base"
+              >
+                {CHANGE_STATUS_FILTERS.filter((s) => s.value).map((s) => (
+                  <option key={s.value} value={s.value}>
+                    {s.label}
+                  </option>
+                ))}
+              </select>
+            </label>
             <label className="block space-y-1">
               <span className="text-xs font-medium text-ink-500">
                 Change Type
@@ -554,6 +569,7 @@ function ChangeFormModal({
               onSubmit({
                 title,
                 description: description || undefined,
+                status,
                 change_type: changeType,
                 priority: priority || undefined,
                 risk_level: riskLevel,
@@ -622,15 +638,15 @@ function ChangeDetailModal({
 
   const decideMut = useMutation({
     mutationFn: ({
-      approvalId,
+      approverId,
       decision,
       comment,
     }: {
-      approvalId: number;
+      approverId: string;
       decision: string;
       comment?: string;
     }) =>
-      api.decideApproval(change.id, String(approvalId), decision, comment),
+      api.decideApproval(change.id, approverId, decision, comment),
     onSuccess: () => {
       queryClient.invalidateQueries({
         queryKey: ["change-approvals", change.id],
@@ -867,7 +883,7 @@ function ChangeDetailModal({
                       <button
                         onClick={() =>
                           decideMut.mutate({
-                            approvalId: a.id,
+                            approverId: a.approver_id,
                             decision: "approved",
                           })
                         }
@@ -879,7 +895,7 @@ function ChangeDetailModal({
                       <button
                         onClick={() =>
                           decideMut.mutate({
-                            approvalId: a.id,
+                            approverId: a.approver_id,
                             decision: "rejected",
                           })
                         }

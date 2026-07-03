@@ -16,14 +16,19 @@ class BaseITSMAdapter(ABC):
     async def fetch_updated_tickets(self, since: datetime) -> List[ExternalTicket]:
         ...
 
-    async def fetch_tickets_since(self, since: datetime, max_pages: Optional[int] = None) -> List[ExternalTicket]:
+    async def fetch_tickets_since(self, since: Optional[datetime], max_pages: Optional[int] = None) -> List[ExternalTicket]:
         """Full paginated fetch of every ticket updated since `since`.
         Adapters that support pagination should override this; the default
         falls back to the single-page incremental fetch."""
         return await self.fetch_new_tickets(since=since)
 
     @abstractmethod
-    def parse_webhook(self, payload: dict, headers: dict) -> Optional[WebhookEvent]:
+    def parse_webhook(
+        self,
+        payload: dict,
+        headers: dict,
+        raw_body: bytes | None = None,
+    ) -> Optional[WebhookEvent]:
         ...
 
     @abstractmethod

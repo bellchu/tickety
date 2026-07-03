@@ -26,7 +26,7 @@ spec:
           - |
             import time, psycopg2, os
             url = os.getenv("DATABASE_URL","").replace("postgresql+psycopg2://","postgresql://")
-            print(f"Connecting to: {url}")
+            print("Connecting to Postgres")
             for i in range(60):
                 try:
                     conn = psycopg2.connect(url)

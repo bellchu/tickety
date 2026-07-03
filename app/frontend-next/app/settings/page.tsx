@@ -13,7 +13,7 @@ import { SearchableSelect } from "@/components/ui/SearchableSelect";
 
 const PROVIDER_OPTIONS = [
   { value: "standalone", label: "Standalone (built-in ticketing)" },
-  { value: "external", label: "External ITSM provider" },
+  { value: "freshservice", label: "Freshservice" },
   { value: "none", label: "None (disabled)" },
 ];
 
@@ -39,7 +39,14 @@ export default function SettingsPage() {
   const [form, setForm] = useState<Partial<SettingsType>>({});
   const [saved, setSaved] = useState(false);
 
-  useEffect(() => { if (data) setForm(data); }, [data]);
+  useEffect(() => {
+    if (data) {
+      setForm({
+        ...data,
+        ITSM_PROVIDER: data.ITSM_PROVIDER === "external" ? "freshservice" : data.ITSM_PROVIDER,
+      });
+    }
+  }, [data]);
 
   const mutation = useMutation({
     mutationFn: api.updateSettings,
@@ -88,6 +95,13 @@ export default function SettingsPage() {
   }, [form.DEFAULT_MODEL, catalog]);
 
   const activeProvider: LlmProvider | undefined = catalog ? (catalog[activeProviderId] as LlmProvider) : undefined;
+  const appMode = (form.APP_MODE as string) || "demo";
+  const automationValue = (key: string) => {
+    const value = form[key as keyof SettingsType] as string | undefined;
+    if (value === "true") return true;
+    if (value === "false") return false;
+    return appMode !== "production";
+  };
 
   const handleProviderChange = (pid: string) => {
     const prov = catalog ? (catalog[pid] as LlmProvider) : undefined;
@@ -184,10 +198,13 @@ export default function SettingsPage() {
             </select>
           </Field>
 
-          {itProvider === "external" && (
+          {itProvider === "freshservice" && (
             <>
               <Field label="Provider Domain">
                 <input type="text" value={form.FRESHSERVICE_DOMAIN || ""} onChange={(e) => handleChange("FRESHSERVICE_DOMAIN", e.target.value)} placeholder="yourdomain.example.com" className="input-base" />
+              </Field>
+              <Field label="Freshworks Org Domain">
+                <input type="text" value={form.FRESHWORKS_ORG_DOMAIN || ""} onChange={(e) => handleChange("FRESHWORKS_ORG_DOMAIN", e.target.value)} placeholder="yourorg.myfreshworks.com" className="input-base" />
               </Field>
               <Field label="Provider API Key">
                 <SecretInput value={form.FRESHSERVICE_API_KEY || ""} onChange={(v) => handleChange("FRESHSERVICE_API_KEY", v)} placeholder="Provider API key" />
@@ -218,8 +235,8 @@ export default function SettingsPage() {
 
         {/* ═══ SLA Targets ═══ */}
         <SettingsSection title="SLA Targets" subtitle="Set resolution time targets per priority level. Used by SLA clocks and escalation risk scoring.">
-          <div className="grid grid-cols-3 gap-4">
-            {[["SLA_P1_HOURS", "P1 (Critical)", "4"], ["SLA_P2_HOURS", "P2 (High)", "24"], ["SLA_P3_HOURS", "P3 (Normal)", "72"]].map(([key, label, def]) => (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            {[["SLA_P1_HOURS", "P1 (Critical)", "4"], ["SLA_P2_HOURS", "P2 (High)", "24"], ["SLA_P3_HOURS", "P3 (Normal)", "72"], ["SLA_P4_HOURS", "P4 (Low)", "168"]].map(([key, label, def]) => (
               <label key={key} className="block space-y-1.5">
                 <span className="text-sm font-medium text-ink-600">{label}</span>
                 <div className="flex items-center gap-2">
@@ -235,7 +252,7 @@ export default function SettingsPage() {
         </SettingsSection>
 
         {/* ═══ External OAuth + Agent Sync (conditional) ═══ */}
-        {itProvider === "external" && (
+        {itProvider === "freshservice" && (
           <>
             <OAuthSection form={form} onChange={handleChange} />
             <AgentSection />
@@ -274,7 +291,7 @@ export default function SettingsPage() {
                 key={t.key}
                 label={t.label}
                 desc={t.desc}
-                value={(form[t.key as keyof SettingsType] as string) !== "false"}
+                value={automationValue(t.key)}
                 onChange={(v) => handleChange(t.key as keyof SettingsType, v ? "true" : "false")}
               />
             ))}
@@ -282,11 +299,64 @@ export default function SettingsPage() {
         </SettingsSection>
 
         {/* ═══ Security & Auth ═══ */}
-        <SettingsSection title="Security &amp; Authentication" subtitle="Require login and configure Single Sign-On (OIDC) for production deployments">
+        <SettingsSection title="Security & Authentication" subtitle="Require login and configure Single Sign-On (OIDC) for production deployments">
+          <Field label="Runtime Mode">
+            <select
+              value={appMode}
+              onChange={(e) => handleChange("APP_MODE", e.target.value)}
+              className="input-base"
+            >
+              <option value="demo">Demo</option>
+              <option value="production">Production</option>
+            </select>
+          </Field>
+          <Field label="Frontend URL">
+            <input
+              type="text"
+              value={form.FRONTEND_URL || ""}
+              onChange={(e) => handleChange("FRONTEND_URL", e.target.value)}
+              placeholder="https://support.example.com"
+              className="input-base"
+            />
+          </Field>
+          <div className="grid grid-cols-2 gap-4">
+            <Field label="CORS Allow Origins">
+              <input
+                type="text"
+                value={form.CORS_ALLOW_ORIGINS || ""}
+                onChange={(e) => handleChange("CORS_ALLOW_ORIGINS", e.target.value)}
+                placeholder="https://support.example.com"
+                className="input-base"
+              />
+            </Field>
+            <Field label="Cookie SameSite">
+              <select
+                value={(form.COOKIE_SAMESITE as string) || "lax"}
+                onChange={(e) => handleChange("COOKIE_SAMESITE", e.target.value)}
+                className="input-base"
+              >
+                <option value="lax">Lax</option>
+                <option value="strict">Strict</option>
+                <option value="none">None</option>
+              </select>
+            </Field>
+          </div>
+          <ToggleRow
+            label="Secure Cookies"
+            desc="Require HTTPS for session cookies. Production mode enables this by default."
+            value={(form.COOKIE_SECURE as string) === "true" || (((form.COOKIE_SECURE as string) || "") === "" && appMode === "production")}
+            onChange={(v) => handleChange("COOKIE_SECURE", v ? "true" : "false")}
+          />
+          <ToggleRow
+            label="Seed Demo Data"
+            desc="Create demo users and sample tickets on startup outside demo mode."
+            value={(form.SEED_DEMO_DATA as string) === "true"}
+            onChange={(v) => handleChange("SEED_DEMO_DATA", v ? "true" : "false")}
+          />
           <ToggleRow
             label="Require Login"
             desc="When enabled, users must sign in. When disabled (default), the app runs in demo mode — no login needed."
-            value={(form.LOGIN_REQUIRED as string) === "true"}
+            value={(form.LOGIN_REQUIRED as string) === "true" || (((form.LOGIN_REQUIRED as string) || "") === "" && appMode === "production")}
             onChange={(v) => handleChange("LOGIN_REQUIRED", v ? "true" : "false")}
           />
 
@@ -324,6 +394,15 @@ export default function SettingsPage() {
               <Field label="Redirect URI">
                 <input type="text" value={form.SSO_REDIRECT_URI || ""} onChange={(e) => handleChange("SSO_REDIRECT_URI", e.target.value)} placeholder="http://localhost:3000/api/auth/sso/callback" className="input-base" />
               </Field>
+              <Field label="Allowed Email Domains">
+                <input type="text" value={form.SSO_ALLOWED_DOMAINS || ""} onChange={(e) => handleChange("SSO_ALLOWED_DOMAINS", e.target.value)} placeholder="company.com,subsidiary.com" className="input-base" />
+              </Field>
+              <ToggleRow
+                label="Auto-Provision SSO Users"
+                desc="Create new active agent accounts for trusted SSO domains. Keep disabled when accounts should be pre-approved."
+                value={(form.SSO_AUTO_PROVISION as string) === "true"}
+                onChange={(v) => handleChange("SSO_AUTO_PROVISION", v ? "true" : "false")}
+              />
               <p className="text-xs text-ink-400">
                 Use the well-known URL for your provider. Common ones:<br />
                 Google: <code className="bg-linen-200 px-1">https://accounts.google.com/.well-known/openid-configuration</code><br />
@@ -662,6 +741,9 @@ function OAuthSection({ form, onChange }: { form: Partial<SettingsType>; onChang
       </div>
       <Field label="Redirect URI (must match provider app config)">
         <input type="text" value={form["FRESHSERVICE_OAUTH_REDIRECT_URI"] || ""} onChange={(e) => onChange("FRESHSERVICE_OAUTH_REDIRECT_URI", e.target.value)} placeholder="http://localhost:8000/oauth/callback" className="input-base" />
+      </Field>
+      <Field label="OAuth Scopes">
+        <input type="text" value={form["FRESHSERVICE_OAUTH_SCOPES"] || ""} onChange={(e) => onChange("FRESHSERVICE_OAUTH_SCOPES", e.target.value)} placeholder="freshservice.tickets.view freshservice.tickets.edit" className="input-base" />
       </Field>
     </SettingsSection>
   );

@@ -1,4 +1,6 @@
 import os
+import secrets
+import hashlib
 from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
@@ -14,11 +16,18 @@ from .database import (
     AssetRecord, SurveyTemplateRecord,
 )
 
-import hashlib
+PASSWORD_HASH_ITERATIONS = 390_000
 
 
 def _hash_pw(pw: str) -> str:
-    return hashlib.sha256(pw.encode()).hexdigest()
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        pw.encode("utf-8"),
+        salt.encode("ascii"),
+        PASSWORD_HASH_ITERATIONS,
+    ).hex()
+    return f"pbkdf2_sha256${PASSWORD_HASH_ITERATIONS}${salt}${digest}"
 
 USERS = [
     {

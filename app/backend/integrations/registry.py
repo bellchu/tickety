@@ -23,7 +23,7 @@ class StandaloneAdapter(BaseITSMAdapter):
     async def fetch_agents(self, max_pages=None):
         return []
 
-    def parse_webhook(self, payload, headers):
+    def parse_webhook(self, payload, headers, raw_body=None):
         return None
 
     def map_priority(self, external_priority):
@@ -38,6 +38,8 @@ class StandaloneAdapter(BaseITSMAdapter):
 
 def get_adapter(provider: str = None) -> BaseITSMAdapter:
     provider = provider or os.getenv("ITSM_PROVIDER", "standalone")
+    if provider == "external":
+        provider = "freshservice"
     if provider not in _ADAPTERS:
         if provider == "freshservice":
             _ADAPTERS[provider] = FreshserviceAdapter()

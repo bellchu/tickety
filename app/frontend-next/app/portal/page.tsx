@@ -21,6 +21,10 @@ const PRIORITY_COLORS: Record<string, string> = {
   high: "bg-amber-400/15 text-amber-600 border-amber-400/30",
   medium: "bg-blue-400/15 text-blue-600 border-blue-400/30",
   low: "bg-moss-400/15 text-moss-600 border-moss-400/30",
+  P1: "bg-rust-400/15 text-rust-500 border-rust-400/30",
+  P2: "bg-amber-400/15 text-amber-600 border-amber-400/30",
+  P3: "bg-blue-400/15 text-blue-600 border-blue-400/30",
+  P4: "bg-moss-400/15 text-moss-600 border-moss-400/30",
 };
 
 const STATUS_COLORS: Record<string, string> = {
@@ -35,6 +39,8 @@ export default function PortalPage() {
 
   const [reporter, setReporter] = useState("");
   const [searchReporter, setSearchReporter] = useState("");
+  const [ticketId, setTicketId] = useState("");
+  const [searchTicketId, setSearchTicketId] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [subject, setSubject] = useState("");
   const [description, setDescription] = useState("");
@@ -45,25 +51,28 @@ export default function PortalPage() {
     isLoading: ticketsLoading,
     error: ticketsError,
   } = useQuery({
-    queryKey: ["portalTickets", searchReporter],
-    queryFn: () => api.portalListTickets(searchReporter),
-    enabled: searchReporter.length > 0,
+    queryKey: ["portalTickets", searchReporter, searchTicketId],
+    queryFn: () => api.portalListTickets(searchReporter, searchTicketId),
+    enabled: searchReporter.length > 0 && searchTicketId.length > 0,
   });
 
   const createMut = useMutation({
-    mutationFn: () => api.portalCreateTicket(subject, description, reporter),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["portalTickets", reporter] });
+    mutationFn: () => api.portalCreateTicket(subject, description, reporter, priority),
+    onSuccess: (created) => {
+      queryClient.invalidateQueries({ queryKey: ["portalTickets", reporter, created.id] });
       setShowForm(false);
       setSubject("");
       setDescription("");
+      setTicketId(created.id);
       setSearchReporter(reporter);
+      setSearchTicketId(created.id);
     },
   });
 
   const handleLookup = () => {
-    if (reporter.trim()) {
+    if (reporter.trim() && ticketId.trim()) {
       setSearchReporter(reporter.trim());
+      setSearchTicketId(ticketId.trim());
     }
   };
 
@@ -84,7 +93,7 @@ export default function PortalPage() {
 
       {/* Reporter lookup */}
       <div className="card-surface p-4">
-        <div className="flex items-end gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-[1fr_1fr_auto] gap-3 items-end">
           <label className="flex-1 space-y-1">
             <span className="text-xs font-medium text-ink-500">Your Email</span>
             <div className="relative">
@@ -99,7 +108,17 @@ export default function PortalPage() {
               />
             </div>
           </label>
-          <button onClick={handleLookup} disabled={!reporter.trim()} className="btn-secondary text-xs">
+          <label className="flex-1 space-y-1">
+            <span className="text-xs font-medium text-ink-500">Ticket ID</span>
+            <input
+              value={ticketId}
+              onChange={(e) => setTicketId(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleLookup()}
+              className="input-base text-xs"
+              placeholder="portal-..."
+            />
+          </label>
+          <button onClick={handleLookup} disabled={!reporter.trim() || !ticketId.trim()} className="btn-secondary text-xs">
             <Search className="w-3.5 h-3.5" strokeWidth={1.5} />
             Look Up
           </button>
@@ -107,22 +126,22 @@ export default function PortalPage() {
       </div>
 
       {/* Tickets list */}
-      {!searchReporter ? (
+      {!searchReporter || !searchTicketId ? (
         <div className="card-surface p-10 text-center space-y-2">
           <Globe className="w-10 h-10 text-ink-300 mx-auto" strokeWidth={1} />
-          <p className="text-sm text-ink-500">Enter your email above to view your tickets.</p>
+          <p className="text-sm text-ink-500">Enter your email and ticket ID to view a request.</p>
         </div>
       ) : ticketsLoading ? (
         <div className="card-surface p-6 space-y-3">{[1, 2, 3].map((i) => <div key={i} className="skeleton h-12 w-full" />)}</div>
       ) : ticketsError ? (
         <div className="card-surface p-6 text-center">
-          <p className="text-sm text-rust-500">Failed to load tickets. Check the email address and try again.</p>
+          <p className="text-sm text-rust-500">Failed to load the ticket. Check the email address and ticket ID.</p>
         </div>
       ) : (
         <div className="card-surface overflow-hidden">
           <div className="flex items-center justify-between px-4 py-3 border-b border-linen-200 bg-linen-100">
             <p className="text-xs font-semibold text-ink-500 uppercase tracking-wider">
-              Tickets for <span className="text-ink-700">{searchReporter}</span>
+              Ticket <span className="text-ink-700">{searchTicketId}</span>
               <span className="ml-2 font-normal normal-case text-ink-400">({tickets?.length || 0})</span>
             </p>
             <div className="flex items-center gap-2">
@@ -144,7 +163,7 @@ export default function PortalPage() {
             <tbody>
               {(tickets || []).length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="px-4 py-10 text-center text-ink-400 text-sm">No tickets found for this email.</td>
+                  <td colSpan={5} className="px-4 py-10 text-center text-ink-400 text-sm">No ticket found for this email and ticket ID.</td>
                 </tr>
               ) : (
                 (tickets || []).map((t: PortalTicket) => (
@@ -152,7 +171,7 @@ export default function PortalPage() {
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2">
                         <FileText className="w-3.5 h-3.5 text-ink-400" strokeWidth={1.5} />
-                        <span className="text-xs font-mono text-ink-500">{t.id.slice(0, 8)}</span>
+                        <span className="text-xs font-mono text-ink-500">{t.id}</span>
                       </div>
                     </td>
                     <td className="px-4 py-3 font-medium text-ink-700 max-w-64 truncate">{t.subject}</td>
@@ -167,7 +186,7 @@ export default function PortalPage() {
                     <td className="px-4 py-3 text-center">
                       <span className={cn(
                         "inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold border",
-                        STATUS_COLORS[t.status] || "bg-ink-100 text-ink-600 border-ink-300"
+                        STATUS_COLORS[t.status.toLowerCase()] || "bg-ink-100 text-ink-600 border-ink-300"
                       )}>
                         {t.status.replace(/_/g, " ")}
                       </span>

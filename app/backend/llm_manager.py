@@ -4,6 +4,7 @@ import json
 import httpx
 from litellm import acompletion
 from dotenv import load_dotenv
+from .privacy import redact_text
 
 load_dotenv()
 
@@ -392,7 +393,7 @@ class LLMManager:
             return self._get_mock_response(prompt)
 
         json_mode = json_schema is not None
-        messages = [{"role": "user", "content": prompt}]
+        messages = [{"role": "user", "content": redact_text(prompt)}]
         kwargs = self._build_kwargs(messages, json_mode)
 
         last_err = None

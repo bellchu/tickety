@@ -3,9 +3,10 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
-import type { ServiceItem } from "@/lib/types";
+import type { ServiceItem, ServiceRequest } from "@/lib/types";
 import {
   Package, ShoppingCart, Plus, RefreshCw, Search, X, Trash2, Edit3,
+  CheckCircle2, XCircle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -38,6 +39,24 @@ export default function ServicesPage() {
   const deleteMut = useMutation({
     mutationFn: (id: string) => api.deleteService(id),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["services"] }),
+  });
+
+  const approvalMut = useMutation({
+    mutationFn: ({ id, decision }: { id: string; decision: "approved" | "rejected" }) =>
+      api.decideServiceRequestApproval(id, decision),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["serviceRequests"] });
+      queryClient.invalidateQueries({ queryKey: ["tickets"] });
+    },
+  });
+
+  const fulfillmentMut = useMutation({
+    mutationFn: ({ id, status }: { id: string; status: "fulfilled" | "cancelled" }) =>
+      api.updateServiceRequestFulfillment(id, status),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["serviceRequests"] });
+      queryClient.invalidateQueries({ queryKey: ["tickets"] });
+    },
   });
 
   const activeServices = (services || []).filter((s) => s.is_active);
@@ -95,7 +114,9 @@ export default function ServicesPage() {
         </div>
         <div className="card-surface p-4">
           <p className="kpi-label">Pending Fulfillment</p>
-          <p className="kpi-value">{(requests || []).filter((r) => !r.fulfilled_at).length}</p>
+          <p className="kpi-value">
+            {(requests || []).filter((r) => r.fulfillment_status === "pending" && r.approval_status !== "pending").length}
+          </p>
         </div>
       </div>
 
@@ -188,13 +209,15 @@ export default function ServicesPage() {
                   <th className="px-4 py-3 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">Service</th>
                   <th className="px-4 py-3 text-center text-xs font-semibold text-ink-500 uppercase tracking-wider">Qty</th>
                   <th className="px-4 py-3 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">Justification</th>
-                  <th className="px-4 py-3 text-center text-xs font-semibold text-ink-500 uppercase tracking-wider">Status</th>
+                  <th className="px-4 py-3 text-center text-xs font-semibold text-ink-500 uppercase tracking-wider">Approval</th>
+                  <th className="px-4 py-3 text-center text-xs font-semibold text-ink-500 uppercase tracking-wider">Fulfillment</th>
+                  <th className="px-4 py-3 text-right text-xs font-semibold text-ink-500 uppercase tracking-wider">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {(requests || []).length === 0 ? (
                   <tr>
-                    <td colSpan={5} className="px-4 py-10 text-center text-ink-400 text-sm">No service requests yet.</td>
+                    <td colSpan={7} className="px-4 py-10 text-center text-ink-400 text-sm">No service requests yet.</td>
                   </tr>
                 ) : (
                   (requests || []).map((r) => (
@@ -204,14 +227,54 @@ export default function ServicesPage() {
                       <td className="px-4 py-3 text-center tabular-nums text-ink-600">{r.quantity}</td>
                       <td className="px-4 py-3 text-xs text-ink-500 max-w-48 truncate">{r.justification || "—"}</td>
                       <td className="px-4 py-3 text-center">
-                        <span className={cn(
-                          "inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold border",
-                          r.fulfilled_at
-                            ? "bg-emerald-400/15 text-emerald-600 border-emerald-400/30"
-                            : "bg-blue-400/15 text-blue-600 border-blue-400/30"
-                        )}>
-                          {r.fulfilled_at ? "Fulfilled" : "Pending"}
-                        </span>
+                        <RequestStatusPill request={r} kind="approval" />
+                      </td>
+                      <td className="px-4 py-3 text-center">
+                        <RequestStatusPill request={r} kind="fulfillment" />
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <div className="inline-flex items-center gap-1">
+                          {r.approval_status === "pending" && (
+                            <>
+                              <button
+                                onClick={() => approvalMut.mutate({ id: r.id, decision: "approved" })}
+                                disabled={approvalMut.isPending}
+                                className="p-1.5 rounded text-ink-400 hover:text-moss-600 hover:bg-moss-400/10 disabled:opacity-50"
+                                title="Approve"
+                              >
+                                <CheckCircle2 className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                onClick={() => approvalMut.mutate({ id: r.id, decision: "rejected" })}
+                                disabled={approvalMut.isPending}
+                                className="p-1.5 rounded text-ink-400 hover:text-rust-500 hover:bg-rust-400/10 disabled:opacity-50"
+                                title="Reject"
+                              >
+                                <XCircle className="w-3.5 h-3.5" />
+                              </button>
+                            </>
+                          )}
+                          {r.fulfillment_status === "pending" && r.approval_status !== "pending" && r.approval_status !== "rejected" && (
+                            <>
+                              <button
+                                onClick={() => fulfillmentMut.mutate({ id: r.id, status: "fulfilled" })}
+                                disabled={fulfillmentMut.isPending}
+                                className="p-1.5 rounded text-ink-400 hover:text-moss-600 hover:bg-moss-400/10 disabled:opacity-50"
+                                title="Mark fulfilled"
+                              >
+                                <CheckCircle2 className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                onClick={() => fulfillmentMut.mutate({ id: r.id, status: "cancelled" })}
+                                disabled={fulfillmentMut.isPending}
+                                className="p-1.5 rounded text-ink-400 hover:text-rust-500 hover:bg-rust-400/10 disabled:opacity-50"
+                                title="Cancel fulfillment"
+                              >
+                                <XCircle className="w-3.5 h-3.5" />
+                              </button>
+                            </>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -239,6 +302,22 @@ export default function ServicesPage() {
         />
       )}
     </div>
+  );
+}
+
+function RequestStatusPill({ request, kind }: { request: ServiceRequest; kind: "approval" | "fulfillment" }) {
+  const value = kind === "approval" ? request.approval_status : request.fulfillment_status;
+  const label = value.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  const tone =
+    value === "approved" || value === "fulfilled" || value === "not_required"
+      ? "bg-moss-400/15 text-moss-600 border-moss-400/30"
+      : value === "rejected" || value === "cancelled"
+        ? "bg-rust-400/15 text-rust-500 border-rust-400/30"
+        : "bg-blue-400/15 text-blue-600 border-blue-400/30";
+  return (
+    <span className={cn("inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold border", tone)}>
+      {label}
+    </span>
   );
 }
 

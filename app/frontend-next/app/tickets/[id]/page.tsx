@@ -1,9 +1,9 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
-import type { RouteRecommendation, ResolutionPlan } from "@/lib/types";
+import type { RouteRecommendation, ResolutionPlan, Ticket, TicketAuditEntry, TicketComment, UserOut } from "@/lib/types";
 import { useParams } from "next/navigation";
 import { AIThinkingStream } from "@/components/ticket/AIThinkingStream";
 import { SentimentTag } from "@/components/engagement/SentimentTag";
@@ -39,9 +39,6 @@ export default function TicketDetailPage() {
         </div>
       </div>
     );
-  }
-
-function TicketDetailFallbackNotUsed() {
   }
 
   if (!ticket) {
@@ -134,6 +131,8 @@ function TicketDetailFallbackNotUsed() {
         </div>
       </div>
 
+      <AgentActionPanel ticket={ticket} />
+
       <AIThinkingStream ticketId={ticket.id} hasExisting={!!ticket.ai_reasoning} />
 
       <IntelligencePanel
@@ -176,7 +175,171 @@ function TicketDetailFallbackNotUsed() {
   );
 }
 
-function InfoItem({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
+function toDateTimeLocal(value: string | null | undefined): string {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+}
+
+function AgentActionPanel({ ticket }: { ticket: Ticket }) {
+  const queryClient = useQueryClient();
+  const [status, setStatus] = useState(ticket.status || "New");
+  const [priority, setPriority] = useState(ticket.priority || "P3");
+  const [assigneeId, setAssigneeId] = useState(ticket.assignee_id || "");
+  const [dueBy, setDueBy] = useState(toDateTimeLocal(ticket.due_by || ticket.resolution_due_at));
+  const [tags, setTags] = useState(ticket.tags || "");
+  const [comment, setComment] = useState("");
+  const [isPrivate, setIsPrivate] = useState(false);
+
+  useEffect(() => {
+    setStatus(ticket.status || "New");
+    setPriority(ticket.priority || "P3");
+    setAssigneeId(ticket.assignee_id || "");
+    setDueBy(toDateTimeLocal(ticket.due_by || ticket.resolution_due_at));
+    setTags(ticket.tags || "");
+  }, [ticket]);
+
+  const { data: users } = useQuery<UserOut[]>({ queryKey: ["users"], queryFn: api.getUsers });
+  const { data: comments } = useQuery<TicketComment[]>({
+    queryKey: ["ticket-comments", ticket.id],
+    queryFn: () => api.getComments(ticket.id),
+  });
+  const { data: audit } = useQuery<TicketAuditEntry[]>({
+    queryKey: ["ticket-audit", ticket.id],
+    queryFn: () => api.getAuditLog(ticket.id),
+  });
+
+  const saveMut = useMutation({
+    mutationFn: () => api.updateTicket(ticket.id, {
+      status,
+      workflow_status: status,
+      priority,
+      assignee_id: assigneeId || null,
+      due_by: dueBy ? new Date(dueBy).toISOString() : null,
+      tags,
+    }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["ticket", ticket.id] });
+      queryClient.invalidateQueries({ queryKey: ["tickets"] });
+      queryClient.invalidateQueries({ queryKey: ["ticket-audit", ticket.id] });
+    },
+  });
+
+  const commentMut = useMutation({
+    mutationFn: () => api.addComment(ticket.id, comment, isPrivate),
+    onSuccess: () => {
+      setComment("");
+      setIsPrivate(false);
+      queryClient.invalidateQueries({ queryKey: ["ticket-comments", ticket.id] });
+    },
+  });
+
+  return (
+    <div className="card-surface p-6 space-y-5">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold text-ink-700">Agent Work</h3>
+        <button
+          onClick={() => saveMut.mutate()}
+          disabled={saveMut.isPending}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded border border-linen-400 text-xs font-semibold text-ink-600 hover:bg-linen-200 disabled:opacity-50"
+        >
+          {saveMut.isPending && <RefreshCw className="w-3 h-3 animate-spin" />}
+          Save
+        </button>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
+        <label className="space-y-1">
+          <span className="text-xs font-medium text-ink-500">Status</span>
+          <select value={status} onChange={(e) => setStatus(e.target.value)} className="input-base text-xs">
+            {["New", "Open", "Awaiting Review", "Pending", "Escalated", "Resolved", "Closed"].map((s) => (
+              <option key={s} value={s}>{s}</option>
+            ))}
+          </select>
+        </label>
+        <label className="space-y-1">
+          <span className="text-xs font-medium text-ink-500">Priority</span>
+          <select value={priority} onChange={(e) => setPriority(e.target.value)} className="input-base text-xs">
+            {["P1", "P2", "P3", "P4"].map((p) => <option key={p} value={p}>{p}</option>)}
+          </select>
+        </label>
+        <label className="space-y-1">
+          <span className="text-xs font-medium text-ink-500">Assignee</span>
+          <select value={assigneeId} onChange={(e) => setAssigneeId(e.target.value)} className="input-base text-xs">
+            <option value="">Unassigned</option>
+            {(users || []).map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+          </select>
+        </label>
+        <label className="space-y-1">
+          <span className="text-xs font-medium text-ink-500">Due</span>
+          <input type="datetime-local" value={dueBy} onChange={(e) => setDueBy(e.target.value)} className="input-base text-xs" />
+        </label>
+        <label className="space-y-1">
+          <span className="text-xs font-medium text-ink-500">Tags</span>
+          <input value={tags} onChange={(e) => setTags(e.target.value)} className="input-base text-xs" placeholder="vpn, vip" />
+        </label>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-ink-500">Conversation</span>
+            <label className="inline-flex items-center gap-1.5 text-xs text-ink-500">
+              <input type="checkbox" checked={isPrivate} onChange={(e) => setIsPrivate(e.target.checked)} />
+              Private note
+            </label>
+          </div>
+          <textarea
+            value={comment}
+            onChange={(e) => setComment(e.target.value)}
+            className="input-base min-h-[88px] text-sm"
+            placeholder="Add a public reply or internal note"
+          />
+          <button
+            onClick={() => commentMut.mutate()}
+            disabled={commentMut.isPending || !comment.trim()}
+            className="btn-secondary text-xs"
+          >
+            {commentMut.isPending && <RefreshCw className="w-3 h-3 animate-spin" />}
+            Add Comment
+          </button>
+          <div className="space-y-2 max-h-44 overflow-auto">
+            {(comments || []).map((c) => (
+              <div key={c.id} className="rounded border border-linen-300 bg-linen-100 p-3">
+                <div className="flex items-center justify-between text-[11px] text-ink-400">
+                  <span>{c.author_name}{c.is_private ? " - private" : ""}</span>
+                  <span>{formatTimeAgo(c.created_at)}</span>
+                </div>
+                <p className="text-sm text-ink-600 mt-1 whitespace-pre-wrap">{c.body}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="space-y-3">
+          <span className="text-xs font-medium text-ink-500">Audit</span>
+          <div className="space-y-2 max-h-72 overflow-auto">
+            {(audit || []).length === 0 ? (
+              <p className="text-xs text-ink-400">No audit entries yet.</p>
+            ) : (audit || []).map((a) => (
+              <div key={a.id} className="rounded border border-linen-300 bg-linen-100 p-3 text-xs">
+                <div className="flex items-center justify-between text-ink-400">
+                  <span>{a.changed_by}</span>
+                  <span>{formatTimeAgo(a.changed_at)}</span>
+                </div>
+                <p className="mt-1 text-ink-600">
+                  <span className="font-semibold">{a.field}</span>: {a.old_value || "-"} -&gt; {a.new_value || "-"}
+                </p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function InfoItem({ icon, label, value }: { icon: ReactNode; label: string; value: string }) {
   return (
     <div>
       <div className="flex items-center gap-1.5 text-[11px] text-ink-400 mb-1">

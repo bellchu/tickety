@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Literal
 from datetime import datetime
 
 
@@ -18,9 +18,20 @@ class Ticket(BaseModel):
     suggested_response: Optional[str] = None
 
     # Standalone ticketing
+    ticket_type: str = "incident"
+    impact: Optional[str] = None
+    urgency: Optional[str] = None
+    workflow_status: Optional[str] = None
+    ai_review_state: Optional[str] = None
     assignee_id: Optional[str] = None
     assignee_name: Optional[str] = None
+    service_id: Optional[str] = None
+    asset_id: Optional[str] = None
+    response_due_at: Optional[datetime] = None
+    resolution_due_at: Optional[datetime] = None
     due_by: Optional[datetime] = None
+    sla_paused_at: Optional[datetime] = None
+    sla_paused_seconds: int = 0
     tags: Optional[str] = None
 
     external_source: Optional[str] = None
@@ -29,6 +40,10 @@ class Ticket(BaseModel):
     external_status: Optional[str] = None
     external_assignee_id: Optional[str] = None
     external_updated_at: Optional[datetime] = None
+    external_created_at: Optional[datetime] = None
+    external_resolved_at: Optional[datetime] = None
+    external_due_by: Optional[datetime] = None
+    external_fr_due_by: Optional[datetime] = None
 
     resolved_by: Optional[str] = None
     resolved_at: Optional[datetime] = None
@@ -130,6 +145,11 @@ class TicketCreate(BaseModel):
     description: str = ""
     reporter: str = ""
     priority: str = "P3"
+    ticket_type: Literal["incident", "request"] = "incident"
+    impact: Optional[str] = None
+    urgency: Optional[str] = None
+    service_id: Optional[str] = None
+    asset_id: Optional[str] = None
 
 
 class ExternalTicket(BaseModel):
@@ -141,6 +161,12 @@ class ExternalTicket(BaseModel):
     status: str
     assignee_id: Optional[str] = None
     updated_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+    resolved_at: Optional[datetime] = None
+    due_by: Optional[datetime] = None
+    fr_due_by: Optional[datetime] = None
+    ticket_type: Optional[str] = None
+    requester_email: Optional[str] = None
     url: Optional[str] = None
 
 
@@ -151,6 +177,11 @@ class WebhookEvent(BaseModel):
 
 
 class Settings(BaseModel):
+    APP_MODE: Optional[str] = None
+    SEED_DEMO_DATA: Optional[str] = None
+    CORS_ALLOW_ORIGINS: Optional[str] = None
+    COOKIE_SECURE: Optional[str] = None
+    COOKIE_SAMESITE: Optional[str] = None
     DEEPSEEK_API_KEY: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None
     OPENAI_API_BASE: Optional[str] = None
@@ -171,20 +202,24 @@ class Settings(BaseModel):
     DATABASE_URL: Optional[str] = None
     ITSM_PROVIDER: Optional[str] = None
     FRESHSERVICE_DOMAIN: Optional[str] = None
+    FRESHWORKS_ORG_DOMAIN: Optional[str] = None
     FRESHSERVICE_API_KEY: Optional[str] = None
     FRESHSERVICE_OAUTH_CLIENT_ID: Optional[str] = None
     FRESHSERVICE_OAUTH_CLIENT_SECRET: Optional[str] = None
     FRESHSERVICE_OAUTH_REDIRECT_URI: Optional[str] = None
+    FRESHSERVICE_OAUTH_SCOPES: Optional[str] = None
     FRESHSERVICE_OAUTH_ACCESS_TOKEN: Optional[str] = None
     FRESHSERVICE_OAUTH_REFRESH_TOKEN: Optional[str] = None
     WEBHOOK_SECRET: Optional[str] = None
     SYNC_INTERVAL_SECONDS: Optional[str] = None
     NEXT_PUBLIC_API_URL: Optional[str] = None
     NEXT_PUBLIC_WS_URL: Optional[str] = None
+    FRONTEND_URL: Optional[str] = None
     # AI automation toggles ("true" / "false" as stored in env-style settings)
     SLA_P1_HOURS: Optional[str] = None
     SLA_P2_HOURS: Optional[str] = None
     SLA_P3_HOURS: Optional[str] = None
+    SLA_P4_HOURS: Optional[str] = None
 
     # Organization / branding
     ORG_NAME: Optional[str] = None
@@ -206,6 +241,8 @@ class Settings(BaseModel):
     SSO_CLIENT_SECRET: Optional[str] = None
     SSO_DISCOVERY_URL: Optional[str] = None
     SSO_REDIRECT_URI: Optional[str] = None
+    SSO_ALLOWED_DOMAINS: Optional[str] = None
+    SSO_AUTO_PROVISION: Optional[str] = None
 
     # Allow any provider-specific key from the catalog without re-declaring.
     model_config = {"extra": "allow"}
@@ -230,10 +267,19 @@ class TicketUpdate(BaseModel):
     subject: Optional[str] = None
     description: Optional[str] = None
     status: Optional[str] = None
+    workflow_status: Optional[str] = None
+    ai_review_state: Optional[str] = None
     priority: Optional[str] = None
+    ticket_type: Optional[Literal["incident", "request"]] = None
+    impact: Optional[str] = None
+    urgency: Optional[str] = None
     assignee_id: Optional[str] = None
+    service_id: Optional[str] = None
+    asset_id: Optional[str] = None
     category: Optional[str] = None
     tags: Optional[str] = None
+    response_due_at: Optional[datetime] = None
+    resolution_due_at: Optional[datetime] = None
     due_by: Optional[datetime] = None
 
 
@@ -319,7 +365,7 @@ class UserCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=120)
     email: str = Field(..., min_length=3)
     title: Optional[str] = None
-    role: str = "agent"  # admin | supervisor | agent
+    role: Literal["admin", "supervisor", "agent"] = "agent"
     password: Optional[str] = None  # optional, generated if omitted
 
 
@@ -327,13 +373,13 @@ class UserUpdate(BaseModel):
     name: Optional[str] = None
     email: Optional[str] = None
     title: Optional[str] = None
-    role: Optional[str] = None
+    role: Optional[Literal["admin", "supervisor", "agent"]] = None
     is_active: Optional[bool] = None
     password: Optional[str] = None
 
 
 class AuthResponse(BaseModel):
-    token: str
+    token: Optional[str] = None
     user: UserOut
 
 
@@ -348,7 +394,11 @@ class KbArticle(BaseModel):
     tags: Optional[str] = None
     author_id: Optional[str] = None
     author_name: Optional[str] = None
+    reviewer_id: Optional[str] = None
     status: str = "draft"
+    version: int = 1
+    published_at: Optional[datetime] = None
+    review_due_at: Optional[datetime] = None
     views: int = 0
     helpful: int = 0
     not_helpful: int = 0
@@ -365,6 +415,8 @@ class KbArticleCreate(BaseModel):
     category: Optional[str] = None
     tags: Optional[str] = None
     status: str = "draft"
+    reviewer_id: Optional[str] = None
+    review_due_at: Optional[datetime] = None
 
 
 class KbArticleUpdate(BaseModel):
@@ -373,6 +425,8 @@ class KbArticleUpdate(BaseModel):
     category: Optional[str] = None
     tags: Optional[str] = None
     status: Optional[str] = None
+    reviewer_id: Optional[str] = None
+    review_due_at: Optional[datetime] = None
 
 
 # ── Custom status / priority config ─────────────────────────────
@@ -514,6 +568,10 @@ class ServiceRequest(BaseModel):
     service_name: Optional[str] = None
     quantity: int = 1
     justification: str = ""
+    approval_status: str = "not_required"
+    fulfillment_status: str = "pending"
+    approved_by: Optional[str] = None
+    approved_at: Optional[datetime] = None
     delivery_notes: Optional[str] = None
     fulfilled_by: Optional[str] = None
     fulfilled_at: Optional[datetime] = None
@@ -528,6 +586,16 @@ class ServiceRequestCreate(BaseModel):
     service_item_id: str = Field(..., min_length=1)
     quantity: int = 1
     justification: str = ""
+
+
+class ServiceRequestApprovalDecision(BaseModel):
+    decision: Literal["approved", "rejected"]
+    comment: str = ""
+
+
+class ServiceRequestFulfillmentUpdate(BaseModel):
+    status: Literal["fulfilled", "cancelled"]
+    delivery_notes: str = ""
 
 
 # ── Problem Management ─────────────────────────────────────────
@@ -607,6 +675,7 @@ class ChangeCreate(BaseModel):
     title: str = Field(..., min_length=1, max_length=200)
     description: str = ""
     change_type: str = "Normal"
+    status: str = "Draft"
     priority: str = "P2"
     risk_level: str = "Medium"
     impact: Optional[str] = None
@@ -647,8 +716,13 @@ class ChangeApprovalOut(BaseModel):
 
 
 class ChangeApprovalCreate(BaseModel):
-    change_id: str
+    change_id: Optional[str] = None
     approver_id: str
+
+
+class ChangeApprovalDecision(BaseModel):
+    decision: Literal["approved", "rejected"]
+    comment: str = ""
 
 
 # ── Asset / CMDB ───────────────────────────────────────────────
@@ -776,6 +850,6 @@ class PortalTicketOut(BaseModel):
     subject: str
     status: str
     priority: str
-    reporter: str
+    reporter: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None

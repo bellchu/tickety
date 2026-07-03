@@ -37,8 +37,19 @@ class TicketRecord(Base):
     suggested_response = Column(Text, nullable=True)
 
     # Standalone ticketing fields
+    ticket_type = Column(String, default="incident")  # incident | request
+    impact = Column(String, nullable=True)
+    urgency = Column(String, nullable=True)
+    workflow_status = Column(String, default="New")
+    ai_review_state = Column(String, nullable=True)
     assignee_id = Column(String, ForeignKey("users.id"), nullable=True, index=True)
+    service_id = Column(String, nullable=True)
+    asset_id = Column(String, nullable=True)
+    response_due_at = Column(DateTime, nullable=True)
+    resolution_due_at = Column(DateTime, nullable=True)
     due_by = Column(DateTime, nullable=True)
+    sla_paused_at = Column(DateTime, nullable=True)
+    sla_paused_seconds = Column(Integer, default=0)
     tags = Column(Text, nullable=True)  # comma-separated tags
 
     # ITSM external linkage
@@ -48,6 +59,10 @@ class TicketRecord(Base):
     external_status = Column(String, nullable=True)
     external_assignee_id = Column(String, nullable=True)
     external_updated_at = Column(DateTime, nullable=True)
+    external_created_at = Column(DateTime, nullable=True)
+    external_resolved_at = Column(DateTime, nullable=True)
+    external_due_by = Column(DateTime, nullable=True)
+    external_fr_due_by = Column(DateTime, nullable=True)
 
     # Resolution tracking (populated when external status -> Closed)
     resolved_by = Column(String, ForeignKey("users.id"), nullable=True)
@@ -194,7 +209,11 @@ class KbArticleRecord(Base):
     category = Column(String, nullable=True, index=True)  # e.g. Network, Software
     tags = Column(Text, nullable=True)  # comma-separated
     author_id = Column(String, ForeignKey("users.id"), nullable=True)
+    reviewer_id = Column(String, ForeignKey("users.id"), nullable=True)
     status = Column(String, default="draft")  # draft | published | archived
+    version = Column(Integer, default=1)
+    published_at = Column(DateTime, nullable=True)
+    review_due_at = Column(DateTime, nullable=True)
     views = Column(Integer, default=0)
     helpful = Column(Integer, default=0)
     not_helpful = Column(Integer, default=0)
@@ -294,6 +313,10 @@ class ServiceRequestRecord(Base):
     service_item_id = Column(String, ForeignKey("service_items.id"), nullable=True)
     quantity = Column(Integer, default=1)
     justification = Column(Text, default="")
+    approval_status = Column(String, default="not_required")  # not_required | pending | approved | rejected
+    fulfillment_status = Column(String, default="pending")  # pending | fulfilled | cancelled
+    approved_by = Column(String, ForeignKey("users.id"), nullable=True)
+    approved_at = Column(DateTime, nullable=True)
     delivery_notes = Column(Text, nullable=True)
     fulfilled_by = Column(String, ForeignKey("users.id"), nullable=True)
     fulfilled_at = Column(DateTime, nullable=True)
@@ -477,9 +500,24 @@ def _ensure_columns():
         "escalation_risk": "INTEGER DEFAULT 0",
         "summary": "TEXT",
         "recommended_solution": "TEXT",
+        "ticket_type": "VARCHAR DEFAULT 'incident'",
+        "impact": "VARCHAR",
+        "urgency": "VARCHAR",
+        "workflow_status": "VARCHAR DEFAULT 'New'",
+        "ai_review_state": "VARCHAR",
         "assignee_id": "VARCHAR",
+        "service_id": "VARCHAR",
+        "asset_id": "VARCHAR",
+        "response_due_at": "TIMESTAMP",
+        "resolution_due_at": "TIMESTAMP",
         "due_by": "TIMESTAMP",
+        "sla_paused_at": "TIMESTAMP",
+        "sla_paused_seconds": "INTEGER DEFAULT 0",
         "tags": "TEXT",
+        "external_created_at": "TIMESTAMP",
+        "external_resolved_at": "TIMESTAMP",
+        "external_due_by": "TIMESTAMP",
+        "external_fr_due_by": "TIMESTAMP",
     }
     with engine.begin() as conn:
         for col, ddl in additions.items():
@@ -502,6 +540,41 @@ def _ensure_columns():
                 if col not in user_cols:
                     conn.exec_driver_sql(
                         f'ALTER TABLE users ADD COLUMN IF NOT EXISTS {col} {ddl}'
+                    )
+
+    # ── service request workflow additions ──
+    if insp.has_table("service_requests"):
+        sr_cols = {c["name"] for c in insp.get_columns("service_requests")}
+        sr_additions = {
+            "approval_status": "VARCHAR DEFAULT 'not_required'",
+            "fulfillment_status": "VARCHAR DEFAULT 'pending'",
+            "approved_by": "VARCHAR",
+            "approved_at": "TIMESTAMP",
+            "delivery_notes": "TEXT",
+            "fulfilled_by": "VARCHAR",
+            "fulfilled_at": "TIMESTAMP",
+        }
+        with engine.begin() as conn:
+            for col, ddl in sr_additions.items():
+                if col not in sr_cols:
+                    conn.exec_driver_sql(
+                        f'ALTER TABLE service_requests ADD COLUMN IF NOT EXISTS {col} {ddl}'
+                    )
+
+    # ── knowledge governance additions ──
+    if insp.has_table("kb_articles"):
+        kb_cols = {c["name"] for c in insp.get_columns("kb_articles")}
+        kb_additions = {
+            "reviewer_id": "VARCHAR",
+            "version": "INTEGER DEFAULT 1",
+            "published_at": "TIMESTAMP",
+            "review_due_at": "TIMESTAMP",
+        }
+        with engine.begin() as conn:
+            for col, ddl in kb_additions.items():
+                if col not in kb_cols:
+                    conn.exec_driver_sql(
+                        f'ALTER TABLE kb_articles ADD COLUMN IF NOT EXISTS {col} {ddl}'
                     )
 
 
