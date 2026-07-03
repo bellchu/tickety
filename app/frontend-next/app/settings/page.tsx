@@ -209,6 +209,19 @@ export default function SettingsPage() {
               <Field label="Provider API Key">
                 <SecretInput value={form.FRESHSERVICE_API_KEY || ""} onChange={(v) => handleChange("FRESHSERVICE_API_KEY", v)} placeholder="Provider API key" />
               </Field>
+              <Field label="Workspace ID">
+                <input type="text" value={form.FRESHSERVICE_WORKSPACE_ID || ""} onChange={(e) => handleChange("FRESHSERVICE_WORKSPACE_ID", e.target.value)} placeholder="Blank for primary, 0 for all workspaces" className="input-base" />
+              </Field>
+              <Field label="Ticket Includes">
+                <input type="text" value={form.FRESHSERVICE_TICKET_INCLUDES || ""} onChange={(e) => handleChange("FRESHSERVICE_TICKET_INCLUDES", e.target.value)} placeholder="stats,requester" className="input-base" />
+              </Field>
+              <Field label="Agent State">
+                <select value={form.FRESHSERVICE_AGENT_STATE || ""} onChange={(e) => handleChange("FRESHSERVICE_AGENT_STATE", e.target.value)} className="input-base">
+                  <option value="">Any active agent</option>
+                  <option value="fulltime">Full-time</option>
+                  <option value="occasional">Occasional</option>
+                </select>
+              </Field>
               <Field label="Webhook Secret">
                 <SecretInput value={form.WEBHOOK_SECRET || ""} onChange={(v) => handleChange("WEBHOOK_SECRET", v)} placeholder="Webhook shared secret" />
               </Field>
@@ -743,7 +756,7 @@ function OAuthSection({ form, onChange }: { form: Partial<SettingsType>; onChang
         <input type="text" value={form["FRESHSERVICE_OAUTH_REDIRECT_URI"] || ""} onChange={(e) => onChange("FRESHSERVICE_OAUTH_REDIRECT_URI", e.target.value)} placeholder="http://localhost:8000/oauth/callback" className="input-base" />
       </Field>
       <Field label="OAuth Scopes">
-        <input type="text" value={form["FRESHSERVICE_OAUTH_SCOPES"] || ""} onChange={(e) => onChange("FRESHSERVICE_OAUTH_SCOPES", e.target.value)} placeholder="freshservice.tickets.view freshservice.tickets.edit" className="input-base" />
+        <input type="text" value={form["FRESHSERVICE_OAUTH_SCOPES"] || ""} onChange={(e) => onChange("FRESHSERVICE_OAUTH_SCOPES", e.target.value)} placeholder="freshservice.tickets.view freshservice.tickets.edit freshservice.agents.manage" className="input-base" />
       </Field>
     </SettingsSection>
   );

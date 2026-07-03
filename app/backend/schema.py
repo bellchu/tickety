@@ -39,6 +39,7 @@ class Ticket(BaseModel):
     external_url: Optional[str] = None
     external_status: Optional[str] = None
     external_assignee_id: Optional[str] = None
+    external_workspace_id: Optional[str] = None
     external_updated_at: Optional[datetime] = None
     external_created_at: Optional[datetime] = None
     external_resolved_at: Optional[datetime] = None
@@ -167,6 +168,7 @@ class ExternalTicket(BaseModel):
     fr_due_by: Optional[datetime] = None
     ticket_type: Optional[str] = None
     requester_email: Optional[str] = None
+    external_workspace_id: Optional[str] = None
     url: Optional[str] = None
 
 
@@ -204,6 +206,9 @@ class Settings(BaseModel):
     FRESHSERVICE_DOMAIN: Optional[str] = None
     FRESHWORKS_ORG_DOMAIN: Optional[str] = None
     FRESHSERVICE_API_KEY: Optional[str] = None
+    FRESHSERVICE_WORKSPACE_ID: Optional[str] = None
+    FRESHSERVICE_TICKET_INCLUDES: Optional[str] = None
+    FRESHSERVICE_AGENT_STATE: Optional[str] = None
     FRESHSERVICE_OAUTH_CLIENT_ID: Optional[str] = None
     FRESHSERVICE_OAUTH_CLIENT_SECRET: Optional[str] = None
     FRESHSERVICE_OAUTH_REDIRECT_URI: Optional[str] = None

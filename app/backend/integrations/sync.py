@@ -37,6 +37,7 @@ def _upsert_ticket(db: Session, ext: ExternalTicket, provider: str, overwrite: b
             or existing.priority != ext.priority
             or existing.external_status != ext.status
             or existing.external_assignee_id != ext.assignee_id
+            or existing.external_workspace_id != ext.external_workspace_id
             or existing.external_updated_at != ext.updated_at
             or existing.external_created_at != ext.created_at
             or existing.external_resolved_at != ext.resolved_at
@@ -55,6 +56,7 @@ def _upsert_ticket(db: Session, ext: ExternalTicket, provider: str, overwrite: b
         existing.priority = ext.priority
         existing.external_status = ext.status
         existing.external_assignee_id = ext.assignee_id
+        existing.external_workspace_id = ext.external_workspace_id
         existing.external_updated_at = ext.updated_at
         existing.external_created_at = ext.created_at
         existing.external_resolved_at = ext.resolved_at
@@ -95,6 +97,7 @@ def _upsert_ticket(db: Session, ext: ExternalTicket, provider: str, overwrite: b
         external_url=ext.url,
         external_status=ext.status,
         external_assignee_id=ext.assignee_id,
+        external_workspace_id=ext.external_workspace_id,
         external_updated_at=ext.updated_at,
         external_created_at=ext.created_at,
         external_resolved_at=ext.resolved_at,
@@ -371,6 +374,7 @@ def handle_webhook_event(event: WebhookEvent, adapter=None) -> Optional[TicketRe
             priority=adapter.map_priority(raw.get("priority", 3)),
             status=adapter.map_status(raw.get("status", 2)),
             assignee_id=str(raw.get("responder_id")) if raw.get("responder_id") else None,
+            external_workspace_id=str(raw.get("workspace_id")) if raw.get("workspace_id") is not None else None,
             updated_at=adapter._parse_datetime(raw.get("updated_at")) if hasattr(adapter, "_parse_datetime") else (
                 datetime.fromisoformat(raw["updated_at"]) if raw.get("updated_at") else None
             ),

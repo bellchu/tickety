@@ -6,19 +6,20 @@ import hmac
 import hashlib
 import base64
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 import httpx
 
+from ..database import SessionLocal, SettingsRecord
 from ..schema import ExternalTicket, WebhookEvent
 from .base import BaseITSMAdapter
 
 FRESHSERVICE_PRIORITY_MAP = {
-    1: "P1",
-    2: "P2",
-    3: "P3",
-    4: "P3",
+    1: "P4",  # Low
+    2: "P3",  # Medium
+    3: "P2",  # High
+    4: "P1",  # Urgent
 }
 
 FRESHSERVICE_STATUS_MAP = {
@@ -27,6 +28,18 @@ FRESHSERVICE_STATUS_MAP = {
     4: "Resolved",
     5: "Closed",
     6: "Escalated",
+}
+
+DEFAULT_FRESHSERVICE_OAUTH_SCOPES = (
+    "freshservice.tickets.view freshservice.tickets.edit freshservice.agents.manage"
+)
+DEFAULT_TICKET_LIST_INCLUDES = "stats,requester"
+SUPPORTED_TICKET_LIST_INCLUDES = {
+    "stats",
+    "requester",
+    "requested_for",
+    "onboarding_context",
+    "offboarding_context",
 }
 
 
@@ -77,7 +90,7 @@ class FreshserviceAdapter(BaseITSMAdapter):
             "client_id": self.oauth_client_id,
             "redirect_uri": self.oauth_redirect_uri,
             "response_type": "code",
-            "scope": os.getenv("FRESHSERVICE_OAUTH_SCOPES", "freshservice.tickets.view freshservice.tickets.edit"),
+            "scope": os.getenv("FRESHSERVICE_OAUTH_SCOPES", DEFAULT_FRESHSERVICE_OAUTH_SCOPES),
             "state": state,
         }
         return f"{self.org_base_url}/org/oauth/v2/authorize?{urllib.parse.urlencode(params)}"
@@ -121,6 +134,43 @@ class FreshserviceAdapter(BaseITSMAdapter):
             resp.raise_for_status()
             return resp.json()
 
+    def _persist_oauth_tokens(self, access_token: str, refresh_token: Optional[str]) -> None:
+        updates = {"FRESHSERVICE_OAUTH_ACCESS_TOKEN": access_token}
+        if refresh_token:
+            updates["FRESHSERVICE_OAUTH_REFRESH_TOKEN"] = refresh_token
+        db = SessionLocal()
+        try:
+            for key, value in updates.items():
+                row = db.query(SettingsRecord).filter(SettingsRecord.key == key).first()
+                if row:
+                    row.value = value
+                else:
+                    db.add(SettingsRecord(key=key, value=value))
+                os.environ[key] = value
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            print(f"[External] failed to persist refreshed OAuth token: {exc}")
+        finally:
+            db.close()
+
+    async def _refresh_oauth_access_token(self) -> bool:
+        if not (self.oauth_configured and self.oauth_refresh_token):
+            return False
+        try:
+            token_data = await self.oauth_refresh()
+        except Exception as exc:
+            print(f"[External] OAuth refresh failed: {exc}")
+            return False
+        access_token = token_data.get("access_token")
+        if not access_token:
+            return False
+        refresh_token = token_data.get("refresh_token") or self.oauth_refresh_token
+        self.oauth_access_token = access_token
+        self.oauth_refresh_token = refresh_token
+        self._persist_oauth_tokens(access_token, refresh_token)
+        return True
+
     def map_priority(self, external_priority) -> str:
         try:
             return FRESHSERVICE_PRIORITY_MAP.get(int(external_priority), "P3")
@@ -147,14 +197,38 @@ class FreshserviceAdapter(BaseITSMAdapter):
         except Exception:
             return None
 
+    @staticmethod
+    def _format_datetime(value: datetime) -> str:
+        if value.tzinfo is not None:
+            value = value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value.replace(microsecond=0).isoformat() + "Z"
+
+    @staticmethod
+    def _configured_ticket_includes() -> str:
+        raw = os.getenv("FRESHSERVICE_TICKET_INCLUDES", DEFAULT_TICKET_LIST_INCLUDES)
+        includes: list[str] = []
+        for item in raw.split(","):
+            include = item.strip()
+            if include in SUPPORTED_TICKET_LIST_INCLUDES and include not in includes:
+                includes.append(include)
+        return ",".join(includes)
+
     def _parse_ticket(self, raw: dict) -> ExternalTicket:
         stats = raw.get("stats") or {}
         requester = raw.get("requester") or {}
+        requested_for = raw.get("requested_for") or {}
         return ExternalTicket(
             external_id=str(raw.get("id", "")),
             subject=raw.get("subject", "(no subject)"),
             description=raw.get("description_text", raw.get("description", "")) or "",
-            reporter=str(requester.get("email") or raw.get("email") or raw.get("requester_id", "")),
+            reporter=str(
+                requester.get("email")
+                or requested_for.get("email")
+                or raw.get("email")
+                or raw.get("requester_id")
+                or raw.get("requested_for_id")
+                or ""
+            ),
             priority=self.map_priority(raw.get("priority", 3)),
             status=self.map_status(raw.get("status", 2)),
             assignee_id=str(raw.get("responder_id")) if raw.get("responder_id") else None,
@@ -167,6 +241,7 @@ class FreshserviceAdapter(BaseITSMAdapter):
             fr_due_by=self._parse_datetime(raw.get("fr_due_by")),
             ticket_type=str(raw.get("type") or raw.get("ticket_type") or ""),
             requester_email=requester.get("email") or raw.get("email"),
+            external_workspace_id=str(raw.get("workspace_id")) if raw.get("workspace_id") is not None else None,
             url=self.build_ticket_url(str(raw.get("id", ""))),
         )
 
@@ -208,6 +283,9 @@ class FreshserviceAdapter(BaseITSMAdapter):
             await asyncio.sleep(retry_after + 0.5)
             self._last_get_ts = time.monotonic()
             resp = await client.get(url, auth=self._auth(), headers=self._headers(), params=params)
+        if resp.status_code == 401 and await self._refresh_oauth_access_token():
+            self._last_get_ts = time.monotonic()
+            resp = await client.get(url, auth=self._auth(), headers=self._headers(), params=params)
         return resp
 
     @staticmethod
@@ -240,9 +318,15 @@ class FreshserviceAdapter(BaseITSMAdapter):
         out: List[ExternalTicket] = []
         page = 1
         url = f"{self.base_url}/api/v2/tickets"
-        params = {"per_page": 100, "include": "stats,requester"}
+        params = {"per_page": 100}
+        includes = self._configured_ticket_includes()
+        if includes:
+            params["include"] = includes
+        workspace_id = os.getenv("FRESHSERVICE_WORKSPACE_ID", "").strip()
+        if workspace_id:
+            params["workspace_id"] = workspace_id
         if since:
-            params["updated_since"] = since.isoformat()
+            params["updated_since"] = self._format_datetime(since)
         async with httpx.AsyncClient(timeout=30) as client:
             while page <= cap:
                 params["page"] = page
@@ -272,6 +356,9 @@ class FreshserviceAdapter(BaseITSMAdapter):
         url = f"{self.base_url}/api/v2/agents"
         # Provider API detail: filter to active agents only.
         params: dict = {"per_page": 100, "active": "true"}
+        agent_state = os.getenv("FRESHSERVICE_AGENT_STATE", "").strip().lower()
+        if agent_state in {"fulltime", "occasional"}:
+            params["state"] = agent_state
         async with httpx.AsyncClient(timeout=30) as client:
             while page <= cap:
                 params["page"] = page

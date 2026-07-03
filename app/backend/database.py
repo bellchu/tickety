@@ -58,6 +58,7 @@ class TicketRecord(Base):
     external_url = Column(String, nullable=True)
     external_status = Column(String, nullable=True)
     external_assignee_id = Column(String, nullable=True)
+    external_workspace_id = Column(String, nullable=True)
     external_updated_at = Column(DateTime, nullable=True)
     external_created_at = Column(DateTime, nullable=True)
     external_resolved_at = Column(DateTime, nullable=True)
@@ -514,6 +515,7 @@ def _ensure_columns():
         "sla_paused_at": "TIMESTAMP",
         "sla_paused_seconds": "INTEGER DEFAULT 0",
         "tags": "TEXT",
+        "external_workspace_id": "VARCHAR",
         "external_created_at": "TIMESTAMP",
         "external_resolved_at": "TIMESTAMP",
         "external_due_by": "TIMESTAMP",

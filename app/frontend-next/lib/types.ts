@@ -31,6 +31,7 @@ export interface Ticket {
   external_url: string | null;
   external_status: string | null;
   external_assignee_id: string | null;
+  external_workspace_id: string | null;
   external_updated_at: string | null;
   external_created_at: string | null;
   external_resolved_at: string | null;
@@ -160,6 +161,9 @@ export interface Settings {
   FRESHSERVICE_DOMAIN: string;
   FRESHWORKS_ORG_DOMAIN: string;
   FRESHSERVICE_API_KEY: string;
+  FRESHSERVICE_WORKSPACE_ID: string;
+  FRESHSERVICE_TICKET_INCLUDES: string;
+  FRESHSERVICE_AGENT_STATE: string;
   FRESHSERVICE_OAUTH_CLIENT_ID: string;
   FRESHSERVICE_OAUTH_CLIENT_SECRET: string;
   FRESHSERVICE_OAUTH_REDIRECT_URI: string;
