@@ -12,9 +12,10 @@ import {
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
 
 const PROVIDER_OPTIONS = [
-  { value: "standalone", label: "Standalone (built-in ticketing)" },
-  { value: "freshservice", label: "Freshservice" },
-  { value: "none", label: "None (disabled)" },
+  { value: "standalone", label: "Standalone", description: "Built-in ticketing" },
+  { value: "freshservice", label: "Freshservice", description: "Freshservice API" },
+  { value: "jira", label: "Jira Service Management", description: "Atlassian Jira API" },
+  { value: "none", label: "None", description: "Disable external sync" },
 ];
 
 const PROVIDER_IDS = ["deepseek", "openai", "openrouter", "azure", "azure_ai", "custom"] as const;
@@ -28,6 +29,17 @@ const CATEGORY_COLORS = [
   { value: "cyan", label: "Cyan", className: "bg-cyan-400" },
   { value: "red", label: "Red", className: "bg-rust-400" },
 ];
+
+async function postMaintenanceAction(path: string) {
+  const res = await fetch(path, { method: "POST" });
+  const text = await res.text();
+  const data = text ? JSON.parse(text) : {};
+  if (!res.ok) {
+    const detail = typeof data.detail === "string" ? data.detail : `HTTP ${res.status}`;
+    throw new Error(detail);
+  }
+  return data;
+}
 
 export default function SettingsPage() {
   const queryClient = useQueryClient();
@@ -70,12 +82,12 @@ export default function SettingsPage() {
   });
 
   const repairMut = useMutation({
-    mutationFn: () => fetch("/api/admin/sync/repair", { method: "POST" }).then(r => r.json()),
+    mutationFn: () => postMaintenanceAction("/api/admin/sync/repair"),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["tickets"] }); },
   });
 
   const triageAllMut = useMutation({
-    mutationFn: () => fetch("/api/admin/sync/triage-all", { method: "POST" }).then(r => r.json()),
+    mutationFn: () => postMaintenanceAction("/api/admin/sync/triage-all"),
   });
 
   const handleChange = (key: keyof SettingsType, value: string) => {
@@ -193,9 +205,27 @@ export default function SettingsPage() {
         {/* ═══ Ticketing Mode ═══ */}
         <SettingsSection title="Ticketing Mode" subtitle="Choose whether Tickety uses its own built-in ticketing system or connects to an external ITSM provider">
           <Field label="Provider">
-            <select value={itProvider} onChange={(e) => handleChange("ITSM_PROVIDER", e.target.value)} className="input-base">
-              {PROVIDER_OPTIONS.map((p) => (<option key={p.value} value={p.value}>{p.label}</option>))}
-            </select>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {PROVIDER_OPTIONS.map((provider) => {
+                const selected = itProvider === provider.value;
+                return (
+                  <button
+                    key={provider.value}
+                    type="button"
+                    onClick={() => handleChange("ITSM_PROVIDER", provider.value)}
+                    className={cn(
+                      "min-h-[64px] rounded border px-3 py-2 text-left transition-colors",
+                      selected
+                        ? "border-clay-500 bg-clay-50 text-clay-700"
+                        : "border-linen-400 bg-linen-50 text-ink-600 hover:bg-linen-200"
+                    )}
+                  >
+                    <span className="block text-sm font-semibold">{provider.label}</span>
+                    <span className="block text-xs text-ink-400 mt-0.5">{provider.description}</span>
+                  </button>
+                );
+              })}
+            </div>
           </Field>
 
           {itProvider === "freshservice" && (
@@ -224,6 +254,29 @@ export default function SettingsPage() {
               </Field>
               <Field label="Webhook Secret">
                 <SecretInput value={form.WEBHOOK_SECRET || ""} onChange={(v) => handleChange("WEBHOOK_SECRET", v)} placeholder="Webhook shared secret" />
+              </Field>
+              <Field label="Sync Interval (seconds)">
+                <input type="number" min={10} value={form.SYNC_INTERVAL_SECONDS || ""} onChange={(e) => handleChange("SYNC_INTERVAL_SECONDS", e.target.value)} placeholder="60" className="input-base" />
+              </Field>
+            </>
+          )}
+
+          {itProvider === "jira" && (
+            <>
+              <Field label="Jira Site URL">
+                <input type="text" value={form.JIRA_BASE_URL || ""} onChange={(e) => handleChange("JIRA_BASE_URL", e.target.value)} placeholder="https://your-site.atlassian.net" className="input-base" />
+              </Field>
+              <Field label="Atlassian Email">
+                <input type="email" value={form.JIRA_EMAIL || ""} onChange={(e) => handleChange("JIRA_EMAIL", e.target.value)} placeholder="you@example.com" className="input-base" />
+              </Field>
+              <Field label="Atlassian API Token">
+                <SecretInput value={form.JIRA_API_TOKEN || ""} onChange={(v) => handleChange("JIRA_API_TOKEN", v)} placeholder="API token" />
+              </Field>
+              <Field label="Project Key">
+                <input type="text" value={form.JIRA_PROJECT_KEY || ""} onChange={(e) => handleChange("JIRA_PROJECT_KEY", e.target.value.toUpperCase())} placeholder="ITSM" className="input-base" />
+              </Field>
+              <Field label="Issue Type">
+                <input type="text" value={form.JIRA_ISSUE_TYPE || ""} onChange={(e) => handleChange("JIRA_ISSUE_TYPE", e.target.value)} placeholder="Task" className="input-base" />
               </Field>
               <Field label="Sync Interval (seconds)">
                 <input type="number" min={10} value={form.SYNC_INTERVAL_SECONDS || ""} onChange={(e) => handleChange("SYNC_INTERVAL_SECONDS", e.target.value)} placeholder="60" className="input-base" />
@@ -444,7 +497,7 @@ export default function SettingsPage() {
               icon={Zap}
               mutation={repairMut}
               loadingText="Repairing…"
-              resultFormatter={(r: any) => `Filled ${r.summaries_filled} summaries, ${r.resolutions_filled} resolutions`}
+              resultFormatter={(r: any) => `Filled ${r.summaries_filled ?? 0} summaries, ${r.resolutions_filled ?? 0} resolutions`}
             />
             <MaintenanceButton
               label="Triage All Untriaged"
@@ -452,7 +505,7 @@ export default function SettingsPage() {
               icon={Activity}
               mutation={triageAllMut}
               loadingText="Triaging…"
-              resultFormatter={(r: any) => `Found ${r.found} untriaged, processed ${r.processed}`}
+              resultFormatter={(r: any) => `Found ${r.found ?? 0} untriaged, processed ${r.processed ?? 0}`}
             />
           </div>
         </SettingsSection>
@@ -682,6 +735,8 @@ function AgentSection() {
           <span className="font-medium text-ink-600">Sync complete:</span> {syncMut.data.result.total} fetched,{" "}
           <span className="text-ink-600 font-medium">{syncMut.data.result.created} created</span>
           {syncMut.data.result.updated > 0 && <>, <span className="text-ink-600">{syncMut.data.result.updated} updated</span></>}
+          {syncMut.data.result.remapped > 0 && <>, <span className="text-ink-600">{syncMut.data.result.remapped} remapped</span></>}
+          {syncMut.data.result.tickets_reassigned > 0 && <>, <span className="text-ink-600">{syncMut.data.result.tickets_reassigned} tickets reassigned</span></>}
           {syncMut.data.result.errors > 0 && <>, <span className="text-rust-500 font-medium">{syncMut.data.result.errors} errors</span></>}
         </div>
       )}

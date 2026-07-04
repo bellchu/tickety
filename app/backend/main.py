@@ -7,7 +7,7 @@ import hmac
 import urllib.parse
 import re
 from datetime import datetime, timedelta
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 
@@ -15,7 +15,7 @@ from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconn
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import desc, func, or_
+from sqlalchemy import desc, func, or_, text
 
 from .database import (
     init_db, get_db, SessionLocal,
@@ -37,6 +37,8 @@ from .schema import (
     ResolutionPlan, RecommendedSolution,
     TicketUpdate, TicketComment, TicketCommentCreate,
     TicketCategory, TicketCategoryCreate, TicketAuditEntry, BulkAction,
+    TicketIntelligenceAnalysisRequest, TicketIntelligenceAnalysisResponse,
+    TicketIntelligenceBackfillRequest, TicketIntelligenceSearchResponse,
     LoginRequest, UserCreate, UserUpdate, AuthResponse, UserOut,
     KbArticle, KbArticleCreate, KbArticleUpdate,
     TicketStatusConfig, TicketStatusConfigCreate,
@@ -56,6 +58,7 @@ from .schema import (
 from .llm_manager import LLMManager, get_llm_catalog
 from .brain import IntelligenceEngine
 from . import intelligence as intel
+from . import ticket_vectors
 from .prompts import (
     RECOGNITIONS, TIER_THRESHOLDS, PRIORITY_POINTS,
     MOMENTUM_BONUS_CAP, MOMENTUM_RESET_HOURS,
@@ -441,6 +444,7 @@ async def update_ticket(
             ticket.resolved_at = datetime.utcnow()
     db.commit()
     db.refresh(ticket)
+    await ticket_vectors.refresh_ticket_documents(db, ticket)
     return ticket
 
 
@@ -449,6 +453,7 @@ async def delete_ticket(ticket_id: str, db: Session = Depends(get_db)):
     ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
+    ticket_vectors.delete_ticket_documents(db, ticket_id)
     db.delete(ticket)
     db.commit()
     return {"status": "deleted", "ticket_id": ticket_id}
@@ -484,6 +489,8 @@ async def add_comment(
     db.add(comment)
     db.commit()
     db.refresh(comment)
+    await ticket_vectors.upsert_comment_document(db, comment)
+    await ticket_vectors.refresh_ticket_documents(db, ticket)
     return comment
 
 
@@ -592,6 +599,7 @@ async def create_ticket(payload: TicketCreate, db: Session = Depends(get_db)):
     db.add(ticket)
     db.commit()
     db.refresh(ticket)
+    await ticket_vectors.refresh_ticket_documents(db, ticket)
     await _auto_process(ticket, db)
     return ticket
 
@@ -660,37 +668,36 @@ async def _auto_process(ticket: TicketRecord, db, force: bool = False):
         except Exception as e:
             print(f"[auto] resolution failed: {e}")
 
+    try:
+        await ticket_vectors.refresh_ticket_documents(db, ticket)
+    except Exception as e:
+        print(f"[vectors] ticket refresh failed: {e}")
 
-@app.post("/tickets/{ticket_id}/triage", response_model=TriageResult)
-async def trigger_triage(ticket_id: str, db: Session = Depends(get_db)):
-    ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
-    if not ticket:
-        raise HTTPException(status_code=404, detail="Ticket not found")
 
-    kb_context = ""
+def _ticket_kb_context(ticket: TicketRecord) -> str:
     text = (ticket.subject + " " + ticket.description).lower()
     if "vpn" in text:
-        kb_context = "To reset VPN, restart the client and click Reconnect. Ensure corporate Wi-Fi is connected."
+        return "To reset VPN, restart the client and click Reconnect. Ensure corporate Wi-Fi is connected."
+    return ""
 
-    analysis_data = await engine.process_ticket({
-        "subject": ticket.subject,
-        "description": ticket.description,
-    }, kb_info=kb_context)
 
+def _apply_ticket_analysis(ticket: TicketRecord, analysis_data: Dict[str, Any], db: Session) -> None:
     ticket.sentiment = analysis_data.get("sentiment")
     ticket.category = analysis_data.get("category")
     ticket.priority = analysis_data.get("priority")
     ticket.mood = analysis_data.get("mood")
     ticket.complexity = analysis_data.get("complexity", 1)
     ticket.ai_reasoning = analysis_data.get("reasoning")
-    # Escalation Risk Agent: score 0-100, persisted for prioritization/alerts.
     ticket.escalation_risk = intel.escalation_risk(ticket)
+    _apply_sla_targets(ticket, db)
+
     if analysis_data.get("suggested_response"):
         ticket.suggested_response = analysis_data.get("suggested_response")
         ticket.ai_review_state = "Awaiting Review"
         if (ticket.workflow_status or ticket.status or "New").lower() in {"new", "open", "processed"}:
             ticket.workflow_status = "Awaiting Review"
-        ticket.ai_reasoning += f" | Suggested Response: {analysis_data['suggested_response']}"
+        reasoning = ticket.ai_reasoning or ""
+        ticket.ai_reasoning = f"{reasoning} | Suggested Response: {analysis_data['suggested_response']}".strip(" |")
     elif analysis_data.get("action") == "escalate":
         ticket.ai_review_state = "Escalated"
         ticket.workflow_status = "Escalated"
@@ -699,21 +706,102 @@ async def trigger_triage(ticket_id: str, db: Session = Depends(get_db)):
         ticket.workflow_status = ticket.workflow_status or ticket.status or "Open"
     ticket.status = ticket.workflow_status or ticket.status
 
+
+def _triage_result_payload(ticket: TicketRecord, analysis_data: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "ticket_id": ticket.id,
+        "sentiment": analysis_data.get("sentiment", "Neutral"),
+        "category": analysis_data.get("category", "Other"),
+        "priority": analysis_data.get("priority", "P3"),
+        "mood": analysis_data.get("mood", "neutral"),
+        "complexity": analysis_data.get("complexity", 1),
+        "action": analysis_data.get("action", "respond"),
+        "reasoning": analysis_data.get("reasoning", ""),
+        "suggested_response": analysis_data.get("suggested_response"),
+        "escalation_risk": ticket.escalation_risk or 0,
+    }
+
+
+async def _run_ticket_analysis(ticket: TicketRecord, db: Session) -> Dict[str, Any]:
+    """Run every per-ticket intelligence action behind the Run Analysis button."""
+    errors: List[Dict[str, str]] = []
+    analysis_data = await engine.process_ticket(
+        {"subject": ticket.subject, "description": ticket.description},
+        kb_info=_ticket_kb_context(ticket),
+    )
+    _apply_ticket_analysis(ticket, analysis_data, db)
     db.commit()
     db.refresh(ticket)
 
-    return TriageResult(
-        ticket_id=ticket.id,
-        sentiment=analysis_data.get("sentiment", "Neutral"),
-        category=analysis_data.get("category", "Other"),
-        priority=analysis_data.get("priority", "P3"),
-        mood=analysis_data.get("mood", "neutral"),
-        complexity=analysis_data.get("complexity", 1),
-        action=analysis_data.get("action", "respond"),
-        reasoning=analysis_data.get("reasoning", ""),
-        suggested_response=analysis_data.get("suggested_response"),
-        escalation_risk=ticket.escalation_risk or 0,
+    summary = None
+    try:
+        summary = await intel.summarize_ticket(engine.llm, ticket)
+        if summary:
+            ticket.summary = summary
+            db.commit()
+            db.refresh(ticket)
+    except Exception as e:
+        errors.append({"step": "summary", "error": str(e)})
+
+    route = None
+    try:
+        route = intel.recommend_assignee(db, ticket)
+    except Exception as e:
+        errors.append({"step": "route", "error": str(e)})
+
+    plan_dict = None
+    try:
+        plan_dict = await intel.recommend_resolution(engine.llm, ticket)
+        ticket.recommended_solution = json.dumps(plan_dict)
+        db.commit()
+        db.refresh(ticket)
+    except Exception as e:
+        errors.append({"step": "resolution", "error": str(e)})
+
+    documents_changed = 0
+    try:
+        documents_changed = await ticket_vectors.refresh_ticket_documents(db, ticket, force=True)
+    except Exception as e:
+        errors.append({"step": "ticket_intelligence", "error": str(e)})
+
+    return {
+        "ticket_id": ticket.id,
+        "triage": _triage_result_payload(ticket, analysis_data),
+        "summary": summary or ticket.summary,
+        "route": route,
+        "recommended_solution": {
+            "ticket_id": ticket.id,
+            "plan": plan_dict,
+            "cached": False,
+        } if plan_dict else None,
+        "documents_changed": documents_changed,
+        "errors": errors,
+    }
+
+
+@app.post("/tickets/{ticket_id}/triage", response_model=TriageResult)
+async def trigger_triage(ticket_id: str, db: Session = Depends(get_db)):
+    ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+
+    analysis_data = await engine.process_ticket(
+        {"subject": ticket.subject, "description": ticket.description},
+        kb_info=_ticket_kb_context(ticket),
     )
+    _apply_ticket_analysis(ticket, analysis_data, db)
+    db.commit()
+    db.refresh(ticket)
+
+    return TriageResult(**_triage_result_payload(ticket, analysis_data))
+
+
+@app.post("/tickets/{ticket_id}/analysis")
+async def run_ticket_analysis(ticket_id: str, db: Session = Depends(get_db)):
+    ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    return await _run_ticket_analysis(ticket, db)
 
 
 # ── Authentication ─────────────────────────────────────────────
@@ -1042,6 +1130,110 @@ async def sso_callback(
     return resp
 
 
+# ── Ticket intelligence retrieval ─────────────────────────────
+
+@app.get("/ticket-intelligence/status")
+async def ticket_intelligence_status(
+    _user: UserRecord = Depends(require_role("admin", "supervisor")),
+    db: Session = Depends(get_db),
+):
+    return ticket_vectors.ticket_vector_status(db)
+
+
+@app.post("/ticket-intelligence/backfill")
+async def ticket_intelligence_backfill(
+    payload: TicketIntelligenceBackfillRequest,
+    _user: UserRecord = Depends(require_role("admin", "supervisor")),
+    db: Session = Depends(get_db),
+):
+    return await ticket_vectors.backfill_ticket_documents(
+        db,
+        limit=payload.limit,
+        include_comments=payload.include_comments,
+        include_kb=payload.include_kb,
+        force=payload.force,
+    )
+
+
+@app.post("/tickets/{ticket_id}/intelligence/refresh")
+async def refresh_ticket_intelligence(
+    ticket_id: str,
+    force: bool = False,
+    _user: UserRecord = Depends(require_role("admin", "supervisor")),
+    db: Session = Depends(get_db),
+):
+    ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    changed = await ticket_vectors.refresh_ticket_documents(db, ticket, force=force)
+    return {"ticket_id": ticket_id, "documents_changed": changed}
+
+
+@app.get("/ticket-intelligence/search", response_model=TicketIntelligenceSearchResponse)
+async def search_ticket_intelligence(
+    q: str = Query(..., min_length=1, max_length=1000),
+    limit: int = Query(8, ge=1, le=30),
+    _user: UserRecord = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return await ticket_vectors.retrieve_ticket_context(db, q, limit=limit)
+
+
+@app.post("/ticket-intelligence/analyze", response_model=TicketIntelligenceAnalysisResponse)
+async def analyze_ticket_intelligence(
+    payload: TicketIntelligenceAnalysisRequest,
+    _user: UserRecord = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    retrieval = await ticket_vectors.retrieve_ticket_context(
+        db,
+        payload.question,
+        limit=payload.limit,
+        source_types=payload.source_types,
+    )
+    context = retrieval.get("results", [])
+    snippets = []
+    for idx, item in enumerate(context, start=1):
+        snippets.append(
+            "\n".join(
+                [
+                    f"[{idx}] {item.get('source_type')} {item.get('source_id')}",
+                    f"Ticket: {item.get('ticket_id') or '-'}",
+                    f"Title: {item.get('title') or ''}",
+                    f"Metadata: {json.dumps(item.get('metadata') or {}, default=str)}",
+                    f"Text: {item.get('snippet') or ''}",
+                ]
+            )
+        )
+    prompt = (
+        "You are Tickety's background ticket database analyst. Answer the user's "
+        "question using only the retrieved ticket context below. Be concise, "
+        "name uncertainty when the context is thin, and do not invent ticket "
+        "facts.\n\n"
+        f"Question: {payload.question}\n\n"
+        "Retrieved context:\n"
+        f"{chr(10).join(snippets) if snippets else 'No matching context.'}\n\n"
+        "Return JSON with this shape: "
+        "{\"answer\":\"short answer\", \"findings\":[\"...\"], "
+        "\"recommended_actions\":[\"...\"]}"
+    )
+    result = await llm_mgr.analyze(prompt, json_schema={})
+    findings = result.get("findings") or []
+    actions = result.get("recommended_actions") or []
+    if isinstance(findings, str):
+        findings = [findings]
+    if isinstance(actions, str):
+        actions = [actions]
+    return {
+        "question": payload.question,
+        "match_method": retrieval.get("match_method", "keyword"),
+        "answer": result.get("answer") or "",
+        "findings": [str(item) for item in findings if str(item).strip()],
+        "recommended_actions": [str(item) for item in actions if str(item).strip()],
+        "context": context,
+    }
+
+
 # ── Users / Agents CRUD (standalone) ───────────────────────────
 
 @app.get("/users", response_model=List[UserOut])
@@ -1237,6 +1429,7 @@ async def create_kb_article(
     db.add(article)
     db.commit()
     db.refresh(article)
+    await ticket_vectors.upsert_kb_document(db, article)
     return article
 
 
@@ -1263,6 +1456,7 @@ async def update_kb_article(
         article.published_at = datetime.utcnow()
     db.commit()
     db.refresh(article)
+    await ticket_vectors.upsert_kb_document(db, article)
     return article
 
 
@@ -1271,6 +1465,14 @@ async def delete_kb_article(article_id: str, db: Session = Depends(get_db)):
     article = db.query(KbArticleRecord).filter(KbArticleRecord.id == article_id).first()
     if not article:
         raise HTTPException(status_code=404, detail="Article not found")
+    if ticket_vectors.ticket_vector_store_ready(db):
+        db.execute(
+            text(
+                "DELETE FROM ticket_search_documents "
+                "WHERE source_type = 'kb_article' AND source_id = :source_id"
+            ),
+            {"source_id": article_id},
+        )
     db.delete(article)
     db.commit()
     return {"status": "deleted"}
@@ -3003,11 +3205,11 @@ async def ws_ticket_stream(ws: WebSocket, ticket_id: str):
 
         steps = [
             {"step": "reading", "label": "Reading ticket details...", "status": "active"},
-            {"step": "sentiment", "label": "Analyzing customer sentiment...", "status": "pending"},
-            {"step": "categorize", "label": "Categorizing issue type...", "status": "pending"},
-            {"step": "priority", "label": "Assessing priority level...", "status": "pending"},
-            {"step": "mood", "label": "Inferring customer mood...", "status": "pending"},
-            {"step": "complexity", "label": "Calculating complexity rating...", "status": "pending"},
+            {"step": "triage", "label": "Triaging sentiment, category, priority...", "status": "pending"},
+            {"step": "summary", "label": "Generating case summary...", "status": "pending"},
+            {"step": "route", "label": "Recommending engineer route...", "status": "pending"},
+            {"step": "resolution", "label": "Drafting resolution plan...", "status": "pending"},
+            {"step": "refresh", "label": "Refreshing ticket intelligence...", "status": "pending"},
             {"step": "done", "label": "Analysis complete", "status": "pending"},
         ]
 
@@ -3021,31 +3223,9 @@ async def ws_ticket_stream(ws: WebSocket, ticket_id: str):
         # status on the client and the spinner never stops.
         await ws.send_json({"type": "progress", "steps": steps})
 
-        # Trigger actual triage
-        analysis = await engine.process_ticket({
-            "subject": ticket.subject,
-            "description": ticket.description,
-        })
+        result = await _run_ticket_analysis(ticket, db)
 
-        ticket.sentiment = analysis.get("sentiment")
-        ticket.category = analysis.get("category")
-        ticket.priority = analysis.get("priority")
-        ticket.mood = analysis.get("mood")
-        ticket.complexity = analysis.get("complexity", 1)
-        ticket.ai_reasoning = analysis.get("reasoning")
-        ticket.escalation_risk = intel.escalation_risk(ticket)
-        if analysis.get("suggested_response"):
-            ticket.suggested_response = analysis.get("suggested_response")
-            ticket.ai_review_state = "Awaiting Review"
-        elif analysis.get("action") == "escalate":
-            ticket.ai_review_state = "Escalated"
-            ticket.workflow_status = "Escalated"
-        else:
-            ticket.ai_review_state = "Processed"
-        ticket.status = ticket.workflow_status or ticket.status
-        db.commit()
-
-        await ws.send_json({"type": "complete", "result": analysis})
+        await ws.send_json({"type": "complete", "result": result})
         await ws.close()
     except WebSocketDisconnect:
         pass

@@ -201,6 +201,10 @@ class Settings(BaseModel):
     CUSTOM_TEMPERATURE: Optional[str] = None
     CUSTOM_MAX_TOKENS: Optional[str] = None
     DEFAULT_MODEL: Optional[str] = None
+    TICKET_EMBEDDING_ENABLED: Optional[str] = None
+    TICKET_EMBEDDING_MODEL: Optional[str] = None
+    TICKET_EMBEDDING_DIMENSIONS: Optional[str] = None
+    TICKET_EMBEDDING_API_BASE: Optional[str] = None
     DATABASE_URL: Optional[str] = None
     ITSM_PROVIDER: Optional[str] = None
     FRESHSERVICE_DOMAIN: Optional[str] = None
@@ -215,6 +219,11 @@ class Settings(BaseModel):
     FRESHSERVICE_OAUTH_SCOPES: Optional[str] = None
     FRESHSERVICE_OAUTH_ACCESS_TOKEN: Optional[str] = None
     FRESHSERVICE_OAUTH_REFRESH_TOKEN: Optional[str] = None
+    JIRA_BASE_URL: Optional[str] = None
+    JIRA_EMAIL: Optional[str] = None
+    JIRA_API_TOKEN: Optional[str] = None
+    JIRA_PROJECT_KEY: Optional[str] = None
+    JIRA_ISSUE_TYPE: Optional[str] = None
     WEBHOOK_SECRET: Optional[str] = None
     SYNC_INTERVAL_SECONDS: Optional[str] = None
     NEXT_PUBLIC_API_URL: Optional[str] = None
@@ -340,6 +349,47 @@ class BulkAction(BaseModel):
     ticket_ids: List[str] = Field(..., min_length=1)
     action: str = Field(..., description="assign | close | set_priority | set_category")
     value: Optional[str] = None
+
+
+class TicketIntelligenceBackfillRequest(BaseModel):
+    limit: int = Field(200, ge=1, le=5000)
+    include_comments: bool = True
+    include_kb: bool = True
+    force: bool = False
+
+
+class TicketIntelligenceSearchResult(BaseModel):
+    source_type: str
+    source_id: str
+    ticket_id: Optional[str] = None
+    title: str = ""
+    snippet: str = ""
+    score: float = 0.0
+    match_method: str = "keyword"
+    metadata: dict = Field(default_factory=dict)
+
+
+class TicketIntelligenceSearchResponse(BaseModel):
+    query: str
+    match_method: str = "keyword"
+    results: List[TicketIntelligenceSearchResult] = Field(default_factory=list)
+
+
+class TicketIntelligenceAnalysisRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=1000)
+    limit: int = Field(8, ge=1, le=30)
+    source_types: List[Literal["ticket", "comment", "kb_article"]] = Field(
+        default_factory=lambda: ["ticket", "comment", "kb_article"]
+    )
+
+
+class TicketIntelligenceAnalysisResponse(BaseModel):
+    question: str
+    match_method: str = "keyword"
+    answer: str = ""
+    findings: List[str] = Field(default_factory=list)
+    recommended_actions: List[str] = Field(default_factory=list)
+    context: List[TicketIntelligenceSearchResult] = Field(default_factory=list)
 
 
 # ── Authentication ──────────────────────────────────────────────

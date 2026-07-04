@@ -22,12 +22,33 @@ FRESHSERVICE_PRIORITY_MAP = {
     4: "P1",  # Urgent
 }
 
+TICKETY_PRIORITY_TO_FRESHSERVICE = {
+    "P4": 1,
+    "LOW": 1,
+    "P3": 2,
+    "MEDIUM": 2,
+    "P2": 3,
+    "HIGH": 3,
+    "P1": 4,
+    "URGENT": 4,
+}
+
 FRESHSERVICE_STATUS_MAP = {
     2: "Open",
     3: "Pending",
     4: "Resolved",
     5: "Closed",
     6: "Escalated",
+}
+
+TICKETY_STATUS_TO_FRESHSERVICE = {
+    "NEW": 2,
+    "OPEN": 2,
+    "AWAITING REVIEW": 3,
+    "PENDING": 3,
+    "RESOLVED": 4,
+    "CLOSED": 5,
+    "ESCALATED": 6,
 }
 
 DEFAULT_FRESHSERVICE_OAUTH_SCOPES = (
@@ -185,6 +206,14 @@ class FreshserviceAdapter(BaseITSMAdapter):
                 return external_status
             return "Open"
 
+    def to_freshservice_priority(self, tickety_priority) -> int:
+        key = str(tickety_priority or "P3").strip().upper()
+        return TICKETY_PRIORITY_TO_FRESHSERVICE.get(key, 2)
+
+    def to_freshservice_status(self, tickety_status) -> int:
+        key = str(tickety_status or "Open").strip().upper()
+        return TICKETY_STATUS_TO_FRESHSERVICE.get(key, 2)
+
     def build_ticket_url(self, external_id: str) -> str:
         return f"{self.base_url}/support/tickets/{external_id}"
 
@@ -288,6 +317,26 @@ class FreshserviceAdapter(BaseITSMAdapter):
             resp = await client.get(url, auth=self._auth(), headers=self._headers(), params=params)
         return resp
 
+    async def _rate_limited_post(self, client: httpx.AsyncClient, url: str, payload: dict) -> httpx.Response:
+        """POST with rate-limit pacing + 429 retry. Returns the Response."""
+        elapsed = time.monotonic() - getattr(self, "_last_post_ts", 0.0)
+        if elapsed < self._MIN_INTERVAL_S:
+            await asyncio.sleep(self._MIN_INTERVAL_S - elapsed)
+
+        resp = await client.post(url, auth=self._auth(), headers=self._headers(), json=payload)
+        self._last_post_ts = time.monotonic()
+
+        if resp.status_code == 429:
+            retry_after = float(resp.headers.get("Retry-After", "5") or "5")
+            print(f"[External] rate limited; sleeping {retry_after}s")
+            await asyncio.sleep(retry_after + 0.5)
+            self._last_post_ts = time.monotonic()
+            resp = await client.post(url, auth=self._auth(), headers=self._headers(), json=payload)
+        if resp.status_code == 401 and await self._refresh_oauth_access_token():
+            self._last_post_ts = time.monotonic()
+            resp = await client.post(url, auth=self._auth(), headers=self._headers(), json=payload)
+        return resp
+
     @staticmethod
     def _parse_link_next(link_header: Optional[str], base_url: str) -> Optional[str]:
         """Extract the rel=\"next\" URL from a Link header."""
@@ -375,6 +424,15 @@ class FreshserviceAdapter(BaseITSMAdapter):
                     break
                 page += 1
         return out
+
+    async def create_ticket(self, payload: dict) -> dict:
+        """Create a ticket in Freshservice and return the raw provider ticket."""
+        url = f"{self.base_url}/api/v2/tickets"
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await self._rate_limited_post(client, url, payload)
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("ticket", data)
 
     def parse_webhook(
         self,

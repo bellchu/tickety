@@ -112,6 +112,7 @@ export interface TriageResult {
   action: string;
   reasoning: string;
   suggested_response: string | null;
+  escalation_risk: number;
 }
 
 export interface PointsNotification {
@@ -168,6 +169,11 @@ export interface Settings {
   FRESHSERVICE_OAUTH_CLIENT_SECRET: string;
   FRESHSERVICE_OAUTH_REDIRECT_URI: string;
   FRESHSERVICE_OAUTH_SCOPES: string;
+  JIRA_BASE_URL: string;
+  JIRA_EMAIL: string;
+  JIRA_API_TOKEN: string;
+  JIRA_PROJECT_KEY: string;
+  JIRA_ISSUE_TYPE: string;
   WEBHOOK_SECRET: string;
   SYNC_INTERVAL_SECONDS: string;
   NEXT_PUBLIC_API_URL: string;
@@ -314,6 +320,16 @@ export interface TicketSummary {
   summary: string;
 }
 
+export interface TicketAnalysisResult {
+  ticket_id: string;
+  triage: TriageResult;
+  summary: string | null;
+  route: RouteRecommendation | null;
+  recommended_solution: RecommendedSolution | null;
+  documents_changed: number;
+  errors: { step: string; error: string }[];
+}
+
 // ── Resolution Agent (Recommended Solution) ─────────────────
 
 export interface ResolutionPlan {
@@ -372,9 +388,11 @@ export interface AgentListResponse {
 export interface SyncAgentsResult {
   created: number;
   updated: number;
+  remapped: number;
   errors: number;
   total: number;
   skipped_inactive: number;
+  tickets_reassigned: number;
 }
 
 // ── Systemic Issues ───────────────────────────────────────────

@@ -3,7 +3,7 @@
 import { useState, useEffect, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
-import type { RouteRecommendation, ResolutionPlan, Ticket, TicketAuditEntry, TicketComment, UserOut } from "@/lib/types";
+import type { RouteRecommendation, ResolutionPlan, Ticket, TicketAnalysisResult, TicketAuditEntry, TicketComment, UserOut } from "@/lib/types";
 import { useParams } from "next/navigation";
 import { AIThinkingStream } from "@/components/ticket/AIThinkingStream";
 import { SentimentTag } from "@/components/engagement/SentimentTag";
@@ -22,6 +22,7 @@ import {
 export default function TicketDetailPage() {
   const params = useParams();
   const id = params.id as string;
+  const [latestAnalysis, setLatestAnalysis] = useState<TicketAnalysisResult | null>(null);
   const { data: ticket, isLoading } = useQuery({
     queryKey: ["ticket", id],
     queryFn: () => api.getTicket(id),
@@ -133,13 +134,18 @@ export default function TicketDetailPage() {
 
       <AgentActionPanel ticket={ticket} />
 
-      <AIThinkingStream ticketId={ticket.id} hasExisting={!!ticket.ai_reasoning} />
+      <AIThinkingStream
+        ticketId={ticket.id}
+        hasExisting={!!ticket.ai_reasoning}
+        onComplete={setLatestAnalysis}
+      />
 
       <IntelligencePanel
         ticketId={ticket.id}
         escalationRisk={ticket.escalation_risk ?? 0}
         summary={ticket.summary ?? null}
         autoFetch={!!ticket.ai_reasoning}
+        latestAnalysis={latestAnalysis}
       />
 
       {ticket.ai_reasoning && <ReasoningLog text={ticket.ai_reasoning} />}
@@ -353,14 +359,25 @@ function InfoItem({ icon, label, value }: { icon: ReactNode; label: string; valu
 /* ── Intelligence panel ── */
 
 function IntelligencePanel({
-  ticketId, escalationRisk, summary, autoFetch,
+  ticketId, escalationRisk, summary, autoFetch, latestAnalysis,
 }: {
-  ticketId: string; escalationRisk: number; summary: string | null; autoFetch: boolean;
+  ticketId: string; escalationRisk: number; summary: string | null; autoFetch: boolean; latestAnalysis: TicketAnalysisResult | null;
 }) {
   const queryClient = useQueryClient();
   const [summaryText, setSummaryText] = useState<string | null>(summary);
   const [route, setRoute] = useState<RouteRecommendation | null>(null);
   const [plan, setPlan] = useState<ResolutionPlan | null>(null);
+
+  useEffect(() => {
+    setSummaryText(summary);
+  }, [summary, ticketId]);
+
+  useEffect(() => {
+    if (!latestAnalysis || latestAnalysis.ticket_id !== ticketId) return;
+    setSummaryText(latestAnalysis.summary);
+    setRoute(latestAnalysis.route);
+    setPlan(latestAnalysis.recommended_solution?.plan ?? null);
+  }, [latestAnalysis, ticketId]);
 
   // Auto-fetch all intelligence when the ticket is already processed
   useEffect(() => {

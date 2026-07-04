@@ -1,8 +1,8 @@
 import uuid
 from datetime import datetime, timedelta
-from typing import List, Optional
+from typing import Any, List, Optional
 
-from sqlalchemy import func
+from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 
 from ..database import (
@@ -10,6 +10,7 @@ from ..database import (
     UserRecord,
 )
 from ..schema import ExternalTicket, WebhookEvent
+from ..ticket_vectors import refresh_ticket_documents_background
 from .registry import get_adapter
 
 
@@ -77,6 +78,7 @@ def _upsert_ticket(db: Session, ext: ExternalTicket, provider: str, overwrite: b
             existing.status = existing.workflow_status or ext.status
         db.commit()
         db.refresh(existing)
+        refresh_ticket_documents_background(db, existing)
         return "updated", existing
 
     new_ticket = TicketRecord(
@@ -109,6 +111,7 @@ def _upsert_ticket(db: Session, ext: ExternalTicket, provider: str, overwrite: b
     db.add(new_ticket)
     db.commit()
     db.refresh(new_ticket)
+    refresh_ticket_documents_background(db, new_ticket)
     return "new", new_ticket
 
 
@@ -394,7 +397,115 @@ def handle_webhook_event(event: WebhookEvent, adapter=None) -> Optional[TicketRe
         return None
     finally:
         db.close()
-import uuid as _uuid
+
+
+def _external_agent_value(agent: dict, *keys: str) -> str:
+    for key in keys:
+        value = agent.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def _external_agent_active(agent: dict) -> bool:
+    value = agent.get("active")
+    if isinstance(value, str):
+        return value.strip().lower() not in {"false", "0", "no", "inactive"}
+    return value is not False
+
+
+def _normalize_external_agent(agent: dict) -> dict[str, Any]:
+    ext_id = _external_agent_value(
+        agent,
+        "id",
+        "accountId",
+        "account_id",
+        "user_id",
+    )
+    first = _external_agent_value(agent, "first_name", "firstName")
+    last = _external_agent_value(agent, "last_name", "lastName")
+    full_name = _external_agent_value(
+        agent,
+        "name",
+        "display_name",
+        "displayName",
+        "full_name",
+        "fullName",
+    )
+    name = full_name or f"{first} {last}".strip()
+    email = _external_agent_value(agent, "email", "emailAddress", "mail").lower()
+    title = _external_agent_value(agent, "job_title", "jobTitle", "title", "accountType")
+    return {
+        "id": ext_id,
+        "name": name or email or (f"Agent {ext_id}" if ext_id else "Agent"),
+        "email": email,
+        "title": title,
+        "active": _external_agent_active(agent),
+    }
+
+
+def _find_user_by_email(db: Session, email: str) -> Optional[UserRecord]:
+    if not email:
+        return None
+    return db.query(UserRecord).filter(func.lower(UserRecord.email) == email).first()
+
+
+def _find_unique_user_by_name(db: Session, name: str) -> Optional[UserRecord]:
+    if not name:
+        return None
+    users = db.query(UserRecord).filter(func.lower(UserRecord.name) == name.lower()).all()
+    return users[0] if len(users) == 1 else None
+
+
+def _apply_external_agent_profile(user: UserRecord, agent: dict[str, Any]) -> bool:
+    changed = False
+    if agent["name"] and user.name != agent["name"]:
+        user.name = agent["name"]
+        changed = True
+    if agent["email"] and (user.email or "").strip().lower() != agent["email"]:
+        user.email = agent["email"]
+        changed = True
+    if agent["title"] and user.title != agent["title"]:
+        user.title = agent["title"]
+        changed = True
+    return changed
+
+
+def _create_external_agent_user(db: Session, agent: dict[str, Any]) -> UserRecord:
+    user = UserRecord(
+        id=str(uuid.uuid4()),
+        name=agent["name"],
+        email=agent["email"],
+        title=agent["title"],
+    )
+    db.add(user)
+    db.flush()
+    return user
+
+
+def _reconcile_ticket_assignees(db: Session, provider: str) -> int:
+    rows = db.query(TicketRecord, UserMappingRecord.tickety_user_id).join(
+        UserMappingRecord,
+        and_(
+            TicketRecord.external_source == UserMappingRecord.external_source,
+            TicketRecord.external_assignee_id == UserMappingRecord.external_assignee_id,
+        ),
+    ).filter(
+        TicketRecord.external_source == provider,
+        TicketRecord.external_assignee_id.isnot(None),
+    ).all()
+    updated = 0
+    for ticket, tickety_user_id in rows:
+        if ticket.assignee_id != tickety_user_id:
+            ticket.assignee_id = tickety_user_id
+            ticket.updated_at = datetime.utcnow()
+            updated += 1
+    if updated:
+        db.commit()
+    return updated
 
 
 def sync_agents_from_external(adapter=None) -> dict:
@@ -415,21 +526,30 @@ def sync_agents_from_external(adapter=None) -> dict:
     """
     adapter = adapter or get_adapter()
     db: Session = SessionLocal()
-    result = {"created": 0, "updated": 0, "errors": 0, "total": 0, "skipped_inactive": 0}
+    result = {
+        "created": 0,
+        "updated": 0,
+        "remapped": 0,
+        "errors": 0,
+        "total": 0,
+        "skipped_inactive": 0,
+        "tickets_reassigned": 0,
+    }
     try:
         import asyncio
         raw_agents = asyncio.run(adapter.fetch_agents())
         result["total"] = len(raw_agents)
 
-        for a in raw_agents:
+        for raw_agent in raw_agents:
             try:
-                ext_id = str(a.get("id", ""))
+                agent = _normalize_external_agent(raw_agent)
+                ext_id = agent["id"]
                 if not ext_id:
                     continue
 
                 # Per API docs: active is a boolean; false means the agent has
                 # been deactivated and should not receive new tickets / points.
-                if a.get("active") is False:
+                if not agent["active"]:
                     result["skipped_inactive"] += 1
                     continue
 
@@ -438,53 +558,60 @@ def sync_agents_from_external(adapter=None) -> dict:
                     UserMappingRecord.external_assignee_id == ext_id,
                 ).first()
 
-                name = f"{a.get('first_name','')} {a.get('last_name','')}".strip()
-                email = a.get("email", "")
-                title = a.get("job_title", "")
+                matched_user = _find_user_by_email(db, agent["email"])
+                if not matched_user and not agent["email"]:
+                    matched_user = _find_unique_user_by_name(db, agent["name"])
+                user = None
+                created_user = False
+                remapped = False
 
                 if mapping:
-                    user = db.query(UserRecord).filter(
+                    mapped_user = db.query(UserRecord).filter(
                         UserRecord.id == mapping.tickety_user_id
                     ).first()
-                    if user:
-                        user.name = name or user.name
-                        user.email = email.strip().lower() if email else user.email
-                        user.title = title or user.title
-                        db.commit()
-                        result["updated"] += 1
-                else:
-                    user = None
-                    if email:
-                        user = db.query(UserRecord).filter(
-                            func.lower(UserRecord.email) == email.strip().lower()
-                        ).first()
-                    if user:
-                        uid = user.id
-                        user.name = name or user.name
-                        user.title = title or user.title
-                        result["updated"] += 1
+
+                    mapped_email = (mapped_user.email or "").strip().lower() if mapped_user else ""
+                    if matched_user and matched_user.id != mapping.tickety_user_id and (
+                        (agent["email"] and mapped_email != agent["email"])
+                        or (not agent["email"] and not mapped_user)
+                    ):
+                        user = matched_user
+                        mapping.tickety_user_id = user.id
+                        remapped = True
                     else:
-                        uid = str(_uuid.uuid4())
-                        user = UserRecord(
-                            id=uid,
-                            name=name or email or f"Agent {ext_id}",
-                            email=email.strip().lower() if email else email,
-                            title=title,
-                        )
-                        db.add(user)
-                        db.flush()
-                        result["created"] += 1
+                        user = mapped_user
+
+                    if not user:
+                        user = matched_user or _create_external_agent_user(db, agent)
+                        created_user = matched_user is None
+                        if mapping.tickety_user_id != user.id:
+                            mapping.tickety_user_id = user.id
+                            remapped = True
+                else:
+                    user = matched_user or _create_external_agent_user(db, agent)
+                    created_user = matched_user is None
                     db.add(UserMappingRecord(
-                        tickety_user_id=uid,
+                        tickety_user_id=user.id,
                         external_source=adapter.provider_name,
                         external_assignee_id=ext_id,
                     ))
-                    db.commit()
+
+                profile_changed = _apply_external_agent_profile(user, agent)
+                db.commit()
+
+                if created_user:
+                    result["created"] += 1
+                elif remapped:
+                    result["remapped"] += 1
+                elif profile_changed or mapping:
+                    result["updated"] += 1
 
             except Exception as e:
-                print(f"[agents] error processing agent {a.get('id')}: {e}")
+                print(f"[agents] error processing agent {raw_agent.get('id') or raw_agent.get('accountId')}: {e}")
                 db.rollback()
                 result["errors"] += 1
+
+        result["tickets_reassigned"] = _reconcile_ticket_assignees(db, adapter.provider_name)
 
     except Exception as e:
         print(f"[agents] fatal error: {e}")

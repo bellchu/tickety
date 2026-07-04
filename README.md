@@ -76,6 +76,25 @@ Configure any OpenAI-compatible endpoint via **Settings → LLM Configuration �
 | Default Model | Free-text — type any model name your provider supports |
 | **Fetch Latest Models** | Auto-discovers available models from your custom endpoint |
 
+### Ticket Intelligence Retrieval
+
+Tickety can maintain a pgvector-backed retrieval index for tickets, ticket
+comments, and knowledge-base articles. This keeps LLM analysis cheap: SQL and
+vector search narrow the database first, then the LLM only sees a short context
+set.
+
+Embeddings are opt-in to avoid surprise token spend:
+
+```bash
+TICKET_EMBEDDING_ENABLED=true
+TICKET_EMBEDDING_MODEL=openai/text-embedding-3-small
+TICKET_EMBEDDING_DIMENSIONS=1536
+```
+
+After enabling embeddings, run `POST /ticket-intelligence/backfill` as an admin
+to index existing records. New/updated tickets, comments, synced tickets, and KB
+articles refresh their documents automatically.
+
 ## Production mode
 
 Tickety ships in **demo mode** — no authentication needed. For production:
@@ -108,6 +127,7 @@ Tickety ships in **demo mode** — no authentication needed. For production:
 | Time Tracking | Per-ticket time entries, daily/total summaries, filter by ticket or agent |
 | Reports | Volume trends (AreaChart), category/status breakdown (PieChart/BarChart), SLA compliance, resolution-time charts |
 | AI Pipeline | Auto-triage (sentiment/category/priority/mood/complexity) &rarr; auto-summarisation &rarr; auto-routing &rarr; auto-resolution plans |
+| Ticket Intelligence | Optional pgvector-backed retrieval over tickets, comments, and KB articles for low-token LLM database analysis |
 | SLA | Per-priority clocks, breach detection, escalation risk scoring, compliance reports |
 | Engagement | Impact points, tier promotions (T1&ndash;T8), momentum streaks, recognition badges, leaderboard |
 | Auth / RBAC | Cookie-based sessions, admin / supervisor / agent roles, login page, SSO (OIDC) |
@@ -123,6 +143,9 @@ Tickety ships in **demo mode** — no authentication needed. For production:
 | `POST /tickets/:id/comments` | Add comment |
 | `GET /tickets/:id/audit` | Audit log for a ticket |
 | `POST /tickets/bulk` | Bulk assign/close/set priority/ set category |
+| `GET /ticket-intelligence/search?q=...` | Retrieve the most relevant ticket/comment/KB snippets for a question |
+| `POST /ticket-intelligence/analyze` | Ask an LLM a question using only retrieved ticket context |
+| `POST /ticket-intelligence/backfill` | Admin: index existing tickets/comments/KB articles |
 | `GET /problems` | List problems (filter by status) |
 | `POST /problems` | Create problem record |
 | `PATCH /problems/:id` | Update problem (status, root cause, resolution) |
@@ -189,6 +212,7 @@ app/
 │   └── integrations/
 │       ├── base.py           Abstract ITSM adapter interface
 │       ├── freshservice.py   External provider adapter (REST + OAuth)
+│       ├── jira.py           Jira Cloud adapter (REST + API token)
 │       ├── registry.py       Adapter factory
 │       └── sync.py           Ticket & agent sync logic
 └── frontend-next/

@@ -484,6 +484,59 @@ class TimeEntryRecord(Base):
 from sqlalchemy import inspect as _sa_inspect
 
 
+def _ensure_ticket_search_documents():
+    """Create the optional pgvector-backed search document table.
+
+    The app can run without pgvector installed; retrieval will fall back to
+    keyword scans until the extension is available.
+    """
+    if engine.dialect.name != "postgresql":
+        print("[vectors] pgvector disabled: database is not PostgreSQL")
+        return
+
+    try:
+        dimensions = int(os.getenv("TICKET_EMBEDDING_DIMENSIONS", "1536") or "1536")
+    except ValueError:
+        dimensions = 1536
+    try:
+        with engine.begin() as conn:
+            conn.exec_driver_sql("CREATE EXTENSION IF NOT EXISTS vector")
+            conn.exec_driver_sql(
+                f"""
+                CREATE TABLE IF NOT EXISTS ticket_search_documents (
+                    id BIGSERIAL PRIMARY KEY,
+                    source_type VARCHAR NOT NULL,
+                    source_id VARCHAR NOT NULL,
+                    ticket_id VARCHAR,
+                    title TEXT DEFAULT '',
+                    body TEXT DEFAULT '',
+                    metadata_json TEXT DEFAULT '{{}}',
+                    content_hash VARCHAR NOT NULL,
+                    embedding vector({dimensions}),
+                    embedding_model VARCHAR,
+                    embedded_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (source_type, source_id)
+                )
+                """
+            )
+            conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_ticket_search_documents_ticket_id "
+                "ON ticket_search_documents (ticket_id)"
+            )
+            conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_ticket_search_documents_source "
+                "ON ticket_search_documents (source_type, source_id)"
+            )
+            conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_ticket_search_documents_embedding "
+                "ON ticket_search_documents USING hnsw (embedding vector_cosine_ops)"
+            )
+    except Exception as e:
+        print(f"[vectors] pgvector table unavailable: {e}")
+
+
 def _ensure_columns():
     """Idempotently add columns introduced after the initial schema.
 
@@ -583,6 +636,7 @@ def _ensure_columns():
 def init_db():
     Base.metadata.create_all(bind=engine)
     _ensure_columns()
+    _ensure_ticket_search_documents()
 
 
 def get_db():

@@ -65,6 +65,82 @@ USER_MAPPINGS = [
     {"tickety_user_id": "u-carol", "external_assignee_id": "1003"},
 ]
 
+SEED_NOW = datetime.utcnow()
+
+
+def _ago(days: int, hours: int = 0) -> datetime:
+    return SEED_NOW - timedelta(days=days, hours=hours)
+
+
+def _ahead(days: int, hours: int = 0) -> datetime:
+    return SEED_NOW + timedelta(days=days, hours=hours)
+
+
+def _seed_ticket(
+    n: int,
+    subject: str,
+    description: str,
+    reporter: str,
+    priority: str,
+    status: str,
+    category: str,
+    ticket_type: str,
+    created_days_ago: int,
+    assignee: str,
+    sentiment: str = "Neutral",
+    mood: str = "neutral",
+    complexity: int = 2,
+    resolved_by: str | None = None,
+    resolution_days_after: int | None = None,
+    points: int = 0,
+    impact: str | None = None,
+    urgency: str | None = None,
+    tags: str | None = None,
+) -> dict:
+    created_at = _ago(created_days_ago)
+    resolved_at = (
+        created_at + timedelta(days=resolution_days_after)
+        if resolution_days_after is not None
+        else None
+    )
+    updated_at = resolved_at or min(created_at + timedelta(days=max(1, created_days_ago // 8)), SEED_NOW)
+    reasoning_action = "escalate" if status == "Escalated" or priority == "P1" else "route" if ticket_type == "request" else "respond"
+    return {
+        "id": f"t-{n:03d}",
+        "external_id": str(100 + n),
+        "subject": subject,
+        "description": description,
+        "reporter": reporter,
+        "priority": priority,
+        "status": status,
+        "workflow_status": status,
+        "external_status": "Pending" if status == "Awaiting Review" else status,
+        "external_assignee_id": assignee,
+        "ticket_type": ticket_type,
+        "impact": impact,
+        "urgency": urgency,
+        "tags": tags or category.lower().replace(" ", "-"),
+        "sentiment": sentiment,
+        "mood": mood,
+        "category": category,
+        "complexity": complexity,
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "external_created_at": created_at,
+        "external_updated_at": updated_at,
+        "due_by": created_at + timedelta(hours={"P1": 4, "P2": 24, "P3": 72}.get(priority, 168)),
+        "fr_due_by": created_at + timedelta(hours=4 if priority in {"P1", "P2"} else 12),
+        "resolved_by": resolved_by,
+        "resolved_at": resolved_at,
+        "external_resolved_at": resolved_at,
+        "points_awarded": points,
+        "ai_reasoning": (
+            f"sentiment: {sentiment}, category: {category}, priority: {priority}, "
+            f"mood: {mood}, action: {reasoning_action} | Reasoning: {ticket_type.title()} scenario for {category.lower()} operations and analytics."
+        ),
+    }
+
+
 TICKETS = [
     {
         "id": "t-001", "external_id": "101", "subject": "VPN connection drops every 10 minutes",
@@ -210,6 +286,67 @@ TICKETS = [
     },
 ]
 
+TICKETS.extend([
+    _seed_ticket(16, "Suspicious inbox forwarding rule detected", "Security monitoring found an auto-forwarding rule sending finance mail to an external address.", "secops@company.com", "P1", "Escalated", "Security", "incident", 180, "1001", "Business-Critical", "critical", 5, "u-alice", 2, 50, "Enterprise", "Critical", "security,email,possible-compromise"),
+    _seed_ticket(17, "Request: temporary VPN access for contractor", "Please grant VPN access for a contractor supporting the payroll migration for two weeks.", "hr-ops@company.com", "P2", "Closed", "Access Request", "request", 174, "1002", "Neutral", "neutral", 2, "u-bob", 3, 30, "Department", "High", "vpn,contractor,access"),
+    _seed_ticket(18, "Quarter-end report export timing out", "The finance reporting export times out after 12 minutes and never downloads the CSV.", "finance@company.com", "P2", "Closed", "Data", "incident", 169, "1003", "High-Impact", "urgent", 4, "u-carol", 4, 30, "Department", "High", "finance,reporting,data-export"),
+    _seed_ticket(19, "Change request: firewall rule for vendor SFTP", "Need an approved firewall rule allowing outbound SFTP to the benefits provider.", "infra@company.com", "P3", "Awaiting Review", "Network", "request", 163, "1001", "Neutral", "neutral", 3, None, None, 0, "Team", "Medium", "change,firewall,vendor"),
+    _seed_ticket(20, "Conference room display will not wake", "Room 4B display stays black even after power cycling the controller.", "facilities@company.com", "P3", "Closed", "Facilities", "incident", 158, "1002", "Neutral", "neutral", 2, "u-bob", 1, 15, "Office", "Medium", "av,conference-room,hardware"),
+    _seed_ticket(21, "New service account for warehouse scanner API", "Create a non-human account and token rotation policy for the scanner integration.", "warehouse@company.com", "P3", "Closed", "Identity", "request", 152, "1003", "Neutral", "neutral", 2, "u-carol", 5, 15, "Team", "Medium", "service-account,api,identity"),
+    _seed_ticket(22, "AWS monthly cost anomaly in analytics workspace", "Analytics workspace spend is 42% higher than baseline after a cluster resize.", "data-eng@company.com", "P2", "Open", "Cloud", "incident", 146, "1001", "High-Impact", "concerned", 4, None, None, 0, "Department", "High", "aws,cost,analytics"),
+    _seed_ticket(23, "Request: enroll team in password manager", "Please add the growth team to the password manager and assign the marketing vault.", "growth@company.com", "P4", "Closed", "Access Request", "request", 140, "1002", "Positive", "satisfied", 1, "u-bob", 2, 15, "Team", "Low", "password-manager,onboarding"),
+    _seed_ticket(24, "Customer portal form creates duplicate tickets", "Submitting the public support form sometimes creates two tickets with the same request ID.", "support-ops@company.com", "P2", "Escalated", "Software", "incident", 134, "1003", "High-Impact", "urgent", 4, None, None, 0, "Customer", "High", "portal,deduplication,bug"),
+    _seed_ticket(25, "Request: replace expired SSL certificate", "The staging API certificate expires this week and needs replacement before QA testing.", "qa@company.com", "P2", "Closed", "Security", "request", 128, "1001", "Neutral", "concerned", 3, "u-alice", 1, 30, "Service", "High", "ssl,certificate,staging"),
+    _seed_ticket(26, "Mobile device lost on business trip", "An employee lost an enrolled phone while traveling and needs remote wipe confirmation.", "travel@company.com", "P1", "Closed", "Mobile", "incident", 122, "1002", "Business-Critical", "urgent", 4, "u-bob", 1, 50, "User", "Critical", "mobile,mdm,remote-wipe"),
+    _seed_ticket(27, "Request: Jira project for AI sidekick pilot", "Create a Jira project with issue types and permissions for the AI sidekick pilot team.", "pilot@company.com", "P3", "Closed", "Software", "request", 116, "1003", "Positive", "satisfied", 2, "u-carol", 2, 15, "Team", "Medium", "jira,pilot,project"),
+    _seed_ticket(28, "Payroll app SSO redirect loop", "Payroll users are bounced between the app and identity provider after login.", "payroll@company.com", "P1", "Escalated", "Identity", "incident", 110, "1001", "Business-Critical", "critical", 5, None, None, 0, "Enterprise", "Critical", "sso,payroll,identity"),
+    _seed_ticket(29, "Request: add shared mailbox delegates", "Add three assistants as delegates on the executive support shared mailbox.", "exec-ops@company.com", "P3", "Closed", "Email", "request", 104, "1002", "Neutral", "neutral", 1, "u-bob", 1, 15, "Team", "Medium", "shared-mailbox,delegates"),
+    _seed_ticket(30, "Warehouse label printer calibration drift", "Shipping labels print 4 mm too low and barcodes fail scanning at pack stations.", "warehouse@company.com", "P2", "Open", "Hardware", "incident", 98, "1003", "High-Impact", "urgent", 3, None, None, 0, "Site", "High", "printer,warehouse,barcode"),
+    _seed_ticket(31, "Change request: database maintenance window", "Schedule a maintenance window to rebuild indexes on the customer analytics database.", "dba@company.com", "P3", "Awaiting Review", "Database", "request", 92, "1001", "Neutral", "neutral", 3, None, None, 0, "Service", "Medium", "change,database,maintenance"),
+    _seed_ticket(32, "Teams calls drop when screen sharing", "Video calls disconnect after screen sharing starts on the latest desktop client.", "sales@company.com", "P2", "Closed", "Collaboration", "incident", 86, "1002", "Moderate", "concerned", 3, "u-bob", 4, 30, "Department", "High", "teams,screen-sharing,collaboration"),
+    _seed_ticket(33, "Request: loaner laptop for visiting auditor", "A visiting auditor needs a managed loaner laptop with restricted network access.", "audit@company.com", "P3", "Closed", "Hardware", "request", 80, "1003", "Neutral", "neutral", 2, "u-carol", 2, 15, "User", "Medium", "loaner,audit,laptop"),
+    _seed_ticket(34, "EDR agent consuming high CPU", "Several engineering workstations report sustained CPU over 90% from the endpoint agent.", "engineering@company.com", "P2", "Escalated", "Security", "incident", 74, "1001", "High-Impact", "urgent", 4, None, None, 0, "Department", "High", "edr,cpu,endpoint"),
+    _seed_ticket(35, "Request: update DNS record for campaign site", "Marketing needs the campaign CNAME updated before the launch announcement.", "marketing@company.com", "P3", "Closed", "Network", "request", 68, "1002", "Positive", "neutral", 2, "u-bob", 1, 15, "Service", "Medium", "dns,campaign,marketing"),
+    _seed_ticket(36, "Inventory sync job failed overnight", "Asset inventory stopped syncing from procurement and new laptops are missing from CMDB.", "procurement@company.com", "P3", "Open", "Assets", "incident", 62, "1003", "Moderate", "concerned", 3, None, None, 0, "Team", "Medium", "assets,cmdb,sync"),
+    _seed_ticket(37, "Request: Okta group for finance analysts", "Create an Okta group for finance analysts and map it to BI dashboard permissions.", "finance@company.com", "P3", "Closed", "Identity", "request", 56, "1001", "Neutral", "neutral", 2, "u-alice", 2, 15, "Department", "Medium", "okta,group,bi"),
+    _seed_ticket(38, "Point-of-sale tablet battery swelling", "A store tablet has a visibly swollen battery and should be replaced urgently.", "store-12@company.com", "P1", "Closed", "Hardware", "incident", 50, "1002", "Business-Critical", "urgent", 4, "u-bob", 1, 50, "Site", "Critical", "pos,tablet,battery"),
+    _seed_ticket(39, "Request: publish knowledge article for VPN split tunnel", "Document how to use split tunneling for trusted SaaS traffic during travel.", "networking@company.com", "P4", "Closed", "Knowledge", "request", 46, "1003", "Positive", "satisfied", 1, "u-carol", 3, 15, "Team", "Low", "kb,vpn,documentation"),
+    _seed_ticket(40, "Data warehouse load delayed after schema change", "Nightly data warehouse load failed after a source table renamed two columns.", "analytics@company.com", "P2", "Open", "Data", "incident", 42, "1001", "High-Impact", "urgent", 4, None, None, 0, "Department", "High", "data-warehouse,etl,schema"),
+    _seed_ticket(41, "Request: emergency access review export", "Compliance needs a CSV export of emergency access grants for the last quarter.", "compliance@company.com", "P3", "Awaiting Review", "Security", "request", 38, "1002", "Neutral", "concerned", 3, None, None, 0, "Enterprise", "Medium", "compliance,access-review,export"),
+    _seed_ticket(42, "MacOS update broke smart card login", "After the latest macOS patch, smart card login fails for legal team laptops.", "legal@company.com", "P2", "Escalated", "Endpoint", "incident", 34, "1003", "High-Impact", "urgent", 4, None, None, 0, "Department", "High", "macos,smart-card,endpoint"),
+    _seed_ticket(43, "Request: deprovision departing employee", "Remove app access, disable accounts, and preserve mailbox for a departing employee.", "hr@company.com", "P2", "Closed", "Access Request", "request", 30, "1001", "Neutral", "neutral", 2, "u-alice", 1, 30, "User", "High", "offboarding,deprovision,mailbox"),
+    _seed_ticket(44, "Guest Wi-Fi captive portal certificate warning", "Visitors see a browser warning when joining guest Wi-Fi in the lobby.", "reception@company.com", "P3", "Open", "Network", "incident", 27, "1002", "Moderate", "concerned", 2, None, None, 0, "Office", "Medium", "guest-wifi,certificate"),
+    _seed_ticket(45, "Request: provision new hire SaaS bundle", "Provision email, Slack, HRIS, payroll, and project management access for a new hire.", "peopleops@company.com", "P2", "Closed", "Access Request", "request", 24, "1003", "Positive", "satisfied", 2, "u-carol", 1, 30, "User", "High", "onboarding,saas,new-hire"),
+    _seed_ticket(46, "Backup verification failed for file server", "The weekly restore verification failed for the department file server backup.", "backup@company.com", "P2", "Escalated", "Infrastructure", "incident", 21, "1001", "High-Impact", "urgent", 4, None, None, 0, "Service", "High", "backup,restore,file-server"),
+    _seed_ticket(47, "Request: add procurement approval workflow", "Configure an approval workflow for purchases over the new department threshold.", "procurement@company.com", "P4", "Awaiting Review", "Workflow", "request", 18, "1002", "Neutral", "neutral", 2, None, None, 0, "Department", "Low", "workflow,approval,procurement"),
+    _seed_ticket(48, "CRM webhook backlog causing stale customer updates", "CRM integration webhook queue is delayed by 90 minutes and customer updates are stale.", "customer-success@company.com", "P2", "Open", "Integration", "incident", 15, "1003", "High-Impact", "urgent", 4, None, None, 0, "Customer", "High", "crm,webhook,integration"),
+    _seed_ticket(49, "Request: new dashboard viewer role", "Create a read-only dashboard role for regional managers.", "ops@company.com", "P3", "Closed", "Access Request", "request", 12, "1001", "Positive", "neutral", 1, "u-alice", 1, 15, "Department", "Medium", "dashboard,role,read-only"),
+    _seed_ticket(50, "VPN MFA push fatigue reported by executive", "An executive received repeated unexpected MFA pushes while trying to connect to VPN.", "executive-support@company.com", "P1", "Escalated", "Security", "incident", 10, "1002", "Business-Critical", "critical", 5, None, None, 0, "User", "Critical", "mfa,vpn,security"),
+    _seed_ticket(51, "Request: archive inactive Slack channels", "Archive stale project channels and export message history for records retention.", "records@company.com", "P4", "Closed", "Collaboration", "request", 8, "1003", "Neutral", "neutral", 1, "u-carol", 2, 15, "Team", "Low", "slack,archive,retention"),
+    _seed_ticket(52, "Billing system PDF invoices render blank", "Generated customer invoice PDFs are blank when downloaded from the billing system.", "billing@company.com", "P2", "Open", "Software", "incident", 7, "1001", "High-Impact", "urgent", 3, None, None, 0, "Customer", "High", "billing,pdf,invoices"),
+    _seed_ticket(53, "Request: emergency patch deployment approval", "Approve expedited deployment for a critical browser vulnerability patch.", "endpoint@company.com", "P1", "Awaiting Review", "Change", "request", 5, "1002", "Business-Critical", "urgent", 4, None, None, 0, "Enterprise", "Critical", "change,patch,security"),
+    _seed_ticket(54, "Warehouse handheld scanner cannot join Wi-Fi", "New handheld scanner model cannot authenticate to the warehouse wireless network.", "warehouse@company.com", "P2", "Open", "Network", "incident", 4, "1003", "Moderate", "concerned", 3, None, None, 0, "Site", "High", "scanner,wifi,warehouse"),
+    _seed_ticket(55, "Request: increase mailbox retention for legal hold", "Extend retention for a set of mailboxes related to a legal hold request.", "legal@company.com", "P2", "Awaiting Review", "Email", "request", 3, "1001", "Neutral", "concerned", 3, None, None, 0, "Department", "High", "mailbox,retention,legal-hold"),
+    _seed_ticket(56, "Kubernetes dev namespace image pull failures", "Developers cannot deploy to the sandbox namespace because image pulls fail with auth errors.", "platform@company.com", "P2", "Open", "Cloud", "incident", 2, "1002", "Moderate", "concerned", 3, None, None, 0, "Team", "High", "kubernetes,registry,dev"),
+    _seed_ticket(57, "Request: issue YubiKeys for finance team", "Finance team needs hardware security keys before the privileged access rollout.", "finance@company.com", "P3", "Open", "Security", "request", 2, "1003", "Positive", "neutral", 2, None, None, 0, "Department", "Medium", "yubikey,mfa,finance"),
+    _seed_ticket(58, "Customer support macros disappeared", "Support agents no longer see saved response macros in the helpdesk sidebar.", "support@company.com", "P2", "Escalated", "Software", "incident", 1, "1001", "High-Impact", "urgent", 3, None, None, 0, "Customer", "High", "support,macros,helpdesk"),
+    _seed_ticket(59, "Request: guest account for onsite vendor", "Create a guest account with building Wi-Fi and limited SharePoint access for onsite vendor.", "facilities@company.com", "P3", "New", "Access Request", "request", 1, "1002", "Neutral", "neutral", 1, None, None, 0, "User", "Medium", "guest,vendor,sharepoint"),
+    _seed_ticket(60, "Monitoring alert: API latency above SLO", "Public API p95 latency has exceeded the SLO for the last 20 minutes.", "sre@company.com", "P1", "Open", "Infrastructure", "incident", 0, "1003", "Business-Critical", "critical", 5, None, None, 0, "Customer", "Critical", "slo,latency,api"),
+])
+
+for index, ticket in enumerate(TICKETS, start=1):
+    ticket.setdefault("ticket_type", "request" if ticket["subject"].lower().startswith(("request:", "how do i", "new ")) or "access" in ticket["subject"].lower() else "incident")
+    ticket.setdefault("impact", "Enterprise" if ticket["priority"] == "P1" else "Department" if ticket["priority"] == "P2" else "Team")
+    ticket.setdefault("urgency", "Critical" if ticket["priority"] == "P1" else "High" if ticket["priority"] == "P2" else "Medium" if ticket["priority"] == "P3" else "Low")
+    ticket.setdefault("tags", ",".join(filter(None, [ticket.get("category", "").lower().replace(" ", "-"), ticket.get("ticket_type")])))
+    ticket.setdefault("created_at", _ago(min(180, 3 + index * 4), index % 7))
+    ticket.setdefault("updated_at", ticket.get("resolved_at") or min(ticket["created_at"] + timedelta(days=max(1, index % 9)), SEED_NOW))
+    ticket.setdefault("external_created_at", ticket["created_at"])
+    ticket.setdefault("external_updated_at", ticket["updated_at"])
+    ticket.setdefault("workflow_status", ticket["status"])
+    ticket.setdefault("due_by", ticket["created_at"] + timedelta(hours={"P1": 4, "P2": 24, "P3": 72}.get(ticket["priority"], 168)))
+    ticket.setdefault("fr_due_by", ticket["created_at"] + timedelta(hours=4 if ticket["priority"] in {"P1", "P2"} else 12))
+
 RECOGNITIONS_SEED = [
     {"user_id": "u-alice", "recognition_key": "first_resolution"},
     {"user_id": "u-alice", "recognition_key": "consistent_performer"},
@@ -273,15 +410,31 @@ def run_seed():
                 mood=t.get("mood"),
                 complexity=t.get("complexity", 1),
                 ai_reasoning=t.get("ai_reasoning"),
+                ticket_type=t.get("ticket_type", "incident"),
+                impact=t.get("impact"),
+                urgency=t.get("urgency"),
+                workflow_status=t.get("workflow_status", t["status"]),
+                ai_review_state=t.get("ai_review_state"),
+                due_by=t.get("due_by"),
+                response_due_at=t.get("fr_due_by"),
+                resolution_due_at=t.get("due_by"),
+                tags=t.get("tags"),
                 external_source="standalone",
                 external_id=t["external_id"],
                 external_url=url,
                 external_status=t.get("external_status"),
                 external_assignee_id=t.get("external_assignee_id"),
+                external_created_at=t.get("external_created_at"),
+                external_updated_at=t.get("external_updated_at"),
+                external_resolved_at=t.get("external_resolved_at"),
+                external_due_by=t.get("due_by"),
+                external_fr_due_by=t.get("fr_due_by"),
                 resolved_by=t.get("resolved_by"),
                 resolved_at=t.get("resolved_at"),
                 points_awarded=t.get("points_awarded", 0),
                 points_awarded_sent=True,
+                created_at=t.get("created_at"),
+                updated_at=t.get("updated_at"),
             ))
         db.flush()
 
@@ -322,11 +475,26 @@ def run_seed():
                 {"name": "Software", "description": "Application and OS issues", "color": "emerald"},
                 {"name": "Access", "description": "Account and permission requests", "color": "violet"},
                 {"name": "Email", "description": "Email and communication issues", "color": "cyan"},
+                {"name": "Security", "description": "Security events, vulnerabilities, and access risk", "color": "red"},
+                {"name": "Cloud", "description": "Cloud infrastructure, Kubernetes, and SaaS platform issues", "color": "blue"},
+                {"name": "Identity", "description": "SSO, MFA, identity provider, and account lifecycle work", "color": "violet"},
+                {"name": "Data", "description": "Reporting, warehouse, analytics, and data pipeline issues", "color": "emerald"},
+                {"name": "Collaboration", "description": "Chat, meetings, shared workspaces, and team productivity tools", "color": "cyan"},
+                {"name": "Infrastructure", "description": "Servers, backups, monitoring, and platform reliability", "color": "amber"},
+                {"name": "Facilities", "description": "Office technology and workplace equipment", "color": "slate"},
+                {"name": "Mobile", "description": "Mobile devices, MDM, and handheld equipment", "color": "blue"},
+                {"name": "Database", "description": "Database maintenance, performance, and availability", "color": "emerald"},
+                {"name": "Assets", "description": "CMDB, inventory, procurement, and asset lifecycle", "color": "amber"},
+                {"name": "Knowledge", "description": "Knowledge base and documentation requests", "color": "slate"},
+                {"name": "Endpoint", "description": "Desktop OS, device agents, and endpoint authentication", "color": "blue"},
+                {"name": "Workflow", "description": "Approval flows and business process automation", "color": "violet"},
+                {"name": "Integration", "description": "API, webhook, and system-to-system integration issues", "color": "cyan"},
+                {"name": "Change", "description": "Change enablement and deployment approval work", "color": "amber"},
                 {"name": "Other", "description": "Miscellaneous issues", "color": "slate"},
             ]:
                 db.add(TicketCategoryRecord(**cat))
             db.commit()
-            print("Seed: inserted 6 default categories.")
+            print("Seed: inserted default ticket categories.")
 
         # Default ticket statuses
         if db.query(TicketStatusConfigRecord).count() == 0:

@@ -2,6 +2,7 @@ import os
 
 from .base import BaseITSMAdapter
 from .freshservice import FreshserviceAdapter
+from .jira import JiraAdapter
 
 _ADAPTERS = {}
 
@@ -43,6 +44,8 @@ def get_adapter(provider: str = None) -> BaseITSMAdapter:
     if provider not in _ADAPTERS:
         if provider == "freshservice":
             _ADAPTERS[provider] = FreshserviceAdapter()
+        elif provider == "jira":
+            _ADAPTERS[provider] = JiraAdapter()
         elif provider in ("standalone", "none", ""):
             _ADAPTERS[provider] = StandaloneAdapter()
         else:

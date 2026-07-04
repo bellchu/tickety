@@ -2,21 +2,21 @@
 
 import { useState, useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api";
 import { createTicketStreamWS } from "@/lib/ws";
-import type { TriageStep } from "@/lib/types";
+import type { TicketAnalysisResult, TriageStep } from "@/lib/types";
 import { ListChecks, Loader2, CheckCircle2, RefreshCw } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
 interface Props {
   ticketId: string;
   hasExisting?: boolean;
+  onComplete?: (result: TicketAnalysisResult) => void;
 }
 
-export function AIThinkingStream({ ticketId, hasExisting }: Props) {
+export function AIThinkingStream({ ticketId, hasExisting, onComplete }: Props) {
   const [steps, setSteps] = useState<TriageStep[]>([]);
   const [running, setRunning] = useState(false);
-  const [result, setResult] = useState<Record<string, unknown> | null>(null);
+  const [result, setResult] = useState<TicketAnalysisResult | null>(null);
   const wsRef = useRef<ReturnType<typeof createTicketStreamWS> | null>(null);
   const queryClient = useQueryClient();
 
@@ -34,13 +34,22 @@ export function AIThinkingStream({ ticketId, hasExisting }: Props) {
       if (data.type === "progress") {
         setSteps(data.steps);
       } else if (data.type === "complete") {
-        setResult(data.result);
+        const result = data.result as TicketAnalysisResult;
+        setResult(result);
         setSteps((prev) => prev.map((s) => ({ ...s, status: "done" as const })));
         setRunning(false);
         wsRef.current?.disconnect();
         wsRef.current = null;
+        onComplete?.(result);
         queryClient.invalidateQueries({ queryKey: ["ticket", ticketId] });
         queryClient.invalidateQueries({ queryKey: ["tickets"] });
+        queryClient.invalidateQueries({ queryKey: ["intel-alerts"] });
+        queryClient.invalidateQueries({ queryKey: ["intel-prioritize"] });
+        queryClient.invalidateQueries({ queryKey: ["intel-sla"] });
+        queryClient.invalidateQueries({ queryKey: ["intel-trends"] });
+        queryClient.invalidateQueries({ queryKey: ["intel-systemic"] });
+        queryClient.invalidateQueries({ queryKey: ["intel-workload"] });
+        queryClient.invalidateQueries({ queryKey: ["intel-route", ticketId] });
       } else if (data.type === "error") {
         setRunning(false);
         wsRef.current?.disconnect();

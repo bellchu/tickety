@@ -22,6 +22,9 @@ class BaseITSMAdapter(ABC):
         falls back to the single-page incremental fetch."""
         return await self.fetch_new_tickets(since=since)
 
+    async def fetch_agents(self, max_pages: Optional[int] = None) -> List[dict]:
+        return []
+
     @abstractmethod
     def parse_webhook(
         self,

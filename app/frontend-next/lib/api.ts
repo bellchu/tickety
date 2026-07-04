@@ -38,6 +38,8 @@ export const api = {
   getTicket: (id: string) => fetchAPI<import("./types").Ticket>(`/tickets/${id}`),
   triggerTriage: (id: string) =>
     fetchAPI<import("./types").TriageResult>(`/tickets/${id}/triage`, { method: "POST" }),
+  runTicketAnalysis: (id: string) =>
+    fetchAPI<import("./types").TicketAnalysisResult>(`/tickets/${id}/analysis`, { method: "POST" }),
   getMe: () => fetchAPI<import("./types").User>("/me"),
   getUser: (id: string) => fetchAPI<import("./types").User>(`/users/${id}`),
   getLeaderboard: () => fetchAPI<import("./types").UserSummary[]>("/leaderboard"),
