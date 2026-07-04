@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query, Request, Response, Cookie
+from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query, Request, Response, Cookie, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy.orm import Session
@@ -64,7 +64,7 @@ from .prompts import (
     MOMENTUM_BONUS_CAP, MOMENTUM_RESET_HOURS,
 )
 from .integrations.registry import get_adapter
-from .integrations.sync import sync_tickets_from_external, handle_webhook_event, fetch_tickets_by_days, sync_agents_from_external
+from .integrations.sync import sync_tickets_from_external, handle_webhook_event, fetch_tickets_by_days, async_sync_agents_from_external
 from .integrations.freshservice import FreshserviceAdapter
 from .sync_worker import start_sync_worker, get_sync_status
 from . import settings as settings_module
@@ -1769,14 +1769,14 @@ async def get_user_recognitions(user_id: str, db: Session = Depends(get_db)):
 # ── Sync / Admin ─────────────────────────────────────────────
 
 @app.post("/admin/sync/trigger")
-async def trigger_sync(_user: UserRecord = Depends(require_role("admin", "supervisor"))):
+def trigger_sync(_user: UserRecord = Depends(require_role("admin", "supervisor"))):
     adapter = get_adapter()
     result = sync_tickets_from_external(adapter)
     return {"status": "completed", "result": result}
 
 
 @app.post("/admin/sync/fetch")
-async def fetch_sync(
+def fetch_sync(
     days: int = Query(7, ge=1, le=365, description="Fetch tickets updated in the last N days"),
     overwrite: bool = Query(False, description="Overwrite already-imported tickets from the source"),
     _user: UserRecord = Depends(require_role("admin", "supervisor")),
@@ -1809,15 +1809,35 @@ async def sync_status(_user: UserRecord = Depends(get_current_user)):
 # ── Settings ─────────────────────────────────────────────────
 
 @app.post("/admin/sync/agents")
-async def sync_agents(_user: UserRecord = Depends(require_role("admin", "supervisor"))):
+async def sync_agents(
+    payload: dict = Body(default_factory=dict),
+    _user: UserRecord = Depends(require_role("admin", "supervisor")),
+):
     """Fetch agents from the ITSM provider and create Tickety user accounts.
 
     Pulls every agent from GET /api/v2/agents (with rate‑limit pacing),
     then creates or updates a matching Tickety UserRecord + UserMappingRecord.
     Returns {created, updated, errors, total}."""
     adapter = get_adapter()
-    result = sync_agents_from_external(adapter)
-    return {"status": "completed", "result": result}
+    result = await async_sync_agents_from_external(adapter, options=payload)
+    changed = (
+        result.get("created", 0)
+        + result.get("updated", 0)
+        + result.get("merged", 0)
+        + result.get("remapped", 0)
+        + result.get("tickets_reassigned", 0)
+    )
+    if result.get("errors", 0) and result.get("total", 0) == 0 and changed == 0:
+        status = "failed"
+    elif result.get("errors", 0):
+        status = "completed_with_errors"
+    elif result.get("conflicts", 0):
+        status = "completed_with_conflicts"
+    elif result.get("missing", 0):
+        status = "completed_with_missing"
+    else:
+        status = "completed"
+    return {"status": status, "result": result}
 
 
 @app.get("/admin/agents")

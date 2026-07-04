@@ -447,16 +447,25 @@ def _normalize_external_agent(agent: dict) -> dict[str, Any]:
     }
 
 
-def _find_user_by_email(db: Session, email: str) -> Optional[UserRecord]:
+def _find_users_by_email(db: Session, email: str) -> list[UserRecord]:
     if not email:
-        return None
-    return db.query(UserRecord).filter(func.lower(UserRecord.email) == email).first()
+        return []
+    return db.query(UserRecord).filter(func.lower(UserRecord.email) == email).all()
+
+
+def _find_user_by_email(db: Session, email: str) -> Optional[UserRecord]:
+    users = _find_users_by_email(db, email)
+    return users[0] if len(users) == 1 else None
+
+
+def _find_users_by_name(db: Session, name: str) -> list[UserRecord]:
+    if not name:
+        return []
+    return db.query(UserRecord).filter(func.lower(UserRecord.name) == name.lower()).all()
 
 
 def _find_unique_user_by_name(db: Session, name: str) -> Optional[UserRecord]:
-    if not name:
-        return None
-    users = db.query(UserRecord).filter(func.lower(UserRecord.name) == name.lower()).all()
+    users = _find_users_by_name(db, name)
     return users[0] if len(users) == 1 else None
 
 
@@ -508,36 +517,75 @@ def _reconcile_ticket_assignees(db: Session, provider: str) -> int:
     return updated
 
 
-def sync_agents_from_external(adapter=None) -> dict:
-    """Fetch agents from the external ITSM provider and create / update
-    Tickety user accounts.
-
-    Agents have fields: id, first_name, last_name, email, job_title,
-    active, occasional, roles, department_ids, …
-      • The "List All Agents" endpoint is paginated (per_page up to 100) and
-        returns {"agents": […]}.  Sort is created_at desc by default.
-      • Rate‑limit sub‑limit: 40–140/min depending on plan.
-
-    This function only imports agents where `active` is True (deactivated
-    agents are skipped).  The `occasional` flag is preserved on the Tickety
-    UserRecord so the leaderboard can distinguish full‑time from part‑time
-    agents later if desired.  Duplicates (same external_source +
-    external_assignee_id) are updated in‑place instead of being re‑created.
-    """
-    adapter = adapter or get_adapter()
-    db: Session = SessionLocal()
-    result = {
+def _empty_agent_sync_result() -> dict:
+    return {
         "created": 0,
         "updated": 0,
+        "merged": 0,
         "remapped": 0,
+        "missing": 0,
+        "conflicts": 0,
         "errors": 0,
+        "error_details": [],
+        "conflict_details": [],
+        "missing_details": [],
         "total": 0,
         "skipped_inactive": 0,
         "tickets_reassigned": 0,
     }
+
+
+def _agent_sync_options(options: Optional[dict[str, Any]]) -> dict[str, bool]:
+    options = options or {}
+    mode = str(options.get("mode") or "sync").strip().lower()
+    merge_mode = mode in {"merge", "merge_reconcile", "reconcile"}
+    return {
+        "create_missing": bool(options.get("create_missing", True)),
+        "merge_existing": bool(options.get("merge_existing", merge_mode)),
+        "update_profiles": bool(options.get("update_profiles", True)),
+        "match_by_name": bool(options.get("match_by_name", merge_mode)),
+        "reassign_tickets": bool(options.get("reassign_tickets", True)),
+    }
+
+
+def _limited_append(items: list[str], detail: str, limit: int = 12) -> None:
+    if len(items) < limit:
+        items.append(detail)
+
+
+def _find_agent_match(
+    db: Session,
+    agent: dict[str, Any],
+    *,
+    match_by_name: bool,
+) -> tuple[Optional[UserRecord], Optional[str], Optional[str]]:
+    email_matches = _find_users_by_email(db, agent["email"])
+    if len(email_matches) == 1:
+        return email_matches[0], "email", None
+    if len(email_matches) > 1:
+        return None, None, (
+            f"{agent['name']} matches {len(email_matches)} Tickety users with email {agent['email']}; "
+            "merge skipped"
+        )
+
+    if match_by_name and not agent["email"]:
+        name_matches = _find_users_by_name(db, agent["name"])
+        if len(name_matches) == 1:
+            return name_matches[0], "name", None
+        if len(name_matches) > 1:
+            return None, None, (
+                f"{agent['name']} matches {len(name_matches)} Tickety users by name; merge skipped"
+            )
+
+    return None, None, None
+
+
+def _import_external_agents(adapter, raw_agents: list[dict[str, Any]], options: Optional[dict[str, Any]] = None) -> dict:
+    sync_options = _agent_sync_options(options)
+    db: Session = SessionLocal()
+    result = _empty_agent_sync_result()
+    result["options"] = sync_options
     try:
-        import asyncio
-        raw_agents = asyncio.run(adapter.fetch_agents())
         result["total"] = len(raw_agents)
 
         for raw_agent in raw_agents:
@@ -558,11 +606,19 @@ def sync_agents_from_external(adapter=None) -> dict:
                     UserMappingRecord.external_assignee_id == ext_id,
                 ).first()
 
-                matched_user = _find_user_by_email(db, agent["email"])
-                if not matched_user and not agent["email"]:
-                    matched_user = _find_unique_user_by_name(db, agent["name"])
+                matched_user, match_reason, conflict = _find_agent_match(
+                    db,
+                    agent,
+                    match_by_name=sync_options["match_by_name"],
+                )
+                if conflict:
+                    result["conflicts"] += 1
+                    _limited_append(result["conflict_details"], conflict)
+                    continue
+
                 user = None
                 created_user = False
+                merged_user = False
                 remapped = False
 
                 if mapping:
@@ -575,47 +631,125 @@ def sync_agents_from_external(adapter=None) -> dict:
                         (agent["email"] and mapped_email != agent["email"])
                         or (not agent["email"] and not mapped_user)
                     ):
-                        user = matched_user
-                        mapping.tickety_user_id = user.id
-                        remapped = True
+                        if sync_options["merge_existing"]:
+                            user = matched_user
+                            mapping.tickety_user_id = user.id
+                            remapped = True
+                        else:
+                            result["conflicts"] += 1
+                            _limited_append(
+                                result["conflict_details"],
+                                f"{agent['name']} is mapped to one Tickety user but matches another by {match_reason}; enable merge to reconcile",
+                            )
+                            continue
                     else:
                         user = mapped_user
 
                     if not user:
-                        user = matched_user or _create_external_agent_user(db, agent)
-                        created_user = matched_user is None
+                        if matched_user and sync_options["merge_existing"]:
+                            user = matched_user
+                            merged_user = True
+                        elif sync_options["create_missing"]:
+                            user = _create_external_agent_user(db, agent)
+                            created_user = True
+                        else:
+                            result["missing"] += 1
+                            _limited_append(result["missing_details"], f"{agent['name']} has no Tickety account")
+                            continue
                         if mapping.tickety_user_id != user.id:
                             mapping.tickety_user_id = user.id
                             remapped = True
                 else:
-                    user = matched_user or _create_external_agent_user(db, agent)
-                    created_user = matched_user is None
+                    if matched_user and sync_options["merge_existing"]:
+                        user = matched_user
+                        merged_user = True
+                    elif sync_options["create_missing"]:
+                        user = _create_external_agent_user(db, agent)
+                        created_user = True
+                    else:
+                        result["missing"] += 1
+                        _limited_append(result["missing_details"], f"{agent['name']} has no Tickety account")
+                        continue
                     db.add(UserMappingRecord(
                         tickety_user_id=user.id,
                         external_source=adapter.provider_name,
                         external_assignee_id=ext_id,
                     ))
 
-                profile_changed = _apply_external_agent_profile(user, agent)
+                profile_changed = _apply_external_agent_profile(user, agent) if sync_options["update_profiles"] else False
                 db.commit()
 
                 if created_user:
                     result["created"] += 1
+                if merged_user:
+                    result["merged"] += 1
                 elif remapped:
                     result["remapped"] += 1
-                elif profile_changed or mapping:
+                elif profile_changed:
                     result["updated"] += 1
 
             except Exception as e:
-                print(f"[agents] error processing agent {raw_agent.get('id') or raw_agent.get('accountId')}: {e}")
+                agent_id = (
+                    raw_agent.get("id") or raw_agent.get("accountId")
+                    if isinstance(raw_agent, dict)
+                    else "unknown"
+                )
+                detail = f"Agent {agent_id}: {e}"
+                print(f"[agents] error processing agent {agent_id}: {e}")
                 db.rollback()
                 result["errors"] += 1
+                result["error_details"].append(detail)
 
-        result["tickets_reassigned"] = _reconcile_ticket_assignees(db, adapter.provider_name)
+        if sync_options["reassign_tickets"]:
+            result["tickets_reassigned"] = _reconcile_ticket_assignees(db, adapter.provider_name)
 
     except Exception as e:
         print(f"[agents] fatal error: {e}")
         result["errors"] += 1
+        result["error_details"].append(str(e))
     finally:
         db.close()
     return result
+
+
+async def async_sync_agents_from_external(adapter=None, options: Optional[dict[str, Any]] = None) -> dict:
+    """Fetch agents from the external ITSM provider and create / update
+    Tickety user accounts.
+
+    Agents have fields: id, first_name, last_name, email, job_title,
+    active, occasional, roles, department_ids, …
+      • The "List All Agents" endpoint is paginated (per_page up to 100) and
+        returns {"agents": […]}.  Sort is created_at desc by default.
+      • Rate‑limit sub‑limit: 40–140/min depending on plan.
+
+    This function only imports agents where `active` is True (deactivated
+    agents are skipped).  The `occasional` flag is preserved on the Tickety
+    UserRecord so the leaderboard can distinguish full‑time from part‑time
+    agents later if desired.  Duplicates (same external_source +
+    external_assignee_id) are updated in‑place instead of being re‑created.
+    """
+    adapter = adapter or get_adapter()
+    try:
+        raw_agents = await adapter.fetch_agents()
+    except Exception as e:
+        print(f"[agents] fatal error: {e}")
+        result = _empty_agent_sync_result()
+        result["errors"] += 1
+        result["error_details"].append(str(e))
+        return result
+    return _import_external_agents(adapter, raw_agents, options=options)
+
+
+def sync_agents_from_external(adapter=None, options: Optional[dict[str, Any]] = None) -> dict:
+    adapter = adapter or get_adapter()
+    import asyncio
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(async_sync_agents_from_external(adapter, options=options))
+
+    raise RuntimeError(
+        "sync_agents_from_external cannot run inside an active event loop; "
+        "use async_sync_agents_from_external instead"
+    )

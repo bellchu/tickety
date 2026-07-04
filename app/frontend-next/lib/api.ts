@@ -62,9 +62,9 @@ export const api = {
       `/admin/sync/fetch?days=${days}&overwrite=${overwrite ? 1 : 0}`,
       { method: "POST" }
     ),
-  syncAgents: () =>
+  syncAgents: (payload: import("./types").SyncAgentsOptions) =>
     fetchAPI<{ status: string; result: import("./types").SyncAgentsResult }>(
-      "/admin/sync/agents", { method: "POST" }
+      "/admin/sync/agents", { method: "POST", body: JSON.stringify(payload) }
     ),
   getAgents: () => fetchAPI<import("./types").AgentListResponse>("/admin/agents"),
   // OAuth 2.0

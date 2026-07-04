@@ -385,14 +385,30 @@ export interface AgentListResponse {
   agents: AgentRecord[];
 }
 
+export interface SyncAgentsOptions {
+  mode?: "sync" | "merge";
+  create_missing: boolean;
+  merge_existing: boolean;
+  update_profiles: boolean;
+  match_by_name: boolean;
+  reassign_tickets: boolean;
+}
+
 export interface SyncAgentsResult {
   created: number;
   updated: number;
+  merged: number;
   remapped: number;
+  missing: number;
+  conflicts: number;
   errors: number;
+  error_details: string[];
+  conflict_details: string[];
+  missing_details: string[];
   total: number;
   skipped_inactive: number;
   tickets_reassigned: number;
+  options?: SyncAgentsOptions;
 }
 
 // ── Systemic Issues ───────────────────────────────────────────

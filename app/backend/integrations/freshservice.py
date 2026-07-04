@@ -62,6 +62,13 @@ SUPPORTED_TICKET_LIST_INCLUDES = {
     "onboarding_context",
     "offboarding_context",
 }
+PLACEHOLDER_FRESHSERVICE_DOMAINS = {
+    "",
+    "demo.freshservice.com",
+    "yourdomain.freshservice.com",
+    "yourdomain.example.com",
+    "acme.freshservice.com",
+}
 
 
 class FreshserviceAdapter(BaseITSMAdapter):
@@ -217,6 +224,18 @@ class FreshserviceAdapter(BaseITSMAdapter):
     def build_ticket_url(self, external_id: str) -> str:
         return f"{self.base_url}/support/tickets/{external_id}"
 
+    def _ensure_provider_configured(self) -> None:
+        if self.domain in PLACEHOLDER_FRESHSERVICE_DOMAINS:
+            raise RuntimeError(
+                "Freshservice is selected, but the saved domain is still a placeholder. "
+                "Set the Freshservice Domain in Ticketing Mode and save settings before syncing."
+            )
+        if not self.oauth_access_token and self.api_key in {"", "dummy-key", "your-key-here"}:
+            raise RuntimeError(
+                "Freshservice is selected, but no API key or OAuth token is configured. "
+                "Add an authentication method in Ticketing Mode before syncing."
+            )
+
     @staticmethod
     def _parse_datetime(value) -> Optional[datetime]:
         if not value:
@@ -363,6 +382,7 @@ class FreshserviceAdapter(BaseITSMAdapter):
         respecting provider rate limits. Used by the manual "fetch by days"
         feature. Stops when a page is empty/short or when the Link header has no
         rel="next". `max_pages` defaults to FRESHSERVICE_MAX_PAGES as a safety cap."""
+        self._ensure_provider_configured()
         cap = max_pages if max_pages is not None else self._MAX_PAGES
         out: List[ExternalTicket] = []
         page = 1
@@ -399,6 +419,7 @@ class FreshserviceAdapter(BaseITSMAdapter):
     async def fetch_agents(self, max_pages: Optional[int] = None) -> List[dict]:
         """Fetch all agents from the provider, walking every page with rate‑limit
         pacing."""
+        self._ensure_provider_configured()
         cap = max_pages if max_pages is not None else self._MAX_PAGES
         out: List[dict] = []
         page = 1
@@ -427,6 +448,7 @@ class FreshserviceAdapter(BaseITSMAdapter):
 
     async def create_ticket(self, payload: dict) -> dict:
         """Create a ticket in Freshservice and return the raw provider ticket."""
+        self._ensure_provider_configured()
         url = f"{self.base_url}/api/v2/tickets"
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await self._rate_limited_post(client, url, payload)

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
-import { Settings as SettingsType, LlmCatalog, LlmProvider, TicketCategory, BuildInfo } from "@/lib/types";
+import { Settings as SettingsType, LlmCatalog, LlmProvider, TicketCategory, BuildInfo, SyncAgentsOptions } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import {
   Settings as SettingsIcon, Save, RefreshCw, CheckCircle2, AlertCircle,
@@ -23,6 +23,7 @@ const PROVIDER_OPTIONS = [
 const PROVIDER_IDS = ["deepseek", "openai", "openrouter", "azure", "azure_ai", "custom"] as const;
 
 type FreshserviceAuthMode = "api" | "oauth";
+type AgentSyncMode = "sync" | "merge";
 
 const FRESHSERVICE_DEFAULT_SCOPES = "freshservice.tickets.view freshservice.tickets.edit freshservice.agents.manage";
 
@@ -1086,7 +1087,20 @@ function InfoTile({ label, value, mono }: { label: string; value: string; mono?:
 
 function AgentSection() {
   const queryClient = useQueryClient();
+  const [syncMode, setSyncMode] = useState<AgentSyncMode>("sync");
+  const [createMissing, setCreateMissing] = useState(true);
+  const [updateProfiles, setUpdateProfiles] = useState(true);
+  const [matchByName, setMatchByName] = useState(false);
+  const [reassignTickets, setReassignTickets] = useState(true);
   const { data: agentList, isLoading } = useQuery({ queryKey: ["agents"], queryFn: api.getAgents });
+  const syncOptions: SyncAgentsOptions = {
+    mode: syncMode,
+    create_missing: createMissing,
+    merge_existing: syncMode === "merge",
+    update_profiles: updateProfiles,
+    match_by_name: syncMode === "merge" && matchByName,
+    reassign_tickets: reassignTickets,
+  };
   const syncMut = useMutation({
     mutationFn: api.syncAgents,
     onSuccess: () => {
@@ -1096,22 +1110,130 @@ function AgentSection() {
     },
   });
   const agents = agentList?.agents ?? [];
+  const syncResult = syncMut.data?.result;
+  const syncHadErrors = (syncResult?.errors ?? 0) > 0;
+  const syncNeedsReview = Boolean(syncResult && ((syncResult.conflicts ?? 0) > 0 || (syncResult.missing ?? 0) > 0));
+  const syncChangedCount = syncResult
+    ? syncResult.created + syncResult.updated + syncResult.merged + syncResult.remapped + syncResult.tickets_reassigned
+    : 0;
+  const syncFailed = Boolean(syncResult && syncHadErrors && syncResult.total === 0 && syncChangedCount === 0);
+  const syncSummary = syncResult
+    ? [
+        `${syncResult.total.toLocaleString()} fetched`,
+        `${syncResult.created.toLocaleString()} created`,
+        syncResult.merged > 0 ? `${syncResult.merged.toLocaleString()} merged` : null,
+        syncResult.updated > 0 ? `${syncResult.updated.toLocaleString()} updated` : null,
+        syncResult.remapped > 0 ? `${syncResult.remapped.toLocaleString()} remapped` : null,
+        syncResult.missing > 0 ? `${syncResult.missing.toLocaleString()} missing` : null,
+        syncResult.conflicts > 0 ? `${syncResult.conflicts.toLocaleString()} conflicts` : null,
+        syncResult.skipped_inactive > 0 ? `${syncResult.skipped_inactive.toLocaleString()} inactive skipped` : null,
+        syncResult.tickets_reassigned > 0 ? `${syncResult.tickets_reassigned.toLocaleString()} tickets reassigned` : null,
+        syncResult.errors > 0 ? `${syncResult.errors.toLocaleString()} ${syncResult.errors === 1 ? "error" : "errors"}` : null,
+      ].filter(Boolean)
+    : [];
 
   return (
     <SettingsSection title="Agent Accounts" subtitle="Sync agents from your external ITSM provider to create Tickety accounts for point tracking">
-      <div className="flex items-center justify-end">
-        <button type="button" onClick={() => syncMut.mutate()} disabled={syncMut.isPending} className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-clay-500 text-linen-50 text-sm font-medium hover:bg-clay-600 disabled:opacity-50">
-          {syncMut.isPending ? <><RefreshCw className="w-4 h-4 animate-spin" /> Syncing…</> : <><Download className="w-4 h-4" /> Fetch Agents</>}
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-3 items-start">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          <button
+            type="button"
+            onClick={() => setSyncMode("sync")}
+            className={cn(
+              "min-h-[58px] rounded border px-3 py-2 text-left transition-colors",
+              syncMode === "sync" ? "border-clay-500 bg-clay-50 text-clay-700" : "border-linen-400 bg-linen-50 text-ink-600 hover:bg-linen-200"
+            )}
+          >
+            <span className="flex items-center gap-2 text-sm font-semibold"><Download className="h-4 w-4" /> Sync missing</span>
+            <span className="block text-xs text-ink-400 mt-0.5">Create unmapped provider agents</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setSyncMode("merge")}
+            className={cn(
+              "min-h-[58px] rounded border px-3 py-2 text-left transition-colors",
+              syncMode === "merge" ? "border-clay-500 bg-clay-50 text-clay-700" : "border-linen-400 bg-linen-50 text-ink-600 hover:bg-linen-200"
+            )}
+          >
+            <span className="flex items-center gap-2 text-sm font-semibold"><Link2 className="h-4 w-4" /> Merge & reconcile</span>
+            <span className="block text-xs text-ink-400 mt-0.5">Link provider agents to existing accounts</span>
+          </button>
+        </div>
+        <button type="button" onClick={() => syncMut.mutate(syncOptions)} disabled={syncMut.isPending} className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-clay-500 text-linen-50 text-sm font-medium hover:bg-clay-600 disabled:opacity-50">
+          {syncMut.isPending ? <><RefreshCw className="w-4 h-4 animate-spin" /> Syncing…</> : <><Download className="w-4 h-4" /> {syncMode === "merge" ? "Merge Agents" : "Sync Agents"}</>}
         </button>
       </div>
-      {syncMut.isSuccess && syncMut.data && (
-        <div className="rounded border border-linen-400 bg-linen-200 p-3 text-sm">
-          <span className="font-medium text-ink-600">Sync complete:</span> {syncMut.data.result.total} fetched,{" "}
-          <span className="text-ink-600 font-medium">{syncMut.data.result.created} created</span>
-          {syncMut.data.result.updated > 0 && <>, <span className="text-ink-600">{syncMut.data.result.updated} updated</span></>}
-          {syncMut.data.result.remapped > 0 && <>, <span className="text-ink-600">{syncMut.data.result.remapped} remapped</span></>}
-          {syncMut.data.result.tickets_reassigned > 0 && <>, <span className="text-ink-600">{syncMut.data.result.tickets_reassigned} tickets reassigned</span></>}
-          {syncMut.data.result.errors > 0 && <>, <span className="text-rust-500 font-medium">{syncMut.data.result.errors} errors</span></>}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+        <label className="flex items-start gap-2 rounded border border-linen-400 bg-linen-50 px-3 py-2 text-sm text-ink-600">
+          <input type="checkbox" checked={createMissing} onChange={(e) => setCreateMissing(e.target.checked)} className="mt-0.5" />
+          <span><span className="block font-medium">Create missing</span><span className="text-xs text-ink-400">Add accounts when no match exists</span></span>
+        </label>
+        <label className="flex items-start gap-2 rounded border border-linen-400 bg-linen-50 px-3 py-2 text-sm text-ink-600">
+          <input type="checkbox" checked={updateProfiles} onChange={(e) => setUpdateProfiles(e.target.checked)} className="mt-0.5" />
+          <span><span className="block font-medium">Refresh profiles</span><span className="text-xs text-ink-400">Update name, email, and title</span></span>
+        </label>
+        <label className={cn("flex items-start gap-2 rounded border border-linen-400 bg-linen-50 px-3 py-2 text-sm text-ink-600", syncMode !== "merge" && "opacity-60")}>
+          <input type="checkbox" checked={matchByName} disabled={syncMode !== "merge"} onChange={(e) => setMatchByName(e.target.checked)} className="mt-0.5" />
+          <span><span className="block font-medium">Match unique names</span><span className="text-xs text-ink-400">Use only when email is absent</span></span>
+        </label>
+        <label className="flex items-start gap-2 rounded border border-linen-400 bg-linen-50 px-3 py-2 text-sm text-ink-600">
+          <input type="checkbox" checked={reassignTickets} onChange={(e) => setReassignTickets(e.target.checked)} className="mt-0.5" />
+          <span><span className="block font-medium">Reassign tickets</span><span className="text-xs text-ink-400">Apply mapped assignees to tickets</span></span>
+        </label>
+      </div>
+      {syncMut.isError && (
+        <div className="rounded border border-rust-400 bg-linen-100 p-3 text-sm text-ink-600">
+          <div className="flex items-start gap-2">
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-rust-500" />
+            <div>
+              <p className="font-medium text-rust-600">Sync failed</p>
+              <p className="mt-0.5 text-ink-500">{syncMut.error instanceof Error ? syncMut.error.message : "The agent sync request could not be completed."}</p>
+            </div>
+          </div>
+        </div>
+      )}
+      {syncMut.isSuccess && syncResult && (
+        <div className={cn(
+          "rounded border bg-linen-100 p-3 text-sm",
+          syncFailed ? "border-rust-400" : syncHadErrors || syncNeedsReview ? "border-amber-400" : "border-moss-400"
+        )}>
+          <div className="flex items-start gap-2">
+            {syncFailed || syncHadErrors || syncNeedsReview ? (
+              <AlertCircle className={cn("mt-0.5 h-4 w-4 shrink-0", syncFailed ? "text-rust-500" : "text-amber-600")} />
+            ) : (
+              <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-moss-600" />
+            )}
+            <div className="min-w-0">
+              <p className={cn("font-medium", syncFailed ? "text-rust-600" : syncHadErrors || syncNeedsReview ? "text-ink-600" : "text-moss-600")}>
+                {syncFailed ? "Sync failed" : syncHadErrors ? "Sync completed with errors" : syncNeedsReview ? "Sync needs review" : "Sync complete"}
+              </p>
+              <p className="mt-0.5 text-ink-500">{syncSummary.join(", ")}</p>
+              {syncFailed && agents.length > 0 && (
+                <p className="mt-1 text-xs text-ink-400">Existing accounts below are from earlier successful syncs.</p>
+              )}
+              {(syncResult.conflict_details?.length ?? 0) > 0 && (
+                <ul className="mt-2 space-y-1 text-xs text-amber-700">
+                  {syncResult.conflict_details.slice(0, 3).map((detail, index) => (
+                    <li key={`${detail}-${index}`}>{detail}</li>
+                  ))}
+                </ul>
+              )}
+              {(syncResult.missing_details?.length ?? 0) > 0 && (
+                <ul className="mt-2 space-y-1 text-xs text-ink-500">
+                  {syncResult.missing_details.slice(0, 3).map((detail, index) => (
+                    <li key={`${detail}-${index}`}>{detail}</li>
+                  ))}
+                </ul>
+              )}
+              {(syncResult.error_details?.length ?? 0) > 0 && (
+                <ul className="mt-2 space-y-1 text-xs text-rust-500">
+                  {syncResult.error_details.slice(0, 3).map((detail, index) => (
+                    <li key={`${detail}-${index}`}>{detail}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
         </div>
       )}
       {isLoading ? (
