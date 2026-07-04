@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { Settings as SettingsType, LlmCatalog, LlmProvider, TicketCategory, BuildInfo } from "@/lib/types";
@@ -8,6 +9,7 @@ import { cn } from "@/lib/utils";
 import {
   Settings as SettingsIcon, Save, RefreshCw, CheckCircle2, AlertCircle,
   Users, Download, Database, Zap, Plus, Trash2, ShieldCheck, Activity,
+  Power, KeyRound, Link2, SlidersHorizontal,
 } from "lucide-react";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
 
@@ -19,6 +21,31 @@ const PROVIDER_OPTIONS = [
 ];
 
 const PROVIDER_IDS = ["deepseek", "openai", "openrouter", "azure", "azure_ai", "custom"] as const;
+
+type FreshserviceAuthMode = "api" | "oauth";
+
+const FRESHSERVICE_DEFAULT_SCOPES = "freshservice.tickets.view freshservice.tickets.edit freshservice.agents.manage";
+
+function normalizeDomain(value: string) {
+  const trimmed = value.trim().replace(/\/+$/, "");
+  if (!trimmed) return "";
+  try {
+    const parsed = new URL(trimmed.includes("://") ? trimmed : `https://${trimmed}`);
+    return parsed.host || trimmed;
+  } catch {
+    return trimmed.replace(/^https?:\/\//, "");
+  }
+}
+
+function ensureHttpsUrl(value: string) {
+  const trimmed = value.trim().replace(/\/+$/, "");
+  if (!trimmed) return "";
+  return trimmed.includes("://") ? trimmed : `https://${trimmed}`;
+}
+
+function isAuthError(error: unknown) {
+  return error instanceof Error && error.message.toLowerCase().includes("not authenticated");
+}
 
 const CATEGORY_COLORS = [
   { value: "slate", label: "Slate", className: "bg-linen-500" },
@@ -42,14 +69,16 @@ async function postMaintenanceAction(path: string) {
 }
 
 export default function SettingsPage() {
+  const router = useRouter();
   const queryClient = useQueryClient();
-  const { data, isLoading } = useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
-  const { data: catalog } = useQuery({ queryKey: ["llm-catalog"], queryFn: api.getLlmCatalog });
+  const { data, isLoading, error: settingsError } = useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
+  const { data: catalog, error: catalogError } = useQuery({ queryKey: ["llm-catalog"], queryFn: api.getLlmCatalog });
   const { data: version } = useQuery({ queryKey: ["version"], queryFn: api.getVersion, staleTime: Infinity });
   const { data: syncStatus } = useQuery({ queryKey: ["sync-status"], queryFn: api.getSyncStatus, refetchInterval: 30000 });
 
   const [form, setForm] = useState<Partial<SettingsType>>({});
   const [saved, setSaved] = useState(false);
+  const [freshserviceAuthMode, setFreshserviceAuthMode] = useState<FreshserviceAuthMode>("api");
 
   useEffect(() => {
     if (data) {
@@ -57,6 +86,10 @@ export default function SettingsPage() {
         ...data,
         ITSM_PROVIDER: data.ITSM_PROVIDER === "external" ? "freshservice" : data.ITSM_PROVIDER,
       });
+      const hasOAuthApp = data.FRESHSERVICE_OAUTH_CLIENT_ID__set || data.FRESHSERVICE_OAUTH_CLIENT_SECRET__set;
+      if (data.FRESHSERVICE_OAUTH_ACCESS_TOKEN__set || (!data.FRESHSERVICE_API_KEY__set && hasOAuthApp)) {
+        setFreshserviceAuthMode("oauth");
+      }
     }
   }, [data]);
 
@@ -70,6 +103,14 @@ export default function SettingsPage() {
       setTimeout(() => setSaved(false), 2500);
     },
   });
+
+  const authError = isAuthError(settingsError) || isAuthError(catalogError) || isAuthError(mutation.error);
+
+  useEffect(() => {
+    if (authError) {
+      router.replace("/login?next=/settings");
+    }
+  }, [authError, router]);
 
   const [fetchedInfo, setFetchedInfo] = useState<{ total_models: number; providers_queried: string[] } | null>(null);
   const refreshMut = useMutation({
@@ -91,6 +132,7 @@ export default function SettingsPage() {
   });
 
   const handleChange = (key: keyof SettingsType, value: string) => {
+    if (mutation.isError) mutation.reset();
     setForm((prev) => ({ ...prev, [key]: value }));
   };
 
@@ -108,12 +150,33 @@ export default function SettingsPage() {
 
   const activeProvider: LlmProvider | undefined = catalog ? (catalog[activeProviderId] as LlmProvider) : undefined;
   const appMode = (form.APP_MODE as string) || "demo";
+  const itProvider = form.ITSM_PROVIDER || "standalone";
   const automationValue = (key: string) => {
     const value = form[key as keyof SettingsType] as string | undefined;
     if (value === "true") return true;
     if (value === "false") return false;
     return appMode !== "production";
   };
+  const keyReady = (key: string) => {
+    const setFlag = data?.[`${key}__set`];
+    if (typeof setFlag === "boolean") return setFlag;
+    const value = form[key as keyof SettingsType];
+    return typeof value === "string" && value.trim() !== "" && !value.includes("****");
+  };
+  const freshserviceAuthReady = freshserviceAuthMode === "oauth"
+    ? keyReady("FRESHSERVICE_OAUTH_ACCESS_TOKEN")
+    : keyReady("FRESHSERVICE_API_KEY");
+  const freshserviceReady = Boolean(
+    form.FRESHSERVICE_DOMAIN?.trim() &&
+    freshserviceAuthReady
+  );
+  const jiraReady = Boolean(
+    form.JIRA_BASE_URL?.trim() &&
+    form.JIRA_EMAIL?.trim() &&
+    form.JIRA_PROJECT_KEY?.trim() &&
+    keyReady("JIRA_API_TOKEN")
+  );
+  const isExternalProvider = itProvider === "freshservice" || itProvider === "jira";
 
   const handleProviderChange = (pid: string) => {
     const prov = catalog ? (catalog[pid] as LlmProvider) : undefined;
@@ -122,8 +185,43 @@ export default function SettingsPage() {
     handleChange("DEFAULT_MODEL", firstModel);
   };
 
+  const handleItsmProviderChange = (provider: string) => {
+    setForm((prev) => {
+      const next = { ...prev, ITSM_PROVIDER: provider };
+      if (provider === "freshservice") {
+        next.SYNC_INTERVAL_SECONDS = next.SYNC_INTERVAL_SECONDS || "60";
+        next.FRESHSERVICE_TICKET_INCLUDES = next.FRESHSERVICE_TICKET_INCLUDES || "stats,requester";
+        next.FRESHSERVICE_OAUTH_SCOPES = next.FRESHSERVICE_OAUTH_SCOPES || FRESHSERVICE_DEFAULT_SCOPES;
+        if (!next.FRESHWORKS_ORG_DOMAIN && next.FRESHSERVICE_DOMAIN) {
+          next.FRESHWORKS_ORG_DOMAIN = next.FRESHSERVICE_DOMAIN;
+        }
+      }
+      if (provider === "jira") {
+        next.SYNC_INTERVAL_SECONDS = next.SYNC_INTERVAL_SECONDS || "60";
+        next.JIRA_ISSUE_TYPE = next.JIRA_ISSUE_TYPE || "Task";
+      }
+      return next;
+    });
+  };
+
+  const normalizeFreshserviceDomain = () => {
+    setForm((prev) => {
+      const domain = normalizeDomain(prev.FRESHSERVICE_DOMAIN || "");
+      const orgDomain = prev.FRESHWORKS_ORG_DOMAIN || domain;
+      return { ...prev, FRESHSERVICE_DOMAIN: domain, FRESHWORKS_ORG_DOMAIN: orgDomain };
+    });
+  };
+
+  const normalizeJiraUrl = () => {
+    setForm((prev) => ({ ...prev, JIRA_BASE_URL: ensureHttpsUrl(prev.JIRA_BASE_URL || "") }));
+  };
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (authError) {
+      router.replace("/login?next=/settings");
+      return;
+    }
     const payload: Record<string, string> = {};
     for (const key of Object.keys(form)) {
       const v = form[key as keyof SettingsType];
@@ -142,7 +240,13 @@ export default function SettingsPage() {
     );
   }
 
-  const itProvider = form.ITSM_PROVIDER || "standalone";
+  if (authError) {
+    return (
+      <div className="flex items-center justify-center py-20 text-ink-400">
+        <RefreshCw className="w-5 h-5 animate-spin mr-2" /> Opening sign in…
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-8 max-w-3xl">
@@ -161,11 +265,36 @@ export default function SettingsPage() {
         {/* ═══ LLM Configuration ═══ */}
         <SettingsSection title="LLM Configuration" subtitle="Choose the AI provider and model for ticket triage, summarization, and resolution">
           <Field label="Provider">
-            <select value={activeProviderId} onChange={(e) => handleProviderChange(e.target.value)} className="input-base">
-              {PROVIDER_IDS.map((pid) => (
-                <option key={pid} value={pid}>{catalog ? (catalog[pid] as LlmProvider)?.label ?? pid : pid}</option>
-              ))}
-            </select>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {PROVIDER_IDS.map((pid) => {
+                const provider = catalog ? (catalog[pid] as LlmProvider | undefined) : undefined;
+                const selected = activeProviderId === pid;
+                const requiredKeys = provider?.env_keys.filter((ek) => !ek.placeholder.toLowerCase().includes("optional")) ?? [];
+                const ready = Boolean(provider && requiredKeys.every((ek) => keyReady(ek.key)));
+                return (
+                  <button
+                    key={pid}
+                    type="button"
+                    onClick={() => handleProviderChange(pid)}
+                    className={cn(
+                      "min-h-[68px] rounded border px-3 py-2 text-left transition-colors",
+                      selected
+                        ? "border-clay-500 bg-clay-50 text-clay-700"
+                        : "border-linen-400 bg-linen-50 text-ink-600 hover:bg-linen-200"
+                    )}
+                  >
+                    <span className="flex items-center justify-between gap-2">
+                      <span className="text-sm font-semibold">{provider?.label ?? pid}</span>
+                      {selected ? <ActivePill /> : ready ? <ReadyPill /> : <OffPill />}
+                    </span>
+                    <span className="mt-1 flex items-center gap-1.5 text-xs text-ink-400">
+                      <Power className="w-3 h-3" />
+                      {selected ? "On" : ready ? "Ready to switch on" : "Needs setup"}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
           </Field>
 
           <Field label="Default Model">
@@ -192,7 +321,7 @@ export default function SettingsPage() {
           </div>
 
           {activeProvider?.env_keys.map((ek) => (
-            <Field key={ek.key} label={`${ek.label}${ek.is_set ? " ✓" : ""}`}>
+            <Field key={ek.key} label={ek.label} ready={keyReady(ek.key)}>
               {ek.secret ? (
                 <SecretInput value={(form[ek.key as keyof SettingsType] as string) || ""} onChange={(v) => handleChange(ek.key as keyof SettingsType, v)} placeholder={ek.placeholder} />
               ) : (
@@ -208,19 +337,26 @@ export default function SettingsPage() {
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
               {PROVIDER_OPTIONS.map((provider) => {
                 const selected = itProvider === provider.value;
+                const ready =
+                  provider.value === "freshservice" ? freshserviceReady :
+                  provider.value === "jira" ? jiraReady :
+                  true;
                 return (
                   <button
                     key={provider.value}
                     type="button"
-                    onClick={() => handleChange("ITSM_PROVIDER", provider.value)}
+                    onClick={() => handleItsmProviderChange(provider.value)}
                     className={cn(
                       "min-h-[64px] rounded border px-3 py-2 text-left transition-colors",
                       selected
                         ? "border-clay-500 bg-clay-50 text-clay-700"
                         : "border-linen-400 bg-linen-50 text-ink-600 hover:bg-linen-200"
-                    )}
+                      )}
                   >
-                    <span className="block text-sm font-semibold">{provider.label}</span>
+                    <span className="flex items-center justify-between gap-2">
+                      <span className="text-sm font-semibold">{provider.label}</span>
+                      {selected ? <ActivePill /> : ready ? <ReadyPill /> : <OffPill />}
+                    </span>
                     <span className="block text-xs text-ink-400 mt-0.5">{provider.description}</span>
                   </button>
                 );
@@ -229,59 +365,122 @@ export default function SettingsPage() {
           </Field>
 
           {itProvider === "freshservice" && (
-            <>
-              <Field label="Provider Domain">
-                <input type="text" value={form.FRESHSERVICE_DOMAIN || ""} onChange={(e) => handleChange("FRESHSERVICE_DOMAIN", e.target.value)} placeholder="yourdomain.example.com" className="input-base" />
+            <ConnectionPanel
+              title="Connect Freshservice"
+              description="Use a Freshservice domain plus one authentication method. Tickety fills sync defaults for you."
+              ready={freshserviceReady}
+              steps={[
+                { label: "Provider", done: true },
+                { label: "Domain", done: Boolean(form.FRESHSERVICE_DOMAIN?.trim()) },
+                { label: freshserviceAuthMode === "oauth" ? "OAuth token" : "API key", done: freshserviceAuthReady },
+              ]}
+            >
+              <Field label="Freshservice Domain" ready={Boolean(form.FRESHSERVICE_DOMAIN?.trim())}>
+                <input
+                  type="text"
+                  value={form.FRESHSERVICE_DOMAIN || ""}
+                  onChange={(e) => handleChange("FRESHSERVICE_DOMAIN", e.target.value)}
+                  onBlur={normalizeFreshserviceDomain}
+                  placeholder="acme.freshservice.com"
+                  className="input-base"
+                />
               </Field>
-              <Field label="Freshworks Org Domain">
-                <input type="text" value={form.FRESHWORKS_ORG_DOMAIN || ""} onChange={(e) => handleChange("FRESHWORKS_ORG_DOMAIN", e.target.value)} placeholder="yourorg.myfreshworks.com" className="input-base" />
-              </Field>
-              <Field label="Provider API Key">
-                <SecretInput value={form.FRESHSERVICE_API_KEY || ""} onChange={(v) => handleChange("FRESHSERVICE_API_KEY", v)} placeholder="Provider API key" />
-              </Field>
-              <Field label="Workspace ID">
-                <input type="text" value={form.FRESHSERVICE_WORKSPACE_ID || ""} onChange={(e) => handleChange("FRESHSERVICE_WORKSPACE_ID", e.target.value)} placeholder="Blank for primary, 0 for all workspaces" className="input-base" />
-              </Field>
-              <Field label="Ticket Includes">
-                <input type="text" value={form.FRESHSERVICE_TICKET_INCLUDES || ""} onChange={(e) => handleChange("FRESHSERVICE_TICKET_INCLUDES", e.target.value)} placeholder="stats,requester" className="input-base" />
-              </Field>
-              <Field label="Agent State">
-                <select value={form.FRESHSERVICE_AGENT_STATE || ""} onChange={(e) => handleChange("FRESHSERVICE_AGENT_STATE", e.target.value)} className="input-base">
-                  <option value="">Any active agent</option>
-                  <option value="fulltime">Full-time</option>
-                  <option value="occasional">Occasional</option>
-                </select>
-              </Field>
-              <Field label="Webhook Secret">
-                <SecretInput value={form.WEBHOOK_SECRET || ""} onChange={(v) => handleChange("WEBHOOK_SECRET", v)} placeholder="Webhook shared secret" />
-              </Field>
-              <Field label="Sync Interval (seconds)">
-                <input type="number" min={10} value={form.SYNC_INTERVAL_SECONDS || ""} onChange={(e) => handleChange("SYNC_INTERVAL_SECONDS", e.target.value)} placeholder="60" className="input-base" />
-              </Field>
-            </>
+
+              <div className="space-y-2">
+                <span className="text-sm font-medium text-ink-600">Authentication</span>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <AuthChoice
+                    active={freshserviceAuthMode === "api"}
+                    icon={KeyRound}
+                    title="API Key"
+                    description="Fastest setup"
+                    onClick={() => setFreshserviceAuthMode("api")}
+                  />
+                  <AuthChoice
+                    active={freshserviceAuthMode === "oauth"}
+                    icon={ShieldCheck}
+                    title="OAuth"
+                    description="Use a Freshworks app"
+                    onClick={() => setFreshserviceAuthMode("oauth")}
+                  />
+                </div>
+              </div>
+
+              {freshserviceAuthMode === "api" ? (
+                <Field label="Freshservice API Key" ready={keyReady("FRESHSERVICE_API_KEY")}>
+                  <SecretInput value={form.FRESHSERVICE_API_KEY || ""} onChange={(v) => handleChange("FRESHSERVICE_API_KEY", v)} placeholder="Paste API key" />
+                </Field>
+              ) : (
+                <FreshserviceOAuthSetup form={form} onChange={handleChange} keyReady={keyReady} />
+              )}
+
+              <AdvancedPanel title="Advanced Freshservice Sync">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <Field label="Freshworks Org Domain" ready={Boolean(form.FRESHWORKS_ORG_DOMAIN?.trim())}>
+                    <input type="text" value={form.FRESHWORKS_ORG_DOMAIN || ""} onChange={(e) => handleChange("FRESHWORKS_ORG_DOMAIN", e.target.value)} onBlur={() => handleChange("FRESHWORKS_ORG_DOMAIN", normalizeDomain(form.FRESHWORKS_ORG_DOMAIN || ""))} placeholder="acme.myfreshworks.com" className="input-base" />
+                  </Field>
+                  <Field label="Workspace ID" ready={Boolean(form.FRESHSERVICE_WORKSPACE_ID?.trim())}>
+                    <input type="text" value={form.FRESHSERVICE_WORKSPACE_ID || ""} onChange={(e) => handleChange("FRESHSERVICE_WORKSPACE_ID", e.target.value)} placeholder="Blank for primary, 0 for all" className="input-base" />
+                  </Field>
+                  <Field label="Ticket Includes" ready={Boolean(form.FRESHSERVICE_TICKET_INCLUDES?.trim())}>
+                    <input type="text" value={form.FRESHSERVICE_TICKET_INCLUDES || ""} onChange={(e) => handleChange("FRESHSERVICE_TICKET_INCLUDES", e.target.value)} placeholder="stats,requester" className="input-base" />
+                  </Field>
+                  <Field label="Agent State" ready={Boolean(form.FRESHSERVICE_AGENT_STATE?.trim())}>
+                    <select value={form.FRESHSERVICE_AGENT_STATE || ""} onChange={(e) => handleChange("FRESHSERVICE_AGENT_STATE", e.target.value)} className="input-base">
+                      <option value="">Any active agent</option>
+                      <option value="fulltime">Full-time</option>
+                      <option value="occasional">Occasional</option>
+                    </select>
+                  </Field>
+                  <Field label="Webhook Secret" ready={keyReady("WEBHOOK_SECRET")}>
+                    <SecretInput value={form.WEBHOOK_SECRET || ""} onChange={(v) => handleChange("WEBHOOK_SECRET", v)} placeholder="Shared secret" />
+                  </Field>
+                  <Field label="Sync Interval" ready={Boolean(form.SYNC_INTERVAL_SECONDS?.trim())}>
+                    <input type="number" min={10} value={form.SYNC_INTERVAL_SECONDS || ""} onChange={(e) => handleChange("SYNC_INTERVAL_SECONDS", e.target.value)} placeholder="60" className="input-base" />
+                  </Field>
+                </div>
+              </AdvancedPanel>
+            </ConnectionPanel>
           )}
 
           {itProvider === "jira" && (
-            <>
-              <Field label="Jira Site URL">
-                <input type="text" value={form.JIRA_BASE_URL || ""} onChange={(e) => handleChange("JIRA_BASE_URL", e.target.value)} placeholder="https://your-site.atlassian.net" className="input-base" />
-              </Field>
-              <Field label="Atlassian Email">
-                <input type="email" value={form.JIRA_EMAIL || ""} onChange={(e) => handleChange("JIRA_EMAIL", e.target.value)} placeholder="you@example.com" className="input-base" />
-              </Field>
-              <Field label="Atlassian API Token">
-                <SecretInput value={form.JIRA_API_TOKEN || ""} onChange={(v) => handleChange("JIRA_API_TOKEN", v)} placeholder="API token" />
-              </Field>
-              <Field label="Project Key">
-                <input type="text" value={form.JIRA_PROJECT_KEY || ""} onChange={(e) => handleChange("JIRA_PROJECT_KEY", e.target.value.toUpperCase())} placeholder="ITSM" className="input-base" />
-              </Field>
-              <Field label="Issue Type">
-                <input type="text" value={form.JIRA_ISSUE_TYPE || ""} onChange={(e) => handleChange("JIRA_ISSUE_TYPE", e.target.value)} placeholder="Task" className="input-base" />
-              </Field>
-              <Field label="Sync Interval (seconds)">
-                <input type="number" min={10} value={form.SYNC_INTERVAL_SECONDS || ""} onChange={(e) => handleChange("SYNC_INTERVAL_SECONDS", e.target.value)} placeholder="60" className="input-base" />
-              </Field>
-            </>
+            <ConnectionPanel
+              title="Connect Jira Service Management"
+              description="Add your Atlassian site, service project, and API token. Defaults cover the rest."
+              ready={jiraReady}
+              steps={[
+                { label: "Site", done: Boolean(form.JIRA_BASE_URL?.trim()) },
+                { label: "Account", done: Boolean(form.JIRA_EMAIL?.trim()) },
+                { label: "Project", done: Boolean(form.JIRA_PROJECT_KEY?.trim()) },
+                { label: "Token", done: keyReady("JIRA_API_TOKEN") },
+              ]}
+            >
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <Field label="Jira Site URL" ready={Boolean(form.JIRA_BASE_URL?.trim())}>
+                  <input type="text" value={form.JIRA_BASE_URL || ""} onChange={(e) => handleChange("JIRA_BASE_URL", e.target.value)} onBlur={normalizeJiraUrl} placeholder="https://acme.atlassian.net" className="input-base" />
+                </Field>
+                <Field label="Project Key" ready={Boolean(form.JIRA_PROJECT_KEY?.trim())}>
+                  <input type="text" value={form.JIRA_PROJECT_KEY || ""} onChange={(e) => handleChange("JIRA_PROJECT_KEY", e.target.value.toUpperCase())} placeholder="ITSM" className="input-base" />
+                </Field>
+                <Field label="Atlassian Email" ready={Boolean(form.JIRA_EMAIL?.trim())}>
+                  <input type="email" value={form.JIRA_EMAIL || ""} onChange={(e) => handleChange("JIRA_EMAIL", e.target.value)} placeholder="you@example.com" className="input-base" />
+                </Field>
+                <Field label="Atlassian API Token" ready={keyReady("JIRA_API_TOKEN")}>
+                  <SecretInput value={form.JIRA_API_TOKEN || ""} onChange={(v) => handleChange("JIRA_API_TOKEN", v)} placeholder="Paste API token" />
+                </Field>
+              </div>
+
+              <AdvancedPanel title="Advanced Jira Sync">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <Field label="Issue Type" ready={Boolean(form.JIRA_ISSUE_TYPE?.trim())}>
+                    <input type="text" value={form.JIRA_ISSUE_TYPE || ""} onChange={(e) => handleChange("JIRA_ISSUE_TYPE", e.target.value)} placeholder="Task" className="input-base" />
+                  </Field>
+                  <Field label="Sync Interval" ready={Boolean(form.SYNC_INTERVAL_SECONDS?.trim())}>
+                    <input type="number" min={10} value={form.SYNC_INTERVAL_SECONDS || ""} onChange={(e) => handleChange("SYNC_INTERVAL_SECONDS", e.target.value)} placeholder="60" className="input-base" />
+                  </Field>
+                </div>
+              </AdvancedPanel>
+            </ConnectionPanel>
           )}
 
           {itProvider === "standalone" && (
@@ -318,12 +517,7 @@ export default function SettingsPage() {
         </SettingsSection>
 
         {/* ═══ External OAuth + Agent Sync (conditional) ═══ */}
-        {itProvider === "freshservice" && (
-          <>
-            <OAuthSection form={form} onChange={handleChange} />
-            <AgentSection />
-          </>
-        )}
+        {isExternalProvider && <AgentSection />}
 
         {/* ═══ Category Management ═══ */}
         <CategorySection />
@@ -522,7 +716,7 @@ export default function SettingsPage() {
           )}
           {mutation.isError && (
             <span className="flex items-center gap-1.5 text-sm text-rust-500">
-              <AlertCircle className="w-4 h-4" /> Failed to save
+              <AlertCircle className="w-4 h-4" /> {mutation.error instanceof Error ? mutation.error.message : "Failed to save"}
             </span>
           )}
           <button type="submit" disabled={mutation.isPending} className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-clay-500 text-linen-50 text-sm font-semibold hover:bg-clay-600 disabled:opacity-50 transition-colors">
@@ -531,6 +725,159 @@ export default function SettingsPage() {
           </button>
         </div>
       </form>
+    </div>
+  );
+}
+
+// ═══ Guided ITSM Connection ══════════════════════════════════
+
+function ConnectionPanel({
+  title,
+  description,
+  ready,
+  steps,
+  children,
+}: {
+  title: string;
+  description: string;
+  ready: boolean;
+  steps: Array<{ label: string; done: boolean }>;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="rounded border border-linen-400 bg-linen-100 p-4 space-y-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <div className="flex items-center gap-2">
+            <Link2 className="w-4 h-4 text-ink-500" />
+            <h3 className="text-sm font-semibold text-ink-700">{title}</h3>
+          </div>
+          <p className="mt-1 text-xs text-ink-500">{description}</p>
+        </div>
+        {ready ? <ReadyPill /> : <OffPill />}
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+        {steps.map((step) => <SetupStep key={step.label} label={step.label} done={step.done} />)}
+      </div>
+
+      <div className="space-y-4">{children}</div>
+    </div>
+  );
+}
+
+function SetupStep({ label, done }: { label: string; done: boolean }) {
+  return (
+    <div className={cn(
+      "flex items-center gap-2 rounded border px-3 py-2 text-xs font-medium",
+      done ? "border-moss-500/30 bg-moss-500/10 text-moss-600" : "border-linen-400 bg-linen-50 text-ink-400"
+    )}>
+      {done ? <CheckCircle2 className="w-3.5 h-3.5 shrink-0" /> : <span className="h-3.5 w-3.5 shrink-0 rounded-full border border-linen-500" />}
+      <span className="truncate">{label}</span>
+    </div>
+  );
+}
+
+function AuthChoice({
+  active,
+  icon: Icon,
+  title,
+  description,
+  onClick,
+}: {
+  active: boolean;
+  icon: React.ComponentType<{ className?: string }>;
+  title: string;
+  description: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "flex min-h-[58px] items-center gap-3 rounded border px-3 py-2 text-left transition-colors",
+        active ? "border-clay-500 bg-clay-50 text-clay-700" : "border-linen-400 bg-linen-50 text-ink-600 hover:bg-linen-200"
+      )}
+    >
+      <Icon className="w-4 h-4 shrink-0" />
+      <span className="min-w-0">
+        <span className="block text-sm font-semibold">{title}</span>
+        <span className="block text-xs text-ink-400">{description}</span>
+      </span>
+    </button>
+  );
+}
+
+function AdvancedPanel({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <details className="rounded border border-linen-400 bg-linen-50">
+      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-sm font-medium text-ink-600">
+        <SlidersHorizontal className="w-4 h-4" />
+        {title}
+      </summary>
+      <div className="border-t border-linen-300 p-3">{children}</div>
+    </details>
+  );
+}
+
+function FreshserviceOAuthSetup({
+  form,
+  onChange,
+  keyReady,
+}: {
+  form: Partial<SettingsType>;
+  onChange: (key: keyof SettingsType, value: string) => void;
+  keyReady: (key: string) => boolean;
+}) {
+  const { data: status } = useQuery({ queryKey: ["oauth-status"], queryFn: api.getOAuthStatus, refetchInterval: 30000 });
+  const authMut = useMutation({ mutationFn: api.getOAuthAuthorizeUrl, onSuccess: (res) => window.open(res.url, "_blank", "width=700,height=600") });
+  const configured = keyReady("FRESHSERVICE_OAUTH_CLIENT_ID") && keyReady("FRESHSERVICE_OAUTH_CLIENT_SECRET") && Boolean(form.FRESHSERVICE_OAUTH_REDIRECT_URI?.trim());
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <Field label="Freshworks Org Domain" ready={Boolean(form.FRESHWORKS_ORG_DOMAIN?.trim())}>
+          <input type="text" value={form.FRESHWORKS_ORG_DOMAIN || ""} onChange={(e) => onChange("FRESHWORKS_ORG_DOMAIN", e.target.value)} onBlur={() => onChange("FRESHWORKS_ORG_DOMAIN", normalizeDomain(form.FRESHWORKS_ORG_DOMAIN || ""))} placeholder="acme.myfreshworks.com" className="input-base" />
+        </Field>
+        <Field label="Redirect URI" ready={Boolean(form.FRESHSERVICE_OAUTH_REDIRECT_URI?.trim())}>
+          <input type="text" value={form.FRESHSERVICE_OAUTH_REDIRECT_URI || ""} onChange={(e) => onChange("FRESHSERVICE_OAUTH_REDIRECT_URI", e.target.value)} placeholder="http://localhost:8000/oauth/callback" className="input-base" />
+        </Field>
+        <Field label="OAuth Client ID" ready={keyReady("FRESHSERVICE_OAUTH_CLIENT_ID")}>
+          <SecretInput value={form.FRESHSERVICE_OAUTH_CLIENT_ID || ""} onChange={(v) => onChange("FRESHSERVICE_OAUTH_CLIENT_ID", v)} placeholder="Client ID" />
+        </Field>
+        <Field label="OAuth Client Secret" ready={keyReady("FRESHSERVICE_OAUTH_CLIENT_SECRET")}>
+          <SecretInput value={form.FRESHSERVICE_OAUTH_CLIENT_SECRET || ""} onChange={(v) => onChange("FRESHSERVICE_OAUTH_CLIENT_SECRET", v)} placeholder="Client secret" />
+        </Field>
+      </div>
+
+      <Field label="OAuth Scopes" ready={Boolean(form.FRESHSERVICE_OAUTH_SCOPES?.trim())}>
+        <input type="text" value={form.FRESHSERVICE_OAUTH_SCOPES || ""} onChange={(e) => onChange("FRESHSERVICE_OAUTH_SCOPES", e.target.value)} placeholder={FRESHSERVICE_DEFAULT_SCOPES} className="input-base" />
+      </Field>
+
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between rounded border border-linen-400 bg-linen-50 px-3 py-2">
+        {status?.connected ? (
+          <span className="inline-flex items-center gap-1.5 text-sm font-medium text-ink-600">
+            <ShieldCheck className="w-4 h-4" /> Connected to {status.domain}
+          </span>
+        ) : (
+          <span className="text-sm text-ink-500">{configured ? "OAuth app details are ready." : "Add OAuth app details, save, then authorize."}</span>
+        )}
+        <button
+          type="button"
+          onClick={() => authMut.mutate()}
+          disabled={authMut.isPending || !configured}
+          className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded bg-clay-500 text-linen-50 text-sm font-medium hover:bg-clay-600 disabled:opacity-50"
+        >
+          {authMut.isPending ? <RefreshCw className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />}
+          Authorize
+        </button>
+      </div>
+      {authMut.isError && (
+        <div className="rounded border border-rust-400/30 bg-rust-400/10 p-3 text-sm text-red-700">
+          {authMut.error instanceof Error ? authMut.error.message : "Failed to get authorization URL"}
+        </div>
+      )}
     </div>
   );
 }
@@ -551,12 +898,39 @@ function SettingsSection({ title, subtitle, children }: { title: string; subtitl
 
 // ═══ Field ═══════════════════════════════════════════════════
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({ label, children, ready }: { label: React.ReactNode; children: React.ReactNode; ready?: boolean }) {
   return (
     <label className="block space-y-1.5">
-      <span className="text-sm font-medium text-ink-600">{label}</span>
+      <span className="flex items-center gap-2 text-sm font-medium text-ink-600">
+        {label}
+        {ready && <ReadyPill />}
+      </span>
       {children}
     </label>
+  );
+}
+
+function ReadyPill() {
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-moss-500/30 bg-moss-500/10 px-2 py-0.5 text-[11px] font-semibold text-moss-600">
+      <CheckCircle2 className="w-3 h-3" /> Ready
+    </span>
+  );
+}
+
+function ActivePill() {
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-clay-500/30 bg-clay-500/10 px-2 py-0.5 text-[11px] font-semibold text-clay-700">
+      <CheckCircle2 className="w-3 h-3" /> On
+    </span>
+  );
+}
+
+function OffPill() {
+  return (
+    <span className="inline-flex shrink-0 items-center rounded-full border border-linen-400 bg-linen-100 px-2 py-0.5 text-[11px] font-semibold text-ink-400">
+      Off
+    </span>
   );
 }
 
@@ -726,7 +1100,7 @@ function AgentSection() {
   return (
     <SettingsSection title="Agent Accounts" subtitle="Sync agents from your external ITSM provider to create Tickety accounts for point tracking">
       <div className="flex items-center justify-end">
-        <button onClick={() => syncMut.mutate()} disabled={syncMut.isPending} className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-clay-500 text-linen-50 text-sm font-medium hover:bg-clay-600 disabled:opacity-50">
+        <button type="button" onClick={() => syncMut.mutate()} disabled={syncMut.isPending} className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-clay-500 text-linen-50 text-sm font-medium hover:bg-clay-600 disabled:opacity-50">
           {syncMut.isPending ? <><RefreshCw className="w-4 h-4 animate-spin" /> Syncing…</> : <><Download className="w-4 h-4" /> Fetch Agents</>}
         </button>
       </div>
@@ -770,49 +1144,6 @@ function AgentSection() {
       ) : (
         <p className="text-sm text-ink-400 py-2">Click &ldquo;Fetch Agents&rdquo; to sync agent accounts from your external provider.</p>
       )}
-    </SettingsSection>
-  );
-}
-
-// ═══ OAuth Section ═══════════════════════════════════════════
-
-function OAuthSection({ form, onChange }: { form: Partial<SettingsType>; onChange: (key: keyof SettingsType, value: string) => void }) {
-  const { data: status } = useQuery({ queryKey: ["oauth-status"], queryFn: api.getOAuthStatus, refetchInterval: 30000 });
-  const authMut = useMutation({ mutationFn: api.getOAuthAuthorizeUrl, onSuccess: (res) => window.open(res.url, "_blank", "width=700,height=600") });
-
-  return (
-    <SettingsSection title="External OAuth 2.0" subtitle="Authenticate via OAuth. Once connected, the API key is ignored.">
-      <div className="flex items-center justify-end">
-        {status?.connected ? (
-          <span className="inline-flex items-center gap-1.5 rounded border border-linen-400 px-3 py-1.5 text-xs font-medium text-ink-600">
-            <ShieldCheck className="w-3.5 h-3.5" /> Connected to {status.domain}
-          </span>
-        ) : (
-          <button onClick={() => authMut.mutate()} disabled={authMut.isPending} className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-clay-500 text-linen-50 text-sm font-medium hover:bg-clay-600 disabled:opacity-50">
-            {authMut.isPending ? <RefreshCw className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />}
-            Authorize
-          </button>
-        )}
-      </div>
-      {authMut.isError && (
-        <div className="rounded border border-rust-400/30 bg-rust-400/10 p-3 text-sm text-red-700">
-          {authMut.error instanceof Error ? authMut.error.message : "Failed to get authorization URL"}
-        </div>
-      )}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <Field label="OAuth Client ID">
-          <SecretInput value={form["FRESHSERVICE_OAUTH_CLIENT_ID"] || ""} onChange={(v) => onChange("FRESHSERVICE_OAUTH_CLIENT_ID", v)} placeholder="From provider developer portal" />
-        </Field>
-        <Field label="OAuth Client Secret">
-          <SecretInput value={form["FRESHSERVICE_OAUTH_CLIENT_SECRET"] || ""} onChange={(v) => onChange("FRESHSERVICE_OAUTH_CLIENT_SECRET", v)} placeholder="Client secret" />
-        </Field>
-      </div>
-      <Field label="Redirect URI (must match provider app config)">
-        <input type="text" value={form["FRESHSERVICE_OAUTH_REDIRECT_URI"] || ""} onChange={(e) => onChange("FRESHSERVICE_OAUTH_REDIRECT_URI", e.target.value)} placeholder="http://localhost:8000/oauth/callback" className="input-base" />
-      </Field>
-      <Field label="OAuth Scopes">
-        <input type="text" value={form["FRESHSERVICE_OAUTH_SCOPES"] || ""} onChange={(e) => onChange("FRESHSERVICE_OAUTH_SCOPES", e.target.value)} placeholder="freshservice.tickets.view freshservice.tickets.edit freshservice.agents.manage" className="input-base" />
-      </Field>
     </SettingsSection>
   );
 }

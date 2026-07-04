@@ -6,8 +6,16 @@ import { api } from "@/lib/api";
 import { TicketyLogo } from "@/components/layout/TicketyLogo";
 import { ShieldCheck, RefreshCw, LogIn } from "lucide-react";
 
+function getSafeNextPath() {
+  if (typeof window === "undefined") return "/";
+  const next = new URLSearchParams(window.location.search).get("next");
+  if (!next || !next.startsWith("/") || next.startsWith("//")) return "/";
+  return next;
+}
+
 export default function LoginPage() {
   const router = useRouter();
+  const [nextPath, setNextPath] = useState("/");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -17,6 +25,7 @@ export default function LoginPage() {
   const [ssoLoading, setSsoLoading] = useState(false);
 
   useEffect(() => {
+    setNextPath(getSafeNextPath());
     api.getSsoConfig().then((cfg) => {
       setSsoEnabled(cfg.enabled);
       setSsoProvider(cfg.provider);
@@ -29,7 +38,7 @@ export default function LoginPage() {
     setError("");
     try {
       await api.login(email, password);
-      router.push("/");
+      router.push(nextPath);
       router.refresh();
     } catch {
       setError("Invalid email or password. Try alice@company.com / tickety123");

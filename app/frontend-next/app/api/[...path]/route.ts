@@ -38,6 +38,10 @@ async function proxy(req: NextRequest, ctx: Ctx) {
   const headers = new Headers(req.headers);
   headers.delete("host");
   headers.delete("content-length"); // fetch recomputes from the body
+  const forwardedOrigin = `${req.nextUrl.protocol}//${req.nextUrl.host}`;
+  headers.set("x-forwarded-host", req.nextUrl.host);
+  headers.set("x-forwarded-proto", req.nextUrl.protocol.replace(":", ""));
+  headers.set("origin", forwardedOrigin);
 
   const init: RequestInit & { duplex?: "half" } = {
     method: req.method,

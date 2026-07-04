@@ -19,12 +19,22 @@ async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API_PREFIX}${path}`, {
     ...options,
     headers: { "Content-Type": "application/json", ...(options?.headers || {}) },
+    credentials: "include",
     cache: "no-store",
   });
-  if (!res.ok) {
-    throw new Error(`API ${path} failed: ${res.status}`);
-  }
   const text = await res.text();
+  if (!res.ok) {
+    let detail = `API ${path} failed: ${res.status}`;
+    if (text) {
+      try {
+        const data = JSON.parse(text);
+        if (typeof data.detail === "string") detail = data.detail;
+      } catch {
+        detail = text;
+      }
+    }
+    throw new Error(detail);
+  }
   return text ? JSON.parse(text) : ({} as T);
 }
 

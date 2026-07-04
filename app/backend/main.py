@@ -144,7 +144,11 @@ def _request_origin_allowed(request: Request) -> bool:
     parsed = urllib.parse.urlparse(origin)
     if not parsed.scheme or not parsed.netloc:
         return False
-    request_origin = f"{request.url.scheme}://{request.url.netloc}"
+    forwarded_host = (request.headers.get("x-forwarded-host") or "").split(",")[0].strip()
+    forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    request_host = forwarded_host or request.url.netloc
+    request_scheme = forwarded_proto or request.url.scheme
+    request_origin = f"{request_scheme}://{request_host}"
     supplied_origin = f"{parsed.scheme}://{parsed.netloc}"
     if supplied_origin == request_origin:
         return True
@@ -185,6 +189,12 @@ def _resolve_request_user(request: Request, db: Session, allow_demo: bool) -> Op
             if user and user.is_active:
                 return user
     if allow_demo and settings_module.is_demo_mode() and not settings_module.get_bool("LOGIN_REQUIRED"):
+        admin = db.query(UserRecord).filter(
+            UserRecord.is_active.is_(True),
+            UserRecord.role == "admin",
+        ).first()
+        if admin:
+            return admin
         return db.query(UserRecord).filter(UserRecord.is_active.is_(True)).first()
     return None
 
