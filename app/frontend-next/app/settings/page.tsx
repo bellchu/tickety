@@ -472,7 +472,7 @@ export default function SettingsPage() {
               <AlertCircle className="w-4 h-4" /> Failed to save
             </span>
           )}
-          <button type="submit" disabled={mutation.isPending} className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-ink-700 text-white text-sm font-semibold hover:bg-ink-800 disabled:opacity-50 transition-colors">
+          <button type="submit" disabled={mutation.isPending} className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-clay-500 text-linen-50 text-sm font-semibold hover:bg-clay-600 disabled:opacity-50 transition-colors">
             {mutation.isPending ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
             Save Changes
           </button>
@@ -610,7 +610,7 @@ function CategorySection() {
                 ))}
               </div>
               <div className="flex items-center gap-2">
-                <button type="button" onClick={() => createMut.mutate()} disabled={!newName.trim() || createMut.isPending} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-ink-700 text-white text-xs font-medium hover:bg-ink-800 disabled:opacity-50">
+                <button type="button" onClick={() => createMut.mutate()} disabled={!newName.trim() || createMut.isPending} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-clay-500 text-linen-50 text-xs font-medium hover:bg-clay-600 disabled:opacity-50">
                   {createMut.isPending ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
                   Create
                 </button>
@@ -673,7 +673,7 @@ function AgentSection() {
   return (
     <SettingsSection title="Agent Accounts" subtitle="Sync agents from your external ITSM provider to create Tickety accounts for point tracking">
       <div className="flex items-center justify-end">
-        <button onClick={() => syncMut.mutate()} disabled={syncMut.isPending} className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-ink-700 text-white text-sm font-medium hover:bg-ink-800 disabled:opacity-50">
+        <button onClick={() => syncMut.mutate()} disabled={syncMut.isPending} className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-clay-500 text-linen-50 text-sm font-medium hover:bg-clay-600 disabled:opacity-50">
           {syncMut.isPending ? <><RefreshCw className="w-4 h-4 animate-spin" /> Syncing…</> : <><Download className="w-4 h-4" /> Fetch Agents</>}
         </button>
       </div>
@@ -733,7 +733,7 @@ function OAuthSection({ form, onChange }: { form: Partial<SettingsType>; onChang
             <ShieldCheck className="w-3.5 h-3.5" /> Connected to {status.domain}
           </span>
         ) : (
-          <button onClick={() => authMut.mutate()} disabled={authMut.isPending} className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-ink-700 text-white text-sm font-medium hover:bg-ink-800 disabled:opacity-50">
+          <button onClick={() => authMut.mutate()} disabled={authMut.isPending} className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-clay-500 text-linen-50 text-sm font-medium hover:bg-clay-600 disabled:opacity-50">
             {authMut.isPending ? <RefreshCw className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />}
             Authorize
           </button>
@@ -848,7 +848,7 @@ function StatusConfigSection() {
                 </label>
               </div>
               <div className="flex items-center gap-2">
-                <button type="button" onClick={() => createMut.mutate()} disabled={!name.trim() || !label.trim()} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-ink-700 text-white text-xs font-medium hover:bg-ink-800 disabled:opacity-50">
+                <button type="button" onClick={() => createMut.mutate()} disabled={!name.trim() || !label.trim()} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-clay-500 text-linen-50 text-xs font-medium hover:bg-clay-600 disabled:opacity-50">
                   <Plus className="w-3 h-3" /> Create
                 </button>
                 <button type="button" onClick={() => setShowForm(false)} className="px-3 py-1.5 rounded text-xs text-ink-500 hover:bg-linen-300">Cancel</button>
@@ -921,7 +921,7 @@ function PriorityConfigSection() {
                 <input type="number" placeholder="Sort weight" value={weight} onChange={(e) => setWeight(e.target.value)} className="input-base" />
               </div>
               <div className="flex items-center gap-2">
-                <button type="button" onClick={() => createMut.mutate()} disabled={!name.trim() || !label.trim()} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-ink-700 text-white text-xs font-medium hover:bg-ink-800 disabled:opacity-50">
+                <button type="button" onClick={() => createMut.mutate()} disabled={!name.trim() || !label.trim()} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-clay-500 text-linen-50 text-xs font-medium hover:bg-clay-600 disabled:opacity-50">
                   <Plus className="w-3 h-3" /> Create
                 </button>
                 <button type="button" onClick={() => setShowForm(false)} className="px-3 py-1.5 rounded text-xs text-ink-500 hover:bg-linen-300">Cancel</button>

@@ -41,5 +41,6 @@ spec:
     app: frontend
   ports:
     - protocol: TCP
-      port: 3000
+      name: http
+      port: 17000
       targetPort: 3000

@@ -66,7 +66,7 @@ export function TicketList() {
                 className={cn(
                   "px-3 py-1.5 rounded-lg text-xs font-medium transition-all",
                   filter === f
-                    ? "bg-ink-700 text-white"
+                    ? "bg-clay-500 text-linen-50"
                     : "bg-linen-50 text-ink-500 border border-linen-400 hover:bg-linen-200"
                 )}
               >

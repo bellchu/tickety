@@ -4,8 +4,8 @@ export function TicketyLogo({ className = "h-6" }: { className?: string }) {
       <div
         className="flex h-9 w-9 items-center justify-center rounded-[10px]"
         style={{
-          background: "linear-gradient(135deg, #C77B4F 0%, #9A5A36 100%)",
-          boxShadow: "0 2px 4px rgba(154, 90, 54, 0.25), inset 0 1px 0 rgba(255,255,255,0.15)",
+          background: "linear-gradient(135deg, #3B7FE5 0%, #0066BB 100%)",
+          boxShadow: "0 2px 4px rgba(0, 79, 147, 0.22), inset 0 1px 0 rgba(255,255,255,0.18)",
         }}
       >
         <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -18,12 +18,12 @@ export function TicketyLogo({ className = "h-6" }: { className?: string }) {
           <path
             d="M4 8C3.87 8 3.74 7.95 3.64 7.85L0.4 4.6C0.2 4.4 0.2 4.09 0.4 3.89C0.6 3.69 0.91 3.69 1.11 3.89L4 6.79L9.64 1.15C9.84 0.95 10.15 0.95 10.35 1.15C10.55 1.35 10.55 1.66 10.35 1.86L4.36 7.85C4.26 7.95 4.13 8 4 8Z"
             transform="translate(4, 5)"
-            fill="#9A5A36"
+            fill="#0066BB"
           />
         </svg>
       </div>
       <div className="flex flex-col leading-none gap-0.5">
-        <span className="font-serif text-base font-semibold italic text-ink-700">
+        <span className="font-mono text-base font-semibold text-ink-700">
           Tickety
         </span>
         <span className="text-[10px] text-ink-400">Support Suite</span>

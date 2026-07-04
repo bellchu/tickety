@@ -72,8 +72,8 @@ export function Sidebar() {
               className={cn(
                 "flex items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] transition-colors",
                 active
-                  ? "bg-linen-300 text-ink-700 font-medium"
-                  : "text-ink-500 hover:bg-linen-200 hover:text-ink-600 font-normal"
+                  ? "bg-clay-50 text-clay-600 font-medium"
+                  : "text-ink-500 hover:bg-linen-200 hover:text-ink-700 font-normal"
               )}
             >
               <Icon className="h-4 w-4 shrink-0" strokeWidth={1.5} />
@@ -93,8 +93,8 @@ export function Sidebar() {
           className={cn(
             "flex items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] transition-colors",
             pathname.startsWith("/profile")
-              ? "bg-linen-300 text-ink-700 font-medium"
-              : "text-ink-500 hover:bg-linen-200 hover:text-ink-600 font-normal"
+              ? "bg-clay-50 text-clay-600 font-medium"
+              : "text-ink-500 hover:bg-linen-200 hover:text-ink-700 font-normal"
           )}
         >
           <div className="flex h-6 w-6 items-center justify-center rounded-full bg-clay-400/15 text-clay-500">
@@ -113,8 +113,8 @@ export function Sidebar() {
           className={cn(
             "flex items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] transition-colors",
             pathname.startsWith("/settings")
-              ? "bg-linen-300 text-ink-700 font-medium"
-              : "text-ink-500 hover:bg-linen-200 hover:text-ink-600 font-normal"
+              ? "bg-clay-50 text-clay-600 font-medium"
+              : "text-ink-500 hover:bg-linen-200 hover:text-ink-700 font-normal"
           )}
         >
           <SettingsIcon className="h-4 w-4 shrink-0" strokeWidth={1.5} />

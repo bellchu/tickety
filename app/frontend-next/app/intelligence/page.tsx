@@ -374,7 +374,7 @@ function HealthPanel() {
               className="input-base input-search py-1.5 text-sm w-44"
             />
           </div>
-          <button type="submit" className="px-3 rounded-lg bg-ink-700 text-white text-sm hover:bg-ink-800">
+          <button type="submit" className="px-3 rounded-lg bg-clay-500 text-linen-50 text-sm hover:bg-clay-600">
             Check
           </button>
         </form>

@@ -5,19 +5,19 @@
 @import url("https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500;1,6..72,600&family=Geist+Mono:wght@400;500;600&display=swap");
 
 :root {
-  --background: #F3EBE2;
-  --foreground: #2B2620;
-  --surface: #FBF8F3;
-  --surface-2: #F3EBE2;
-  --surface-3: #EAE3D9;
-  --border: #E0D8CE;
-  --border-subtle: #EAE3D9;
-  --accent: #B5704A;
-  --accent-dark: #9A5A36;
-  --fg: #2B2620;
-  --fg-2: #5C554B;
-  --fg-muted: #8A8276;
-  --fg-inverse: #FBF8F3;
+  --background: #FAF8F4;
+  --foreground: #1C1814;
+  --surface: #FFFEFB;
+  --surface-2: #F7F4EE;
+  --surface-3: #F0ECE4;
+  --border: #D9D2C7;
+  --border-subtle: #E8E1D6;
+  --accent: #0066BB;
+  --accent-dark: #004F93;
+  --fg: #1C1814;
+  --fg-2: #5C5347;
+  --fg-muted: #9B9084;
+  --fg-inverse: #FAF8F4;
 }
 
 * {
@@ -65,11 +65,11 @@ body {
 /* ═══ Buttons — refined ═══ */
 .btn-primary {
   @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-full text-sm font-medium transition-all;
-  background: var(--fg);
+  background: var(--accent);
   color: var(--fg-inverse);
 }
 .btn-primary:hover {
-  background: #1C1814;
+  background: var(--accent-dark);
 }
 .btn-primary:active {
   @apply scale-[0.98];
@@ -113,7 +113,7 @@ body {
 .input-base:focus {
   @apply outline-none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(181, 112, 74, 0.12);
+  box-shadow: 0 0 0 3px rgba(0, 102, 187, 0.12);
 }
 
 /* ═══ Select ═══ */
@@ -128,7 +128,7 @@ select.input-base {
 /* ═══ Checkbox ═══ */
 input[type="checkbox"] {
   @apply rounded;
-  accent-color: #B5704A;
+  accent-color: #0066BB;
 }
 
 /* ═══ Scrollbar ═══ */
@@ -140,6 +140,6 @@ input[type="checkbox"] {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #C5BEB6;
+  background: #B0A89C;
   border-radius: 3px;
 }

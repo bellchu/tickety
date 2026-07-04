@@ -29,7 +29,7 @@ export function ImpactBar({ points, tier, momentum }: Props) {
         <div className="flex-1">
           <div className="h-2 bg-linen-300 rounded-full overflow-hidden">
             <motion.div
-              className="h-full bg-gradient-to-r from-linen-500 to-ink-600 rounded-full"
+              className="h-full bg-gradient-to-r from-clay-300 to-clay-500 rounded-full"
               initial={{ width: 0 }}
               animate={{ width: `${percent}%` }}
               transition={{ duration: 0.8, ease: "easeOut" }}

@@ -60,7 +60,7 @@ export default function LoginPage() {
               type="button"
               onClick={handleSsoLogin}
               disabled={ssoLoading}
-              className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg border-2 border-ink-700 text-ink-700 text-sm font-semibold hover:bg-ink-700 hover:text-white disabled:opacity-50 transition-colors"
+              className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg border-2 border-clay-500 text-clay-600 text-sm font-semibold hover:bg-clay-500 hover:text-linen-50 disabled:opacity-50 transition-colors"
             >
               {ssoLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />}
               Sign in with {ssoProvider || "SSO"}
@@ -100,7 +100,7 @@ export default function LoginPage() {
             <button
               type="submit"
               disabled={loading}
-              className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-ink-700 text-white text-sm font-semibold hover:bg-ink-800 disabled:opacity-50 transition-colors"
+              className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-clay-500 text-linen-50 text-sm font-semibold hover:bg-clay-600 disabled:opacity-50 transition-colors"
             >
               {loading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <LogIn className="w-4 h-4" />}
               Sign In

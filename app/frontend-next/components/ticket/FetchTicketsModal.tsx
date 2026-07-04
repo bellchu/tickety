@@ -103,7 +103,7 @@ export function FetchTicketsModal({ open, onClose }: Props) {
               checked={overwrite}
               onChange={(e) => setOverwrite(e.target.checked)}
               disabled={mutation.isPending}
-              className="mt-0.5 w-4 h-4 rounded border-linen-400 text-ink-600 focus:ring-clay-400/30"
+              className="mt-0.5 w-4 h-4 rounded border-linen-400 text-clay-500 focus:ring-clay-400/30"
             />
             <span className="text-sm text-ink-600">
               <span className="font-medium">Overwrite existing tickets</span>

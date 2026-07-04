@@ -36,5 +36,5 @@ echo "✅ Deployment complete!"
 echo "🔍 Checking pod status..."
 kubectl get pods -n tickety
 echo ""
-echo "🌐 Frontend: http://localhost:3000"
+echo "🌐 Frontend: http://localhost:17000"
 echo "🔌 Backend API: http://localhost:8000"

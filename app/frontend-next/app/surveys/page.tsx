@@ -278,7 +278,7 @@ function SendSurveyModal({
           <button
             onClick={() => onSubmit(ticketId, Number(templateId))}
             disabled={loading || !ticketId || !templateId}
-            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-ink-700 text-white text-xs font-semibold hover:bg-ink-800 disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-clay-500 text-linen-50 text-xs font-semibold hover:bg-clay-600 disabled:opacity-50"
           >
             {loading && <RefreshCw className="w-3 h-3 animate-spin" />}
             <Send className="w-3 h-3" />

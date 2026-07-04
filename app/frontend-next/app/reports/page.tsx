@@ -11,8 +11,8 @@ import {
 } from "recharts";
 import { cn } from "@/lib/utils";
 
-const CHART_COLORS = ["#6B8E5A", "#C77B4F", "#D4A24C", "#5C554B", "#8AA874", "#C44A3F", "#3D372F"];
-const PRIORITY_COLORS: Record<string, string> = { P1: "#C44A3F", P2: "#D4A24C", P3: "#6B8E5A", P4: "#8A8276" };
+const CHART_COLORS = ["#0066BB", "#2487DD", "#5C5347", "#9B9084", "#6B8E5A", "#D4A24C", "#C44A3F"];
+const PRIORITY_COLORS: Record<string, string> = { P1: "#C44A3F", P2: "#D4A24C", P3: "#0066BB", P4: "#9B9084" };
 
 export default function ReportsPage() {
   const { data: summary } = useQuery({ queryKey: ["report-summary"], queryFn: api.getReportSummary });
@@ -63,15 +63,15 @@ export default function ReportsPage() {
             <AreaChart data={volumeData}>
               <defs>
                 <linearGradient id="volGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#6B8E5A" stopOpacity={0.3} />
-                  <stop offset="95%" stopColor="#6B8E5A" stopOpacity={0} />
+                  <stop offset="5%" stopColor="#0066BB" stopOpacity={0.3} />
+                  <stop offset="95%" stopColor="#0066BB" stopOpacity={0} />
                 </linearGradient>
               </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="#EAE3D9" vertical={false} />
-              <XAxis dataKey="day" tick={{ fontSize: 10, fill: "#8A8276" }} interval="preserveStartEnd" />
-              <YAxis tick={{ fontSize: 10, fill: "#8A8276" }} allowDecimals={false} />
-              <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #EAE3D9" }} />
-              <Area type="monotone" dataKey="count" stroke="#6B8E5A" strokeWidth={2} fill="url(#volGrad)" />
+              <CartesianGrid strokeDasharray="3 3" stroke="#E8E1D6" vertical={false} />
+              <XAxis dataKey="day" tick={{ fontSize: 10, fill: "#9B9084" }} interval="preserveStartEnd" />
+              <YAxis tick={{ fontSize: 10, fill: "#9B9084" }} allowDecimals={false} />
+              <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #E8E1D6" }} />
+              <Area type="monotone" dataKey="count" stroke="#0066BB" strokeWidth={2} fill="url(#volGrad)" />
             </AreaChart>
           </ResponsiveContainer>
         ) : (
@@ -102,10 +102,10 @@ export default function ReportsPage() {
           {statusData.length > 0 ? (
             <ResponsiveContainer width="100%" height={220}>
               <BarChart data={statusData} layout="vertical">
-                <CartesianGrid strokeDasharray="3 3" stroke="#EAE3D9" horizontal={false} />
-                <XAxis type="number" tick={{ fontSize: 10, fill: "#8A8276" }} allowDecimals={false} />
-                <YAxis type="category" dataKey="name" tick={{ fontSize: 10, fill: "#8A8276" }} width={90} />
-                <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #EAE3D9" }} />
+                <CartesianGrid strokeDasharray="3 3" stroke="#E8E1D6" horizontal={false} />
+                <XAxis type="number" tick={{ fontSize: 10, fill: "#9B9084" }} allowDecimals={false} />
+                <YAxis type="category" dataKey="name" tick={{ fontSize: 10, fill: "#9B9084" }} width={90} />
+                <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #E8E1D6" }} />
                 <Bar dataKey="value" radius={[0, 4, 4, 0]}>
                   {statusData.map((_, i) => <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />)}
                 </Bar>
@@ -144,10 +144,10 @@ export default function ReportsPage() {
         {resolutionData.length > 0 ? (
           <ResponsiveContainer width="100%" height={220}>
             <BarChart data={resolutionData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#EAE3D9" vertical={false} />
-              <XAxis dataKey="category" tick={{ fontSize: 10, fill: "#8A8276" }} />
-              <YAxis tick={{ fontSize: 10, fill: "#8A8276" }} />
-              <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #EAE3D9" }} />
+              <CartesianGrid strokeDasharray="3 3" stroke="#E8E1D6" vertical={false} />
+              <XAxis dataKey="category" tick={{ fontSize: 10, fill: "#9B9084" }} />
+              <YAxis tick={{ fontSize: 10, fill: "#9B9084" }} />
+              <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #E8E1D6" }} />
               <Bar dataKey="hours" radius={[4, 4, 0, 0]}>
                 {resolutionData.map((_, i) => <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />)}
               </Bar>
