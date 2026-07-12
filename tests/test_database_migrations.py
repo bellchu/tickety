@@ -43,7 +43,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             for table_name, table in Base.metadata.tables.items():
                 actual_columns = {column["name"] for column in inspector.get_columns(table_name)}
                 self.assertEqual(actual_columns, set(table.columns.keys()), table_name)
-            self.assertEqual(self._current_revision(engine), "0002")
+            self.assertEqual(self._current_revision(engine), "0004")
             command.check(self.config)
         finally:
             engine.dispose()
@@ -82,7 +82,27 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertEqual(user["name"], "Legacy User")
             self.assertEqual(user["role"], "agent")
             self.assertTrue(user["is_active"])
-            self.assertEqual(self._current_revision(engine), "0002")
+            self.assertEqual(self._current_revision(engine), "0004")
+        finally:
+            engine.dispose()
+
+    def test_existing_ai_artifacts_are_classified_as_legacy_stale(self):
+        command.upgrade(self.config, "0002")
+        engine = create_engine(self.url)
+        try:
+            with engine.begin() as connection:
+                connection.execute(text(
+                    "INSERT INTO tickets (id, subject, ai_reasoning, summary, recommended_solution) "
+                    "VALUES ('legacy-ai', 'Old analysis', 'old reasoning', 'old summary', '{}')"
+                ))
+            command.upgrade(self.config, "head")
+            with engine.connect() as connection:
+                row = connection.execute(text(
+                    "SELECT ai_status, ai_error, ai_source_hash FROM tickets WHERE id = 'legacy-ai'"
+                )).mappings().one()
+            self.assertEqual(row["ai_status"], "legacy_stale")
+            self.assertEqual(row["ai_error"], "provenance_unknown")
+            self.assertIsNone(row["ai_source_hash"])
         finally:
             engine.dispose()
 

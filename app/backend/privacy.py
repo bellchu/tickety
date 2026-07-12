@@ -8,6 +8,22 @@ _REDACTIONS = [
     (re.compile(r"\b(?:\d[ -]*?){13,19}\b"), "[card]"),
     (re.compile(r"\b(?:api[_-]?key|token|password|secret)\s*[:=]\s*\S+", re.IGNORECASE), "[secret]"),
     (re.compile(r"\bauthorization\s*:\s*(?:bearer|basic)\s+\S+", re.IGNORECASE), "[secret]"),
+    (re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"), "[ip]"),
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"), "[token]"),
+    (
+        re.compile(
+            r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+            re.IGNORECASE | re.DOTALL,
+        ),
+        "[private-key]",
+    ),
+    (
+        re.compile(
+            r"([?&](?:access_token|api_key|apikey|key|token|secret|password)=)[^&#\s]+",
+            re.IGNORECASE,
+        ),
+        r"\1[secret]",
+    ),
 ]
 
 

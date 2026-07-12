@@ -22,6 +22,8 @@ if ! kubectl get secret tickety-secrets -n tickety >/dev/null 2>&1; then
   exit 1
 fi
 kubectl apply -f k8s/postgres.yaml
+kubectl apply -n tickety -f k8s/network-policy.yaml
+bash k8s/verify-network-policy.sh tickety
 
 echo "🗄️ Applying database migrations..."
 # Jobs have immutable pod templates and a completed Job will not rerun. Replace

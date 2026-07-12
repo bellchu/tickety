@@ -25,6 +25,10 @@ after verifying that every baseline table and column exists. Partial or
 unrecognised schemas fail closed. Revision `0002` idempotently adds the managed
 ticket, portal capability, authentication, knowledge-governance, and service
 workflow fields, indexes, defaults, and foreign keys while preserving rows.
+Revision `0003` adds AI artifact provenance, cross-process claim state, and
+durable request-budget tables without rewriting existing generated content.
+Revision `0004` adds expiring provider-concurrency leases shared by API and
+worker processes.
 
 ## Change procedure
 

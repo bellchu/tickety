@@ -11,6 +11,20 @@ export interface Ticket {
   complexity: number;
   ai_reasoning: string | null;
   suggested_response: string | null;
+  ai_source_hash: string | null;
+  ai_pipeline_version: string | null;
+  ai_model: string | null;
+  ai_status: string | null;
+  ai_claim_id: string | null;
+  ai_lease_expires_at: string | null;
+  ai_attempts: number;
+  ai_next_attempt_at: string | null;
+  ai_requested_artifacts: string | null;
+  ai_started_at: string | null;
+  ai_generated_at: string | null;
+  ai_error: string | null;
+  ai_synthetic: boolean;
+  ai_suggested_priority: string | null;
   ticket_type: string;
   impact: string | null;
   urgency: string | null;
@@ -348,6 +362,7 @@ export interface TicketAnalysisResult {
   recommended_solution: RecommendedSolution | null;
   documents_changed: number;
   errors: { step: string; error: string }[];
+  cached: boolean;
 }
 
 // ── Resolution Agent (Recommended Solution) ─────────────────
@@ -355,8 +370,8 @@ export interface TicketAnalysisResult {
 export interface ResolutionPlan {
   root_cause_hypothesis: string;
   resolution_steps: string[];
-  confidence: "high" | "medium" | "low" | string;
-  estimated_effort: "high" | "medium" | "low" | string;
+  confidence: "high" | "medium" | "low";
+  estimated_effort: "high" | "medium" | "low";
   escalation_advice: string;
   preventive_note: string;
 }

@@ -1,5 +1,8 @@
 import os
 import threading
+import ipaddress
+import socket
+from urllib.parse import urlparse
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -49,6 +52,8 @@ _ALL_KEYS = [
     "CORS_ALLOW_ORIGINS",
     "COOKIE_SECURE",
     "COOKIE_SAMESITE",
+    "LLM_ALLOW_PRIVATE_ENDPOINTS",
+    "LLM_ALLOW_INSECURE_ENDPOINTS",
     # LLM provider keys (multi-provider; see llm_manager.PROVIDERS)
     "DEEPSEEK_API_KEY",
     "OPENAI_API_KEY",
@@ -67,9 +72,28 @@ _ALL_KEYS = [
     "CUSTOM_TEMPERATURE",
     "CUSTOM_MAX_TOKENS",
     "DEFAULT_MODEL",
+    "LLM_ALLOW_SYNTHETIC",
+    "LLM_REQUEST_TIMEOUT_SECONDS",
+    "LLM_OVERALL_TIMEOUT_SECONDS",
+    "LLM_MAX_PROMPT_CHARS",
+    "LLM_MAX_CONCURRENCY",
+    "LLM_PERSIST_METRICS",
+    "LLM_DAILY_TOKEN_BUDGET",
+    "LLM_PROVIDER_REQUESTS_PER_MINUTE",
+    "LLM_PROVIDER_TOKENS_PER_MINUTE",
+    "LLM_ENFORCE_PROVIDER_LIMITS",
+    "AI_USER_REQUESTS_PER_MINUTE",
+    "AI_USER_REQUESTS_PER_DAY",
+    "AI_ANALYSIS_LEASE_SECONDS",
+    "AI_ANALYSIS_MAX_ATTEMPTS",
+    "AI_PIPELINE_TIMEOUT_SECONDS",
     "TICKET_EMBEDDING_ENABLED",
     "TICKET_EMBEDDING_MODEL",
     "TICKET_EMBEDDING_DIMENSIONS",
+    "TICKET_EMBEDDING_TIMEOUT_SECONDS",
+    "TICKET_EMBEDDING_MAX_CHARS",
+    "TICKET_EMBEDDING_MAX_COMMENTS_PER_REFRESH",
+    "TICKET_VECTOR_MIN_SCORE",
     "TICKET_EMBEDDING_API_BASE",
     "DATABASE_URL",
     "ITSM_PROVIDER",
@@ -129,6 +153,17 @@ _READONLY_KEYS = {
     "DATABASE_URL",
     "NEXT_PUBLIC_API_URL",
     "NEXT_PUBLIC_WS_URL",
+    "LLM_ALLOW_PRIVATE_ENDPOINTS",
+    "LLM_ALLOW_INSECURE_ENDPOINTS",
+}
+
+_LLM_BASE_URL_KEYS = {
+    "OPENAI_API_BASE",
+    "OPENROUTER_API_BASE",
+    "AZURE_API_BASE",
+    "AZURE_AI_API_BASE",
+    "CUSTOM_API_BASE",
+    "TICKET_EMBEDDING_API_BASE",
 }
 
 _lock = threading.Lock()
@@ -137,6 +172,32 @@ _loaded = False
 
 def _truthy(value: Optional[str]) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _validate_llm_base_url(value: str) -> str:
+    parsed = urlparse(value)
+    if parsed.scheme not in {"https", "http"} or not parsed.hostname:
+        raise ValueError("LLM base URL must be an absolute HTTP(S) URL")
+    if parsed.username or parsed.password:
+        raise ValueError("LLM base URL must not contain credentials")
+    if parsed.scheme != "https" and not _truthy(os.getenv("LLM_ALLOW_INSECURE_ENDPOINTS")):
+        raise ValueError("LLM base URL must use HTTPS")
+
+    if _truthy(os.getenv("LLM_ALLOW_PRIVATE_ENDPOINTS")):
+        return value.rstrip("/")
+
+    hostname = parsed.hostname.lower().rstrip(".")
+    if hostname == "localhost" or hostname.endswith((".localhost", ".local", ".internal")):
+        raise ValueError("LLM base URL must not target a local hostname")
+    try:
+        addresses = {item[4][0] for item in socket.getaddrinfo(hostname, parsed.port or 443)}
+    except socket.gaierror as exc:
+        raise ValueError("LLM base URL hostname could not be resolved") from exc
+    for address in addresses:
+        ip = ipaddress.ip_address(address)
+        if not ip.is_global:
+            raise ValueError("LLM base URL must not target a private or reserved address")
+    return value.rstrip("/")
 
 
 def get_bool(key: str, default: bool = False, aliases: tuple[str, ...] = ()) -> bool:
@@ -214,8 +275,19 @@ def load_settings_into_env():
         overrides = _read_db_overrides()
         for key, value in overrides.items():
             if value is not None:
+                if key in _LLM_BASE_URL_KEYS and value:
+                    value = _validate_llm_base_url(value)
                 os.environ[key] = value
+        validate_effective_llm_urls()
         _loaded = True
+
+
+def validate_effective_llm_urls() -> None:
+    """Validate DB and process-environment destinations before any AI I/O."""
+    for key in _LLM_BASE_URL_KEYS:
+        value = (os.getenv(key) or "").strip()
+        if value:
+            os.environ[key] = _validate_llm_base_url(value)
 
 
 def get_settings() -> dict:
@@ -251,6 +323,12 @@ def update_settings(payload: dict) -> dict:
                 if key in _SENSITIVE_KEYS:
                     continue
                 new_val = os.getenv(key, "")
+            if key in _LLM_BASE_URL_KEYS and new_val:
+                new_val = _validate_llm_base_url(new_val)
+            if key == "DEFAULT_MODEL":
+                from .llm_manager import resolve_provider
+
+                resolve_provider(new_val)
             updates[key] = new_val
             os.environ[key] = new_val
 

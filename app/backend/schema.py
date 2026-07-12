@@ -57,6 +57,20 @@ class Ticket(BaseModel):
     escalation_risk: int = 0
     summary: Optional[str] = None
     recommended_solution: Optional[str] = None
+    ai_source_hash: Optional[str] = None
+    ai_pipeline_version: Optional[str] = None
+    ai_model: Optional[str] = None
+    ai_status: Optional[str] = None
+    ai_claim_id: Optional[str] = None
+    ai_lease_expires_at: Optional[datetime] = None
+    ai_attempts: int = 0
+    ai_next_attempt_at: Optional[datetime] = None
+    ai_requested_artifacts: Optional[str] = None
+    ai_started_at: Optional[datetime] = None
+    ai_generated_at: Optional[datetime] = None
+    ai_error: Optional[str] = None
+    ai_synthetic: bool = False
+    ai_suggested_priority: Optional[str] = None
 
 
 class AIAnalysis(BaseModel):
@@ -143,7 +157,7 @@ class SyncStatus(BaseModel):
 
 class TicketCreate(BaseModel):
     subject: str = Field(..., min_length=1, max_length=200)
-    description: str = ""
+    description: str = Field("", max_length=20_000)
     reporter: str = ""
     priority: str = "P3"
     ticket_type: Literal["incident", "request"] = "incident"
@@ -156,7 +170,7 @@ class TicketCreate(BaseModel):
 class ExternalTicket(BaseModel):
     external_id: str
     subject: str
-    description: str
+    description: str = Field(..., max_length=100_000)
     reporter: str
     priority: str
     status: str
@@ -201,9 +215,23 @@ class Settings(BaseModel):
     CUSTOM_TEMPERATURE: Optional[str] = None
     CUSTOM_MAX_TOKENS: Optional[str] = None
     DEFAULT_MODEL: Optional[str] = None
+    LLM_ALLOW_SYNTHETIC: Optional[str] = None
+    LLM_REQUEST_TIMEOUT_SECONDS: Optional[str] = None
+    LLM_OVERALL_TIMEOUT_SECONDS: Optional[str] = None
+    LLM_MAX_PROMPT_CHARS: Optional[str] = None
+    LLM_MAX_CONCURRENCY: Optional[str] = None
+    LLM_PERSIST_METRICS: Optional[str] = None
+    LLM_DAILY_TOKEN_BUDGET: Optional[str] = None
+    AI_USER_REQUESTS_PER_MINUTE: Optional[str] = None
+    AI_USER_REQUESTS_PER_DAY: Optional[str] = None
+    AI_ANALYSIS_LEASE_SECONDS: Optional[str] = None
+    AI_ANALYSIS_MAX_ATTEMPTS: Optional[str] = None
     TICKET_EMBEDDING_ENABLED: Optional[str] = None
     TICKET_EMBEDDING_MODEL: Optional[str] = None
     TICKET_EMBEDDING_DIMENSIONS: Optional[str] = None
+    TICKET_EMBEDDING_TIMEOUT_SECONDS: Optional[str] = None
+    TICKET_EMBEDDING_MAX_CHARS: Optional[str] = None
+    TICKET_VECTOR_MIN_SCORE: Optional[str] = None
     TICKET_EMBEDDING_API_BASE: Optional[str] = None
     DATABASE_URL: Optional[str] = None
     ITSM_PROVIDER: Optional[str] = None
@@ -263,9 +291,9 @@ class Settings(BaseModel):
 
 class ResolutionPlan(BaseModel):
     root_cause_hypothesis: str = ""
-    resolution_steps: List[str] = []
-    confidence: str = "medium"
-    estimated_effort: str = "medium"
+    resolution_steps: List[str] = Field(default_factory=list)
+    confidence: Literal["high", "medium", "low"] = "medium"
+    estimated_effort: Literal["high", "medium", "low"] = "medium"
     escalation_advice: str = ""
     preventive_note: str = ""
 
@@ -278,8 +306,8 @@ class RecommendedSolution(BaseModel):
 # ── Standalone ticketing schemas ──────────────────────────────
 
 class TicketUpdate(BaseModel):
-    subject: Optional[str] = None
-    description: Optional[str] = None
+    subject: Optional[str] = Field(None, min_length=1, max_length=200)
+    description: Optional[str] = Field(None, max_length=20_000)
     status: Optional[str] = None
     workflow_status: Optional[str] = None
     ai_review_state: Optional[str] = None
@@ -389,6 +417,8 @@ class TicketIntelligenceAnalysisResponse(BaseModel):
     answer: str = ""
     findings: List[str] = Field(default_factory=list)
     recommended_actions: List[str] = Field(default_factory=list)
+    citations: List[str] = Field(default_factory=list)
+    confidence: Literal["high", "medium", "low"] = "low"
     context: List[TicketIntelligenceSearchResult] = Field(default_factory=list)
 
 
@@ -896,7 +926,7 @@ class TimeEntryCreate(BaseModel):
 
 class PortalTicketCreate(BaseModel):
     subject: str = Field(..., min_length=1, max_length=200)
-    description: str = ""
+    description: str = Field("", max_length=20_000)
     reporter: str = Field(..., min_length=1)
     priority: str = "P3"
 

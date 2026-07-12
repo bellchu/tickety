@@ -11,6 +11,7 @@ from ..database import (
 )
 from ..schema import ExternalTicket, WebhookEvent
 from ..ticket_vectors import refresh_ticket_documents_background
+from ..ai_state import invalidate_ticket_ai, invalidate_ticket_resolution
 from .registry import get_adapter
 
 
@@ -31,6 +32,10 @@ def _upsert_ticket(db: Session, ext: ExternalTicket, provider: str, overwrite: b
     workflow_status = "Closed" if ext.status.lower() in ("closed", "resolved") else ext.status
 
     if existing:
+        analysis_input_changed = (
+            existing.subject != ext.subject or existing.description != ext.description
+        )
+        resolution_input_changed = existing.priority != ext.priority
         changed = (
             existing.subject != ext.subject
             or existing.description != ext.description
@@ -53,6 +58,10 @@ def _upsert_ticket(db: Session, ext: ExternalTicket, provider: str, overwrite: b
             return "skipped", existing
         existing.subject = ext.subject
         existing.description = ext.description
+        if analysis_input_changed:
+            invalidate_ticket_ai(existing)
+        elif resolution_input_changed:
+            invalidate_ticket_resolution(existing)
         existing.reporter = ext.reporter
         existing.priority = ext.priority
         existing.external_status = ext.status
@@ -239,8 +248,6 @@ def fetch_tickets_by_days(adapter=None, days: int = 7, overwrite: bool = False) 
 
         from .. import settings as settings_module
         auto_triage = settings_module.automation_enabled("AUTO_TRIAGE_ENABLED", "AUTO_TRIAGE")
-        auto_summary = settings_module.automation_enabled("AUTO_SUMMARIZE_ENABLED")
-        auto_resolution = settings_module.automation_enabled("AUTO_RESOLVE_ENABLED")
         new_tickets: list = []  # collect for auto-triage
 
         max_persisted_updated_at = None
@@ -293,63 +300,16 @@ def fetch_tickets_by_days(adapter=None, days: int = 7, overwrite: bool = False) 
         # Auto-triage newly imported tickets
         if auto_triage and new_tickets:
             import asyncio
-            from ..llm_manager import LLMManager
-            from ..brain import IntelligenceEngine
-            from .. import intelligence as intel
-            engine = IntelligenceEngine(LLMManager())
+            from ..main import _auto_process
             db2 = SessionLocal()
             for t in new_tickets:
                 try:
                     t2 = db2.query(TicketRecord).filter(TicketRecord.id == t.id).first()
                     if t2 and not t2.ai_reasoning:
-                        analysis = asyncio.run(engine.process_ticket({
-                            "subject": t2.subject,
-                            "description": t2.description,
-                        }))
-                        t2.sentiment = analysis.get("sentiment")
-                        t2.category = analysis.get("category")
-                        t2.priority = analysis.get("priority")
-                        t2.mood = analysis.get("mood")
-                        t2.complexity = analysis.get("complexity", 1)
-                        t2.ai_reasoning = analysis.get("reasoning")
-                        t2.escalation_risk = intel.escalation_risk(t2)
-                        if analysis.get("suggested_response"):
-                            t2.suggested_response = analysis.get("suggested_response")
-                            t2.ai_review_state = "Awaiting Review"
-                            if (t2.workflow_status or t2.status or "New").lower() in {"new", "open", "processed"}:
-                                t2.workflow_status = "Awaiting Review"
-                        elif analysis.get("action") == "escalate":
-                            t2.ai_review_state = "Escalated"
-                            t2.workflow_status = "Escalated"
-                        else:
-                            t2.ai_review_state = "Processed"
-                            t2.workflow_status = t2.workflow_status or t2.status or "Open"
-                        t2.status = t2.workflow_status or t2.status
-                        db2.commit()
+                        asyncio.run(_auto_process(t2, db2))
                         print(f"[fetch] auto-triaged {t2.id[:8]}")
-
-                        if auto_summary:
-                            try:
-                                summary = asyncio.run(intel.summarize_ticket(
-                                    engine.llm, t2
-                                ))
-                                if summary:
-                                    t2.summary = summary
-                                    db2.commit()
-                            except Exception as se:
-                                print(f"[fetch] summary error on {t2.id[:8]}: {se}")
-
-                        if auto_resolution:
-                            try:
-                                plan = asyncio.run(intel.recommend_resolution(
-                                    engine.llm, t2
-                                ))
-                                t2.recommended_solution = __import__("json").dumps(plan)
-                                db2.commit()
-                            except Exception as re:
-                                print(f"[fetch] resolution error on {t2.id[:8]}: {re}")
                 except Exception as e:
-                    print(f"[fetch] auto-triage error on {t.id}: {e}")
+                    print(f"[fetch] auto-triage error on {t.id} kind={type(e).__name__}")
                     db2.rollback()
             db2.close()
 

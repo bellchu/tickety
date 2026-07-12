@@ -167,6 +167,11 @@ export default function TicketDetailPage() {
         escalationRisk={ticket.escalation_risk ?? 0}
         summary={ticket.summary ?? null}
         latestAnalysis={latestAnalysis}
+        aiStatus={ticket.ai_status}
+        aiModel={ticket.ai_model}
+        aiGeneratedAt={ticket.ai_generated_at}
+        aiSynthetic={ticket.ai_synthetic}
+        aiSuggestedPriority={ticket.ai_suggested_priority}
       />
 
       {ticket.ai_reasoning && <ReasoningLog text={ticket.ai_reasoning} />}
@@ -408,9 +413,17 @@ function InfoItem({ icon, label, value }: { icon: ReactNode; label: string; valu
 /* ── Intelligence panel ── */
 
 function IntelligencePanel({
-  ticketId, escalationRisk, summary, latestAnalysis,
+  ticketId, escalationRisk, summary, latestAnalysis, aiStatus, aiModel, aiGeneratedAt, aiSynthetic, aiSuggestedPriority,
 }: {
-  ticketId: string; escalationRisk: number; summary: string | null; latestAnalysis: TicketAnalysisResult | null;
+  ticketId: string;
+  escalationRisk: number;
+  summary: string | null;
+  latestAnalysis: TicketAnalysisResult | null;
+  aiStatus: string | null;
+  aiModel: string | null;
+  aiGeneratedAt: string | null;
+  aiSynthetic: boolean;
+  aiSuggestedPriority: string | null;
 }) {
   const queryClient = useQueryClient();
   const [summaryText, setSummaryText] = useState<string | null>(summary);
@@ -429,7 +442,7 @@ function IntelligencePanel({
   }, [latestAnalysis, ticketId]);
 
   const summaryMut = useMutation({
-    mutationFn: () => api.generateTicketSummary(ticketId),
+    mutationFn: () => api.generateTicketSummary(ticketId, !!summaryText),
     onSuccess: (res) => {
       setSummaryText(res.summary);
       queryClient.invalidateQueries({ queryKey: ["ticket", ticketId] });
@@ -458,6 +471,15 @@ function IntelligencePanel({
           <p className="text-xs font-semibold uppercase tracking-[0.12em] text-semantic-primary">Decision support</p>
           <h2 id="ticket-intelligence-title" className="mt-1 text-lg font-semibold text-ink-700">Ticket intelligence</h2>
           <p className="mt-1 text-xs leading-5 text-ink-500">AI actions run only when requested. Review generated guidance before applying it.</p>
+          {(aiStatus || aiModel || aiGeneratedAt) && (
+            <p className="mt-2 text-[11px] text-ink-400">
+              {aiStatus ? `Status: ${aiStatus.replaceAll("_", " ")}` : ""}
+              {aiModel ? ` · Model: ${aiModel}` : ""}
+              {aiSynthetic ? " · Synthetic demo result" : ""}
+              {aiSuggestedPriority ? ` · Suggested priority: ${aiSuggestedPriority}` : ""}
+              {aiGeneratedAt ? ` · Generated ${formatTimeAgo(aiGeneratedAt)}` : ""}
+            </p>
+          )}
         </div>
       </div>
 

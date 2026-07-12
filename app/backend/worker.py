@@ -5,12 +5,19 @@ import threading
 
 from . import settings as settings_module
 from .database import init_db
+from .database import SessionLocal
+from . import ticket_vectors
 from .sync_worker import process_role, start_sync_worker, stop_sync_worker
 
 
 def run() -> int:
     init_db()
     settings_module.load_settings_into_env()
+    cleanup_db = SessionLocal()
+    try:
+        ticket_vectors.purge_private_comment_documents(cleanup_db)
+    finally:
+        cleanup_db.close()
     role = process_role()
     if role not in {"worker", "all"}:
         print(

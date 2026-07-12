@@ -30,3 +30,15 @@ rendered Secret manifests or plaintext credentials.
 The database password in `DATABASE_URL` must be URL-encoded and must match
 `POSTGRES_PASSWORD`. Apply the remaining manifests only after the Secret
 exists.
+
+Apply `network-policy.yaml` with the workloads (for example,
+`kubectl apply -n tickety-standalone -f k8s/network-policy.yaml` for a public
+standalone namespace). It restricts backend and worker
+egress to cluster DNS, the Tickety Postgres pod, and public IPv4 destinations.
+This is the connection-time SSRF/DNS-rebinding boundary for configurable AI
+and ITSM endpoints; clusters must use a CNI that enforces Kubernetes
+NetworkPolicy. The canonical local deployment runs
+`verify-network-policy.sh` and aborts unless a reachable private canary is
+blocked while public HTTPS remains available. Target-specific deployment
+workflows must run the same check with their namespace. Private AI endpoints require a deliberately reviewed policy
+change rather than only an application setting.

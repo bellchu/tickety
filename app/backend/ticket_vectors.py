@@ -3,10 +3,11 @@ import hashlib
 import json
 import os
 import re
+import time
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
-from sqlalchemy import text
+from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
 
 from .database import KbArticleRecord, SessionLocal, TicketCommentRecord, TicketRecord
@@ -22,8 +23,17 @@ def embedding_enabled() -> bool:
     return (os.getenv("TICKET_EMBEDDING_ENABLED", "") or "").strip().lower() in _TRUE_VALUES
 
 
+def private_comment_indexing_enabled() -> bool:
+    """Private notes stay local unless an operator explicitly opts them in."""
+    return (os.getenv("TICKET_INDEX_PRIVATE_COMMENTS", "") or "").strip().lower() in _TRUE_VALUES
+
+
 def embedding_model() -> str:
     return (os.getenv("TICKET_EMBEDDING_MODEL") or _DEFAULT_EMBEDDING_MODEL).strip()
+
+
+def _embedding_identity() -> str:
+    return f"{embedding_model()}#dimensions={_dimensions()}"
 
 
 def _dimensions() -> int:
@@ -31,6 +41,14 @@ def _dimensions() -> int:
         return int(os.getenv("TICKET_EMBEDDING_DIMENSIONS", "1536") or "1536")
     except ValueError:
         return 1536
+
+
+def _minimum_vector_score() -> float:
+    try:
+        score = float(os.getenv("TICKET_VECTOR_MIN_SCORE", "0.25") or "0.25")
+    except ValueError:
+        score = 0.25
+    return max(-1.0, min(score, 1.0))
 
 
 def _embedding_kwargs() -> dict[str, Any]:
@@ -48,7 +66,19 @@ def _embedding_kwargs() -> dict[str, Any]:
         api_base = os.getenv("TICKET_EMBEDDING_API_BASE") or os.getenv("CUSTOM_API_BASE")
         if api_base:
             kwargs["api_base"] = api_base
+    if kwargs.get("api_base"):
+        from .settings import _validate_llm_base_url
+
+        kwargs["api_base"] = _validate_llm_base_url(kwargs["api_base"])
     return {k: v for k, v in kwargs.items() if v}
+
+
+def _embedding_timeout() -> float:
+    try:
+        value = float(os.getenv("TICKET_EMBEDDING_TIMEOUT_SECONDS", "30") or "30")
+    except ValueError:
+        value = 30.0
+    return max(5.0, min(value, 120.0))
 
 
 def _document_hash(title: str, body: str, metadata: dict[str, Any]) -> str:
@@ -74,19 +104,37 @@ async def _embed_text(text_value: str) -> Optional[list[float]]:
     try:
         from litellm import aembedding
 
-        response = await aembedding(input=[redact_text(text_value)], **kwargs)
+        try:
+            max_chars = int(os.getenv("TICKET_EMBEDDING_MAX_CHARS", "32000") or "32000")
+        except ValueError:
+            max_chars = 32_000
+        max_chars = max(4_000, min(max_chars, 120_000))
+        response = await asyncio.wait_for(
+            aembedding(
+                input=[redact_text(text_value)[:max_chars]],
+                timeout=_embedding_timeout(),
+                **kwargs,
+            ),
+            timeout=_embedding_timeout(),
+        )
         data = response.get("data") if isinstance(response, dict) else getattr(response, "data", None)
         first = data[0] if data else None
         embedding = first.get("embedding") if isinstance(first, dict) else getattr(first, "embedding", None)
         if not embedding:
             return None
-        return [float(v) for v in embedding]
+        values = [float(v) for v in embedding]
+        if len(values) != _dimensions():
+            print(
+                f"[vectors] embedding dimension mismatch expected={_dimensions()} actual={len(values)}"
+            )
+            return None
+        return values
     except Exception as e:
-        print(f"[vectors] embedding failed: {e}")
+        print(f"[vectors] embedding failed kind={type(e).__name__}")
         return None
 
 
-def ticket_vector_store_ready(db: Session) -> bool:
+def _ticket_document_table_exists(db: Session) -> bool:
     if db.bind.dialect.name != "postgresql":
         return False
     try:
@@ -96,13 +144,55 @@ def ticket_vector_store_ready(db: Session) -> bool:
         return False
 
 
+def ticket_vector_store_ready(db: Session) -> bool:
+    if not _ticket_document_table_exists(db):
+        return False
+    try:
+        row = db.execute(text(
+            """
+            SELECT to_regclass('ticket_search_documents') AS relation,
+                   format_type(a.atttypid, a.atttypmod) AS embedding_type
+            FROM pg_attribute a
+            WHERE a.attrelid = to_regclass('ticket_search_documents')
+              AND a.attname = 'embedding'
+              AND NOT a.attisdropped
+            """
+        )).first()
+        if not row or not row.relation:
+            return False
+        match = re.fullmatch(r"vector\((\d+)\)", str(row.embedding_type or ""))
+        if not match or int(match.group(1)) != _dimensions():
+            print(
+                f"[vectors] disabled: configured dimensions={_dimensions()} "
+                f"database_type={getattr(row, 'embedding_type', None)}"
+            )
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def purge_private_comment_documents(db: Session) -> int:
+    if private_comment_indexing_enabled() or not _ticket_document_table_exists(db):
+        return 0
+    result = db.execute(text(
+        """
+        DELETE FROM ticket_search_documents
+        WHERE source_type = 'comment'
+          AND COALESCE((CAST(metadata_json AS jsonb)->>'is_private')::boolean, false) = true
+        """
+    ))
+    db.commit()
+    return int(result.rowcount or 0)
+
+
 def _row_current(db: Session, source_type: str, source_id: str, content_hash: str) -> bool:
     if not ticket_vector_store_ready(db):
         return False
     row = db.execute(
         text(
             """
-            SELECT embedding IS NOT NULL AS has_embedding
+            SELECT embedding IS NOT NULL AS has_embedding, embedding_model
             FROM ticket_search_documents
             WHERE source_type = :source_type
               AND source_id = :source_id
@@ -114,7 +204,9 @@ def _row_current(db: Session, source_type: str, source_id: str, content_hash: st
     ).first()
     if not row:
         return False
-    return bool(row.has_embedding) or not embedding_enabled()
+    return (
+        bool(row.has_embedding) and row.embedding_model == _embedding_identity()
+    ) or not embedding_enabled()
 
 
 async def _upsert_document(
@@ -134,7 +226,10 @@ async def _upsert_document(
     title = (title or "").strip()
     body = (body or "").strip()
     content_hash = _document_hash(title, body, metadata)
-    if not force and _row_current(db, source_type, source_id, content_hash):
+    current = not force and _row_current(db, source_type, source_id, content_hash)
+    # End the read transaction before awaiting an external embedding provider.
+    db.commit()
+    if current:
         return False
 
     text_for_embedding = "\n".join([title, body]).strip()
@@ -148,7 +243,7 @@ async def _upsert_document(
         "metadata_json": json.dumps(metadata, default=str),
         "content_hash": content_hash,
         "embedding": _vector_literal(vector) if vector else None,
-        "embedding_model": embedding_model() if vector else None,
+        "embedding_model": _embedding_identity() if vector else None,
         "embedded_at": datetime.utcnow() if vector else None,
     }
     try:
@@ -170,9 +265,21 @@ async def _upsert_document(
                     body = EXCLUDED.body,
                     metadata_json = EXCLUDED.metadata_json,
                     content_hash = EXCLUDED.content_hash,
-                    embedding = COALESCE(EXCLUDED.embedding, ticket_search_documents.embedding),
-                    embedding_model = COALESCE(EXCLUDED.embedding_model, ticket_search_documents.embedding_model),
-                    embedded_at = COALESCE(EXCLUDED.embedded_at, ticket_search_documents.embedded_at),
+                    embedding = CASE
+                        WHEN EXCLUDED.content_hash = ticket_search_documents.content_hash
+                        THEN COALESCE(EXCLUDED.embedding, ticket_search_documents.embedding)
+                        ELSE EXCLUDED.embedding
+                    END,
+                    embedding_model = CASE
+                        WHEN EXCLUDED.content_hash = ticket_search_documents.content_hash
+                        THEN COALESCE(EXCLUDED.embedding_model, ticket_search_documents.embedding_model)
+                        ELSE EXCLUDED.embedding_model
+                    END,
+                    embedded_at = CASE
+                        WHEN EXCLUDED.content_hash = ticket_search_documents.content_hash
+                        THEN COALESCE(EXCLUDED.embedded_at, ticket_search_documents.embedded_at)
+                        ELSE EXCLUDED.embedded_at
+                    END,
                     updated_at = CURRENT_TIMESTAMP
                 """
             ),
@@ -182,7 +289,7 @@ async def _upsert_document(
         return True
     except Exception as e:
         db.rollback()
-        print(f"[vectors] document upsert failed for {source_type}:{source_id}: {e}")
+        print(f"[vectors] document upsert failed kind={type(e).__name__}")
         return False
 
 
@@ -223,6 +330,17 @@ async def upsert_ticket_document(db: Session, ticket: TicketRecord, force: bool 
 
 
 async def upsert_comment_document(db: Session, comment: TicketCommentRecord, force: bool = False) -> bool:
+    if comment.is_private and not private_comment_indexing_enabled():
+        if ticket_vector_store_ready(db) and comment.id is not None:
+            db.execute(
+                text(
+                    "DELETE FROM ticket_search_documents "
+                    "WHERE source_type = 'comment' AND source_id = :source_id"
+                ),
+                {"source_id": str(comment.id)},
+            )
+            db.commit()
+        return False
     return await _upsert_document(
         db,
         source_type="comment",
@@ -259,14 +377,36 @@ async def upsert_kb_document(db: Session, article: KbArticleRecord, force: bool 
     )
 
 
-async def refresh_ticket_documents(db: Session, ticket: TicketRecord, force: bool = False) -> int:
+async def refresh_ticket_documents(
+    db: Session,
+    ticket: TicketRecord,
+    force: bool = False,
+    *,
+    heartbeat: Optional[Callable[[], Awaitable[None]]] = None,
+    deadline_monotonic: Optional[float] = None,
+) -> int:
     changed = 0
+    if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+        raise asyncio.TimeoutError("ticket intelligence refresh deadline exceeded")
+    if heartbeat:
+        await heartbeat()
     if await upsert_ticket_document(db, ticket, force=force):
         changed += 1
+    try:
+        max_comments = int(os.getenv("TICKET_EMBEDDING_MAX_COMMENTS_PER_REFRESH", "50") or "50")
+    except ValueError:
+        max_comments = 50
+    max_comments = max(0, min(max_comments, 500))
     comments = db.query(TicketCommentRecord).filter(
         TicketCommentRecord.ticket_id == ticket.id
-    ).all()
+    ).order_by(TicketCommentRecord.created_at.desc()).limit(max_comments).all()
     for comment in comments:
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            raise asyncio.TimeoutError("ticket intelligence refresh deadline exceeded")
+        if heartbeat:
+            await heartbeat()
+        if comment.is_private and not private_comment_indexing_enabled():
+            continue
         if await upsert_comment_document(db, comment, force=force):
             changed += 1
     return changed
@@ -321,6 +461,9 @@ async def backfill_ticket_documents(
     if not result["vector_store_ready"]:
         return result
 
+    if not private_comment_indexing_enabled():
+        purge_private_comment_documents(db)
+
     tickets = db.query(TicketRecord).order_by(TicketRecord.updated_at.desc()).limit(limit).all()
     for ticket in tickets:
         result["tickets_seen"] += 1
@@ -328,7 +471,10 @@ async def backfill_ticket_documents(
             result["documents_changed"] += 1
 
     if include_comments:
-        comments = db.query(TicketCommentRecord).order_by(TicketCommentRecord.created_at.desc()).limit(limit).all()
+        comments_query = db.query(TicketCommentRecord)
+        if not private_comment_indexing_enabled():
+            comments_query = comments_query.filter(TicketCommentRecord.is_private.is_(False))
+        comments = comments_query.order_by(TicketCommentRecord.created_at.desc()).limit(limit).all()
         for comment in comments:
             result["comments_seen"] += 1
             if await upsert_comment_document(db, comment, force=force):
@@ -407,6 +553,54 @@ def _shape_result(row: Any, score: float, method: str) -> dict[str, Any]:
     }
 
 
+def _filter_private_results(
+    results: list[dict[str, Any]], include_private_comments: bool
+) -> list[dict[str, Any]]:
+    if include_private_comments:
+        return results
+    return [
+        item
+        for item in results
+        if not (
+            item.get("source_type") == "comment"
+            and bool((item.get("metadata") or {}).get("is_private"))
+        )
+    ]
+
+
+def _filter_ticket_scope(
+    db: Session,
+    results: list[dict[str, Any]],
+    allowed_assignee_id: Optional[str],
+) -> list[dict[str, Any]]:
+    """Keep KB evidence plus tickets the agent may operate on."""
+    if allowed_assignee_id is None:
+        return results
+    ticket_ids = {
+        str(item["ticket_id"])
+        for item in results
+        if item.get("ticket_id") and item.get("source_type") != "kb_article"
+    }
+    if not ticket_ids:
+        return [item for item in results if item.get("source_type") == "kb_article"]
+    allowed_ids = {
+        str(ticket_id)
+        for ticket_id, in db.query(TicketRecord.id).filter(
+            TicketRecord.id.in_(ticket_ids),
+            or_(
+                TicketRecord.assignee_id.is_(None),
+                TicketRecord.assignee_id == allowed_assignee_id,
+            ),
+        ).all()
+    }
+    return [
+        item
+        for item in results
+        if item.get("source_type") == "kb_article"
+        or str(item.get("ticket_id")) in allowed_ids
+    ]
+
+
 def _parse_metadata(raw_metadata: Any) -> dict[str, Any]:
     if not raw_metadata:
         return {}
@@ -422,12 +616,18 @@ async def retrieve_ticket_context(
     *,
     limit: int = 8,
     source_types: Optional[list[str]] = None,
+    include_private_comments: bool = False,
+    allowed_assignee_id: Optional[str] = None,
 ) -> dict[str, Any]:
     limit = max(1, min(int(limit or 8), 30))
     source_types = source_types or ["ticket", "comment", "kb_article"]
     ready = ticket_vector_store_ready(db)
     if not ready:
-        return _fallback_from_core_tables(db, query, limit)
+        return _fallback_from_core_tables(
+            db, query, limit, source_types, allowed_assignee_id=allowed_assignee_id
+        )
+    # Do not hold a database connection while awaiting the embedding provider.
+    db.commit()
 
     if embedding_enabled():
         query_embedding = await _embed_text(query)
@@ -441,6 +641,12 @@ async def retrieve_ticket_context(
                         FROM ticket_search_documents
                         WHERE embedding IS NOT NULL
                           AND source_type = ANY(:source_types)
+                          AND 1 - (embedding <=> CAST(:embedding AS vector)) >= :min_score
+                          AND (
+                            :include_private_comments
+                            OR source_type <> 'comment'
+                            OR COALESCE((CAST(metadata_json AS jsonb)->>'is_private')::boolean, false) = false
+                          )
                         ORDER BY embedding <=> CAST(:embedding AS vector)
                         LIMIT :limit
                         """
@@ -448,17 +654,25 @@ async def retrieve_ticket_context(
                     {
                         "embedding": _vector_literal(query_embedding),
                         "source_types": source_types,
-                        "limit": limit,
+                        "include_private_comments": include_private_comments,
+                        "limit": min(100, limit * 4),
+                        "min_score": _minimum_vector_score(),
                     },
                 ).all()
+                shaped = [_shape_result(row, row.score, "vector") for row in rows]
+                shaped = _filter_ticket_scope(
+                    db,
+                    _filter_private_results(shaped, include_private_comments),
+                    allowed_assignee_id,
+                )
                 return {
                     "query": query,
                     "match_method": "vector",
-                    "results": [_shape_result(row, row.score, "vector") for row in rows],
+                    "results": shaped[:limit],
                 }
             except Exception as e:
                 db.rollback()
-                print(f"[vectors] vector search failed, using keyword fallback: {e}")
+                print(f"[vectors] vector search failed; using keyword fallback kind={type(e).__name__}")
 
     terms = _terms(query)
     rows = db.execute(
@@ -467,11 +681,19 @@ async def retrieve_ticket_context(
             SELECT source_type, source_id, ticket_id, title, body, metadata_json
             FROM ticket_search_documents
             WHERE source_type = ANY(:source_types)
+              AND (
+                :include_private_comments
+                OR source_type <> 'comment'
+                OR COALESCE((CAST(metadata_json AS jsonb)->>'is_private')::boolean, false) = false
+              )
             ORDER BY updated_at DESC
             LIMIT 500
             """
         ),
-        {"source_types": source_types},
+        {
+            "source_types": source_types,
+            "include_private_comments": include_private_comments,
+        },
     ).all()
     scored = []
     for row in rows:
@@ -480,13 +702,37 @@ async def retrieve_ticket_context(
         scored.append(_shape_result(row, score, "keyword"))
     scored = [item for item in scored if item["score"] > 0]
     scored.sort(key=lambda item: item["score"], reverse=True)
-    return {"query": query, "match_method": "keyword", "results": scored[:limit]}
+    scored = _filter_ticket_scope(
+        db,
+        _filter_private_results(scored, include_private_comments),
+        allowed_assignee_id,
+    )
+    return {
+        "query": query,
+        "match_method": "keyword",
+        "results": scored[:limit],
+    }
 
 
-def _fallback_from_core_tables(db: Session, query: str, limit: int) -> dict[str, Any]:
+def _fallback_from_core_tables(
+    db: Session,
+    query: str,
+    limit: int,
+    source_types: list[str],
+    *,
+    allowed_assignee_id: Optional[str] = None,
+) -> dict[str, Any]:
     terms = _terms(query)
     candidates: list[dict[str, Any]] = []
-    for ticket in db.query(TicketRecord).order_by(TicketRecord.updated_at.desc()).limit(500).all():
+    if "ticket" not in source_types:
+        return {"query": query, "match_method": "keyword", "results": []}
+    ticket_query = db.query(TicketRecord)
+    if allowed_assignee_id is not None:
+        ticket_query = ticket_query.filter(or_(
+            TicketRecord.assignee_id.is_(None),
+            TicketRecord.assignee_id == allowed_assignee_id,
+        ))
+    for ticket in ticket_query.order_by(TicketRecord.updated_at.desc()).limit(500).all():
         metadata = _ticket_metadata(ticket)
         score = _keyword_score(terms, ticket.subject, ticket.description or "", metadata)
         if score > 0:

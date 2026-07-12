@@ -81,13 +81,13 @@ Configure any OpenAI-compatible endpoint via **Settings → LLM Configuration �
 | API Version | Optional (e.g. `2024-10-21`) |
 | Temperature | Optional 0–2 (e.g. `0.7`) |
 | Max Tokens | Optional (e.g. `4096`) |
-| Default Model | Free-text — type any model name your provider supports |
+| Default Model | A provider-qualified identifier such as `custom/my-model`; unknown or blank identifiers are rejected. |
 | **Fetch Latest Models** | Auto-discovers available models from your custom endpoint |
 
 ### Ticket Intelligence Retrieval
 
-Tickety can maintain a pgvector-backed retrieval index for tickets, ticket
-comments, and knowledge-base articles. This keeps LLM analysis cheap: SQL and
+Tickety can maintain a pgvector-backed retrieval index for tickets, public
+ticket comments, and knowledge-base articles. This keeps LLM analysis cheap: SQL and
 vector search narrow the database first, then the LLM only sees a short context
 set.
 
@@ -97,11 +97,50 @@ Embeddings are opt-in to avoid surprise token spend:
 TICKET_EMBEDDING_ENABLED=true
 TICKET_EMBEDDING_MODEL=openai/text-embedding-3-small
 TICKET_EMBEDDING_DIMENSIONS=1536
+TICKET_VECTOR_MIN_SCORE=0.25
 ```
 
 After enabling embeddings, run `POST /ticket-intelligence/backfill` as an admin
 to index existing records. New/updated tickets, comments, synced tickets, and KB
-articles refresh their documents automatically.
+articles refresh their documents automatically. Private/internal comments are
+excluded from external embeddings by default. Enabling
+`TICKET_INDEX_PRIVATE_COMMENTS=true` is an explicit data-governance decision;
+anonymous demo identities can never retrieve private AI context.
+
+### AI reliability and cost controls
+
+Every LLM task uses a strict output schema and a separate system policy that
+treats ticket, KB, and retrieved text as untrusted evidence. Production fails
+closed when a provider is missing, times out, or returns invalid output. Demo
+mode can use local results only when `LLM_ALLOW_SYNTHETIC=true`; those artifacts
+are persisted and displayed as synthetic. Generated escalation decisions
+remain suggestions until a human applies the audited workflow action.
+
+Analysis is keyed by ticket input, model, and pipeline version. A durable claim
+prevents API and worker processes from paying for the same analysis, unchanged
+requests reuse the cached result, and bulk repair endpoints queue bounded worker
+jobs instead of holding an HTTP request open. Operational limits include:
+
+```bash
+LLM_REQUEST_TIMEOUT_SECONDS=30
+LLM_OVERALL_TIMEOUT_SECONDS=90
+LLM_MAX_PROMPT_CHARS=32000
+LLM_MAX_CONCURRENCY=4
+LLM_DAILY_TOKEN_BUDGET=500000
+LLM_PROVIDER_REQUESTS_PER_MINUTE=120
+LLM_PROVIDER_TOKENS_PER_MINUTE=250000
+AI_PIPELINE_TIMEOUT_SECONDS=900
+TICKET_EMBEDDING_MAX_COMMENTS_PER_REFRESH=50
+AI_USER_REQUESTS_PER_MINUTE=10
+AI_USER_REQUESTS_PER_DAY=200
+```
+
+Provider concurrency uses expiring database-backed leases shared by API and
+worker replicas; request and token ceilings are reserved before each retry.
+Provider base URLs must use public HTTPS endpoints unless deployment-owned
+private/insecure endpoint exceptions are deliberately enabled. Prompt-free
+latency, retry, token, failure, and synthetic-result counters are available to
+admins and supervisors at `GET /admin/llm/metrics`.
 
 ## Production mode
 

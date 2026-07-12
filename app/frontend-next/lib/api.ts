@@ -118,8 +118,11 @@ export const api = {
     fetchAPI<import("./types").AccountHealth>(`/intelligence/health/${encodeURIComponent(reporter)}`),
   getIntelRoute: (ticketId: string) =>
     fetchAPI<import("./types").RouteRecommendation>(`/intelligence/route/${ticketId}`),
-  generateTicketSummary: (ticketId: string) =>
-    fetchAPI<import("./types").TicketSummary>(`/tickets/${ticketId}/summary`, { method: "POST" }),
+  generateTicketSummary: (ticketId: string, force = false) =>
+    fetchAPI<import("./types").TicketSummary>(
+      `/tickets/${ticketId}/summary?force=${force ? 1 : 0}`,
+      { method: "POST" }
+    ),
   getRecommendedSolution: (ticketId: string, force = false) =>
     fetchAPI<import("./types").RecommendedSolution>(
       `/intelligence/resolve/${ticketId}?force=${force ? 1 : 0}`,
