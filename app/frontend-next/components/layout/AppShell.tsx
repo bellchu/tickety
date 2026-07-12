@@ -1,12 +1,13 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { Menu } from "lucide-react";
 import { AppExperience } from "@/components/layout/AppExperience";
 import { Footer } from "@/components/layout/Footer";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { TicketyLogo } from "@/components/layout/TicketyLogo";
+import { api, APIError } from "@/lib/api";
 
 const PUBLIC_ROUTES = ["/login", "/portal"];
 
@@ -18,12 +19,41 @@ function isPublicRoute(pathname: string) {
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const router = useRouter();
   const [navigationOpen, setNavigationOpen] = useState(false);
+  const [authState, setAuthState] = useState<"checking" | "authenticated">("checking");
   const menuButtonRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     setNavigationOpen(false);
   }, [pathname]);
+
+  useEffect(() => {
+    if (isPublicRoute(pathname)) {
+      setAuthState("authenticated");
+      return;
+    }
+
+    let cancelled = false;
+    setAuthState("checking");
+    api.getAuthMe()
+      .then(() => {
+        if (!cancelled) setAuthState("authenticated");
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        if (error instanceof APIError && error.status === 401) {
+          router.replace(`/login?next=${encodeURIComponent(pathname)}`);
+          return;
+        }
+        // Let page-level queries render the appropriate connection error for
+        // non-authentication failures instead of misclassifying them as logout.
+        setAuthState("authenticated");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [pathname, router]);
 
   useEffect(() => {
     if (!navigationOpen) return;
@@ -64,6 +94,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, [navigationOpen]);
 
   if (isPublicRoute(pathname)) return <>{children}</>;
+
+  if (authState === "checking") {
+    return (
+      <main className="grid min-h-screen place-items-center bg-linen-100" aria-busy="true">
+        <div className="flex flex-col items-center gap-4 text-sm text-ink-500">
+          <TicketyLogo className="h-9" />
+          <span>Checking your session…</span>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <AppExperience>

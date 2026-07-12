@@ -15,6 +15,20 @@ export const queryClient = new QueryClient({
 // needing the browser to reach the in-cluster backend directly (it can't).
 const API_PREFIX = "/api";
 
+export class APIError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "APIError";
+  }
+}
+
+function redirectExpiredSessionToLogin(path: string, status: number) {
+  if (status !== 401 || typeof window === "undefined" || path.startsWith("/auth/")) return;
+  const currentPath = `${window.location.pathname}${window.location.search}`;
+  if (currentPath.startsWith("/login") || currentPath.startsWith("/portal")) return;
+  window.location.replace(`/login?next=${encodeURIComponent(currentPath)}`);
+}
+
 async function fetchAPIResponse<T>(path: string, options?: RequestInit): Promise<{ data: T; response: Response }> {
   const res = await fetch(`${API_PREFIX}${path}`, {
     ...options,
@@ -33,7 +47,8 @@ async function fetchAPIResponse<T>(path: string, options?: RequestInit): Promise
         detail = text;
       }
     }
-    throw new Error(detail);
+    redirectExpiredSessionToLogin(path, res.status);
+    throw new APIError(detail, res.status);
   }
   return { data: text ? JSON.parse(text) : ({} as T), response: res };
 }
