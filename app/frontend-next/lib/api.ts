@@ -15,7 +15,7 @@ export const queryClient = new QueryClient({
 // needing the browser to reach the in-cluster backend directly (it can't).
 const API_PREFIX = "/api";
 
-async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
+async function fetchAPIResponse<T>(path: string, options?: RequestInit): Promise<{ data: T; response: Response }> {
   const res = await fetch(`${API_PREFIX}${path}`, {
     ...options,
     headers: { "Content-Type": "application/json", ...(options?.headers || {}) },
@@ -35,11 +35,34 @@ async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
     }
     throw new Error(detail);
   }
-  return text ? JSON.parse(text) : ({} as T);
+  return { data: text ? JSON.parse(text) : ({} as T), response: res };
+}
+
+async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
+  return (await fetchAPIResponse<T>(path, options)).data;
 }
 
 export const api = {
   getTickets: () => fetchAPI<import("./types").Ticket[]>("/tickets"),
+  getTicketsPage: async (options: import("./types").TicketListParams = {}) => {
+    const params = new URLSearchParams();
+    if (options.status) params.set("status", options.status);
+    if (options.priority) params.set("priority", options.priority);
+    if (options.assigneeId) params.set("assignee_id", options.assigneeId);
+    if (options.category) params.set("category", options.category);
+    if (options.search) params.set("search", options.search);
+    if (options.sort) params.set("sort", options.sort);
+    if (options.limit != null) params.set("limit", String(options.limit));
+    if (options.offset != null) params.set("offset", String(options.offset));
+    const path = `/tickets${params.size ? `?${params.toString()}` : ""}`;
+    const { data, response } = await fetchAPIResponse<import("./types").Ticket[]>(path);
+    return {
+      tickets: data,
+      limit: Number(response.headers.get("x-page-limit")) || options.limit || 100,
+      offset: Number(response.headers.get("x-page-offset")) || options.offset || 0,
+      hasMore: response.headers.get("x-has-more") === "true",
+    } satisfies import("./types").TicketPage;
+  },
   createTicket: (payload: import("./types").TicketCreateInput) =>
     fetchAPI<import("./types").Ticket>("/tickets", {
       method: "POST",
@@ -302,12 +325,13 @@ export const api = {
   getTimeSummary: () => fetchAPI<{ total_hours: number; today_hours: number }>("/time-entries/summary"),
   // Self-Service Portal
   portalCreateTicket: (subject: string, description: string, reporter: string, priority = "P3") =>
-    fetchAPI<import("./types").PortalTicket>("/portal/tickets", {
+    fetchAPI<import("./types").PortalTicketCreated>("/portal/tickets", {
       method: "POST",
       body: JSON.stringify({ subject, description, reporter, priority }),
     }),
-  portalListTickets: (reporter: string, ticketId: string) =>
-    fetchAPI<import("./types").PortalTicket[]>(
-      `/portal/tickets?reporter=${encodeURIComponent(reporter)}&ticket_id=${encodeURIComponent(ticketId)}`
-    ),
+  portalGetTicket: (accessToken: string) => {
+    return fetchAPI<import("./types").PortalTicket>("/portal/tickets", {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+  },
 };

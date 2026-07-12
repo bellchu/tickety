@@ -35,6 +35,14 @@ Tickety — ITSM platform with built-in AI. Runs standalone or connects to an ex
 
 ## Quick start
 
+Python dependencies are declared in `requirements.txt` and reproducibly pinned
+in `requirements.lock`. CI and production images install the lock. After an
+intentional dependency change, regenerate it with:
+
+```bash
+uv pip compile requirements.txt --universal --python-version 3.11 --output-file requirements.lock
+```
+
 ```bash
 cp .env.example .env   # configure DATABASE_URL (and your preferred LLM keys)
 docker compose up -d    # or ./deploy.sh for K8s
@@ -99,6 +107,10 @@ articles refresh their documents automatically.
 
 Tickety ships in **demo mode** — no authentication needed. For production:
 
+`APP_MODE` is deployment-owned and cannot be changed through the settings API.
+Production mode never creates the fixed demo accounts or sample data, even if
+an old `SEED_DEMO_DATA` override exists.
+
 1. Go to **Settings → Security & Auth**
 2. Enable **"Require Login"** — all API endpoints will require a valid session
 3. Optionally enable **SSO (OIDC)** — supports Google, Azure AD, Okta, and any OpenID Connect provider
@@ -111,6 +123,28 @@ Tickety ships in **demo mode** — no authentication needed. For production:
 | Client ID / Secret | OIDC credentials from your identity provider. |
 | Discovery URL | Provider's `.well-known/openid-configuration` endpoint. |
 | Redirect URI | Must match the callback URL registered with your provider (e.g. `https://yourdomain.com/api/auth/sso/callback`). |
+
+### Background worker roles
+
+Production API replicas do not run APScheduler. Scheduled external sync and AI
+gap-filling jobs run in the dedicated `backend-worker` deployment, which has one
+replica and uses a `Recreate` rollout so worker revisions never overlap. This
+allows the `backend` API deployment to scale independently without duplicating
+jobs.
+
+The process role is controlled with `TICKETY_PROCESS_ROLE`:
+
+| Value | Behaviour |
+|---|---|
+| `api` | Serve HTTP only; scheduled jobs are always disabled. |
+| `worker` | Own scheduled jobs; use `python -m app.backend.worker`. |
+| `all` | Combined API and scheduler process for local/demo use. |
+
+When the variable is unset, production defaults to `api` and demo mode defaults
+to `all`. `TICKETY_SCHEDULER_ENABLED=false` is an emergency kill switch for a
+worker or combined process; setting it to true never grants scheduler ownership
+to an `api` process. Sync intervals are bounded and controlled with
+`SYNC_INTERVAL_SECONDS` and `AUTO_TRIAGE_INTERVAL_SECONDS`.
 
 ## Modules
 
@@ -203,7 +237,8 @@ app/
 │   ├── database.py          SQLAlchemy models (20 tables)
 │   ├── schema.py            Pydantic request/response models
 │   ├── settings.py          DB-backed env override persistence
-│   ├── sync_worker.py       Background scheduler
+│   ├── sync_worker.py       Role-gated background scheduler lifecycle
+│   ├── worker.py            Dedicated production scheduler entrypoint
 │   ├── brain.py             LLM-powered ticket processor
 │   ├── intelligence.py      AI agents (escalation, SLA, systemic, trends, routing)
 │   ├── llm_manager.py       LiteLLM router + live model fetching
@@ -241,8 +276,12 @@ app/
     │   ├── ticket/            AI stream, ticket list, modals
     │   └── ui/                Shared UI (searchable select)
     └── lib/                   API client, types, utilities, WebSocket, stores
-k8s/                           Namespace, secrets, backend, frontend, postgres manifests
+k8s/                           Namespace, workloads, database, and secret setup guidance
 ```
+
+Production schema changes use forward-only Alembic migrations. See
+[Database migrations](docs/database-migrations.md) for deployment, backup, and
+recovery expectations.
 
 ## License
 

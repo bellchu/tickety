@@ -346,9 +346,9 @@ class TicketAuditEntry(BaseModel):
 
 
 class BulkAction(BaseModel):
-    ticket_ids: List[str] = Field(..., min_length=1)
-    action: str = Field(..., description="assign | close | set_priority | set_category")
-    value: Optional[str] = None
+    ticket_ids: List[str] = Field(..., min_length=1, max_length=100)
+    action: Literal["assign", "close", "set_priority", "set_category"]
+    value: Optional[str] = Field(None, max_length=255)
 
 
 class TicketIntelligenceBackfillRequest(BaseModel):
@@ -905,6 +905,16 @@ class PortalTicketOut(BaseModel):
     subject: str
     status: str
     priority: str
-    reporter: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class PortalTicketCreated(PortalTicketOut):
+    # Capability material is deliberately present only in the creation
+    # response; the database stores its digest, not this bearer token.
+    access_token: str
+    tracking_url: str
+    access_expires_at: datetime

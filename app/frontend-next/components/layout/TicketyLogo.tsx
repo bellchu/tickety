@@ -1,4 +1,10 @@
-export function TicketyLogo({ className = "h-6" }: { className?: string }) {
+export function TicketyLogo({
+  className = "h-6",
+  inverse = false,
+}: {
+  className?: string;
+  inverse?: boolean;
+}) {
   return (
     <div className={`flex items-center gap-2.5 ${className}`}>
       <div
@@ -23,10 +29,10 @@ export function TicketyLogo({ className = "h-6" }: { className?: string }) {
         </svg>
       </div>
       <div className="flex flex-col leading-none gap-0.5">
-        <span className="font-mono text-base font-semibold text-ink-700">
+        <span className={`font-mono text-base font-semibold ${inverse ? "text-white" : "text-ink-700"}`}>
           Tickety
         </span>
-        <span className="text-[10px] text-ink-400">Support Suite</span>
+        <span className={`text-[10px] ${inverse ? "text-slate-400" : "text-ink-400"}`}>Support Suite</span>
       </div>
     </div>
   );

@@ -1,6 +1,7 @@
 import os
 import secrets
 from datetime import datetime
+from pathlib import Path
 from sqlalchemy import (
     create_engine, Column, String, Text, Integer, DateTime, Boolean, Float,
     ForeignKey, UniqueConstraint, Index,
@@ -51,6 +52,11 @@ class TicketRecord(Base):
     sla_paused_at = Column(DateTime, nullable=True)
     sla_paused_seconds = Column(Integer, default=0)
     tags = Column(Text, nullable=True)  # comma-separated tags
+
+    # Public requester tracking capability. Only the SHA-256 digest is stored;
+    # the bearer token itself is returned once when a portal ticket is created.
+    portal_access_token_hash = Column(String(64), nullable=True, unique=True, index=True)
+    portal_access_expires_at = Column(DateTime, nullable=True)
 
     # ITSM external linkage
     external_source = Column(String, nullable=True)
@@ -538,11 +544,11 @@ def _ensure_ticket_search_documents():
 
 
 def _ensure_columns():
-    """Idempotently add columns introduced after the initial schema.
+    """Legacy bootstrap support for non-production demo/development databases.
 
     Base.metadata.create_all() only creates *missing tables*, not missing
-    columns on existing tables, so for already-deployed Postgres instances we
-    ALTER TABLE ... ADD COLUMN IF NOT EXISTS for any new field.
+    columns on existing tables. Production schema changes are exclusively
+    managed by Alembic and must never call this helper.
     """
     insp = _sa_inspect(engine)
     if not insp.has_table("tickets"):
@@ -568,6 +574,10 @@ def _ensure_columns():
         "sla_paused_at": "TIMESTAMP",
         "sla_paused_seconds": "INTEGER DEFAULT 0",
         "tags": "TEXT",
+        # Legacy demo/development compatibility; revision 0002 owns these in
+        # production databases.
+        "portal_access_token_hash": "VARCHAR(64)",
+        "portal_access_expires_at": "TIMESTAMP",
         "external_workspace_id": "VARCHAR",
         "external_created_at": "TIMESTAMP",
         "external_resolved_at": "TIMESTAMP",
@@ -580,6 +590,10 @@ def _ensure_columns():
                 conn.exec_driver_sql(
                     f'ALTER TABLE tickets ADD COLUMN IF NOT EXISTS {col} {ddl}'
                 )
+        conn.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_tickets_portal_access_token_hash "
+            "ON tickets (portal_access_token_hash)"
+        )
 
     # ── users table additions (auth/roles) ──
     if insp.has_table("users"):
@@ -633,7 +647,32 @@ def _ensure_columns():
                     )
 
 
+def verify_database_schema() -> None:
+    """Fail closed unless the production database is at the Alembic head."""
+    try:
+        from alembic.config import Config
+        from alembic.runtime.migration import MigrationContext
+        from alembic.script import ScriptDirectory
+
+        config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
+        script = ScriptDirectory.from_config(config)
+        expected_heads = set(script.get_heads())
+        with engine.connect() as connection:
+            current_heads = set(MigrationContext.configure(connection).get_current_heads())
+        if not expected_heads or current_heads != expected_heads:
+            raise RuntimeError
+    except Exception:
+        raise RuntimeError(
+            "Database schema is not at the required migration revision; run `alembic upgrade head`."
+        ) from None
+
+
 def init_db():
+    if os.getenv("APP_MODE", "demo").strip().lower() == "production":
+        # Production startup is verification-only. DDL belongs to the explicit
+        # migration job so replicas never race schema changes.
+        verify_database_schema()
+        return
     Base.metadata.create_all(bind=engine)
     _ensure_columns()
     _ensure_ticket_search_documents()

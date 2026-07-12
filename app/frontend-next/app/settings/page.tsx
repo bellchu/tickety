@@ -12,6 +12,7 @@ import {
   Power, KeyRound, Link2, SlidersHorizontal,
 } from "lucide-react";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
+import { Alert, Button, ErrorState, Skeleton } from "@/components/ui";
 
 const PROVIDER_OPTIONS = [
   { value: "standalone", label: "Standalone", description: "Built-in ticketing" },
@@ -59,9 +60,17 @@ const CATEGORY_COLORS = [
 ];
 
 async function postMaintenanceAction(path: string) {
-  const res = await fetch(path, { method: "POST" });
+  const res = await fetch(path, { method: "POST", credentials: "include", cache: "no-store" });
   const text = await res.text();
-  const data = text ? JSON.parse(text) : {};
+  let data: Record<string, unknown> = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      if (!res.ok) throw new Error(`Maintenance request failed with HTTP ${res.status}`);
+      throw new Error("Maintenance request returned an invalid response");
+    }
+  }
   if (!res.ok) {
     const detail = typeof data.detail === "string" ? data.detail : `HTTP ${res.status}`;
     throw new Error(detail);
@@ -72,8 +81,10 @@ async function postMaintenanceAction(path: string) {
 export default function SettingsPage() {
   const router = useRouter();
   const queryClient = useQueryClient();
-  const { data, isLoading, error: settingsError } = useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
-  const { data: catalog, error: catalogError } = useQuery({ queryKey: ["llm-catalog"], queryFn: api.getLlmCatalog });
+  const settingsQuery = useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
+  const catalogQuery = useQuery({ queryKey: ["llm-catalog"], queryFn: api.getLlmCatalog });
+  const { data, isLoading, error: settingsError } = settingsQuery;
+  const { data: catalog, error: catalogError } = catalogQuery;
   const { data: version } = useQuery({ queryKey: ["version"], queryFn: api.getVersion, staleTime: Infinity });
   const { data: syncStatus } = useQuery({ queryKey: ["sync-status"], queryFn: api.getSyncStatus, refetchInterval: 30000 });
 
@@ -178,6 +189,11 @@ export default function SettingsPage() {
     keyReady("JIRA_API_TOKEN")
   );
   const isExternalProvider = itProvider === "freshservice" || itProvider === "jira";
+  const baselineForm = useMemo(() => data ? {
+    ...data,
+    ITSM_PROVIDER: data.ITSM_PROVIDER === "external" ? "freshservice" : data.ITSM_PROVIDER,
+  } : null, [data]);
+  const isDirty = baselineForm ? JSON.stringify(form) !== JSON.stringify(baselineForm) : false;
 
   const handleProviderChange = (pid: string) => {
     const prov = catalog ? (catalog[pid] as LlmProvider) : undefined;
@@ -235,8 +251,10 @@ export default function SettingsPage() {
 
   if (isLoading) {
     return (
-      <div className="flex items-center justify-center py-20 text-ink-400">
-        <RefreshCw className="w-5 h-5 animate-spin mr-2" /> Loading settings…
+      <div className="space-y-5" aria-busy="true" aria-label="Loading administration settings">
+        <Skeleton className="h-12 w-72" />
+        <Skeleton className="h-72 w-full" />
+        <Skeleton className="h-72 w-full" />
       </div>
     );
   }
@@ -249,18 +267,37 @@ export default function SettingsPage() {
     );
   }
 
+  if (settingsError) {
+    return (
+      <ErrorState
+        title="Settings could not be loaded"
+        description="Administration controls are unavailable, so no configuration values are being shown or changed."
+        actionLabel="Retry settings"
+        onRetry={() => void settingsQuery.refetch()}
+        retrying={settingsQuery.isFetching}
+      />
+    );
+  }
+
   return (
-    <div className="space-y-8 max-w-3xl">
+    <div className="mx-auto max-w-5xl space-y-8">
       {/* Header */}
-      <div className="flex items-center gap-3">
-        <div className="w-10 h-10 rounded-lg bg-linen-300 flex items-center justify-center">
-          <SettingsIcon className="w-5 h-5 text-ink-600" />
+      <header className="flex items-start gap-4 border-b border-linen-300 pb-6">
+        <div className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-[var(--color-primary-soft)] text-semantic-primary">
+          <SettingsIcon className="h-5 w-5" aria-hidden="true" />
         </div>
         <div>
-          <h1 className="font-serif text-2xl text-ink-700">Settings</h1>
-          <p className="text-sm text-ink-500">Configure LLM, ticketing, SLA, categories, and system maintenance</p>
+          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-semantic-primary">Administration</p>
+          <h1 className="mt-1 text-3xl font-semibold tracking-[-0.03em] text-ink-700">System settings</h1>
+          <p className="mt-2 text-sm leading-6 text-ink-500">Configure intelligence, ticketing, security, workflow, and operational maintenance.</p>
         </div>
-      </div>
+      </header>
+
+      {catalogError && !isAuthError(catalogError) && (
+        <Alert variant="warning" title="Model catalog unavailable" action={<Button variant="secondary" size="sm" onClick={() => void catalogQuery.refetch()} pending={catalogQuery.isFetching} pendingLabel="Retrying…">Retry</Button>}>
+          Saved settings are available, but provider and model choices may be incomplete until the catalog reconnects.
+        </Alert>
+      )}
 
       <form onSubmit={handleSubmit} className="space-y-8">
         {/* ═══ LLM Configuration ═══ */}
@@ -564,12 +601,14 @@ export default function SettingsPage() {
           <Field label="Runtime Mode">
             <select
               value={appMode}
-              onChange={(e) => handleChange("APP_MODE", e.target.value)}
+              disabled
+              aria-describedby="runtime-mode-help"
               className="input-base"
             >
               <option value="demo">Demo</option>
               <option value="production">Production</option>
             </select>
+            <span id="runtime-mode-help" className="block text-xs leading-5 text-ink-400">Runtime mode is deployment-owned and cannot be changed from the application.</span>
           </Field>
           <Field label="Frontend URL">
             <input
@@ -610,9 +649,10 @@ export default function SettingsPage() {
           />
           <ToggleRow
             label="Seed Demo Data"
-            desc="Create demo users and sample tickets on startup outside demo mode."
-            value={(form.SEED_DEMO_DATA as string) === "true"}
-            onChange={(v) => handleChange("SEED_DEMO_DATA", v ? "true" : "false")}
+            desc={appMode === "production" ? "Demo accounts and sample records are permanently disabled in production." : "Demo mode creates local sample users and records on startup."}
+            value={appMode === "demo"}
+            disabled
+            onChange={() => {}}
           />
           <ToggleRow
             label="Require Login"
@@ -621,7 +661,7 @@ export default function SettingsPage() {
             onChange={(v) => handleChange("LOGIN_REQUIRED", v ? "true" : "false")}
           />
 
-          {(form.LOGIN_REQUIRED as string) === "true" && (
+          {appMode === "demo" && (form.LOGIN_REQUIRED as string) === "true" && (
             <div className="rounded border border-amber-400/40 bg-amber-400/5 p-3 text-xs text-ink-600">
               <p className="font-medium mb-1">Default demo accounts (seeded on first start):</p>
               <p>alice@company.com · bob@company.com · carol@company.com</p>
@@ -709,9 +749,11 @@ export default function SettingsPage() {
         <SystemInfoSection version={version} syncStatus={syncStatus} />
 
         {/* ═══ Save Bar ═══ */}
-        <div className="sticky bottom-4 flex items-center justify-end gap-3 bg-linen-50/90 backdrop-blur rounded-lg border border-linen-400 px-4 py-3 shadow-sm">
+        <div className="sticky bottom-4 z-30 flex flex-col gap-3 rounded-xl border border-linen-400 bg-linen-50/95 px-4 py-3 shadow-[var(--shadow-raised)] backdrop-blur sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-xs text-ink-500">{isDirty ? "You have unsaved configuration changes." : "Configuration is up to date."}</p>
+          <div className="flex items-center justify-end gap-3">
           {saved && (
-            <span className="flex items-center gap-1.5 text-sm text-ink-600">
+            <span role="status" className="flex items-center gap-1.5 text-sm text-moss-600">
               <CheckCircle2 className="w-4 h-4" /> Saved
             </span>
           )}
@@ -720,10 +762,10 @@ export default function SettingsPage() {
               <AlertCircle className="w-4 h-4" /> {mutation.error instanceof Error ? mutation.error.message : "Failed to save"}
             </span>
           )}
-          <button type="submit" disabled={mutation.isPending} className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-clay-500 text-linen-50 text-sm font-semibold hover:bg-clay-600 disabled:opacity-50 transition-colors">
-            {mutation.isPending ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+          <Button type="submit" disabled={!isDirty} pending={mutation.isPending} pendingLabel="Saving…" leadingIcon={<Save className="h-4 w-4" />}>
             Save Changes
-          </button>
+          </Button>
+          </div>
         </div>
       </form>
     </div>
@@ -887,10 +929,10 @@ function FreshserviceOAuthSetup({
 
 function SettingsSection({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
   return (
-    <section className="card-surface p-6 space-y-4">
-      <div>
-        <h2 className="text-base font-semibold text-ink-700">{title}</h2>
-        {subtitle && <p className="text-xs text-ink-500 mt-0.5">{subtitle}</p>}
+    <section className="space-y-5 rounded-2xl border border-linen-400 bg-linen-50 p-5 shadow-sm sm:p-6">
+      <div className="border-b border-linen-300 pb-4">
+        <h2 className="text-lg font-semibold tracking-[-0.01em] text-ink-700">{title}</h2>
+        {subtitle && <p className="mt-1 max-w-3xl text-xs leading-5 text-ink-500">{subtitle}</p>}
       </div>
       {children}
     </section>
@@ -950,8 +992,9 @@ function SecretInput({ value, onChange, placeholder }: { value: string; onChange
         onFocus={() => { if (isMasked) onChange(""); }}
         className="input-base flex-1"
       />
-      <button type="button" onClick={() => setReveal((r) => !r)} className="px-3 rounded-lg border border-linen-400 text-xs text-ink-500 hover:bg-linen-200">
-        {reveal ? "Hide" : "Show"}
+      <button type="button" aria-pressed={reveal} onClick={() => setReveal((r) => !r)} className="px-3 rounded-lg border border-linen-400 text-xs text-ink-500 hover:bg-linen-200">
+        <span className="sr-only">{reveal ? "Hide secret value" : "Show secret value"}</span>
+        <span aria-hidden="true">{reveal ? "Hide" : "Show"}</span>
       </button>
     </div>
   );
@@ -1272,15 +1315,19 @@ function AgentSection() {
 
 // ═══ Toggle Row (AI automation) ═══════════════════════════════
 
-function ToggleRow({ label, desc, value, onChange }: { label: string; desc: string; value: boolean; onChange: (v: boolean) => void }) {
+function ToggleRow({ label, desc, value, onChange, disabled = false }: { label: string; desc: string; value: boolean; onChange: (v: boolean) => void; disabled?: boolean }) {
   return (
-    <div className="flex items-center justify-between rounded border border-linen-400 p-3">
+    <div className={cn("flex items-center justify-between rounded border border-linen-400 p-3", disabled && "opacity-65")}>
       <div className="min-w-0 flex-1">
         <p className="text-sm font-medium text-ink-600">{label}</p>
         <p className="text-xs text-ink-400 mt-0.5">{desc}</p>
       </div>
       <button
         type="button"
+        role="switch"
+        aria-checked={value}
+        aria-label={label}
+        disabled={disabled}
         onClick={() => onChange(!value)}
         className={cn(
           "relative shrink-0 w-10 h-5 rounded-full transition-colors ml-3 flex items-center",

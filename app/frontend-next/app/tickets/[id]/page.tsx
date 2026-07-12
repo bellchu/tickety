@@ -10,7 +10,7 @@ import { SentimentTag } from "@/components/engagement/SentimentTag";
 import {
   ShieldCheck, AlertTriangle,
   ArrowLeft, ArrowUpRight, User, Tag, Flag, MessageSquare,
-  CheckCircle2, Clock, Gauge, FileText, Users, RefreshCw, Wrench,
+  CheckCircle2, Clock, Gauge, FileText, Users, Wrench, Inbox,
 } from "lucide-react";
 import { ReasoningLog } from "@/components/engagement/ReasoningLog";
 import Link from "next/link";
@@ -18,12 +18,13 @@ import {
   priorityColor, statusColor, sentimentColor, complexityDots,
   formatTimeAgo, cn,
 } from "@/lib/utils";
+import { Alert, Button, EmptyState, ErrorState, Skeleton } from "@/components/ui";
 
 export default function TicketDetailPage() {
   const params = useParams();
   const id = params.id as string;
   const [latestAnalysis, setLatestAnalysis] = useState<TicketAnalysisResult | null>(null);
-  const { data: ticket, isLoading } = useQuery({
+  const { data: ticket, isLoading, isError, isFetching, refetch } = useQuery({
     queryKey: ["ticket", id],
     queryFn: () => api.getTicket(id),
     enabled: !!id,
@@ -31,43 +32,61 @@ export default function TicketDetailPage() {
 
   if (isLoading) {
     return (
-      <div className="space-y-4">
-        <div className="skeleton h-8 w-32" />
-        <div className="card-surface p-6">
-          <div className="skeleton h-6 w-2/3 mb-4" />
-          <div className="skeleton h-4 w-full mb-2" />
-          <div className="skeleton h-4 w-1/2" />
+      <div className="space-y-5" aria-busy="true" aria-label="Loading ticket workbench">
+        <Skeleton className="h-9 w-36" />
+        <div className="rounded-2xl border border-linen-400 bg-linen-50 p-6">
+          <Skeleton className="mb-4 h-7 w-2/3" />
+          <Skeleton className="mb-2 h-4 w-full" />
+          <Skeleton className="h-4 w-1/2" />
         </div>
+        <Skeleton className="h-72 w-full" />
       </div>
+    );
+  }
+
+  if (isError) {
+    return (
+      <ErrorState
+        title="Ticket could not be loaded"
+        description="The workbench is unavailable, so no ticket data or actions are being shown."
+        actionLabel="Retry ticket"
+        onRetry={() => void refetch()}
+        retrying={isFetching}
+      />
     );
   }
 
   if (!ticket) {
     return (
-      <div className="card-surface p-12 text-center">
-        <p className="text-ink-500">Ticket not found.</p>
-        <Link href="/tickets" className="btn-secondary mt-4 inline-flex">
-          Back to Tickets
-        </Link>
-      </div>
+      <EmptyState
+        title="Ticket not found"
+        description="This ticket may have been removed or the link may be incorrect."
+        icon={<Inbox className="h-5 w-5" />}
+        action={<Link href="/tickets" className="inline-flex min-h-10 items-center rounded-lg border border-linen-500 bg-linen-50 px-4 text-sm font-semibold text-ink-700 hover:bg-linen-200">Back to queue</Link>}
+      />
     );
   }
 
   const dots = complexityDots(ticket.complexity);
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-6">
       <Link
         href="/tickets"
-        className="inline-flex items-center gap-1.5 text-xs text-ink-500 hover:text-ink-700"
+        className="inline-flex min-h-9 items-center gap-1.5 rounded-lg px-2 text-xs font-semibold text-ink-500 hover:bg-linen-200 hover:text-ink-700"
       >
-        <ArrowLeft className="w-3.5 h-3.5" />
-        Back to Tickets
+        <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
+        Back to ticket queue
       </Link>
 
-      {/* Main ticket card */}
-      <div className="card-surface p-6">
-        <div className="flex items-start justify-between gap-4 mb-4">
+      <section className="overflow-hidden rounded-2xl border border-linen-400 bg-linen-50 shadow-sm" aria-labelledby="ticket-title">
+        <div className="border-b border-linen-300 bg-gradient-to-r from-linen-100 to-white px-5 py-6 sm:px-7">
+          <div className="mb-3 flex flex-wrap items-center gap-2 text-xs text-ink-400">
+            <span className="font-mono font-semibold">{ticket.id}</span>
+            {ticket.ticket_type && <span className="capitalize">· {ticket.ticket_type}</span>}
+            <span>· Created {formatTimeAgo(ticket.created_at)}</span>
+          </div>
+          <div className="flex items-start justify-between gap-4">
           <div className="flex-1">
             <div className="flex flex-wrap items-center gap-2 mb-3">
               <span className={cn("badge", priorityColor(ticket.priority))}>
@@ -85,7 +104,7 @@ export default function TicketDetailPage() {
                 ))}
               </span>
             </div>
-            <h1 className="font-serif text-2xl text-ink-700">
+            <h1 id="ticket-title" className="max-w-4xl text-2xl font-semibold tracking-[-0.025em] text-ink-700 sm:text-3xl">
               {ticket.subject}
             </h1>
             {ticket.external_url && (
@@ -93,19 +112,21 @@ export default function TicketDetailPage() {
                 href={ticket.external_url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center gap-1 text-xs text-ink-600 hover:text-ink-700 mt-2"
+                className="mt-3 inline-flex min-h-8 items-center gap-1 rounded-md text-xs font-semibold text-semantic-primary hover:underline"
               >
-                View Source <ArrowUpRight className="w-3 h-3" />
+                View source record <ArrowUpRight className="h-3 w-3" aria-hidden="true" />
               </a>
             )}
           </div>
         </div>
+        </div>
 
-        <p className="text-sm text-ink-600 whitespace-pre-wrap leading-relaxed">
-          {ticket.description}
-        </p>
+        <div className="px-5 py-6 sm:px-7">
+          <p className="max-w-5xl whitespace-pre-wrap text-sm leading-7 text-ink-600">
+            {ticket.description || "No description was provided for this ticket."}
+          </p>
 
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-5 pt-5 border-t border-linen-300">
+        <div className="mt-6 grid grid-cols-2 gap-4 border-t border-linen-300 pt-5 md:grid-cols-4">
           <InfoItem icon={<User className="w-3.5 h-3.5" />} label="Reporter" value={ticket.reporter || "—"} />
           <InfoItem icon={<Tag className="w-3.5 h-3.5" />} label="Category" value={ticket.category || "—"} />
           <div>
@@ -126,11 +147,12 @@ export default function TicketDetailPage() {
           <InfoItem icon={<Clock className="w-3.5 h-3.5" />} label="Created" value={formatTimeAgo(ticket.created_at)} />
         </div>
 
-        <div className="flex items-center gap-3 mt-4">
+        <div className="mt-5 flex items-center gap-3 rounded-xl bg-linen-100 px-4 py-3">
           <span className="text-xs text-ink-400">Customer Mood:</span>
           <SentimentTag mood={ticket.mood} size="md" />
         </div>
-      </div>
+        </div>
+      </section>
 
       <AgentActionPanel ticket={ticket} />
 
@@ -144,7 +166,6 @@ export default function TicketDetailPage() {
         ticketId={ticket.id}
         escalationRisk={ticket.escalation_risk ?? 0}
         summary={ticket.summary ?? null}
-        autoFetch={!!ticket.ai_reasoning}
         latestAnalysis={latestAnalysis}
       />
 
@@ -197,6 +218,8 @@ function AgentActionPanel({ ticket }: { ticket: Ticket }) {
   const [tags, setTags] = useState(ticket.tags || "");
   const [comment, setComment] = useState("");
   const [isPrivate, setIsPrivate] = useState(false);
+  const [saveNotice, setSaveNotice] = useState<{ variant: "success" | "danger"; message: string } | null>(null);
+  const [commentNotice, setCommentNotice] = useState<string | null>(null);
 
   useEffect(() => {
     setStatus(ticket.status || "New");
@@ -206,15 +229,20 @@ function AgentActionPanel({ ticket }: { ticket: Ticket }) {
     setTags(ticket.tags || "");
   }, [ticket]);
 
-  const { data: users } = useQuery<UserOut[]>({ queryKey: ["users"], queryFn: api.getUsers });
-  const { data: comments } = useQuery<TicketComment[]>({
+  const meQuery = useQuery({ queryKey: ["auth-me"], queryFn: api.getAuthMe, retry: false });
+  const canManageAssignment = meQuery.data?.role === "admin" || meQuery.data?.role === "supervisor";
+  const usersQuery = useQuery<UserOut[]>({ queryKey: ["users"], queryFn: api.getUsers, enabled: canManageAssignment, retry: false });
+  const commentsQuery = useQuery<TicketComment[]>({
     queryKey: ["ticket-comments", ticket.id],
     queryFn: () => api.getComments(ticket.id),
   });
-  const { data: audit } = useQuery<TicketAuditEntry[]>({
+  const auditQuery = useQuery<TicketAuditEntry[]>({
     queryKey: ["ticket-audit", ticket.id],
     queryFn: () => api.getAuditLog(ticket.id),
   });
+  const users = usersQuery.data;
+  const comments = commentsQuery.data;
+  const audit = auditQuery.data;
 
   const saveMut = useMutation({
     mutationFn: () => api.updateTicket(ticket.id, {
@@ -226,10 +254,12 @@ function AgentActionPanel({ ticket }: { ticket: Ticket }) {
       tags,
     }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["ticket", ticket.id] });
-      queryClient.invalidateQueries({ queryKey: ["tickets"] });
-      queryClient.invalidateQueries({ queryKey: ["ticket-audit", ticket.id] });
+      setSaveNotice({ variant: "success", message: "Ticket fields were saved and added to the audit trail." });
+      void queryClient.invalidateQueries({ queryKey: ["ticket", ticket.id] });
+      void queryClient.invalidateQueries({ queryKey: ["tickets"] });
+      void queryClient.invalidateQueries({ queryKey: ["ticket-audit", ticket.id] });
     },
+    onError: (error) => setSaveNotice({ variant: "danger", message: error instanceof Error ? error.message : "Ticket changes could not be saved." }),
   });
 
   const commentMut = useMutation({
@@ -237,25 +267,31 @@ function AgentActionPanel({ ticket }: { ticket: Ticket }) {
     onSuccess: () => {
       setComment("");
       setIsPrivate(false);
-      queryClient.invalidateQueries({ queryKey: ["ticket-comments", ticket.id] });
+      setCommentNotice(isPrivate ? "Private note added." : "Public reply added.");
+      void queryClient.invalidateQueries({ queryKey: ["ticket-comments", ticket.id] });
     },
+    onError: (error) => setCommentNotice(error instanceof Error ? error.message : "The comment could not be added."),
   });
 
   return (
-    <div className="card-surface p-6 space-y-5">
+    <section className="space-y-6 rounded-2xl border border-linen-400 bg-linen-50 p-5 shadow-sm sm:p-6" aria-labelledby="agent-work-title">
       <div className="flex items-center justify-between gap-3">
-        <h3 className="text-sm font-semibold text-ink-700">Agent Work</h3>
-        <button
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-semantic-primary">Workflow</p>
+          <h2 id="agent-work-title" className="mt-1 text-lg font-semibold text-ink-700">Agent workbench</h2>
+        </div>
+        <Button
           onClick={() => saveMut.mutate()}
-          disabled={saveMut.isPending}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded border border-linen-400 text-xs font-semibold text-ink-600 hover:bg-linen-200 disabled:opacity-50"
+          pending={saveMut.isPending}
+          pendingLabel="Saving…"
         >
-          {saveMut.isPending && <RefreshCw className="w-3 h-3 animate-spin" />}
-          Save
-        </button>
+          Save changes
+        </Button>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
+      {saveNotice && <Alert variant={saveNotice.variant} title={saveNotice.variant === "success" ? "Changes saved" : "Save failed"}>{saveNotice.message}</Alert>}
+
+      <div className="grid grid-cols-1 gap-4 rounded-xl border border-linen-300 bg-linen-100 p-4 sm:grid-cols-2 xl:grid-cols-5">
         <label className="space-y-1">
           <span className="text-xs font-medium text-ink-500">Status</span>
           <select value={status} onChange={(e) => setStatus(e.target.value)} className="input-base text-xs">
@@ -272,8 +308,8 @@ function AgentActionPanel({ ticket }: { ticket: Ticket }) {
         </label>
         <label className="space-y-1">
           <span className="text-xs font-medium text-ink-500">Assignee</span>
-          <select value={assigneeId} onChange={(e) => setAssigneeId(e.target.value)} className="input-base text-xs">
-            <option value="">Unassigned</option>
+          <select value={assigneeId} disabled={!canManageAssignment || usersQuery.isError} onChange={(e) => setAssigneeId(e.target.value)} className="input-base text-xs">
+            <option value="">{!canManageAssignment ? "Supervisor access required" : usersQuery.isError ? "Assignees unavailable" : "Unassigned"}</option>
             {(users || []).map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
           </select>
         </label>
@@ -287,7 +323,7 @@ function AgentActionPanel({ ticket }: { ticket: Ticket }) {
         </label>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-ink-500">Conversation</span>
@@ -301,34 +337,47 @@ function AgentActionPanel({ ticket }: { ticket: Ticket }) {
             onChange={(e) => setComment(e.target.value)}
             className="input-base min-h-[88px] text-sm"
             placeholder="Add a public reply or internal note"
+            maxLength={10_000}
           />
-          <button
+          <Button
+            variant="secondary"
             onClick={() => commentMut.mutate()}
-            disabled={commentMut.isPending || !comment.trim()}
-            className="btn-secondary text-xs"
+            disabled={!comment.trim()}
+            pending={commentMut.isPending}
+            pendingLabel="Posting…"
           >
-            {commentMut.isPending && <RefreshCw className="w-3 h-3 animate-spin" />}
-            Add Comment
-          </button>
-          <div className="space-y-2 max-h-44 overflow-auto">
+            {isPrivate ? "Add private note" : "Post public reply"}
+          </Button>
+          {commentNotice && <p role="status" className="text-xs text-ink-500">{commentNotice}</p>}
+          {commentsQuery.isLoading ? (
+            <div className="space-y-2" aria-label="Loading conversation"><Skeleton className="h-16" /><Skeleton className="h-16" /></div>
+          ) : commentsQuery.isError ? (
+            <Alert variant="warning" title="Conversation unavailable" action={<Button size="sm" variant="secondary" onClick={() => void commentsQuery.refetch()}>Retry</Button>}>Existing replies are not being shown.</Alert>
+          ) : comments?.length === 0 ? (
+            <p className="rounded-xl border border-dashed border-linen-400 px-4 py-6 text-center text-xs text-ink-400">No conversation yet.</p>
+          ) : <div className="max-h-72 space-y-2 overflow-auto pr-1">
             {(comments || []).map((c) => (
-              <div key={c.id} className="rounded border border-linen-300 bg-linen-100 p-3">
+              <article key={c.id} className="rounded-xl border border-linen-300 bg-linen-100 p-3">
                 <div className="flex items-center justify-between text-[11px] text-ink-400">
                   <span>{c.author_name}{c.is_private ? " - private" : ""}</span>
                   <span>{formatTimeAgo(c.created_at)}</span>
                 </div>
                 <p className="text-sm text-ink-600 mt-1 whitespace-pre-wrap">{c.body}</p>
-              </div>
+              </article>
             ))}
-          </div>
+          </div>}
         </div>
         <div className="space-y-3">
-          <span className="text-xs font-medium text-ink-500">Audit</span>
-          <div className="space-y-2 max-h-72 overflow-auto">
+          <span className="text-xs font-medium text-ink-500">Audit trail</span>
+          {auditQuery.isLoading ? (
+            <div className="space-y-2" aria-label="Loading audit trail"><Skeleton className="h-16" /><Skeleton className="h-16" /></div>
+          ) : auditQuery.isError ? (
+            <Alert variant="warning" title="Audit trail unavailable" action={<Button size="sm" variant="secondary" onClick={() => void auditQuery.refetch()}>Retry</Button>}>Change history is not being shown.</Alert>
+          ) : <div className="max-h-96 space-y-2 overflow-auto pr-1">
             {(audit || []).length === 0 ? (
               <p className="text-xs text-ink-400">No audit entries yet.</p>
             ) : (audit || []).map((a) => (
-              <div key={a.id} className="rounded border border-linen-300 bg-linen-100 p-3 text-xs">
+              <article key={a.id} className="rounded-xl border border-linen-300 bg-linen-100 p-3 text-xs">
                 <div className="flex items-center justify-between text-ink-400">
                   <span>{a.changed_by}</span>
                   <span>{formatTimeAgo(a.changed_at)}</span>
@@ -336,12 +385,12 @@ function AgentActionPanel({ ticket }: { ticket: Ticket }) {
                 <p className="mt-1 text-ink-600">
                   <span className="font-semibold">{a.field}</span>: {a.old_value || "-"} -&gt; {a.new_value || "-"}
                 </p>
-              </div>
+              </article>
             ))}
-          </div>
+          </div>}
         </div>
       </div>
-    </div>
+    </section>
   );
 }
 
@@ -359,9 +408,9 @@ function InfoItem({ icon, label, value }: { icon: ReactNode; label: string; valu
 /* ── Intelligence panel ── */
 
 function IntelligencePanel({
-  ticketId, escalationRisk, summary, autoFetch, latestAnalysis,
+  ticketId, escalationRisk, summary, latestAnalysis,
 }: {
-  ticketId: string; escalationRisk: number; summary: string | null; autoFetch: boolean; latestAnalysis: TicketAnalysisResult | null;
+  ticketId: string; escalationRisk: number; summary: string | null; latestAnalysis: TicketAnalysisResult | null;
 }) {
   const queryClient = useQueryClient();
   const [summaryText, setSummaryText] = useState<string | null>(summary);
@@ -378,16 +427,6 @@ function IntelligencePanel({
     setRoute(latestAnalysis.route);
     setPlan(latestAnalysis.recommended_solution?.plan ?? null);
   }, [latestAnalysis, ticketId]);
-
-  // Auto-fetch all intelligence when the ticket is already processed
-  useEffect(() => {
-    if (autoFetch) {
-      if (!summaryText) summaryMut.mutate();
-      if (!route) routeMut.mutate();
-      if (!plan && ticketId) resolveMut.mutate(false);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoFetch, ticketId]);
 
   const summaryMut = useMutation({
     mutationFn: () => api.generateTicketSummary(ticketId),
@@ -412,14 +451,18 @@ function IntelligencePanel({
   const riskLabel = escalationRisk >= 70 ? "High" : escalationRisk >= 40 ? "Medium" : "Low";
 
   return (
-    <div className="card-surface p-6 space-y-5">
-      <div className="flex items-center gap-2">
-        <Gauge className="w-4 h-4 text-ink-600" />
-        <h3 className="text-sm font-semibold text-ink-700">Intelligence</h3>
+    <section className="space-y-6 rounded-2xl border border-linen-400 bg-linen-50 p-5 shadow-sm sm:p-6" aria-labelledby="ticket-intelligence-title">
+      <div className="flex items-start gap-3">
+        <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[var(--color-primary-soft)] text-semantic-primary"><Gauge className="h-5 w-5" aria-hidden="true" /></div>
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-semantic-primary">Decision support</p>
+          <h2 id="ticket-intelligence-title" className="mt-1 text-lg font-semibold text-ink-700">Ticket intelligence</h2>
+          <p className="mt-1 text-xs leading-5 text-ink-500">AI actions run only when requested. Review generated guidance before applying it.</p>
+        </div>
       </div>
 
       {/* Escalation risk */}
-      <div className="flex items-center gap-3">
+      <div className="flex flex-col gap-2 rounded-xl border border-linen-300 bg-linen-100 p-4 sm:flex-row sm:items-center sm:gap-3">
         <span className="text-xs text-ink-500 w-28">Escalation risk</span>
         <div className="flex items-center gap-2 flex-1">
           <div className="h-1.5 flex-1 rounded-full bg-linen-300 overflow-hidden">
@@ -439,6 +482,7 @@ function IntelligencePanel({
         loading={summaryMut.isPending}
         actionLabel={summaryText ? "Regenerate" : "Summarize"}
         icon={FileText}
+        error={summaryMut.error}
       >
         {summaryText ? (
           <p className="text-sm text-ink-600 bg-linen-200 rounded p-3 border border-linen-300">{summaryText}</p>
@@ -454,6 +498,7 @@ function IntelligencePanel({
         loading={routeMut.isPending}
         actionLabel="Recommend engineer"
         icon={Users}
+        error={routeMut.error}
       >
         {route ? (
           <div className="space-y-1.5">
@@ -481,6 +526,7 @@ function IntelligencePanel({
         loading={resolveMut.isPending}
         actionLabel={plan ? "Regenerate" : "Resolve"}
         icon={Wrench}
+        error={resolveMut.error}
       >
         {plan ? (
           <div className="space-y-3">
@@ -532,33 +578,37 @@ function IntelligencePanel({
           </div>
         ) : null}
       </Section>
-    </div>
+    </section>
   );
 }
 
 function Section({
-  label, onClick, loading, actionLabel, icon: Icon, children,
+  label, onClick, loading, actionLabel, icon: Icon, error, children,
 }: {
   label: string;
   onClick: () => void;
   loading: boolean;
   actionLabel: string;
   icon: React.ComponentType<{ className?: string }>;
+  error?: Error | null;
   children: React.ReactNode;
 }) {
   return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between">
-        <span className="text-xs text-ink-500">{label}</span>
-        <button
+    <div className="space-y-3 rounded-xl border border-linen-300 bg-white p-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <span className="text-sm font-semibold text-ink-700">{label}</span>
+        <Button
+          variant="secondary"
+          size="sm"
           onClick={onClick}
-          disabled={loading}
-          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded border border-linen-400 text-xs font-medium text-ink-600 hover:bg-linen-200 disabled:opacity-50"
+          pending={loading}
+          pendingLabel="Generating…"
+          leadingIcon={<Icon className="h-3.5 w-3.5" />}
         >
-          {loading ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Icon className="w-3 h-3" />}
           {actionLabel}
-        </button>
+        </Button>
       </div>
+      {error && <Alert variant="danger" title={`${label} failed`}>{error.message || "The AI request could not be completed."}</Alert>}
       {children}
     </div>
   );

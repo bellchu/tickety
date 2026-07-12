@@ -17,6 +17,14 @@ const config: Config = {
         mono: ['"Geist Mono"', '"JetBrains Mono"', '"SF Mono"', '"Fira Code"', "monospace"],
       },
       colors: {
+        semantic: {
+          primary: "var(--color-primary)",
+          "primary-hover": "var(--color-primary-hover)",
+          success: "var(--color-success)",
+          warning: "var(--color-warning)",
+          danger: "var(--color-danger)",
+          info: "var(--color-info)",
+        },
         linen: {
           50:  "#FFFEFB",
           100: "#FAF8F4",

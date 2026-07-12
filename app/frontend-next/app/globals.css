@@ -18,6 +18,24 @@
   --fg-2: #5C5347;
   --fg-muted: #9B9084;
   --fg-inverse: #FAF8F4;
+
+  /* Semantic product tokens. Keep component meaning independent from the palette. */
+  --color-primary: #0066BB;
+  --color-primary-hover: #004F93;
+  --color-primary-soft: #EDF6FF;
+  --color-success: #557048;
+  --color-success-soft: #EFF5EB;
+  --color-warning: #9A681E;
+  --color-warning-soft: #FFF6E3;
+  --color-danger: #B43E34;
+  --color-danger-hover: #933129;
+  --color-danger-soft: #FFF0ED;
+  --color-info: #0066BB;
+  --color-info-soft: #EDF6FF;
+  --color-overlay: rgba(28, 24, 20, 0.56);
+  --focus-ring: #2487DD;
+  --focus-ring-offset: #FFFEFB;
+  --shadow-raised: 0 12px 36px rgba(28, 24, 20, 0.12), 0 2px 8px rgba(28, 24, 20, 0.06);
 }
 
 * {
@@ -33,6 +51,21 @@ body {
   -moz-osx-font-smoothing: grayscale;
   font-size: 14px;
   line-height: 1.5;
+}
+
+::selection {
+  background: var(--color-primary-soft);
+  color: var(--fg);
+}
+
+/* A consistent keyboard affordance across native and custom controls. */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+:where(button, input, select, textarea):disabled {
+  cursor: not-allowed;
 }
 
 .font-serif {
@@ -114,6 +147,17 @@ body {
   @apply outline-none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(0, 102, 187, 0.12);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 /* ═══ Select ═══ */

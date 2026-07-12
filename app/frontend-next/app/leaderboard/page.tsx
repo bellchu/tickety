@@ -1,113 +1,19 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
+import { Award, Crown, Medal, Trophy, Users } from "lucide-react";
+import { Badge, EmptyState, ErrorState, Skeleton } from "@/components/ui";
 import { api } from "@/lib/api";
-import { motion } from "framer-motion";
-import { Crown, Medal, Award } from "lucide-react";
-import { cn } from "@/lib/utils";
+
+function RankMark({ rank }: { rank: number }) { const icon = rank === 1 ? <Crown className="h-5 w-5" /> : rank === 2 ? <Medal className="h-5 w-5" /> : rank === 3 ? <Award className="h-5 w-5" /> : <span className="text-sm font-semibold tabular-nums">{rank}</span>; return <span className={`grid h-10 w-10 place-items-center rounded-xl ${rank <= 3 ? "bg-ink-700 text-white" : "bg-linen-200 text-ink-500"}`}>{icon}</span>; }
 
 export default function LeaderboardPage() {
-  const { data: leaderboard, isLoading } = useQuery({
-    queryKey: ["leaderboard"],
-    queryFn: api.getLeaderboard,
-  });
-
-  const rankIcon = (rank: number) => {
-    if (rank === 1) return <Crown className="h-5 w-5 text-ink-500" />;
-    if (rank === 2) return <Medal className="h-5 w-5 text-ink-400" />;
-    if (rank === 3) return <Award className="h-5 w-5 text-orange-600" />;
-    return (
-      <span className="w-5 text-center text-sm font-bold text-linen-400">
-        {rank}
-      </span>
-    );
-  };
-
-  return (
-    <div className="space-y-8">
-      <div>
-        <p className="text-xs font-semibold text-ink-400 uppercase tracking-widest mb-1">
-          Team
-        </p>
-        <h1 className="text-[1.75rem] font-extrabold text-ink-700 tracking-tight">
-          Leaderboard
-        </h1>
-      </div>
-
-      {isLoading ? (
-        <div className="space-y-3">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className="card-surface p-5">
-              <div className="skeleton h-6 w-full" />
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div className="space-y-2">
-          {(leaderboard || []).map((user, i) => (
-            <motion.div
-              key={user.id}
-              initial={{ opacity: 0, x: -10 }}
-              animate={{ opacity: 1, x: 0 }}
-              transition={{ delay: i * 0.05, duration: 0.25 }}
-              className={cn(
-                "card-surface p-4 flex items-center gap-4",
-                user.rank === 1 &&
-                  ""
-              )}
-            >
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-linen-200">
-                {rankIcon(user.rank || i + 1)}
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-bold text-ink-700 truncate">
-                  {user.name}
-                </p>
-                <p className="text-xs text-ink-400 truncate">{user.title}</p>
-              </div>
-              <div className="flex shrink-0 items-center gap-6">
-                <Stat label="Resolved" value={user.tickets_resolved} />
-                <Stat label="Momentum" value={user.momentum} accent />
-                <Stat
-                  label="Points"
-                  value={user.impact_points.toLocaleString()}
-                  primary
-                />
-                <Stat label="Tier" value={`T${user.tier}`} />
-              </div>
-            </motion.div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
+  const query = useQuery({ queryKey: ["leaderboard"], queryFn: api.getLeaderboard });
+  const people = query.data ?? [];
+  const top = people[0];
+  return <div className="mx-auto max-w-7xl space-y-6"><header className="border-b border-linen-400 pb-6"><p className="text-xs font-semibold uppercase tracking-[0.16em] text-ink-400">Team performance</p><h1 className="mt-2 text-3xl font-semibold tracking-[-0.04em] text-ink-700">Leaderboard</h1><p className="mt-2 max-w-2xl text-sm leading-6 text-ink-500">Recognize consistent service impact without losing sight of throughput, momentum, and tier.</p></header>
+  {query.isLoading ? <div className="space-y-3" aria-label="Loading leaderboard">{Array.from({ length: 6 }, (_, index) => <Skeleton key={index} className="h-24" />)}</div> : query.isError ? <ErrorState title="The leaderboard could not be loaded" description="Team rankings are temporarily unavailable." onRetry={() => void query.refetch()} retrying={query.isFetching} /> : people.length === 0 ? <EmptyState icon={<Users className="h-5 w-5" />} title="No ranked agents yet" description="Rankings will appear after agents begin resolving service work." /> : <><section className="grid gap-4 rounded-2xl border border-linen-400 bg-ink-700 p-5 text-white shadow-sm sm:grid-cols-[1fr_auto] sm:items-center sm:p-7"><div><div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.14em] text-white/55"><Trophy className="h-4 w-4" />Current leader</div><h2 className="mt-4 text-3xl font-semibold tracking-[-0.04em]">{top.name}</h2><p className="mt-1 text-sm text-white/60">{top.title || "Team member"}</p></div><div className="grid grid-cols-3 gap-6 rounded-xl bg-white/10 p-4 text-center ring-1 ring-white/10"><DarkStat label="Points" value={top.impact_points.toLocaleString()} /><DarkStat label="Resolved" value={top.tickets_resolved} /><DarkStat label="Momentum" value={top.momentum} /></div></section><section className="overflow-hidden rounded-2xl border border-linen-400 bg-linen-50 shadow-sm" aria-label="Team rankings"><div className="border-b border-linen-400 p-4"><h2 className="text-sm font-semibold text-ink-700">Team standings</h2><p className="mt-1 text-xs text-ink-500">{people.length} ranked contributor{people.length === 1 ? "" : "s"}</p></div><ol className="divide-y divide-linen-300">{people.map((user, index) => { const rank = user.rank || index + 1; return <li key={user.id} className="grid gap-4 p-4 transition-colors hover:bg-linen-100 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center sm:px-5"><div className="flex min-w-0 items-center gap-3"><RankMark rank={rank} /><div className="min-w-0"><p className="truncate text-sm font-semibold text-ink-700">{user.name}</p><p className="truncate text-xs text-ink-400">{user.title || "Title not set"}</p></div></div><div className="grid grid-cols-2 gap-3 sm:col-start-3 sm:grid-cols-4 sm:gap-6"><Stat label="Resolved" value={user.tickets_resolved} /><Stat label="Momentum" value={user.momentum} /><Stat label="Points" value={user.impact_points.toLocaleString()} /><div className="text-center"><p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-400">Tier</p><Badge className="mt-1">T{user.tier}</Badge></div></div></li>; })}</ol></section></>}
+  </div>;
 }
-
-function Stat({
-  label,
-  value,
-  accent,
-  primary,
-}: {
-  label: string;
-  value: string | number;
-  accent?: boolean;
-  primary?: boolean;
-}) {
-  return (
-    <div className="text-center">
-      <p className="text-[10px] font-semibold uppercase tracking-wider text-ink-400">
-        {label}
-      </p>
-      <p
-        className={cn(
-          "text-sm font-bold mt-0.5",
-          primary ? "text-[1.1rem] text-ink-600" : "text-ink-600",
-          accent && "text-ink-600"
-        )}
-      >
-        {value}
-      </p>
-    </div>
-  );
-}
+function Stat({ label, value }: { label: string; value: string | number }) { return <div className="text-center"><p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-400">{label}</p><p className="mt-1 text-sm font-semibold tabular-nums text-ink-700">{value}</p></div>; }
+function DarkStat({ label, value }: { label: string; value: string | number }) { return <div><p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-white/45">{label}</p><p className="mt-1 text-lg font-semibold tabular-nums">{value}</p></div>; }

@@ -4,7 +4,8 @@ import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import type { FetchTicketsResult } from "@/lib/types";
-import { X, Download, Loader2, CheckCircle2, AlertTriangle } from "lucide-react";
+import { Download, CheckCircle2 } from "lucide-react";
+import { Alert, Button, Dialog } from "@/components/ui";
 
 interface Props {
   open: boolean;
@@ -28,39 +29,27 @@ export function FetchTicketsModal({ open, onClose }: Props) {
     onError: (e) => setError(e instanceof Error ? e.message : String(e)),
   });
 
-  if (!open) return null;
-
   const reset = () => {
     setResult(null);
     setError(null);
   };
 
   const close = () => {
+    if (mutation.isPending) return;
     reset();
     onClose();
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-ink-700/40 backdrop-blur-sm">
-      <div className="w-full max-w-md rounded-lg bg-linen-50 shadow-xl border border-linen-400">
-        {/* Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-linen-300">
-          <div className="flex items-center gap-2">
-            <Download className="w-5 h-5 text-ink-600" />
-            <h2 className="text-base font-semibold text-ink-700">
-              Fetch Tickets
-            </h2>
-          </div>
-          <button
-            onClick={close}
-            className="text-ink-400 hover:text-ink-600 transition-colors"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        {/* Body */}
-        <div className="px-5 py-4 space-y-4">
+    <Dialog
+      open={open}
+      onOpenChange={(next) => { if (!next) close(); }}
+      title="Fetch tickets from ITSM"
+      description="Import recently updated source records. Pagination and provider rate limits are handled automatically."
+      dismissible={!mutation.isPending}
+      footer={result ? <Button onClick={close}>Done</Button> : <><Button variant="secondary" onClick={close} disabled={mutation.isPending}>Cancel</Button><Button onClick={() => mutation.mutate()} disabled={days < 1} pending={mutation.isPending} pendingLabel="Fetching…" leadingIcon={<Download className="h-4 w-4" />}>Fetch last {days} day{days > 1 ? "s" : ""}</Button></>}
+    >
+        <div className="space-y-4">
           <p className="text-sm text-ink-500">
             Pull tickets updated in the last N days from your ITSM provider.
             Already-imported tickets are skipped unless overwrite is selected.
@@ -114,10 +103,7 @@ export function FetchTicketsModal({ open, onClose }: Props) {
           </label>
 
           {error && (
-            <div className="flex items-start gap-2 p-3 rounded-lg bg-red-50 text-red-700 text-sm">
-              <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
-              <span>{error}</span>
-            </div>
+            <Alert variant="danger" title="Fetch failed">{error}</Alert>
           )}
 
           {result && (
@@ -154,45 +140,6 @@ export function FetchTicketsModal({ open, onClose }: Props) {
             </div>
           )}
         </div>
-
-        {/* Footer */}
-        <div className="flex items-center justify-end gap-3 px-5 py-4 border-t border-linen-300">
-          {result ? (
-            <button
-              onClick={close}
-              className="btn-primary text-xs"
-            >
-              Done
-            </button>
-          ) : (
-            <>
-              <button
-                onClick={close}
-                disabled={mutation.isPending}
-                className="btn-secondary text-xs"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => mutation.mutate()}
-                disabled={mutation.isPending || days < 1}
-                className="btn-primary text-xs"
-              >
-                {mutation.isPending ? (
-                  <>
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" /> Fetching…
-                  </>
-                ) : (
-                  <>
-                    <Download className="w-3.5 h-3.5" /> Fetch last {days}{" "}
-                    day{days > 1 ? "s" : ""}
-                  </>
-                )}
-              </button>
-            </>
-          )}
-        </div>
-      </div>
-    </div>
+    </Dialog>
   );
 }

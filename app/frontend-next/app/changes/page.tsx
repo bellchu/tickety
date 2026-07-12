@@ -1,929 +1,127 @@
 "use client";
 
-import { useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api";
-import type { ChangeRecord, ChangeApproval, UserOut } from "@/lib/types";
+import { useMemo, useState, type ReactNode } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  GitBranch,
-  Plus,
-  RefreshCw,
-  X,
-  Trash2,
-  Search,
-  Filter,
+  Check,
   Eye,
-  AlertTriangle,
-  CheckCircle2,
-  Clock,
-  UserPlus,
-  ThumbsUp,
+  GitBranch,
+  Pencil,
+  Plus,
+  Search,
+  ShieldCheck,
   ThumbsDown,
+  ThumbsUp,
+  Trash2,
+  UserPlus,
 } from "lucide-react";
-import { cn } from "@/lib/utils";
-import { priorityColor, formatTimeAgo } from "@/lib/utils";
+import { api } from "@/lib/api";
+import type { ChangeApproval, ChangeRecord, UserOut } from "@/lib/types";
+import { cn, formatTimeAgo, priorityColor } from "@/lib/utils";
+import { Alert, Button, ConfirmDialog, Dialog, EmptyState, ErrorState, IconButton, Skeleton } from "@/components/ui";
 
-const CHANGE_STATUS_FILTERS = [
-  { value: "", label: "All Statuses" },
-  { value: "Draft", label: "Draft" },
-  { value: "Submitted", label: "Submitted" },
-  { value: "Approved", label: "Approved" },
-  { value: "In Progress", label: "In Progress" },
-  { value: "Completed", label: "Completed" },
-  { value: "Rejected", label: "Rejected" },
-  { value: "Cancelled", label: "Cancelled" },
-];
+const STATUSES = ["", "Draft", "Submitted", "Approved", "In Progress", "Completed", "Rejected", "Cancelled"];
+const TYPES = ["Normal", "Standard", "Emergency"];
+const RISKS = ["Low", "Medium", "High"];
+const PRIORITIES = ["P1", "P2", "P3", "P4"];
 
-const CHANGE_TYPES = ["Normal", "Standard", "Emergency"];
-const RISK_LEVELS = ["Low", "Medium", "High"];
-const PRIORITY_OPTIONS = ["P1", "P2", "P3", "P4"];
-
-const CHANGE_STATUS_COLORS: Record<string, string> = {
-  Draft: "text-ink-500 bg-linen-300 border-linen-400",
-  Submitted: "text-clay-500 bg-clay-400/10 border-clay-400/30",
-  Approved: "text-moss-600 bg-moss-500/10 border-moss-500/30",
-  "In Progress": "text-blue-500 bg-blue-400/10 border-blue-400/30",
-  Completed: "text-moss-600 bg-moss-500/15 border-moss-500/40",
-  Rejected: "text-rust-500 bg-rust-400/10 border-rust-400/30",
-  Cancelled: "text-ink-400 bg-linen-300 border-linen-400",
+const STATUS_STYLES: Record<string, string> = {
+  Draft: "border-linen-500 bg-linen-300 text-ink-600",
+  Submitted: "border-clay-400/40 bg-clay-400/10 text-clay-700",
+  Approved: "border-moss-500/30 bg-moss-500/10 text-moss-700",
+  "In Progress": "border-blue-400/30 bg-blue-400/10 text-blue-600",
+  Completed: "border-moss-500/40 bg-moss-500/15 text-moss-700",
+  Rejected: "border-rust-400/30 bg-rust-400/10 text-rust-600",
+  Cancelled: "border-linen-500 bg-linen-300 text-ink-500",
+};
+const RISK_STYLES: Record<string, string> = {
+  Low: "border-moss-500/30 bg-moss-500/10 text-moss-700",
+  Medium: "border-amber-400/40 bg-amber-400/10 text-amber-700",
+  High: "border-rust-400/30 bg-rust-400/10 text-rust-600",
+};
+const TYPE_STYLES: Record<string, string> = {
+  Normal: "border-blue-400/30 bg-blue-400/10 text-blue-600",
+  Standard: "border-moss-500/30 bg-moss-500/10 text-moss-700",
+  Emergency: "border-rust-400/30 bg-rust-400/10 text-rust-600",
 };
 
-const RISK_COLORS: Record<string, string> = {
-  Low: "text-moss-600 bg-moss-500/10 border-moss-500/30",
-  Medium: "text-amber-600 bg-amber-400/10 border-amber-400/30",
-  High: "text-rust-500 bg-rust-400/10 border-rust-400/30",
-};
-
-const TYPE_COLORS: Record<string, string> = {
-  Normal: "text-blue-500 bg-blue-400/10 border-blue-400/30",
-  Standard: "text-moss-600 bg-moss-500/10 border-moss-500/30",
-  Emergency: "text-rust-500 bg-rust-400/10 border-rust-400/30",
-};
-
-function formatDate(dateStr: string | null): string {
-  if (!dateStr) return "—";
-  return new Date(dateStr).toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
+function errorMessage(error: unknown) { return error instanceof Error ? error.message : error ? String(error) : "An unexpected error occurred."; }
+function formatDate(value: string | null) { if (!value) return "Not scheduled"; const date = new Date(value); return Number.isNaN(date.getTime()) ? "Invalid date" : date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); }
+function Pill({ value, styles }: { value: string; styles: Record<string, string> }) { return <span className={cn("inline-flex rounded-full border px-2.5 py-1 text-[11px] font-semibold", styles[value] ?? "border-linen-500 bg-linen-300 text-ink-600")}>{value}</span>; }
 
 export default function ChangesPage() {
   const queryClient = useQueryClient();
   const [statusFilter, setStatusFilter] = useState("");
   const [search, setSearch] = useState("");
-  const [showForm, setShowForm] = useState(false);
-  const [editing, setEditing] = useState<ChangeRecord | null>(null);
+  const [formChange, setFormChange] = useState<ChangeRecord | null | undefined>(undefined);
   const [viewing, setViewing] = useState<ChangeRecord | null>(null);
+  const [deleting, setDeleting] = useState<ChangeRecord | null>(null);
 
-  const { data: changes, isLoading } = useQuery({
-    queryKey: ["changes", statusFilter],
-    queryFn: () => api.getChanges(statusFilter || undefined),
-  });
-  const { data: users } = useQuery({ queryKey: ["users"], queryFn: api.getUsers });
+  const changesQuery = useQuery({ queryKey: ["changes", statusFilter], queryFn: () => api.getChanges(statusFilter || undefined) });
+  const usersQuery = useQuery({ queryKey: ["users"], queryFn: api.getUsers });
+  const createMutation = useMutation({ mutationFn: (payload: Partial<ChangeRecord>) => api.createChange(payload), onSuccess: async () => { await queryClient.invalidateQueries({ queryKey: ["changes"] }); setFormChange(undefined); } });
+  const updateMutation = useMutation({ mutationFn: ({ id, payload }: { id: string; payload: Partial<ChangeRecord> }) => api.updateChange(id, payload), onSuccess: async () => { await queryClient.invalidateQueries({ queryKey: ["changes"] }); setFormChange(undefined); } });
+  const deleteMutation = useMutation({ mutationFn: (id: string) => api.deleteChange(id), onSuccess: async () => { await queryClient.invalidateQueries({ queryKey: ["changes"] }); setDeleting(null); }, onError: () => setDeleting(null) });
 
-  const createMut = useMutation({
-    mutationFn: (payload: Partial<ChangeRecord>) => api.createChange(payload),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["changes"] });
-      setShowForm(false);
-    },
-  });
+  const changes = useMemo(() => changesQuery.data ?? [], [changesQuery.data]);
+  const filtered = useMemo(() => { const term = search.trim().toLowerCase(); if (!term) return changes; return changes.filter((change) => [change.title, change.description, change.change_type, change.assigned_name].filter(Boolean).some((value) => String(value).toLowerCase().includes(term))); }, [changes, search]);
+  const pendingReview = changes.filter((item) => item.status === "Submitted").length;
+  const inProgress = changes.filter((item) => item.status === "In Progress").length;
+  const highRisk = changes.filter((item) => item.risk_level === "High" && !["Completed", "Cancelled"].includes(item.status)).length;
+  const resetFormErrors = () => { createMutation.reset(); updateMutation.reset(); };
 
-  const updateMut = useMutation({
-    mutationFn: ({
-      id,
-      payload,
-    }: {
-      id: string;
-      payload: Partial<ChangeRecord>;
-    }) => api.updateChange(id, payload),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["changes"] });
-      setEditing(null);
-    },
-  });
+  return <div className="space-y-6 pb-10">
+    <header className="flex flex-col gap-5 border-b border-linen-400 pb-6 lg:flex-row lg:items-end lg:justify-between"><div className="max-w-2xl"><p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-clay-600">Release governance</p><h1 className="text-3xl font-semibold tracking-[-0.035em] text-ink-800 sm:text-4xl">Changes</h1><p className="mt-2 text-sm leading-6 text-ink-500">Plan operational changes, document risk and rollback readiness, and capture accountable approvals.</p></div><Button leadingIcon={<Plus className="h-4 w-4" />} onClick={() => { resetFormErrors(); setFormChange(null); }}>New change</Button></header>
 
-  const deleteMut = useMutation({
-    mutationFn: (id: string) => api.deleteChange(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["changes"] }),
-  });
+    <section aria-label="Change overview" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{[{ label: "Visible changes", value: changes.length, note: "In the current status view" }, { label: "Awaiting review", value: pendingReview, note: "Submitted for approval" }, { label: "In progress", value: inProgress, note: "Execution underway" }, { label: "High risk", value: highRisk, note: "Active records needing attention" }].map((metric) => <div key={metric.label} className="rounded-2xl border border-linen-400 bg-linen-50 p-4 shadow-[var(--shadow-card)]"><p className="text-xs font-medium text-ink-500">{metric.label}</p><p className="mt-2 text-2xl font-semibold tabular-nums tracking-tight text-ink-800">{metric.value}</p><p className="mt-1 text-xs text-ink-400">{metric.note}</p></div>)}</section>
 
-  const filtered = (changes || []).filter(
-    (c) =>
-      c.title.toLowerCase().includes(search.toLowerCase()) ||
-      (c.description || "").toLowerCase().includes(search.toLowerCase())
-  );
+    <section className="overflow-hidden rounded-2xl border border-linen-400 bg-linen-50 shadow-[var(--shadow-card)]">
+      <div className="flex flex-col gap-3 border-b border-linen-400 p-4 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="text-sm font-semibold text-ink-800">Change register</h2><p className="mt-0.5 text-xs text-ink-500">{filtered.length} {filtered.length === 1 ? "record" : "records"} shown</p></div><div className="flex flex-col gap-2 sm:flex-row"><label className="relative"><span className="sr-only">Search changes</span><Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-400" aria-hidden="true" /><input type="search" className="input-base min-h-10 pl-9 sm:w-64" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search title, type, owner…" /></label><label><span className="sr-only">Filter by status</span><select className="input-base min-h-10 sm:w-52" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>{STATUSES.map((status) => <option key={status || "all"} value={status}>{status || "All statuses"}</option>)}</select></label></div></div>
+      {deleteMutation.error && <div className="p-4 pb-0"><Alert variant="danger" title="Change was not deleted">{errorMessage(deleteMutation.error)}</Alert></div>}
+      {changesQuery.isLoading ? <RegisterSkeleton /> : changesQuery.isError ? <div className="p-4"><ErrorState title="Changes could not be loaded" description={errorMessage(changesQuery.error)} onRetry={() => changesQuery.refetch()} retrying={changesQuery.isFetching} /></div> : !filtered.length ? <div className="p-4"><EmptyState icon={<GitBranch className="h-5 w-5" />} title={changes.length ? "No matching changes" : "No changes recorded"} description={changes.length ? "Adjust the search or status filter to broaden this view." : "Create a governed change record before modifying a production service."} action={!changes.length ? <Button leadingIcon={<Plus className="h-4 w-4" />} onClick={() => setFormChange(null)}>Create first change</Button> : <Button variant="secondary" onClick={() => { setSearch(""); setStatusFilter(""); }}>Clear filters</Button>} /></div> : <><div className="hidden overflow-x-auto md:block"><table className="w-full min-w-[940px] text-left text-sm"><thead className="border-b border-linen-400 bg-linen-100 text-[11px] font-semibold uppercase tracking-[0.12em] text-ink-500"><tr><th className="px-5 py-3">Change</th><th className="px-4 py-3">Type</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Risk</th><th className="px-4 py-3">Priority</th><th className="px-4 py-3">Schedule</th><th className="px-5 py-3 text-right">Actions</th></tr></thead><tbody className="divide-y divide-linen-300">{filtered.map((change) => <ChangeRow key={change.id} change={change} onView={() => setViewing(change)} onEdit={() => { resetFormErrors(); setFormChange(change); }} onDelete={() => { deleteMutation.reset(); setDeleting(change); }} />)}</tbody></table></div><div className="divide-y divide-linen-300 md:hidden">{filtered.map((change) => <ChangeCard key={change.id} change={change} onView={() => setViewing(change)} onEdit={() => { resetFormErrors(); setFormChange(change); }} onDelete={() => { deleteMutation.reset(); setDeleting(change); }} />)}</div></>}
+    </section>
 
-  return (
-    <div className="space-y-6">
-      <div className="flex items-end justify-between gap-4">
-        <div className="space-y-1.5">
-          <h1 className="font-serif text-3xl text-ink-700">Change Management</h1>
-          <p className="text-[13px] text-ink-500">
-            {(changes || []).length} changes · plan, review, and deploy
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="relative">
-            <Filter className="w-3.5 h-3.5 text-ink-400 absolute left-3 top-1/2 -translate-y-1/2" />
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
-              className="input-base input-search text-xs w-44"
-            >
-              {CHANGE_STATUS_FILTERS.map((f) => (
-                <option key={f.value} value={f.value}>
-                  {f.label}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="relative">
-            <Search className="w-3.5 h-3.5 text-ink-400 absolute left-3 top-1/2 -translate-y-1/2" />
-            <input
-              type="text"
-              placeholder="Search changes…"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="input-base input-search text-xs w-48"
-            />
-          </div>
-          <button
-            onClick={() => setShowForm(true)}
-            className="btn-primary text-xs"
-          >
-            <Plus className="w-4 h-4" strokeWidth={1.5} />
-            New Change
-          </button>
-        </div>
-      </div>
-
-      {isLoading ? (
-        <div className="card-surface p-6 space-y-3">
-          {[1, 2, 3, 4].map((i) => (
-            <div key={i} className="skeleton h-12 w-full" />
-          ))}
-        </div>
-      ) : filtered.length === 0 ? (
-        <div className="card-surface p-12 text-center">
-          <GitBranch className="w-10 h-10 text-ink-300 mx-auto mb-3" />
-          <p className="text-ink-500 text-sm font-medium">No changes found</p>
-          <p className="text-ink-400 text-xs mt-1">
-            {statusFilter
-              ? "Try changing the status filter"
-              : "Create a new change request to get started"}
-          </p>
-        </div>
-      ) : (
-        <div className="card-surface overflow-hidden">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-linen-300 bg-linen-100">
-                <th className="px-4 py-3 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">
-                  ID
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">
-                  Title
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">
-                  Type
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">
-                  Status
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">
-                  Risk
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">
-                  Priority
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">
-                  Scheduled
-                </th>
-                <th className="px-4 py-3 text-right text-xs font-semibold text-ink-500 uppercase tracking-wider">
-                  Actions
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((c) => (
-                <tr
-                  key={c.id}
-                  className="border-b border-linen-200 last:border-0 hover:bg-linen-100 cursor-pointer"
-                  onClick={() => setViewing(c)}
-                >
-                  <td className="px-4 py-3 text-xs text-ink-400 font-mono">
-                    {c.id.slice(0, 8)}
-                  </td>
-                  <td className="px-4 py-3 font-medium text-ink-700 max-w-xs truncate">
-                    {c.title}
-                  </td>
-                  <td className="px-4 py-3">
-                    <span
-                      className={cn(
-                        "inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold border",
-                        TYPE_COLORS[c.change_type] || TYPE_COLORS.Normal
-                      )}
-                    >
-                      {c.change_type}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3">
-                    <span
-                      className={cn(
-                        "inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold border",
-                        CHANGE_STATUS_COLORS[c.status] ||
-                          CHANGE_STATUS_COLORS.Draft
-                      )}
-                    >
-                      {c.status}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3">
-                    <span
-                      className={cn(
-                        "inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold border",
-                        RISK_COLORS[c.risk_level] || RISK_COLORS.Medium
-                      )}
-                    >
-                      {c.risk_level}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3">
-                    {c.priority ? (
-                      <span
-                        className={cn(
-                          "inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold border",
-                          priorityColor(c.priority)
-                        )}
-                      >
-                        {c.priority}
-                      </span>
-                    ) : (
-                      <span className="text-ink-300">—</span>
-                    )}
-                  </td>
-                  <td className="px-4 py-3 text-ink-500 text-xs">
-                    {formatDate(c.scheduled_start)}
-                  </td>
-                  <td className="px-4 py-3 text-right">
-                    <div
-                      className="inline-flex items-center gap-1"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <button
-                        onClick={() => setViewing(c)}
-                        className="p-1.5 rounded text-ink-400 hover:text-ink-700 hover:bg-linen-200"
-                        title="View"
-                      >
-                        <Eye className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        onClick={() => setEditing(c)}
-                        className="p-1.5 rounded text-ink-400 hover:text-ink-700 hover:bg-linen-200"
-                        title="Edit"
-                      >
-                        <RefreshCw className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        onClick={() => {
-                          if (
-                            window.confirm("Delete this change record?")
-                          )
-                            deleteMut.mutate(c.id);
-                        }}
-                        className="p-1.5 rounded text-ink-400 hover:text-rust-500 hover:bg-rust-400/10"
-                        title="Delete"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {(showForm || editing) && (
-        <ChangeFormModal
-          change={editing}
-          users={users || []}
-          onClose={() => {
-            setShowForm(false);
-            setEditing(null);
-          }}
-          onSubmit={(payload) => {
-            if (editing) {
-              updateMut.mutate({ id: editing.id, payload });
-            } else {
-              createMut.mutate(payload);
-            }
-          }}
-          loading={createMut.isPending || updateMut.isPending}
-          error={createMut.error || updateMut.error}
-        />
-      )}
-
-      {viewing && (
-        <ChangeDetailModal
-          change={viewing}
-          users={users || []}
-          onClose={() => setViewing(null)}
-        />
-      )}
-    </div>
-  );
+    <ChangeFormDialog key={formChange?.id ?? (formChange === null ? "new" : "closed")} open={formChange !== undefined} change={formChange ?? null} users={usersQuery.data ?? []} usersUnavailable={usersQuery.isError} onOpenChange={(open) => { if (!open && !createMutation.isPending && !updateMutation.isPending) setFormChange(undefined); }} onSubmit={(payload) => formChange ? updateMutation.mutate({ id: formChange.id, payload }) : createMutation.mutate(payload)} pending={createMutation.isPending || updateMutation.isPending} error={createMutation.error || updateMutation.error} />
+    <ChangeDetailDialog change={viewing} users={usersQuery.data ?? []} usersUnavailable={usersQuery.isError} onOpenChange={(open) => { if (!open) setViewing(null); }} />
+    <ConfirmDialog open={Boolean(deleting)} onOpenChange={(open) => { if (!open) setDeleting(null); }} title="Delete change record?" description={<>This permanently removes <strong>{deleting?.title}</strong> and its approval history. No deployment action is performed.</>} confirmLabel="Delete change" destructive pending={deleteMutation.isPending} onConfirm={() => { if (deleting) deleteMutation.mutate(deleting.id); }} />
+  </div>;
 }
 
-function ChangeFormModal({
-  change,
-  users,
-  onClose,
-  onSubmit,
-  loading,
-  error,
-}: {
-  change: ChangeRecord | null;
-  users: UserOut[];
-  onClose: () => void;
-  onSubmit: (payload: Partial<ChangeRecord>) => void;
-  loading: boolean;
-  error: unknown;
-}) {
-  const [title, setTitle] = useState(change?.title || "");
-  const [description, setDescription] = useState(change?.description || "");
-  const [changeType, setChangeType] = useState(change?.change_type || "Normal");
-  const [status, setStatus] = useState(change?.status || "Draft");
-  const [priority, setPriority] = useState(change?.priority || "");
-  const [riskLevel, setRiskLevel] = useState(change?.risk_level || "Low");
-  const [impact, setImpact] = useState(change?.impact || "");
-  const [rollbackPlan, setRollbackPlan] = useState(
-    change?.rollback_plan || ""
-  );
-  const [testPlan, setTestPlan] = useState(change?.test_plan || "");
-  const [scheduledStart, setScheduledStart] = useState(
-    change?.scheduled_start
-      ? change.scheduled_start.slice(0, 16)
-      : ""
-  );
-  const [scheduledEnd, setScheduledEnd] = useState(
-    change?.scheduled_end ? change.scheduled_end.slice(0, 16) : ""
-  );
-  const [assignedTo, setAssignedTo] = useState(change?.assigned_to || "");
+function RegisterSkeleton() { return <div className="space-y-3 p-5" role="status" aria-label="Loading changes"><Skeleton className="h-10 w-full" />{[1, 2, 3, 4].map((item) => <Skeleton key={item} className="h-14 w-full" />)}</div>; }
+type ChangeActions = { change: ChangeRecord; onView: () => void; onEdit: () => void; onDelete: () => void };
+function ChangeRow({ change, onView, onEdit, onDelete }: ChangeActions) { return <tr className="transition-colors hover:bg-linen-100/80"><td className="px-5 py-4"><button onClick={onView} className="max-w-xs text-left focus-visible:rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"><span className="block truncate font-semibold text-ink-800">{change.title}</span><span className="mt-1 block font-mono text-[11px] text-ink-400">{change.id.slice(0, 8).toUpperCase()}</span></button></td><td className="px-4 py-4"><Pill value={change.change_type} styles={TYPE_STYLES} /></td><td className="px-4 py-4"><Pill value={change.status} styles={STATUS_STYLES} /></td><td className="px-4 py-4"><Pill value={change.risk_level} styles={RISK_STYLES} /></td><td className="px-4 py-4">{change.priority ? <span className={cn("inline-flex rounded-full border px-2.5 py-1 text-[11px] font-semibold", priorityColor(change.priority))}>{change.priority}</span> : <span className="text-ink-300">—</span>}</td><td className="px-4 py-4 text-xs text-ink-600">{formatDate(change.scheduled_start)}</td><td className="px-5 py-4"><div className="flex justify-end gap-1"><IconButton size="sm" aria-label={`View ${change.title}`} icon={<Eye className="h-4 w-4" />} onClick={onView} /><IconButton size="sm" aria-label={`Edit ${change.title}`} icon={<Pencil className="h-4 w-4" />} onClick={onEdit} /><IconButton size="sm" aria-label={`Delete ${change.title}`} icon={<Trash2 className="h-4 w-4" />} onClick={onDelete} className="text-rust-600 hover:bg-rust-400/10" /></div></td></tr>; }
+function ChangeCard({ change, onView, onEdit, onDelete }: ChangeActions) { return <article className="p-4"><div className="flex items-start justify-between gap-3"><button onClick={onView} className="min-w-0 text-left"><span className="block font-semibold leading-5 text-ink-800">{change.title}</span><span className="mt-1 block font-mono text-[11px] text-ink-400">{change.id.slice(0, 8).toUpperCase()}</span></button><Pill value={change.risk_level} styles={RISK_STYLES} /></div><div className="mt-4 flex flex-wrap gap-2"><Pill value={change.status} styles={STATUS_STYLES} /><Pill value={change.change_type} styles={TYPE_STYLES} /></div><div className="mt-4 flex items-center justify-between border-t border-linen-300 pt-3"><span className="text-xs text-ink-500">{formatDate(change.scheduled_start)}</span><div className="flex gap-1"><IconButton size="sm" aria-label={`View ${change.title}`} icon={<Eye className="h-4 w-4" />} onClick={onView} /><IconButton size="sm" aria-label={`Edit ${change.title}`} icon={<Pencil className="h-4 w-4" />} onClick={onEdit} /><IconButton size="sm" aria-label={`Delete ${change.title}`} icon={<Trash2 className="h-4 w-4" />} onClick={onDelete} className="text-rust-600" /></div></div></article>; }
 
-  const errorMsg =
-    error instanceof Error ? error.message : error ? String(error) : null;
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-ink-800/30 backdrop-blur-sm"
-      onClick={onClose}
-    >
-      <div
-        className="card-surface w-full max-w-lg p-6 space-y-4 max-h-[90vh] overflow-y-auto"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between">
-          <h2 className="font-serif text-xl text-ink-700">
-            {change ? "Edit Change" : "New Change"}
-          </h2>
-          <button
-            onClick={onClose}
-            className="p-1 rounded text-ink-400 hover:bg-linen-200"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-        <div className="space-y-3">
-          <label className="block space-y-1">
-            <span className="text-xs font-medium text-ink-500">Title *</span>
-            <input
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              className="input-base"
-              placeholder="Change title"
-            />
-          </label>
-          <label className="block space-y-1">
-            <span className="text-xs font-medium text-ink-500">
-              Description
-            </span>
-            <textarea
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              className="input-base min-h-[80px]"
-              placeholder="Describe the change…"
-            />
-          </label>
-          <div className="grid grid-cols-2 gap-3">
-            <label className="block space-y-1">
-              <span className="text-xs font-medium text-ink-500">Status</span>
-              <select
-                value={status}
-                onChange={(e) => setStatus(e.target.value)}
-                className="input-base"
-              >
-                {CHANGE_STATUS_FILTERS.filter((s) => s.value).map((s) => (
-                  <option key={s.value} value={s.value}>
-                    {s.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="block space-y-1">
-              <span className="text-xs font-medium text-ink-500">
-                Change Type
-              </span>
-              <select
-                value={changeType}
-                onChange={(e) => setChangeType(e.target.value)}
-                className="input-base"
-              >
-                {CHANGE_TYPES.map((t) => (
-                  <option key={t} value={t}>
-                    {t}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="block space-y-1">
-              <span className="text-xs font-medium text-ink-500">Priority</span>
-              <select
-                value={priority}
-                onChange={(e) => setPriority(e.target.value)}
-                className="input-base"
-              >
-                <option value="">—</option>
-                {PRIORITY_OPTIONS.map((p) => (
-                  <option key={p} value={p}>
-                    {p}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <label className="block space-y-1">
-              <span className="text-xs font-medium text-ink-500">
-                Risk Level
-              </span>
-              <select
-                value={riskLevel}
-                onChange={(e) => setRiskLevel(e.target.value)}
-                className="input-base"
-              >
-                {RISK_LEVELS.map((r) => (
-                  <option key={r} value={r}>
-                    {r}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="block space-y-1">
-              <span className="text-xs font-medium text-ink-500">Assignee</span>
-              <select
-                value={assignedTo}
-                onChange={(e) => setAssignedTo(e.target.value)}
-                className="input-base"
-              >
-                <option value="">Unassigned</option>
-                {users.map((u) => (
-                  <option key={u.id} value={u.id}>
-                    {u.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-          <label className="block space-y-1">
-            <span className="text-xs font-medium text-ink-500">Impact</span>
-            <textarea
-              value={impact}
-              onChange={(e) => setImpact(e.target.value)}
-              className="input-base min-h-[60px]"
-              placeholder="Describe the impact…"
-            />
-          </label>
-          <label className="block space-y-1">
-            <span className="text-xs font-medium text-ink-500">
-              Rollback Plan
-            </span>
-            <textarea
-              value={rollbackPlan}
-              onChange={(e) => setRollbackPlan(e.target.value)}
-              className="input-base min-h-[60px]"
-              placeholder="Steps to rollback if needed…"
-            />
-          </label>
-          <label className="block space-y-1">
-            <span className="text-xs font-medium text-ink-500">Test Plan</span>
-            <textarea
-              value={testPlan}
-              onChange={(e) => setTestPlan(e.target.value)}
-              className="input-base min-h-[60px]"
-              placeholder="How will you test this change…"
-            />
-          </label>
-          <div className="grid grid-cols-2 gap-3">
-            <label className="block space-y-1">
-              <span className="text-xs font-medium text-ink-500">
-                Scheduled Start
-              </span>
-              <input
-                type="datetime-local"
-                value={scheduledStart}
-                onChange={(e) => setScheduledStart(e.target.value)}
-                className="input-base"
-              />
-            </label>
-            <label className="block space-y-1">
-              <span className="text-xs font-medium text-ink-500">
-                Scheduled End
-              </span>
-              <input
-                type="datetime-local"
-                value={scheduledEnd}
-                onChange={(e) => setScheduledEnd(e.target.value)}
-                className="input-base"
-              />
-            </label>
-          </div>
-        </div>
-        {errorMsg && (
-          <p className="text-xs text-rust-500">Failed: {errorMsg}</p>
-        )}
-        <div className="flex items-center justify-end gap-2">
-          <button
-            onClick={onClose}
-            className="px-3 py-2 rounded text-xs text-ink-500 hover:bg-linen-200"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={() =>
-              onSubmit({
-                title,
-                description: description || undefined,
-                status,
-                change_type: changeType,
-                priority: priority || undefined,
-                risk_level: riskLevel,
-                impact: impact || undefined,
-                rollback_plan: rollbackPlan || undefined,
-                test_plan: testPlan || undefined,
-                scheduled_start: scheduledStart
-                  ? new Date(scheduledStart).toISOString()
-                  : undefined,
-                scheduled_end: scheduledEnd
-                  ? new Date(scheduledEnd).toISOString()
-                  : undefined,
-                assigned_to: assignedTo || undefined,
-              })
-            }
-            disabled={loading || !title.trim()}
-            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-clay-500 text-linen-50 text-xs font-semibold hover:bg-clay-600 disabled:opacity-50"
-          >
-            {loading && <RefreshCw className="w-3 h-3 animate-spin" />}
-            {change ? "Save" : "Create"}
-          </button>
-        </div>
-      </div>
+function ChangeFormDialog({ open, change, users, usersUnavailable, onOpenChange, onSubmit, pending, error }: { open: boolean; change: ChangeRecord | null; users: UserOut[]; usersUnavailable: boolean; onOpenChange: (open: boolean) => void; onSubmit: (payload: Partial<ChangeRecord>) => void; pending: boolean; error: unknown }) {
+  const [title, setTitle] = useState(change?.title ?? ""); const [description, setDescription] = useState(change?.description ?? ""); const [type, setType] = useState(change?.change_type ?? "Normal"); const [status, setStatus] = useState(change?.status ?? "Draft"); const [priority, setPriority] = useState(change?.priority ?? ""); const [risk, setRisk] = useState(change?.risk_level ?? "Low"); const [impact, setImpact] = useState(change?.impact ?? ""); const [rollback, setRollback] = useState(change?.rollback_plan ?? ""); const [testPlan, setTestPlan] = useState(change?.test_plan ?? ""); const [start, setStart] = useState(change?.scheduled_start?.slice(0, 16) ?? ""); const [end, setEnd] = useState(change?.scheduled_end?.slice(0, 16) ?? ""); const [assignedTo, setAssignedTo] = useState(change?.assigned_to ?? "");
+  const invalidWindow = Boolean(start && end && new Date(end) <= new Date(start));
+  return <Dialog open={open} onOpenChange={onOpenChange} title={change ? "Edit change" : "Create change"} description="Document scope, controls, ownership, and execution timing before review." dismissible={!pending} className="max-w-3xl" footer={<><Button variant="secondary" disabled={pending} onClick={() => onOpenChange(false)}>Cancel</Button><Button pending={pending} pendingLabel={change ? "Saving…" : "Creating…"} disabled={!title.trim() || invalidWindow} onClick={() => onSubmit({ title: title.trim(), description: description.trim(), change_type: type, status, priority, risk_level: risk, impact: impact.trim() || null, rollback_plan: rollback.trim() || null, test_plan: testPlan.trim() || null, scheduled_start: start ? new Date(start).toISOString() : null, scheduled_end: end ? new Date(end).toISOString() : null, assigned_to: assignedTo || null })}>{change ? "Save changes" : "Create change"}</Button></>}>
+    <div className="space-y-5">{Boolean(error) && <Alert variant="danger" title={change ? "Changes were not saved" : "Change was not created"}>{errorMessage(error)}</Alert>}{usersUnavailable && <Alert variant="warning" title="Assignees unavailable">The user directory could not be loaded. You can save this change without an assignee.</Alert>}<Field label="Title" required><input autoFocus className="input-base" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="What will change?" /></Field><Field label="Description"><textarea className="input-base min-h-24 resize-y" value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Purpose, scope, dependencies, and expected outcome" /></Field>
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3"><Field label="Status"><select className="input-base" value={status} onChange={(event) => setStatus(event.target.value)}>{STATUSES.filter(Boolean).map((item) => <option key={item}>{item}</option>)}</select></Field><Field label="Change type"><select className="input-base" value={type} onChange={(event) => setType(event.target.value)}>{TYPES.map((item) => <option key={item}>{item}</option>)}</select></Field><Field label="Risk"><select className="input-base" value={risk} onChange={(event) => setRisk(event.target.value)}>{RISKS.map((item) => <option key={item}>{item}</option>)}</select></Field><Field label="Priority"><select className="input-base" value={priority} onChange={(event) => setPriority(event.target.value)}><option value="">Not set</option>{PRIORITIES.map((item) => <option key={item}>{item}</option>)}</select></Field><Field label="Assignee"><select className="input-base" value={assignedTo} onChange={(event) => setAssignedTo(event.target.value)} disabled={usersUnavailable}><option value="">Unassigned</option>{users.map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}</select></Field></div>
+      <div className="grid gap-4 sm:grid-cols-2"><Field label="Scheduled start"><input type="datetime-local" className="input-base" value={start} onChange={(event) => setStart(event.target.value)} /></Field><Field label="Scheduled end"><input type="datetime-local" className="input-base" value={end} min={start || undefined} onChange={(event) => setEnd(event.target.value)} aria-invalid={invalidWindow} /></Field></div>{invalidWindow && <Alert variant="danger" title="Invalid schedule">The end time must be later than the start time.</Alert>}
+      <Field label="Impact"><textarea className="input-base min-h-20 resize-y" value={impact} onChange={(event) => setImpact(event.target.value)} placeholder="Customer, service, security, and operational impact" /></Field><div className="grid gap-4 sm:grid-cols-2"><Field label="Rollback plan"><textarea className="input-base min-h-28 resize-y" value={rollback} onChange={(event) => setRollback(event.target.value)} placeholder="Trigger, steps, owner, and recovery validation" /></Field><Field label="Test plan"><textarea className="input-base min-h-28 resize-y" value={testPlan} onChange={(event) => setTestPlan(event.target.value)} placeholder="Pre-change checks and success criteria" /></Field></div>
     </div>
-  );
+  </Dialog>;
 }
 
-function ChangeDetailModal({
-  change,
-  users,
-  onClose,
-}: {
-  change: ChangeRecord;
-  users: UserOut[];
-  onClose: () => void;
-}) {
-  const queryClient = useQueryClient();
-  const [approverId, setApproverId] = useState("");
-
-  const { data: fullChange } = useQuery({
-    queryKey: ["change", change.id],
-    queryFn: () => api.getChange(change.id),
-    initialData: change,
-  });
-
-  const { data: approvals, isLoading: approvalsLoading } = useQuery({
-    queryKey: ["change-approvals", change.id],
-    queryFn: () => api.getChangeApprovals(change.id),
-  });
-
-  const addApprovalMut = useMutation({
-    mutationFn: ({
-      changeId,
-      approverId,
-    }: {
-      changeId: string;
-      approverId: string;
-    }) => api.addChangeApproval(changeId, approverId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({
-        queryKey: ["change-approvals", change.id],
-      });
-      setApproverId("");
-    },
-  });
-
-  const decideMut = useMutation({
-    mutationFn: ({
-      approverId,
-      decision,
-      comment,
-    }: {
-      approverId: string;
-      decision: string;
-      comment?: string;
-    }) =>
-      api.decideApproval(change.id, approverId, decision, comment),
-    onSuccess: () => {
-      queryClient.invalidateQueries({
-        queryKey: ["change-approvals", change.id],
-      });
-    },
-  });
-
-  const c = fullChange;
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-ink-800/30 backdrop-blur-sm p-4"
-      onClick={onClose}
-    >
-      <div
-        className="card-surface w-full max-w-2xl max-h-[90vh] overflow-y-auto p-6 space-y-6"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-start justify-between">
-          <div className="space-y-1 min-w-0">
-            <h2 className="font-serif text-xl text-ink-700">{c.title}</h2>
-            <p className="text-xs text-ink-400 font-mono">{c.id}</p>
-          </div>
-          <button
-            onClick={onClose}
-            className="p-1 rounded text-ink-400 hover:bg-linen-200 shrink-0"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-          <div className="space-y-1">
-            <p className="text-xs font-medium text-ink-400">Status</p>
-            <span
-              className={cn(
-                "inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold border",
-                CHANGE_STATUS_COLORS[c.status] || CHANGE_STATUS_COLORS.Draft
-              )}
-            >
-              {c.status}
-            </span>
-          </div>
-          <div className="space-y-1">
-            <p className="text-xs font-medium text-ink-400">Type</p>
-            <span
-              className={cn(
-                "inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold border",
-                TYPE_COLORS[c.change_type] || TYPE_COLORS.Normal
-              )}
-            >
-              {c.change_type}
-            </span>
-          </div>
-          <div className="space-y-1">
-            <p className="text-xs font-medium text-ink-400">Risk</p>
-            <span
-              className={cn(
-                "inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold border",
-                RISK_COLORS[c.risk_level] || RISK_COLORS.Medium
-              )}
-            >
-              {c.risk_level}
-            </span>
-          </div>
-          <div className="space-y-1">
-            <p className="text-xs font-medium text-ink-400">Priority</p>
-            {c.priority ? (
-              <span
-                className={cn(
-                  "inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold border",
-                  priorityColor(c.priority)
-                )}
-              >
-                {c.priority}
-              </span>
-            ) : (
-              <span className="text-xs text-ink-300">—</span>
-            )}
-          </div>
-          <div className="space-y-1">
-            <p className="text-xs font-medium text-ink-400">Assigned To</p>
-            <p className="text-sm text-ink-700">{c.assigned_name || "—"}</p>
-          </div>
-          <div className="space-y-1">
-            <p className="text-xs font-medium text-ink-400">Requested By</p>
-            <p className="text-sm text-ink-700">{c.requested_name || "—"}</p>
-          </div>
-        </div>
-
-        {c.description && (
-          <div className="space-y-1">
-            <p className="text-xs font-medium text-ink-400">Description</p>
-            <p className="text-sm text-ink-600 whitespace-pre-wrap">
-              {c.description}
-            </p>
-          </div>
-        )}
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          {c.impact && (
-            <div className="space-y-1">
-              <p className="text-xs font-medium text-ink-400">Impact</p>
-              <p className="text-sm text-ink-600 whitespace-pre-wrap">
-                {c.impact}
-              </p>
-            </div>
-          )}
-          {c.rollback_plan && (
-            <div className="space-y-1">
-              <p className="text-xs font-medium text-ink-400">
-                Rollback Plan
-              </p>
-              <p className="text-sm text-ink-600 whitespace-pre-wrap">
-                {c.rollback_plan}
-              </p>
-            </div>
-          )}
-          {c.test_plan && (
-            <div className="space-y-1">
-              <p className="text-xs font-medium text-ink-400">Test Plan</p>
-              <p className="text-sm text-ink-600 whitespace-pre-wrap">
-                {c.test_plan}
-              </p>
-            </div>
-          )}
-          <div className="space-y-1">
-            <p className="text-xs font-medium text-ink-400">Schedule</p>
-            <p className="text-sm text-ink-600">
-              {c.scheduled_start
-                ? formatDate(c.scheduled_start)
-                : "—"}{" "}
-              →{" "}
-              {c.scheduled_end ? formatDate(c.scheduled_end) : "—"}
-            </p>
-          </div>
-        </div>
-
-        <div className="border-t border-linen-200 pt-4">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-semibold text-ink-700">
-              Approvals
-              {approvals && (
-                <span className="text-ink-400 font-normal ml-1">
-                  ({approvals.length})
-                </span>
-              )}
-            </h3>
-            <div className="flex items-center gap-1.5">
-              <select
-                value={approverId}
-                onChange={(e) => setApproverId(e.target.value)}
-                className="input-base text-xs w-36 h-7"
-              >
-                <option value="">Select approver</option>
-                {users.map((u) => (
-                  <option key={u.id} value={u.id}>
-                    {u.name}
-                  </option>
-                ))}
-              </select>
-              <button
-                onClick={() =>
-                  addApprovalMut.mutate({
-                    changeId: change.id,
-                    approverId,
-                  })
-                }
-                disabled={!approverId || addApprovalMut.isPending}
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-semibold bg-moss-400/15 text-moss-600 hover:bg-moss-400/25 disabled:opacity-50"
-              >
-                {addApprovalMut.isPending ? (
-                  <RefreshCw className="w-3 h-3 animate-spin" />
-                ) : (
-                  <UserPlus className="w-3 h-3" />
-                )}
-                Add
-              </button>
-            </div>
-          </div>
-
-          {addApprovalMut.error && (
-            <p className="text-xs text-rust-500 mb-2">
-              Failed:{" "}
-              {addApprovalMut.error instanceof Error
-                ? addApprovalMut.error.message
-                : String(addApprovalMut.error)}
-            </p>
-          )}
-
-          {approvalsLoading ? (
-            <div className="space-y-2">
-              {[1, 2].map((i) => (
-                <div key={i} className="skeleton h-10 w-full" />
-              ))}
-            </div>
-          ) : approvals && approvals.length > 0 ? (
-            <div className="space-y-2">
-              {approvals.map((a) => (
-                <div
-                  key={a.id}
-                  className="flex items-center justify-between px-3 py-2 rounded-lg bg-linen-100"
-                >
-                  <div className="min-w-0">
-                    <p className="text-xs font-medium text-ink-700">
-                      {a.approver_name || a.approver_id}
-                    </p>
-                    {a.decision ? (
-                      <div className="flex items-center gap-1 mt-0.5">
-                        <span
-                          className={cn(
-                            "inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold border",
-                            a.decision === "approved"
-                              ? "text-moss-600 bg-moss-500/10 border-moss-500/30"
-                              : "text-rust-500 bg-rust-400/10 border-rust-400/30"
-                          )}
-                        >
-                          {a.decision}
-                        </span>
-                        {a.comment && (
-                          <span className="text-[11px] text-ink-400 truncate max-w-[200px]">
-                            — {a.comment}
-                          </span>
-                        )}
-                      </div>
-                    ) : (
-                      <p className="text-[11px] text-ink-400 mt-0.5">
-                        Pending decision
-                      </p>
-                    )}
-                  </div>
-                  {!a.decision && (
-                    <div className="flex items-center gap-1">
-                      <button
-                        onClick={() =>
-                          decideMut.mutate({
-                            approverId: a.approver_id,
-                            decision: "approved",
-                          })
-                        }
-                        className="p-1 rounded text-moss-500 hover:bg-moss-400/15"
-                        title="Approve"
-                      >
-                        <ThumbsUp className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        onClick={() =>
-                          decideMut.mutate({
-                            approverId: a.approver_id,
-                            decision: "rejected",
-                          })
-                        }
-                        className="p-1 rounded text-rust-500 hover:bg-rust-400/15"
-                        title="Reject"
-                      >
-                        <ThumbsDown className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-xs text-ink-400 text-center py-4">
-              No approvals yet
-            </p>
-          )}
-        </div>
-
-        <div className="text-xs text-ink-400 flex items-center gap-4">
-          {c.created_at && <span>Created {formatTimeAgo(c.created_at)}</span>}
-          {c.updated_at && <span>Updated {formatTimeAgo(c.updated_at)}</span>}
-          {c.completed_at && (
-            <span>Completed {formatTimeAgo(c.completed_at)}</span>
-          )}
-        </div>
-      </div>
-    </div>
-  );
+function ChangeDetailDialog({ change, users, usersUnavailable, onOpenChange }: { change: ChangeRecord | null; users: UserOut[]; usersUnavailable: boolean; onOpenChange: (open: boolean) => void }) {
+  const queryClient = useQueryClient(); const [approverId, setApproverId] = useState(""); const [decision, setDecision] = useState<{ approval: ChangeApproval; value: "approved" | "rejected" } | null>(null);
+  const detailQuery = useQuery({ queryKey: ["change", change?.id], queryFn: () => api.getChange(change!.id), enabled: Boolean(change), initialData: change ?? undefined });
+  const approvalsQuery = useQuery({ queryKey: ["change-approvals", change?.id], queryFn: () => api.getChangeApprovals(change!.id), enabled: Boolean(change) });
+  const addMutation = useMutation({ mutationFn: (id: string) => api.addChangeApproval(change!.id, id), onSuccess: async () => { await queryClient.invalidateQueries({ queryKey: ["change-approvals", change?.id] }); setApproverId(""); } });
+  const decideMutation = useMutation({ mutationFn: ({ approverId: id, value }: { approverId: string; value: "approved" | "rejected" }) => api.decideApproval(change!.id, id, value), onSuccess: async () => { await queryClient.invalidateQueries({ queryKey: ["change-approvals", change?.id] }); setDecision(null); }, onError: () => setDecision(null) });
+  const current = detailQuery.data ?? change;
+  return <><Dialog open={Boolean(change) && !decision} onOpenChange={onOpenChange} title={current?.title ?? "Change details"} description={current ? `Change ${current.id.slice(0, 8).toUpperCase()}` : undefined} className="max-w-3xl">{current && <div className="space-y-6">{detailQuery.isError && <Alert variant="warning" title="Latest record unavailable">Showing the last loaded data. {errorMessage(detailQuery.error)}</Alert>}<div className="flex flex-wrap gap-2"><Pill value={current.status} styles={STATUS_STYLES} /><Pill value={current.change_type} styles={TYPE_STYLES} /><Pill value={current.risk_level} styles={RISK_STYLES} />{current.priority && <span className={cn("inline-flex rounded-full border px-2.5 py-1 text-[11px] font-semibold", priorityColor(current.priority))}>{current.priority}</span>}</div>
+      <dl className="grid gap-4 rounded-xl border border-linen-400 bg-linen-100 p-4 sm:grid-cols-2"><Detail label="Assignee" value={current.assigned_name || "Unassigned"} /><Detail label="Requester" value={current.requested_name || "Unknown"} /><Detail label="Start" value={formatDate(current.scheduled_start)} /><Detail label="End" value={formatDate(current.scheduled_end)} /></dl><Narrative label="Description" value={current.description} /><Narrative label="Impact" value={current.impact} /><div className="grid gap-4 sm:grid-cols-2"><NarrativeCard label="Rollback plan" value={current.rollback_plan} /><NarrativeCard label="Test plan" value={current.test_plan} /></div>
+      <section className="border-t border-linen-400 pt-5"><div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between"><div><h3 className="text-sm font-semibold text-ink-800">Approvals</h3><p className="mt-1 text-xs text-ink-500">Named decisions create an accountable review trail.</p></div><div className="flex gap-2"><label className="min-w-0 flex-1 sm:w-56"><span className="sr-only">Select approver</span><select className="input-base min-h-10" value={approverId} onChange={(event) => setApproverId(event.target.value)} disabled={usersUnavailable}><option value="">Select approver</option>{users.map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label><Button size="sm" leadingIcon={<UserPlus className="h-4 w-4" />} pending={addMutation.isPending} pendingLabel="Adding…" disabled={!approverId || usersUnavailable} onClick={() => addMutation.mutate(approverId)}>Add</Button></div></div>
+        {usersUnavailable && <Alert className="mt-4" variant="warning" title="Approver directory unavailable">Existing decisions remain visible, but new approvers cannot be added.</Alert>}{addMutation.error && <Alert className="mt-4" variant="danger" title="Approver was not added">{errorMessage(addMutation.error)}</Alert>}{decideMutation.error && <Alert className="mt-4" variant="danger" title="Decision was not recorded">{errorMessage(decideMutation.error)}</Alert>}
+        <div className="mt-4">{approvalsQuery.isLoading ? <div className="space-y-2"><Skeleton className="h-14" /><Skeleton className="h-14" /></div> : approvalsQuery.isError ? <ErrorState className="min-h-40" title="Approvals could not be loaded" description={errorMessage(approvalsQuery.error)} onRetry={() => approvalsQuery.refetch()} retrying={approvalsQuery.isFetching} /> : approvalsQuery.data?.length ? <div className="divide-y divide-linen-300 rounded-xl border border-linen-400">{approvalsQuery.data.map((approval) => <ApprovalRow key={approval.id} approval={approval} pending={decideMutation.isPending} onDecision={(value) => { decideMutation.reset(); setDecision({ approval, value }); }} />)}</div> : <EmptyState className="min-h-40" icon={<ShieldCheck className="h-5 w-5" />} title="No approvers assigned" description="Add the first reviewer to begin the approval trail." />}</div>
+      </section><div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-400">{current.created_at && <span>Created {formatTimeAgo(current.created_at)}</span>}{current.updated_at && <span>Updated {formatTimeAgo(current.updated_at)}</span>}{current.completed_at && <span>Completed {formatTimeAgo(current.completed_at)}</span>}</div>
+    </div>}</Dialog><ConfirmDialog open={Boolean(decision)} onOpenChange={(open) => { if (!open) setDecision(null); }} title={decision?.value === "approved" ? "Approve this change?" : "Reject this change?"} description={<>Record <strong>{decision?.value}</strong> for {decision?.approval.approver_name || "this approver"}. This decision becomes part of the change audit trail.</>} confirmLabel={decision?.value === "approved" ? "Record approval" : "Record rejection"} destructive={decision?.value === "rejected"} pending={decideMutation.isPending} onConfirm={() => { if (decision) decideMutation.mutate({ approverId: decision.approval.approver_id, value: decision.value }); }} /></>;
 }
+
+function ApprovalRow({ approval, pending, onDecision }: { approval: ChangeApproval; pending: boolean; onDecision: (value: "approved" | "rejected") => void }) { const decided = Boolean(approval.decision); return <div className="flex items-center justify-between gap-3 p-3"><div className="min-w-0"><p className="truncate text-sm font-medium text-ink-700">{approval.approver_name || approval.approver_id}</p><div className="mt-1 flex items-center gap-2">{decided ? <span className={cn("inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold capitalize", approval.decision === "approved" ? "border-moss-500/30 bg-moss-500/10 text-moss-700" : "border-rust-400/30 bg-rust-400/10 text-rust-600")}>{approval.decision}</span> : <span className="text-xs text-ink-400">Pending decision</span>}{approval.comment && <span className="truncate text-xs text-ink-500">{approval.comment}</span>}</div></div>{!decided && <div className="flex gap-1"><IconButton size="sm" aria-label={`Approve for ${approval.approver_name || approval.approver_id}`} icon={<ThumbsUp className="h-4 w-4" />} disabled={pending} onClick={() => onDecision("approved")} className="text-moss-700" /><IconButton size="sm" aria-label={`Reject for ${approval.approver_name || approval.approver_id}`} icon={<ThumbsDown className="h-4 w-4" />} disabled={pending} onClick={() => onDecision("rejected")} className="text-rust-600" /></div>}</div>; }
+function Field({ label, required = false, children }: { label: string; required?: boolean; children: ReactNode }) { return <label className="block space-y-1.5"><span className="text-xs font-semibold text-ink-600">{label}{required && <span className="text-rust-600"> *</span>}</span>{children}</label>; }
+function Detail({ label, value }: { label: string; value: string }) { return <div><dt className="text-[11px] font-semibold uppercase tracking-wider text-ink-400">{label}</dt><dd className="mt-1 text-sm text-ink-700">{value}</dd></div>; }
+function Narrative({ label, value }: { label: string; value: string | null }) { if (!value) return null; return <section><h3 className="text-xs font-semibold uppercase tracking-wider text-ink-400">{label}</h3><p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-ink-700">{value}</p></section>; }
+function NarrativeCard({ label, value }: { label: string; value: string | null }) { return <section className="rounded-xl border border-linen-400 p-4"><h3 className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-ink-500"><Check className="h-3.5 w-3.5" aria-hidden="true" />{label}</h3><p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-ink-700">{value || "Not documented"}</p></section>; }

@@ -5,6 +5,14 @@ metadata:
   namespace: tickety
 spec:
   replicas: 1
+  revisionHistoryLimit: 3
+  minReadySeconds: 5
+  progressDeadlineSeconds: 300
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app: backend
@@ -13,6 +21,14 @@ spec:
       labels:
         app: backend
     spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
       initContainers:
       - name: wait-for-postgres
         image: tickety-backend:latest
@@ -33,21 +49,193 @@ spec:
                     conn.close()
                     print("Postgres is ready")
                     break
-                except Exception as e:
-                    print(f"Waiting for postgres... ({e})")
+                except Exception:
+                    print("Waiting for Postgres")
                     time.sleep(2)
             else:
                 raise SystemExit("Postgres did not become ready")
+        resources:
+          requests:
+            cpu: 25m
+            memory: 64Mi
+          limits:
+            cpu: 250m
+            memory: 256Mi
+        securityContext:
+          runAsUser: 10001
+          runAsGroup: 10001
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
       containers:
       - name: backend
         image: tickety-backend:latest
         imagePullPolicy: Never
         command: ["uvicorn", "app.backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
         ports:
-        - containerPort: 8000
+        - name: http
+          containerPort: 8000
         envFrom:
         - secretRef:
             name: tickety-secrets
+        env:
+        - name: TICKETY_PROCESS_ROLE
+          value: api
+        startupProbe:
+          httpGet:
+            path: /health/live
+            port: http
+          periodSeconds: 2
+          timeoutSeconds: 2
+          failureThreshold: 30
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 3
+          successThreshold: 1
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 3
+        lifecycle:
+          preStop:
+            exec:
+              command: ["/bin/sh", "-c", "sleep 5"]
+        resources:
+          requests:
+            cpu: 200m
+            memory: 256Mi
+          limits:
+            cpu: "1"
+            memory: 1Gi
+        securityContext:
+          runAsUser: 10001
+          runAsGroup: 10001
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 64Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-worker
+  namespace: tickety
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  progressDeadlineSeconds: 300
+  # Scheduled jobs are process-local. Recreate prevents old and new worker
+  # revisions from overlapping during a rollout.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: backend-worker
+  template:
+    metadata:
+      labels:
+        app: backend-worker
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+      - name: wait-for-postgres
+        image: tickety-backend:latest
+        imagePullPolicy: Never
+        envFrom:
+        - secretRef:
+            name: tickety-secrets
+        command:
+          - python
+          - -c
+          - |
+            import time, psycopg2, os
+            url = os.getenv("DATABASE_URL","").replace("postgresql+psycopg2://","postgresql://")
+            print("Connecting to Postgres")
+            for i in range(60):
+                try:
+                    conn = psycopg2.connect(url)
+                    conn.close()
+                    print("Postgres is ready")
+                    break
+                except Exception:
+                    print("Waiting for Postgres")
+                    time.sleep(2)
+            else:
+                raise SystemExit("Postgres did not become ready")
+        resources:
+          requests:
+            cpu: 25m
+            memory: 64Mi
+          limits:
+            cpu: 250m
+            memory: 256Mi
+        securityContext:
+          runAsUser: 10001
+          runAsGroup: 10001
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      containers:
+      - name: worker
+        image: tickety-backend:latest
+        imagePullPolicy: Never
+        command: ["python", "-m", "app.backend.worker"]
+        envFrom:
+        - secretRef:
+            name: tickety-secrets
+        env:
+        - name: TICKETY_PROCESS_ROLE
+          value: worker
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: "1"
+            memory: 1Gi
+        securityContext:
+          runAsUser: 10001
+          runAsGroup: 10001
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 64Mi
 ---
 apiVersion: v1
 kind: Service

@@ -175,6 +175,11 @@ def sync_tickets_from_external(adapter=None) -> dict:
                     max_persisted_updated_at = max(max_persisted_updated_at or ext.updated_at, ext.updated_at)
             except Exception as e:
                 print(f"[sync] error upserting ticket {ext.external_id}: {e}")
+                # A flush/commit failure leaves the SQLAlchemy session in a
+                # failed transaction. Reset it before processing the next
+                # ticket so one bad record cannot poison the rest of the
+                # batch or prevent the final sync-state update.
+                db.rollback()
                 result["errors"] += 1
 
         if result["errors"]:
@@ -649,6 +654,13 @@ def _import_external_agents(adapter, raw_agents: list[dict[str, Any]], options: 
                         if matched_user and sync_options["merge_existing"]:
                             user = matched_user
                             merged_user = True
+                        elif matched_user:
+                            result["conflicts"] += 1
+                            _limited_append(
+                                result["conflict_details"],
+                                f"{agent['name']} matches an existing Tickety user by {match_reason}; enable merge to link the accounts",
+                            )
+                            continue
                         elif sync_options["create_missing"]:
                             user = _create_external_agent_user(db, agent)
                             created_user = True
@@ -663,6 +675,13 @@ def _import_external_agents(adapter, raw_agents: list[dict[str, Any]], options: 
                     if matched_user and sync_options["merge_existing"]:
                         user = matched_user
                         merged_user = True
+                    elif matched_user:
+                        result["conflicts"] += 1
+                        _limited_append(
+                            result["conflict_details"],
+                            f"{agent['name']} matches an existing Tickety user by {match_reason}; enable merge to link the accounts",
+                        )
+                        continue
                     elif sync_options["create_missing"]:
                         user = _create_external_agent_user(db, agent)
                         created_user = True

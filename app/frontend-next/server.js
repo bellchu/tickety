@@ -12,7 +12,6 @@
  * trick the /api route handler uses.
  */
 const http = require("http");
-const { parse } = require("url");
 const next = require("next");
 const httpProxy = require("http-proxy");
 
@@ -21,6 +20,7 @@ const port = parseInt(process.env.PORT || "3000", 10);
 const hostname = process.env.HOSTNAME || "0.0.0.0";
 
 const BACKEND = process.env.BACKEND_URL || "http://localhost:8000";
+const BACKEND_TLS_INSECURE = process.env.BACKEND_TLS_INSECURE === "true";
 
 const app = next({ dev, hostname, port });
 const handle = app.getRequestHandler();
@@ -30,7 +30,9 @@ app.prepare().then(() => {
     target: BACKEND,
     ws: true,
     changeOrigin: true,
-    secure: false,
+    // Verify upstream TLS by default. Local development can explicitly opt
+    // out for a self-signed backend without weakening production behavior.
+    secure: !BACKEND_TLS_INSECURE,
   });
 
   proxy.on("error", (err, _req, target) => {
@@ -41,8 +43,9 @@ app.prepare().then(() => {
   });
 
   const server = http.createServer((req, res) => {
-    const parsedUrl = parse(req.url, true);
-    handle(req, res, parsedUrl);
+    // Let Next parse the request using its current WHATWG URL path. Passing a
+    // legacy url.parse() result here emits a Node security deprecation warning.
+    handle(req, res);
   });
 
   // WebSocket upgrade handling.

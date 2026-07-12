@@ -124,6 +124,8 @@ _ALL_KEYS = [
 
 # Keys that are static infra config
 _READONLY_KEYS = {
+    "APP_MODE",
+    "SEED_DEMO_DATA",
     "DATABASE_URL",
     "NEXT_PUBLIC_API_URL",
     "NEXT_PUBLIC_WS_URL",

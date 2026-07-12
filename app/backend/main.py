@@ -15,7 +15,7 @@ from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconn
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import desc, func, or_, text
+from sqlalchemy import case, desc, func, or_, text
 
 from .database import (
     init_db, get_db, SessionLocal,
@@ -53,7 +53,7 @@ from .schema import (
     Asset, AssetCreate, AssetUpdate,
     SurveyTemplate, SurveyOut, SurveySend, SurveyResponseCreate,
     TimeEntry, TimeEntryCreate,
-    PortalTicketCreate, PortalTicketOut,
+    PortalTicketCreate, PortalTicketOut, PortalTicketCreated,
 )
 from .llm_manager import LLMManager, get_llm_catalog
 from .brain import IntelligenceEngine
@@ -66,7 +66,7 @@ from .prompts import (
 from .integrations.registry import get_adapter
 from .integrations.sync import sync_tickets_from_external, handle_webhook_event, fetch_tickets_by_days, async_sync_agents_from_external
 from .integrations.freshservice import FreshserviceAdapter
-from .sync_worker import start_sync_worker, get_sync_status
+from .sync_worker import start_sync_worker, stop_sync_worker, get_sync_status
 from . import settings as settings_module
 
 # Single source of truth for the backend version. Bump when shipping user-visible
@@ -111,9 +111,13 @@ PASSWORD_HASH_ITERATIONS = 390_000
 _LOGIN_FAILURES: dict[str, list[datetime]] = {}
 _LOGIN_FAILURE_WINDOW = timedelta(minutes=15)
 _LOGIN_FAILURE_LIMIT = 5
+PORTAL_ACCESS_TOKEN_BYTES = 32
+PORTAL_ACCESS_TOKEN_TTL_DAYS = 90
 
 _PUBLIC_HTTP_PATHS = {
     "/health",
+    "/health/live",
+    "/health/ready",
     "/version",
     "/auth/login",
     "/auth/logout",
@@ -166,6 +170,10 @@ def _roles_required_for_request(path: str, method: str) -> Optional[set[str]]:
         return {"admin", "supervisor"}
     if unsafe and path == "/tickets/bulk":
         return {"admin", "supervisor"}
+    if method.upper() == "DELETE" and path.startswith("/tickets/"):
+        return {"admin", "supervisor"}
+    if method.upper() == "GET" and path == "/users":
+        return {"admin", "supervisor"}
     if unsafe and path.startswith((
         "/categories",
         "/projects",
@@ -197,6 +205,36 @@ def _resolve_request_user(request: Request, db: Session, allow_demo: bool) -> Op
             return admin
         return db.query(UserRecord).filter(UserRecord.is_active.is_(True)).first()
     return None
+
+
+def get_current_user(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> UserRecord:
+    """Dependency: resolve the logged-in user from the session cookie.
+
+    Falls back to the first user only in demo mode when LOGIN_REQUIRED is not
+    enabled. Production mode always requires an explicit session."""
+    state_user = getattr(request.state, "current_user", None)
+    if state_user and getattr(state_user, "is_active", False):
+        return state_user
+    user = _resolve_request_user(
+        request,
+        db,
+        allow_demo=settings_module.is_demo_mode() and not settings_module.get_bool("LOGIN_REQUIRED"),
+    )
+    if user:
+        return user
+    raise HTTPException(status_code=401, detail="Not authenticated")
+
+
+def require_role(*roles: str):
+    """Dependency factory: require the current user to have one of the roles."""
+    def checker(user: UserRecord = Depends(get_current_user)) -> UserRecord:
+        if user.role not in roles:
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
+        return user
+    return checker
 
 
 def _login_key(payload: LoginRequest, request: Request) -> str:
@@ -270,10 +308,17 @@ async def startup():
     global llm_mgr
     llm_mgr = LLMManager()
     engine.llm = llm_mgr
-    if settings_module.is_demo_mode() or settings_module.get_bool("SEED_DEMO_DATA"):
+    # Fixed demo accounts and sample data are never created in production,
+    # even if a stale database override still contains SEED_DEMO_DATA=true.
+    if settings_module.is_demo_mode():
         from .seed import run_seed
         run_seed()
     start_sync_worker()
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    stop_sync_worker(wait=True)
 
 
 # ── Health ───────────────────────────────────────────────────
@@ -287,6 +332,25 @@ async def health():
         "build_sha": BUILD_SHA,
         "build_time": BUILD_TIME,
     }
+
+
+@app.get("/health/live")
+async def health_live():
+    """Process liveness only; dependencies intentionally are not consulted."""
+    return {"status": "alive"}
+
+
+@app.get("/health/ready")
+async def health_ready(response: Response, db: Session = Depends(get_db)):
+    """Readiness gate for dependencies required to serve application traffic."""
+    try:
+        db.execute(text("SELECT 1"))
+    except Exception:
+        # Public health responses must not expose drivers, hosts, credentials,
+        # SQL, or other internal exception details.
+        response.status_code = 503
+        return {"status": "not_ready", "checks": {"database": "unavailable"}}
+    return {"status": "ready", "checks": {"database": "ok"}}
 
 
 @app.get("/version")
@@ -306,13 +370,16 @@ async def version():
 
 @app.get("/tickets", response_model=List[Ticket])
 async def list_tickets(
+    response: Response,
     db: Session = Depends(get_db),
-    status: Optional[str] = None,
-    priority: Optional[str] = None,
-    assignee_id: Optional[str] = None,
-    category: Optional[str] = None,
-    search: Optional[str] = None,
-    sort: str = "newest",
+    status: Optional[str] = Query(default=None, max_length=100),
+    priority: Optional[str] = Query(default=None, max_length=100),
+    assignee_id: Optional[str] = Query(default=None, max_length=255),
+    category: Optional[str] = Query(default=None, max_length=100),
+    search: Optional[str] = Query(default=None, max_length=200),
+    sort: str = Query(default="newest", pattern="^(newest|oldest|priority|updated|complexity)$"),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
 ):
     q = db.query(TicketRecord)
     if status:
@@ -324,19 +391,61 @@ async def list_tickets(
     if category:
         q = q.filter(TicketRecord.category == category)
     if search:
-        q = q.filter(TicketRecord.subject.ilike(f"%{search}%"))
+        # Treat SQL wildcard characters as user text so searches remain
+        # predictable and cannot accidentally expand into an unbounded match.
+        escaped_search = search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        if escaped_search:
+            pattern = f"%{escaped_search}%"
+            q = q.filter(or_(
+                TicketRecord.subject.ilike(pattern, escape="\\"),
+                TicketRecord.description.ilike(pattern, escape="\\"),
+                TicketRecord.reporter.ilike(pattern, escape="\\"),
+                TicketRecord.external_id.ilike(pattern, escape="\\"),
+            ))
     if sort == "oldest":
-        q = q.order_by(TicketRecord.created_at.asc())
+        q = q.order_by(TicketRecord.created_at.asc(), TicketRecord.id.asc())
     elif sort == "priority":
-        q = q.order_by(desc(TicketRecord.priority))
+        priority_rank = {
+            "P1": 1, "Urgent": 1,
+            "P2": 2, "High": 2,
+            "P3": 3, "Medium": 3,
+            "P4": 4, "Low": 4,
+        }
+        # SQLAlchemy's portable CASE expression keeps semantic priority order
+        # across SQLite (tests) and PostgreSQL (production).
+        q = q.order_by(
+            case(priority_rank, value=TicketRecord.priority, else_=5),
+            TicketRecord.created_at.desc(),
+            TicketRecord.id.asc(),
+        )
+    elif sort == "updated":
+        q = q.order_by(TicketRecord.updated_at.desc(), TicketRecord.id.asc())
+    elif sort == "complexity":
+        q = q.order_by(TicketRecord.complexity.desc(), TicketRecord.created_at.desc(), TicketRecord.id.asc())
     else:
-        q = q.order_by(desc(TicketRecord.created_at))
-    tickets = q.all()
-    # Enrich with assignee names
-    for t in tickets:
-        if t.assignee_id:
-            user = db.query(UserRecord).filter(UserRecord.id == t.assignee_id).first()
-            t.__dict__["assignee_name"] = user.name if user else None
+        q = q.order_by(TicketRecord.created_at.desc(), TicketRecord.id.asc())
+
+    # Fetch one extra row to signal whether another page exists without a
+    # potentially expensive COUNT(*) over the filtered result set.
+    page = q.offset(offset).limit(limit + 1).all()
+    has_more = len(page) > limit
+    tickets = page[:limit]
+    response.headers["X-Page-Limit"] = str(limit)
+    response.headers["X-Page-Offset"] = str(offset)
+    response.headers["X-Has-More"] = str(has_more).lower()
+
+    # Resolve every assignee in one query instead of issuing one query per
+    # ticket. Missing users intentionally remain null in the API response.
+    assignee_ids = {ticket.assignee_id for ticket in tickets if ticket.assignee_id}
+    assignee_names = {}
+    if assignee_ids:
+        assignee_names = dict(
+            db.query(UserRecord.id, UserRecord.name)
+            .filter(UserRecord.id.in_(assignee_ids))
+            .all()
+        )
+    for ticket in tickets:
+        ticket.__dict__["assignee_name"] = assignee_names.get(ticket.assignee_id)
     return tickets
 
 
@@ -373,6 +482,61 @@ def _normalize_portal_priority(priority: str) -> str:
         "p4": "P4",
     }
     return mapping.get(value.lower(), value.upper() if value.upper() in {"P1", "P2", "P3", "P4"} else "P3")
+
+
+def _portal_token_ttl() -> timedelta:
+    """Return a bounded portal capability lifetime.
+
+    The environment override supports deployments with stricter retention
+    requirements while preventing accidental non-expiring or extreme values.
+    """
+    try:
+        days = int(os.getenv("PORTAL_ACCESS_TOKEN_TTL_DAYS", PORTAL_ACCESS_TOKEN_TTL_DAYS))
+    except (TypeError, ValueError):
+        days = PORTAL_ACCESS_TOKEN_TTL_DAYS
+    return timedelta(days=max(1, min(days, 3650)))
+
+
+def _portal_token_digest(token: str) -> str:
+    return hashlib.sha256(token.encode("ascii")).hexdigest()
+
+
+def _portal_tracking_url(request: Request, token: str) -> str:
+    frontend_origin = os.getenv("FRONTEND_URL", "").strip().rstrip("/")
+    origin = frontend_origin or str(request.base_url).rstrip("/")
+    # Keep bearer capability material in the fragment: fragments are handled
+    # client-side and are not sent in HTTP requests or ordinary access logs.
+    return f"{origin}/portal#token={urllib.parse.quote(token, safe='')}"
+
+
+def _portal_bearer_token(request: Request) -> Optional[str]:
+    authorization = request.headers.get("authorization", "")
+    scheme, separator, token = authorization.partition(" ")
+    if not separator or scheme.lower() != "bearer" or not token or token != token.strip():
+        return None
+    return token
+
+
+def _portal_ticket_for_token(db: Session, token: Optional[str]) -> Optional[TicketRecord]:
+    # urlsafe_b64encode output for a 32-byte token is 43 characters. Keep the
+    # accepted range narrow and do a dummy comparison for malformed tokens so
+    # obvious invalid inputs do not take a completely separate fast path.
+    if not token or not 40 <= len(token) <= 128 or not re.fullmatch(r"[A-Za-z0-9_-]+", token):
+        hmac.compare_digest("0" * 64, _portal_token_digest("invalid"))
+        return None
+    digest = _portal_token_digest(token)
+    ticket = db.query(TicketRecord).filter(
+        TicketRecord.portal_access_token_hash == digest,
+        TicketRecord.external_source == "portal",
+    ).first()
+    if not ticket or not ticket.portal_access_token_hash:
+        hmac.compare_digest("0" * 64, digest)
+        return None
+    if not hmac.compare_digest(ticket.portal_access_token_hash, digest):
+        return None
+    if not ticket.portal_access_expires_at or ticket.portal_access_expires_at <= datetime.utcnow():
+        return None
+    return ticket
 
 
 def _priority_sla_hours(db: Session, priority: str) -> int:
@@ -459,7 +623,11 @@ async def update_ticket(
 
 
 @app.delete("/tickets/{ticket_id}")
-async def delete_ticket(ticket_id: str, db: Session = Depends(get_db)):
+async def delete_ticket(
+    ticket_id: str,
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(require_role("admin", "supervisor")),
+):
     ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
@@ -545,10 +713,42 @@ async def delete_category(cat_id: int, db: Session = Depends(get_db)):
 # ── Bulk operations ───────────────────────────────────────────
 
 @app.post("/tickets/bulk")
-async def bulk_action(payload: BulkAction, request: Request, db: Session = Depends(get_db)):
+async def bulk_action(
+    payload: BulkAction,
+    request: Request,
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(require_role("admin", "supervisor")),
+):
     """Apply an action to multiple tickets at once.
     Actions: assign, close, set_priority, set_category."""
-    tickets = db.query(TicketRecord).filter(TicketRecord.id.in_(payload.ticket_ids)).all()
+    ticket_ids = list(dict.fromkeys(payload.ticket_ids))
+    tickets = db.query(TicketRecord).filter(TicketRecord.id.in_(ticket_ids)).all()
+    if len(tickets) != len(ticket_ids):
+        raise HTTPException(status_code=404, detail="One or more tickets were not found")
+
+    if payload.action != "close" and not payload.value:
+        raise HTTPException(status_code=422, detail="A value is required for this bulk action")
+    if payload.action == "assign":
+        assignee = db.query(UserRecord).filter(
+            UserRecord.id == payload.value,
+            UserRecord.is_active.is_(True),
+        ).first()
+        if not assignee:
+            raise HTTPException(status_code=422, detail="Assignee is not an active user")
+    elif payload.action == "set_category":
+        category = db.query(TicketCategoryRecord).filter(
+            TicketCategoryRecord.name == payload.value,
+        ).first()
+        if not category:
+            raise HTTPException(status_code=422, detail="Category does not exist")
+    elif payload.action == "set_priority":
+        configured_priorities = {
+            row[0] for row in db.query(TicketPriorityConfigRecord.name).all()
+        }
+        allowed_priorities = configured_priorities or {"P1", "P2", "P3", "P4"}
+        if payload.value not in allowed_priorities:
+            raise HTTPException(status_code=422, detail="Priority does not exist")
+
     count = 0
     actor = getattr(getattr(request, "state", None), "current_user", None)
     actor_name = actor.name if actor else "System"
@@ -903,36 +1103,6 @@ def _create_session(db: Session, user_id: str, request: Request) -> str:
     return token
 
 
-def get_current_user(
-    request: Request,
-    db: Session = Depends(get_db),
-) -> UserRecord:
-    """Dependency: resolve the logged-in user from the session cookie.
-
-    Falls back to the first user only in demo mode when LOGIN_REQUIRED is not
-    enabled. Production mode always requires an explicit session."""
-    state_user = getattr(request.state, "current_user", None)
-    if state_user and getattr(state_user, "is_active", False):
-        return state_user
-    user = _resolve_request_user(
-        request,
-        db,
-        allow_demo=settings_module.is_demo_mode() and not settings_module.get_bool("LOGIN_REQUIRED"),
-    )
-    if user:
-        return user
-    raise HTTPException(status_code=401, detail="Not authenticated")
-
-
-def require_role(*roles: str):
-    """Dependency factory: require the current user to have one of the roles."""
-    def checker(user: UserRecord = Depends(get_current_user)) -> UserRecord:
-        if user.role not in roles:
-            raise HTTPException(status_code=403, detail="Insufficient permissions")
-        return user
-    return checker
-
-
 @app.post("/auth/login", response_model=AuthResponse)
 async def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)):
     if _login_blocked(payload, request):
@@ -1249,7 +1419,7 @@ async def analyze_ticket_intelligence(
 @app.get("/users", response_model=List[UserOut])
 async def list_users(
     db: Session = Depends(get_db),
-    _user: UserRecord = Depends(get_current_user),
+    _user: UserRecord = Depends(require_role("admin", "supervisor")),
 ):
     return db.query(UserRecord).order_by(UserRecord.name).all()
 
@@ -2502,10 +2672,13 @@ async def delete_service(service_id: str, db: Session = Depends(get_db)):
 @app.get("/service-requests", response_model=List[ServiceRequest])
 async def list_service_requests(db: Session = Depends(get_db)):
     reqs = db.query(ServiceRequestRecord).order_by(desc(ServiceRequestRecord.created_at)).all()
-    for r in reqs:
-        if r.service_item_id:
-            svc = db.query(ServiceItemRecord).filter(ServiceItemRecord.id == r.service_item_id).first()
-            r.__dict__["service_name"] = svc.name if svc else None
+    service_ids = {request.service_item_id for request in reqs if request.service_item_id}
+    service_names = {
+        service.id: service.name
+        for service in db.query(ServiceItemRecord).filter(ServiceItemRecord.id.in_(service_ids)).all()
+    } if service_ids else {}
+    for request in reqs:
+        request.__dict__["service_name"] = service_names.get(request.service_item_id)
     return reqs
 
 
@@ -3164,12 +3337,19 @@ async def time_summary(db: Session = Depends(get_db)):
 
 # ── Self-Service Portal ────────────────────────────────────────
 
-@app.post("/portal/tickets", response_model=PortalTicketOut, status_code=201)
-async def portal_create_ticket(payload: PortalTicketCreate, db: Session = Depends(get_db)):
+@app.post("/portal/tickets", response_model=PortalTicketCreated, status_code=201)
+async def portal_create_ticket(
+    payload: PortalTicketCreate,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
     import uuid as _uuid
     reporter = _normalize_portal_reporter(payload.reporter)
+    access_token = secrets.token_urlsafe(PORTAL_ACCESS_TOKEN_BYTES)
+    access_expires_at = datetime.utcnow() + _portal_token_ttl()
     ticket = TicketRecord(
-        id=f"portal-{_uuid.uuid4().hex[:8]}",
+        id=f"portal-{_uuid.uuid4().hex}",
         subject=payload.subject.strip(),
         description=payload.description,
         reporter=reporter,
@@ -3178,28 +3358,40 @@ async def portal_create_ticket(payload: PortalTicketCreate, db: Session = Depend
         priority=_normalize_portal_priority(payload.priority),
         ticket_type="incident",
         external_source="portal",
+        portal_access_token_hash=_portal_token_digest(access_token),
+        portal_access_expires_at=access_expires_at,
     )
     _apply_sla_targets(ticket, db)
     db.add(ticket)
     db.commit()
     db.refresh(ticket)
-    return ticket
+    response.headers["Cache-Control"] = "no-store"
+    return PortalTicketCreated(
+        id=ticket.id,
+        subject=ticket.subject,
+        status=ticket.status,
+        priority=ticket.priority,
+        created_at=ticket.created_at,
+        updated_at=ticket.updated_at,
+        access_token=access_token,
+        tracking_url=_portal_tracking_url(request, access_token),
+        access_expires_at=access_expires_at,
+    )
 
 
-@app.get("/portal/tickets", response_model=List[PortalTicketOut])
+@app.get("/portal/tickets", response_model=PortalTicketOut)
 async def portal_list_tickets(
-    reporter: str,
-    ticket_id: Optional[str] = None,
+    request: Request,
+    response: Response,
     db: Session = Depends(get_db),
 ):
-    reporter_email = _normalize_portal_reporter(reporter)
-    if not ticket_id:
-        raise HTTPException(status_code=400, detail="Ticket ID is required")
-    tickets = db.query(TicketRecord).filter(
-        func.lower(TicketRecord.reporter) == reporter_email,
-        TicketRecord.id == ticket_id.strip(),
-    ).order_by(desc(TicketRecord.created_at)).limit(1).all()
-    return tickets
+    response.headers["Cache-Control"] = "no-store"
+    ticket = _portal_ticket_for_token(db, _portal_bearer_token(request))
+    if not ticket:
+        # Missing, malformed, unknown, expired, and legacy tickets share one
+        # response so this public endpoint cannot be used for enumeration.
+        raise HTTPException(status_code=404, detail="Tracking link is invalid or expired")
+    return ticket
 
 
 def _websocket_user(ws: WebSocket) -> Optional[UserRecord]:

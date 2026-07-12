@@ -2,6 +2,7 @@ import os
 import asyncio
 import threading
 from datetime import datetime
+from typing import Optional
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -10,8 +11,58 @@ from .integrations.sync import sync_tickets_from_external
 from .integrations.registry import get_adapter
 from . import settings as settings_module
 
-_scheduler: BackgroundScheduler = None
+_scheduler: Optional[BackgroundScheduler] = None
 _lock = threading.Lock()
+
+_PROCESS_ROLE_ENV = "TICKETY_PROCESS_ROLE"
+_SCHEDULER_ENABLED_ENV = "TICKETY_SCHEDULER_ENABLED"
+_VALID_PROCESS_ROLES = {"api", "worker", "all"}
+
+
+def process_role() -> str:
+    """Return this process's explicit runtime role.
+
+    Production defaults to an API-only process so adding API replicas can
+    never multiply scheduled jobs. Demo mode retains the historical combined
+    API + scheduler process unless a role is explicitly configured.
+    """
+    configured = os.getenv(_PROCESS_ROLE_ENV, "").strip().lower()
+    if configured:
+        if configured not in _VALID_PROCESS_ROLES:
+            raise ValueError(
+                f"{_PROCESS_ROLE_ENV} must be one of: "
+                f"{', '.join(sorted(_VALID_PROCESS_ROLES))}"
+            )
+        return configured
+    return "all" if settings_module.is_demo_mode() else "api"
+
+
+def scheduler_enabled_for_process() -> bool:
+    """Whether this process may own scheduled jobs.
+
+    The optional enable flag is a kill switch, not a way to turn an API role
+    into a worker. This keeps a mistaken boolean on replicated API pods from
+    reintroducing duplicate schedulers.
+    """
+    role = process_role()
+    configured = os.getenv(_SCHEDULER_ENABLED_ENV)
+    if configured is not None:
+        normalized = configured.strip().lower()
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        if normalized not in {"1", "true", "yes", "on"}:
+            raise ValueError(
+                f"{_SCHEDULER_ENABLED_ENV} must be a boolean value"
+            )
+    return role in {"worker", "all"}
+
+
+def _bounded_interval(env_name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        configured = int(os.getenv(env_name, str(default)))
+    except (TypeError, ValueError):
+        configured = default
+    return max(minimum, min(configured, maximum))
 
 
 def _auto_triage_job():
@@ -134,25 +185,66 @@ def _sync_job():
         print(f"[sync_worker] error: {e}")
 
 
-def start_sync_worker():
+def start_sync_worker() -> bool:
+    """Start the process-local scheduler once when this role owns jobs."""
     global _scheduler
+    if not scheduler_enabled_for_process():
+        return False
     with _lock:
         if _scheduler is not None:
-            return
-        interval = int(os.getenv("SYNC_INTERVAL_SECONDS", "60"))
-        _scheduler = BackgroundScheduler(daemon=True)
-        _scheduler.add_job(_sync_job, "interval", seconds=interval, id="sync_job")
-        _scheduler.add_job(_auto_triage_job, "interval", seconds=30, id="auto_triage_job")
-        _scheduler.start()
-        print(f"[sync_worker] started, sync every {interval}s, auto-triage every 30s")
+            return False
+        sync_interval = _bounded_interval("SYNC_INTERVAL_SECONDS", 60, 10, 86_400)
+        triage_interval = _bounded_interval("AUTO_TRIAGE_INTERVAL_SECONDS", 30, 10, 86_400)
+        scheduler = BackgroundScheduler(daemon=True)
+        job_defaults = {
+            "coalesce": True,
+            "max_instances": 1,
+            "replace_existing": True,
+        }
+        scheduler.add_job(
+            _sync_job,
+            "interval",
+            seconds=sync_interval,
+            id="sync_job",
+            misfire_grace_time=sync_interval,
+            next_run_time=datetime.now(),
+            **job_defaults,
+        )
+        scheduler.add_job(
+            _auto_triage_job,
+            "interval",
+            seconds=triage_interval,
+            id="auto_triage_job",
+            misfire_grace_time=triage_interval,
+            next_run_time=datetime.now(),
+            **job_defaults,
+        )
+        try:
+            scheduler.start()
+        except Exception:
+            try:
+                scheduler.shutdown(wait=False)
+            except Exception:
+                pass
+            raise
+        _scheduler = scheduler
+        print(
+            f"[sync_worker] started role={process_role()}, "
+            f"sync every {sync_interval}s, auto-triage every {triage_interval}s"
+        )
+        return True
 
 
-def stop_sync_worker():
+def stop_sync_worker(wait: bool = True) -> bool:
+    """Stop the process-local scheduler once and optionally drain jobs."""
     global _scheduler
     with _lock:
-        if _scheduler is not None:
-            _scheduler.shutdown(wait=False)
-            _scheduler = None
+        if _scheduler is None:
+            return False
+        scheduler = _scheduler
+        _scheduler = None
+        scheduler.shutdown(wait=wait)
+        return True
 
 
 def get_sync_status() -> dict:

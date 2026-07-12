@@ -59,6 +59,26 @@ export interface TicketCreateInput {
   asset_id?: string | null;
 }
 
+export type TicketListSort = "newest" | "oldest" | "priority" | "updated" | "complexity";
+
+export interface TicketListParams {
+  status?: string;
+  priority?: string;
+  assigneeId?: string;
+  category?: string;
+  search?: string;
+  sort?: TicketListSort;
+  limit?: number;
+  offset?: number;
+}
+
+export interface TicketPage {
+  tickets: Ticket[];
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+}
+
 export interface User {
   id: string;
   name: string;
@@ -740,7 +760,16 @@ export interface PortalTicket {
   subject: string;
   status: string;
   priority: string;
-  reporter: string | null;
   created_at: string | null;
   updated_at: string | null;
+}
+
+/**
+ * Returned only by the public ticket creation endpoint. Capability material is
+ * intentionally absent from every subsequent ticket response.
+ */
+export interface PortalTicketCreated extends PortalTicket {
+  access_token: string;
+  tracking_url: string;
+  access_expires_at: string;
 }
