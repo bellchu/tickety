@@ -73,7 +73,7 @@ export default function LoginPage() {
           <div className="absolute -bottom-36 left-1/4 h-96 w-96 rounded-full bg-cyan-400/10 blur-3xl" aria-hidden="true" />
 
           <div className="relative z-10">
-            <TicketyLogo inverse className="h-10" />
+            <TicketyLogo inverse size="xl" />
           </div>
 
           <div className="relative z-10 my-auto max-w-xl py-16">
@@ -109,7 +109,7 @@ export default function LoginPage() {
         <section className="flex items-center justify-center px-6 py-10 sm:px-12 lg:px-16 xl:px-24">
           <div className="w-full max-w-md">
             <div className="mb-10 lg:hidden">
-              <TicketyLogo className="h-10" />
+              <TicketyLogo size="xl" />
             </div>
 
             <div className="mb-8">

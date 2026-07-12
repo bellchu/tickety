@@ -12,8 +12,8 @@ import {
 import { cn } from "@/lib/utils";
 import { Alert, EmptyState, ErrorState, Skeleton } from "@/components/ui";
 
-const CHART_COLORS = ["#0066BB", "#2487DD", "#5C5347", "#9B9084", "#6B8E5A", "#D4A24C", "#C44A3F"];
-const PRIORITY_COLORS: Record<string, string> = { P1: "#C44A3F", P2: "#D4A24C", P3: "#0066BB", P4: "#9B9084" };
+const CHART_COLORS = ["#3D5AFE", "#7C8BFF", "#5C5347", "#9B9084", "#6B8E5A", "#D4A24C", "#C44A3F"];
+const PRIORITY_COLORS: Record<string, string> = { P1: "#C44A3F", P2: "#D4A24C", P3: "#3D5AFE", P4: "#9B9084" };
 
 export default function ReportsPage() {
   const summaryQuery = useQuery({ queryKey: ["report-summary"], queryFn: api.getReportSummary });
@@ -75,15 +75,15 @@ export default function ReportsPage() {
             <AreaChart data={volumeData}>
               <defs>
                 <linearGradient id="volGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#0066BB" stopOpacity={0.3} />
-                  <stop offset="95%" stopColor="#0066BB" stopOpacity={0} />
+                  <stop offset="5%" stopColor="#3D5AFE" stopOpacity={0.3} />
+                  <stop offset="95%" stopColor="#3D5AFE" stopOpacity={0} />
                 </linearGradient>
               </defs>
               <CartesianGrid strokeDasharray="3 3" stroke="#E8E1D6" vertical={false} />
               <XAxis dataKey="day" tick={{ fontSize: 10, fill: "#9B9084" }} interval="preserveStartEnd" />
               <YAxis tick={{ fontSize: 10, fill: "#9B9084" }} allowDecimals={false} />
               <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #E8E1D6" }} />
-              <Area type="monotone" dataKey="count" stroke="#0066BB" strokeWidth={2} fill="url(#volGrad)" />
+              <Area type="monotone" dataKey="count" stroke="#3D5AFE" strokeWidth={2} fill="url(#volGrad)" />
             </AreaChart>
           </ResponsiveContainer>
         ) : (

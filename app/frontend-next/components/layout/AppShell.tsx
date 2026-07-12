@@ -99,7 +99,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     return (
       <main className="grid min-h-screen place-items-center bg-linen-100" aria-busy="true">
         <div className="flex flex-col items-center gap-4 text-sm text-ink-500">
-          <TicketyLogo className="h-9" />
+          <TicketyLogo size="lg" />
           <span>Checking your session…</span>
         </div>
       </main>
@@ -132,7 +132,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
         <div className="flex min-h-screen flex-col lg:pl-64">
           <header className="sticky top-0 z-30 flex h-16 items-center justify-between border-b border-linen-300 bg-linen-50/95 px-4 backdrop-blur-md lg:hidden">
-            <TicketyLogo className="h-8" />
+            <TicketyLogo size="md" />
             <button
               ref={menuButtonRef}
               type="button"

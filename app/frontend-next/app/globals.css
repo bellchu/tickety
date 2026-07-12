@@ -12,17 +12,22 @@
   --surface-3: #F0ECE4;
   --border: #D9D2C7;
   --border-subtle: #E8E1D6;
-  --accent: #0066BB;
-  --accent-dark: #004F93;
+  --brand-ink: #0A0B0D;
+  --brand-graphite: #202329;
+  --brand-paper: #F6F6F2;
+  --brand-cobalt: #3D5AFE;
+  --brand-cobalt-soft: #EEF0FF;
+  --accent: var(--brand-cobalt);
+  --accent-dark: #3047D8;
   --fg: #1C1814;
   --fg-2: #5C5347;
   --fg-muted: #9B9084;
   --fg-inverse: #FAF8F4;
 
   /* Semantic product tokens. Keep component meaning independent from the palette. */
-  --color-primary: #0066BB;
-  --color-primary-hover: #004F93;
-  --color-primary-soft: #EDF6FF;
+  --color-primary: var(--brand-cobalt);
+  --color-primary-hover: #3047D8;
+  --color-primary-soft: var(--brand-cobalt-soft);
   --color-success: #557048;
   --color-success-soft: #EFF5EB;
   --color-warning: #9A681E;
@@ -30,10 +35,10 @@
   --color-danger: #B43E34;
   --color-danger-hover: #933129;
   --color-danger-soft: #FFF0ED;
-  --color-info: #0066BB;
-  --color-info-soft: #EDF6FF;
+  --color-info: var(--brand-cobalt);
+  --color-info-soft: var(--brand-cobalt-soft);
   --color-overlay: rgba(28, 24, 20, 0.56);
-  --focus-ring: #2487DD;
+  --focus-ring: #6578FF;
   --focus-ring-offset: #FFFEFB;
   --shadow-raised: 0 12px 36px rgba(28, 24, 20, 0.12), 0 2px 8px rgba(28, 24, 20, 0.06);
 }
@@ -146,7 +151,7 @@ body {
 .input-base:focus {
   @apply outline-none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(0, 102, 187, 0.12);
+  box-shadow: 0 0 0 3px rgba(61, 90, 254, 0.14);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -172,7 +177,7 @@ select.input-base {
 /* ═══ Checkbox ═══ */
 input[type="checkbox"] {
   @apply rounded;
-  accent-color: #0066BB;
+  accent-color: #3D5AFE;
 }
 
 /* ═══ Scrollbar ═══ */

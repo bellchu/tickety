@@ -2,6 +2,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { TicketyLogo } from "@/components/layout/TicketyLogo";
 
 export function Footer() {
   const { data: version } = useQuery({
@@ -12,8 +13,8 @@ export function Footer() {
   });
 
   return (
-    <footer className="border-t border-linen-300 bg-linen-50/50 px-6 py-3 text-xs text-ink-400 flex items-center justify-between">
-      <span className="font-serif italic">Tickety</span>
+    <footer className="flex items-center justify-between border-t border-linen-300 bg-linen-50/50 px-6 py-3 text-xs text-ink-400">
+      <TicketyLogo showDescriptor={false} size="sm" />
       <span className="flex items-center gap-3">
         {version && (
           <>

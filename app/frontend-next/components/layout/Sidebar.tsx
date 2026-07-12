@@ -6,6 +6,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { TicketyLogo } from "@/components/layout/TicketyLogo";
 import { SyncIndicator } from "@/components/layout/SyncIndicator";
+import { ProductIcon } from "@/components/icons/ProductIcon";
 import {
   LayoutDashboard,
   Inbox,
@@ -21,7 +22,6 @@ import {
   GitBranch,
   Laptop,
   MessageSquareHeart,
-  Timer,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -64,7 +64,7 @@ export function Sidebar({
     >
       <div className="flex h-16 items-center justify-between border-b border-white/10 px-4">
         <Link href="/" className="-ml-0.5 rounded-md focus:outline-none focus:ring-2 focus:ring-clay-300" onClick={onClose}>
-          <TicketyLogo className="h-8" inverse />
+          <TicketyLogo inverse size="md" />
         </Link>
         <button
           type="button"
@@ -95,13 +95,13 @@ export function Sidebar({
               aria-current={active ? "page" : undefined}
               onClick={onClose}
               className={cn(
-                "flex min-h-10 items-center gap-3 rounded-lg px-3 py-2 text-[13px] transition-colors focus:outline-none focus:ring-2 focus:ring-inset focus:ring-clay-300",
+                "group flex min-h-10 items-center gap-3 rounded-md px-3 py-2 text-[13px] transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#3D5AFE]",
                 active
-                  ? "bg-clay-500 text-white font-medium shadow-sm"
-                  : "text-slate-300 hover:bg-white/[0.07] hover:text-white font-normal"
+                  ? "font-medium text-[#F2F5F8]"
+                  : "font-normal text-[#9AA5B3] hover:bg-white/[0.035] hover:text-[#E7EBF0]"
               )}
             >
-              <Icon className="h-4 w-4 shrink-0" strokeWidth={1.5} />
+              <ProductIcon icon={Icon} active={active} />
               {item.label}
             </Link>
           );
@@ -118,15 +118,13 @@ export function Sidebar({
           onClick={onClose}
           aria-current={pathname.startsWith("/profile") ? "page" : undefined}
           className={cn(
-            "flex min-h-10 items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] transition-colors focus:outline-none focus:ring-2 focus:ring-inset focus:ring-clay-300",
+            "group flex min-h-10 items-center gap-3 rounded-md px-3 py-2 text-[13px] transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#3D5AFE]",
             pathname.startsWith("/profile")
-              ? "bg-clay-500 text-white font-medium"
-              : "text-slate-300 hover:bg-white/[0.07] hover:text-white font-normal"
+              ? "font-medium text-[#F2F5F8]"
+              : "font-normal text-[#9AA5B3] hover:bg-white/[0.035] hover:text-[#E7EBF0]"
           )}
         >
-          <div className="flex h-6 w-6 items-center justify-center rounded-full bg-clay-400/20 text-clay-200">
-            <User className="h-3.5 w-3.5" strokeWidth={1.5} />
-          </div>
+          <ProductIcon icon={User} active={pathname.startsWith("/profile")} />
           <span className="flex-1 truncate">{me?.name || "Profile"}</span>
           {me && (
             <span className="rounded-full border border-white/15 px-1.5 py-0.5 text-[10px] font-medium text-slate-400">
@@ -140,13 +138,16 @@ export function Sidebar({
           onClick={onClose}
           aria-current={pathname.startsWith("/settings") ? "page" : undefined}
           className={cn(
-            "flex min-h-10 items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] transition-colors focus:outline-none focus:ring-2 focus:ring-inset focus:ring-clay-300",
+            "group flex min-h-10 items-center gap-3 rounded-md px-3 py-2 text-[13px] transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#3D5AFE]",
             pathname.startsWith("/settings")
-              ? "bg-clay-500 text-white font-medium"
-              : "text-slate-300 hover:bg-white/[0.07] hover:text-white font-normal"
+              ? "font-medium text-[#F2F5F8]"
+              : "font-normal text-[#9AA5B3] hover:bg-white/[0.035] hover:text-[#E7EBF0]"
           )}
         >
-          <SettingsIcon className="h-4 w-4 shrink-0" strokeWidth={1.5} />
+          <ProductIcon
+            icon={SettingsIcon}
+            active={pathname.startsWith("/settings")}
+          />
           Settings
         </Link>
       </div>
