@@ -46,6 +46,10 @@ spec:
         # the route handler reads this non-public var at request time instead.
         - name: BACKEND_URL
           value: "http://backend-service:8000"
+        # Server-only public origin for absolute metadata URLs. This manifest is
+        # the local OrbStack target exposed by frontend-service on port 17000.
+        - name: SITE_URL
+          value: "http://localhost:17000"
         startupProbe:
           httpGet:
             path: /

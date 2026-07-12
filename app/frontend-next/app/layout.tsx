@@ -6,7 +6,9 @@ import { AppShell } from "@/components/layout/AppShell";
 export const dynamic = "force-dynamic";
 
 const metadataBase = new URL(
-  process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000"
+  process.env.SITE_URL ??
+    process.env.NEXT_PUBLIC_SITE_URL ??
+    "http://localhost:3000"
 );
 
 export const metadata: Metadata = {
