@@ -42,3 +42,8 @@ NetworkPolicy. The canonical local deployment runs
 blocked while public HTTPS remains available. Target-specific deployment
 workflows must run the same check with their namespace. Private AI endpoints require a deliberately reviewed policy
 change rather than only an application setting.
+
+OrbStack's built-in local Kubernetes networking currently accepts but does not
+enforce NetworkPolicy. The local `deploy.sh` therefore reports that limitation
+and continues; remote and public-cluster deployment paths retain the mandatory
+enforcement check.
