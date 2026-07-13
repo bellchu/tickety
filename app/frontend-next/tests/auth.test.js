@@ -22,6 +22,9 @@ function loadAuthHelpers() {
 
 const {
   canAccessAdministration,
+  canAccessProtectedIntelligence,
+  hasProtectedProductionSession,
+  isDemoContext,
   isDemoAdministrationContext,
 } = loadAuthHelpers();
 
@@ -52,6 +55,8 @@ test("administration access fails closed for every non-admin context", () => {
     context({ app_mode: "demo" }),
     context({ role: "supervisor" }),
     context({ role: "agent" }),
+    context({ is_active: false }),
+    context({ role: null }),
   ];
 
   for (const candidate of cases) {
@@ -60,7 +65,47 @@ test("administration access fails closed for every non-admin context", () => {
   assert.equal(canAccessAdministration(context()), true);
 });
 
+test("protected production sessions require a real active production session", () => {
+  const cases = [
+    undefined,
+    null,
+    context({ auth_kind: "demo_fallback" }),
+    context({ app_mode: "demo" }),
+    context({ is_active: false }),
+  ];
+
+  for (const candidate of cases) {
+    assert.equal(hasProtectedProductionSession(candidate), false);
+  }
+  assert.equal(hasProtectedProductionSession(context({ role: "agent" })), true);
+});
+
+test("protected intelligence allows only production admin and supervisor sessions", () => {
+  const denied = [
+    undefined,
+    null,
+    context({ auth_kind: "demo_fallback" }),
+    context({ app_mode: "demo" }),
+    context({ role: "agent" }),
+    context({ role: "unknown" }),
+    context({ role: null }),
+    context({ is_active: false }),
+  ];
+
+  for (const candidate of denied) {
+    assert.equal(canAccessProtectedIntelligence(candidate), false);
+  }
+  assert.equal(canAccessProtectedIntelligence(context({ role: "admin" })), true);
+  assert.equal(canAccessProtectedIntelligence(context({ role: "supervisor" })), true);
+  assert.equal(canAccessProtectedIntelligence(context({ role: "SUPERVISOR" })), true);
+});
+
 test("demo administration state covers fallback and signed-in demo sessions", () => {
+  assert.equal(isDemoContext(undefined), false);
+  assert.equal(isDemoContext(context()), false);
+  assert.equal(isDemoContext(context({ auth_kind: "demo_fallback" })), true);
+  assert.equal(isDemoContext(context({ app_mode: "demo" })), true);
+
   assert.equal(isDemoAdministrationContext(undefined), false);
   assert.equal(isDemoAdministrationContext(context()), false);
   assert.equal(

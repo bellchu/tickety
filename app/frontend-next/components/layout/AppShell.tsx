@@ -7,7 +7,8 @@ import { AppExperience } from "@/components/layout/AppExperience";
 import { Footer } from "@/components/layout/Footer";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { TicketyLogo } from "@/components/layout/TicketyLogo";
-import { api, APIError } from "@/lib/api";
+import { api, APIError, queryClient } from "@/lib/api";
+import type { AuthContext } from "@/lib/types";
 
 const PUBLIC_ROUTES = ["/login", "/portal"];
 
@@ -15,6 +16,14 @@ function isPublicRoute(pathname: string) {
   return PUBLIC_ROUTES.some(
     (route) => pathname === route || pathname.startsWith(`${route}/`)
   );
+}
+
+function crossesAuthorizationBoundary(previous: AuthContext, next: AuthContext) {
+  return previous.id !== next.id
+    || previous.role.toLowerCase() !== next.role.toLowerCase()
+    || previous.is_active !== next.is_active
+    || previous.auth_kind !== next.auth_kind
+    || previous.app_mode !== next.app_mode;
 }
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -30,6 +39,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (isPublicRoute(pathname)) {
+      // Login is a user-isolation boundary. No data from the previous session
+      // may survive into the next SPA navigation.
+      queryClient.clear();
       setAuthState("authenticated");
       return;
     }
@@ -37,11 +49,21 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     let cancelled = false;
     setAuthState("checking");
     api.getAuthMe()
-      .then(() => {
-        if (!cancelled) setAuthState("authenticated");
+      .then((context) => {
+        if (!cancelled) {
+          const previous = queryClient.getQueryData<AuthContext>(["auth-me"]);
+          if (previous && crossesAuthorizationBoundary(previous, context)) {
+            queryClient.clear();
+          }
+          queryClient.setQueryData(["auth-me"], context);
+          setAuthState("authenticated");
+        }
       })
       .catch((error: unknown) => {
         if (cancelled) return;
+        // Never let a previously privileged identity survive a failed access
+        // check in the shared query cache.
+        queryClient.clear();
         if (error instanceof APIError && error.status === 401) {
           router.replace(`/login?next=${encodeURIComponent(pathname)}`);
           return;

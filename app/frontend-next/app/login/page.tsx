@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { ArrowRight, Check, LockKeyhole, ShieldCheck } from "lucide-react";
 import { TicketyLogo } from "@/components/layout/TicketyLogo";
 import { Alert, Button } from "@/components/ui";
-import { api } from "@/lib/api";
+import { api, queryClient } from "@/lib/api";
 
 function getSafeNextPath() {
   if (typeof window === "undefined") return "/";
@@ -51,6 +51,7 @@ export default function LoginPage() {
 
     try {
       await api.login(email, password);
+      queryClient.clear();
       router.push(nextPath);
       router.refresh();
     } catch {
@@ -62,6 +63,7 @@ export default function LoginPage() {
 
   const handleSsoLogin = () => {
     setSsoLoading(true);
+    queryClient.clear();
     window.location.assign("/api/auth/sso/login");
   };
 

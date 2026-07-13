@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
-import { canAccessAdministration } from "@/lib/auth";
+import { canAccessAdministration, canAccessProtectedIntelligence, isDemoContext } from "@/lib/auth";
 import { TicketyLogo } from "@/components/layout/TicketyLogo";
 import { SyncIndicator } from "@/components/layout/SyncIndicator";
 import { ProductIcon } from "@/components/icons/ProductIcon";
@@ -52,7 +52,8 @@ export function Sidebar({
   const pathname = usePathname();
   const { data: me } = useQuery({ queryKey: ["auth-me"], queryFn: api.getAuthMe, retry: false });
   const canAccessAdmin = canAccessAdministration(me);
-  const isDemoFallback = me?.auth_kind === "demo_fallback";
+  const canAccessIntelligence = canAccessProtectedIntelligence(me);
+  const isDemoWorkspace = isDemoContext(me);
 
   return (
     <aside
@@ -86,7 +87,7 @@ export function Sidebar({
       </div>
 
       <nav aria-label="Workspace" className="flex-1 space-y-0.5 overflow-y-auto px-3 pb-4">
-        {navItems.map((item) => {
+        {navItems.filter((item) => item.href !== "/intelligence" || canAccessIntelligence).map((item) => {
           const Icon = item.icon;
           const active =
             pathname === item.href ||
@@ -131,11 +132,11 @@ export function Sidebar({
         >
           <ProductIcon icon={User} active={pathname.startsWith("/profile")} />
           <span className="flex-1 truncate">
-            {isDemoFallback ? "Demo workspace" : me?.name || "Profile"}
+            {isDemoWorkspace ? "Demo workspace" : me?.name || "Profile"}
           </span>
           {me && (
             <span className="rounded-full border border-white/15 px-1.5 py-0.5 text-[10px] font-medium text-slate-400">
-              {isDemoFallback ? "DEMO" : `T${me.tier}`}
+              {isDemoWorkspace ? "DEMO" : `T${me.tier}`}
             </span>
           )}
         </Link>
