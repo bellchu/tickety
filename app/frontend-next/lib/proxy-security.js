@@ -32,6 +32,35 @@ function jsonError(status, detail) {
 }
 
 /**
+ * Use the deployment-owned public URL for forwarding identity. TLS commonly
+ * terminates before the Next.js pod, so req.nextUrl can legitimately be http
+ * even while the browser origin is https. Falling back to the request URL
+ * keeps local development usable when SITE_URL is absent or invalid.
+ *
+ * @param {string | URL} requestUrl
+ * @param {string | undefined} configuredSiteUrl
+ */
+function publicForwardingIdentity(requestUrl, configuredSiteUrl) {
+  let url;
+  try {
+    const configured = configuredSiteUrl
+      ? new URL(configuredSiteUrl)
+      : null;
+    if (
+      configured &&
+      ["http:", "https:"].includes(configured.protocol) &&
+      configured.host
+    ) {
+      url = configured;
+    }
+  } catch {
+    // Invalid deployment configuration falls back to the actual request URL.
+  }
+  if (!url) url = new URL(String(requestUrl));
+  return { host: url.host, proto: url.protocol.replace(":", "") };
+}
+
+/**
  * Validate framing headers before reading a body. A transfer-encoded request
  * without Content-Length remains valid; its decoded stream is bounded below.
  *
@@ -116,6 +145,7 @@ module.exports = {
   boundedBody,
   jsonError,
   maxRequestBodyBytes,
+  publicForwardingIdentity,
   sanitizedProxyRequestHeaders,
   sanitizedProxyResponseHeaders,
   validateRequestBodyHeaders,

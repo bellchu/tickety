@@ -5,6 +5,7 @@ const {
   boundedBody,
   jsonError,
   maxRequestBodyBytes,
+  publicForwardingIdentity,
   sanitizedProxyRequestHeaders,
   sanitizedProxyResponseHeaders,
   validateRequestBodyHeaders,
@@ -31,6 +32,23 @@ test("proxy errors expose only the stable public code", async () => {
   assert.equal(response.status, 502);
   assert.deepEqual(await response.json(), { detail: "upstream_unavailable" });
   assert.equal(response.headers.get("content-type"), "application/json");
+});
+
+test("deployment public URL survives TLS termination before the pod", () => {
+  assert.deepEqual(
+    publicForwardingIdentity(
+      "http://tickety.situ.io/api/tickets",
+      "https://tickety.situ.io",
+    ),
+    { host: "tickety.situ.io", proto: "https" },
+  );
+  assert.deepEqual(
+    publicForwardingIdentity(
+      "http://localhost:3000/api/tickets",
+      "not-a-url",
+    ),
+    { host: "localhost:3000", proto: "http" },
+  );
 });
 
 test("framing validation rejects malformed, conflicting, and oversized lengths", () => {

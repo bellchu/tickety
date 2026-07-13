@@ -3,6 +3,7 @@ import {
   boundedBody,
   jsonError,
   maxRequestBodyBytes,
+  publicForwardingIdentity,
   sanitizedProxyRequestHeaders,
   sanitizedProxyResponseHeaders,
   validateRequestBodyHeaders,
@@ -61,10 +62,14 @@ async function proxy(req: NextRequest, ctx: Ctx) {
   // Hop-by-hop / host headers must not be forwarded verbatim. Preserve the
   // browser's Origin and Sec-Fetch-* headers so backend CSRF checks see the
   // real caller instead of a synthetic same-origin value from this proxy.
+  const forwardingIdentity = publicForwardingIdentity(
+    req.nextUrl,
+    process.env.SITE_URL,
+  );
   const headers = sanitizedProxyRequestHeaders(
     req.headers,
-    req.nextUrl.host,
-    req.nextUrl.protocol.replace(":", ""),
+    forwardingIdentity.host,
+    forwardingIdentity.proto,
   );
 
   const init: RequestInit & { duplex?: "half" } = {
