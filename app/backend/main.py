@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import case, desc, func, or_, text
+from sqlalchemy.exc import IntegrityError
 
 from .database import (
     init_db, get_db, SessionLocal,
@@ -35,6 +36,7 @@ from .database import (
     AIRequestBucketRecord,
     LLMCallRecord,
     AIArtifactRecord,
+    SettingsRecord,
 )
 from .schema import (
     Ticket, User, UserSummary, Recognition, SyncStatus,
@@ -172,13 +174,16 @@ def _auth_required_for_request() -> bool:
     return settings_module.is_production_mode() or settings_module.get_bool("LOGIN_REQUIRED")
 
 
-def _request_origin_allowed(request: Request) -> bool:
+def _request_origin_allowed(request: Request, *, require_explicit: bool = False) -> bool:
+    fetch_site = (request.headers.get("sec-fetch-site") or "").strip().lower()
+    if fetch_site == "cross-site":
+        return False
     origin = request.headers.get("origin")
     if not origin:
         referer = request.headers.get("referer", "")
         origin = referer if referer else ""
     if not origin:
-        return True
+        return fetch_site == "same-origin" or (not require_explicit and not fetch_site)
     parsed = urllib.parse.urlparse(origin)
     if not parsed.scheme or not parsed.netloc:
         return False
@@ -253,13 +258,19 @@ def get_current_user(
     enabled. Production mode always requires an explicit session."""
     state_user = getattr(request.state, "current_user", None)
     if state_user and getattr(state_user, "is_active", False):
+        request.state.demo_fallback = False
         return state_user
+    user = _resolve_request_user(request, db, allow_demo=False)
+    if user:
+        request.state.demo_fallback = False
+        return user
     user = _resolve_request_user(
         request,
         db,
         allow_demo=settings_module.is_demo_mode() and not settings_module.get_bool("LOGIN_REQUIRED"),
     )
     if user:
+        request.state.demo_fallback = True
         return user
     raise HTTPException(status_code=401, detail="Not authenticated")
 
@@ -289,8 +300,15 @@ def get_authenticated_user(
     raise HTTPException(status_code=401, detail="Not authenticated")
 
 
+def require_protected_ai_origin(request: Request) -> None:
+    """Block cross-site browser requests even for billable AI GET endpoints."""
+    if not _request_origin_allowed(request, require_explicit=True):
+        raise HTTPException(status_code=403, detail="Invalid request origin")
+
+
 def get_protected_ai_user(
     user: UserRecord = Depends(get_authenticated_user),
+    _origin: None = Depends(require_protected_ai_origin),
 ) -> UserRecord:
     """Require production mode before exposing externally-triggered AI I/O."""
     if not settings_module.is_production_mode():
@@ -315,6 +333,17 @@ def require_protected_ai_role(*roles: str):
     return checker
 
 
+def require_production_admin_callback_user(
+    user: UserRecord = Depends(get_authenticated_user),
+) -> UserRecord:
+    """Authenticate OAuth callbacks without rejecting the provider redirect."""
+    if not settings_module.is_production_mode():
+        raise HTTPException(status_code=403, detail="OAuth is disabled in demo mode")
+    if (user.role or "").lower() != "admin":
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    return user
+
+
 def _can_access_private_ai_context(user: UserRecord) -> bool:
     # Demo-mode fallback identities are anonymous conveniences, not authenticated
     # principals, even when the seeded account happens to have the admin role.
@@ -331,6 +360,16 @@ def _authorize_ticket_analysis(user: UserRecord, ticket: TicketRecord) -> None:
     if (user.role or "").lower() == "agent" and ticket.assignee_id in {None, user.id}:
         return
     raise HTTPException(status_code=403, detail="Insufficient ticket analysis permission")
+
+
+def _ticket_scope_assignee_id(user: UserRecord) -> Optional[str]:
+    """Return the agent scope; fail closed for every unknown active role."""
+    role = (user.role or "").lower()
+    if role in {"admin", "supervisor"}:
+        return None
+    if role == "agent":
+        return user.id
+    raise HTTPException(status_code=403, detail="Insufficient ticket permissions")
 
 
 def _login_key(payload: LoginRequest, request: Request) -> str:
@@ -502,10 +541,48 @@ async def version():
 
 # ── Tickets ──────────────────────────────────────────────────
 
+_PUBLIC_DEMO_AI_FIELDS = {
+    "sentiment": None,
+    "category": None,
+    "mood": None,
+    "complexity": 1,
+    "ai_reasoning": None,
+    "suggested_response": None,
+    "ai_review_state": None,
+    "escalation_risk": 0,
+    "summary": None,
+    "recommended_solution": None,
+    "ai_source_hash": None,
+    "ai_pipeline_version": None,
+    "ai_model": None,
+    "ai_status": None,
+    "ai_claim_id": None,
+    "ai_lease_expires_at": None,
+    "ai_attempts": 0,
+    "ai_next_attempt_at": None,
+    "ai_requested_artifacts": None,
+    "ai_started_at": None,
+    "ai_generated_at": None,
+    "ai_error": None,
+    "ai_synthetic": False,
+    "ai_suggested_priority": None,
+}
+
+
+def _ticket_for_request(request: Request, ticket: TicketRecord) -> Ticket | TicketRecord:
+    """Remove generated AI artifacts from anonymous demo browsing responses."""
+    if not getattr(request.state, "demo_fallback", False):
+        return ticket
+    return Ticket.model_validate(ticket, from_attributes=True).model_copy(
+        update=_PUBLIC_DEMO_AI_FIELDS
+    )
+
 @app.get("/tickets", response_model=List[Ticket])
 async def list_tickets(
+    request: Request,
     response: Response,
     db: Session = Depends(get_db),
+    user: UserRecord = Depends(get_current_user),
     status: Optional[str] = Query(default=None, max_length=100),
     priority: Optional[str] = Query(default=None, max_length=100),
     assignee_id: Optional[str] = Query(default=None, max_length=255),
@@ -515,7 +592,13 @@ async def list_tickets(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0, le=1_000_000),
 ):
+    allowed_assignee_id = _ticket_scope_assignee_id(user)
     q = db.query(TicketRecord)
+    if allowed_assignee_id is not None:
+        q = q.filter(or_(
+            TicketRecord.assignee_id.is_(None),
+            TicketRecord.assignee_id == allowed_assignee_id,
+        ))
     if status:
         q = q.filter(TicketRecord.status == status)
     if priority:
@@ -580,19 +663,25 @@ async def list_tickets(
         )
     for ticket in tickets:
         ticket.__dict__["assignee_name"] = assignee_names.get(ticket.assignee_id)
-    return tickets
+    return [_ticket_for_request(request, ticket) for ticket in tickets]
 
 
 @app.get("/tickets/{ticket_id}", response_model=Ticket)
-async def get_ticket(ticket_id: str, db: Session = Depends(get_db)):
+async def get_ticket(
+    ticket_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(get_current_user),
+):
     ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
+    _authorize_ticket_analysis(user, ticket)
     # Enrich with assignee name
     if ticket.assignee_id:
         user = db.query(UserRecord).filter(UserRecord.id == ticket.assignee_id).first()
         ticket.__dict__["assignee_name"] = user.name if user else None
-    return ticket
+    return _ticket_for_request(request, ticket)
 
 
 def _normalize_portal_reporter(reporter: str) -> str:
@@ -861,7 +950,7 @@ async def update_ticket(
 async def delete_ticket(
     ticket_id: str,
     db: Session = Depends(get_db),
-    _user: UserRecord = Depends(require_role("admin", "supervisor")),
+    _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
     ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
     if not ticket:
@@ -968,7 +1057,7 @@ async def bulk_action(
     payload: BulkAction,
     request: Request,
     db: Session = Depends(get_db),
-    _user: UserRecord = Depends(require_role("admin", "supervisor")),
+    _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
     """Apply an action to multiple tickets at once.
     Actions: assign, close, set_priority, set_category."""
@@ -1030,10 +1119,12 @@ async def bulk_action(
                 t.resolved_at = datetime.utcnow()
                 changed_ticket_ids.add(t.id)
         elif payload.action == "set_priority" and payload.value:
-            record_change(t, "priority", payload.value)
+            if record_change(t, "priority", payload.value):
+                invalidate_ticket_resolution(t)
             _apply_sla_targets(t, db)
         elif payload.action == "set_category" and payload.value:
-            record_change(t, "category", payload.value)
+            if record_change(t, "category", payload.value):
+                invalidate_ticket_resolution(t)
         count += 1
     ticket_vectors.delete_ticket_source_documents(db, list(changed_ticket_ids))
     db.commit()
@@ -1228,11 +1319,18 @@ def _triage_result_payload(ticket: TicketRecord, analysis_data: Dict[str, Any]) 
     }
 
 
+def _llm_cache_identity() -> str:
+    identity = getattr(engine.llm, "cache_identity", None)
+    if isinstance(identity, str) and identity:
+        return identity
+    return str(engine.llm.model_name)
+
+
 def _ticket_analysis_hash(ticket: TicketRecord) -> str:
     payload = {
         "subject": ticket.subject or "",
         "description": ticket.description or "",
-        "model": engine.llm.model_name,
+        "model": _llm_cache_identity(),
         "pipeline": AI_PIPELINE_VERSION,
     }
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
@@ -1253,7 +1351,7 @@ def _artifact_input_hash(ticket: TicketRecord, artifact: str) -> str:
         "artifact": artifact,
         "subject": ticket.subject or "",
         "description": ticket.description or "",
-        "model": engine.llm.model_name,
+        "model": _llm_cache_identity(),
         "pipeline": AI_PIPELINE_VERSION,
     }
     if artifact in {"summary", "resolution"}:
@@ -1281,7 +1379,7 @@ def _artifact_is_current(db: Session, ticket: TicketRecord, artifact: str) -> bo
         AIArtifactRecord.artifact == artifact,
         AIArtifactRecord.input_hash == _artifact_input_hash(ticket, artifact),
         AIArtifactRecord.pipeline_version == AI_PIPELINE_VERSION,
-        AIArtifactRecord.model == engine.llm.model_name,
+        AIArtifactRecord.model == _llm_cache_identity(),
         AIArtifactRecord.active.is_(True),
     )
     if settings_module.is_production_mode() or not bool(
@@ -1314,7 +1412,7 @@ def _claim_ticket_analysis(
             TicketRecord.ai_source_hash.is_(None),
             TicketRecord.ai_pipeline_version != AI_PIPELINE_VERSION,
             TicketRecord.ai_pipeline_version.is_(None),
-            TicketRecord.ai_model != engine.llm.model_name,
+            TicketRecord.ai_model != _llm_cache_identity(),
             TicketRecord.ai_model.is_(None),
         ))
     changed = query.update(
@@ -1326,7 +1424,7 @@ def _claim_ticket_analysis(
             TicketRecord.ai_error: None,
             TicketRecord.ai_source_hash: source_hash,
             TicketRecord.ai_pipeline_version: AI_PIPELINE_VERSION,
-            TicketRecord.ai_model: engine.llm.model_name,
+            TicketRecord.ai_model: _llm_cache_identity(),
         },
         synchronize_session=False,
     )
@@ -1385,7 +1483,7 @@ def _record_ai_artifact(
         input_hash=_artifact_input_hash(ticket, artifact),
         pipeline_version=AI_PIPELINE_VERSION,
         provider=getattr(engine.llm, "provider", "unknown"),
-        model=engine.llm.model_name,
+        model=_llm_cache_identity(),
         synthetic=bool(
             getattr(engine.llm, "is_mock", False)
             and getattr(engine.llm, "allow_synthetic", False)
@@ -1672,7 +1770,7 @@ async def _run_ticket_analysis(
     ticket = _ensure_analysis_input_current(ticket, db, source_hash, claim_id)
     ticket.ai_source_hash = source_hash
     ticket.ai_pipeline_version = AI_PIPELINE_VERSION
-    ticket.ai_model = engine.llm.model_name
+    ticket.ai_model = _llm_cache_identity()
     complete = bool(ticket.ai_reasoning and ticket.summary and ticket.recommended_solution)
     ticket.ai_status = (
         "partial" if errors else "completed" if complete else "triage_completed"
@@ -2091,13 +2189,14 @@ async def search_ticket_intelligence(
     _user: UserRecord = Depends(get_protected_ai_user),
     db: Session = Depends(get_db),
 ):
+    allowed_assignee_id = _ticket_scope_assignee_id(_user)
     _reserve_ai_request(db, _user.id, "ticket_intelligence_search")
     return await ticket_vectors.retrieve_ticket_context(
         db,
         q,
         limit=limit,
         include_private_comments=_can_access_private_ai_context(_user),
-        allowed_assignee_id=_user.id if _user.role == "agent" else None,
+        allowed_assignee_id=allowed_assignee_id,
     )
 
 
@@ -2108,6 +2207,7 @@ async def analyze_ticket_intelligence(
     _user: UserRecord = Depends(get_protected_ai_user),
     db: Session = Depends(get_db),
 ):
+    allowed_assignee_id = _ticket_scope_assignee_id(_user)
     _reserve_ai_request(db, _user.id, "ticket_intelligence")
     retrieval = await ticket_vectors.retrieve_ticket_context(
         db,
@@ -2115,7 +2215,7 @@ async def analyze_ticket_intelligence(
         limit=payload.limit,
         source_types=payload.source_types,
         include_private_comments=_can_access_private_ai_context(_user),
-        allowed_assignee_id=_user.id if _user.role == "agent" else None,
+        allowed_assignee_id=allowed_assignee_id,
     )
     # Retrieval is complete; release its read transaction before the LLM call.
     db.rollback()
@@ -2488,7 +2588,12 @@ async def kb_feedback(article_id: str, payload: dict, db: Session = Depends(get_
 
 
 @app.post("/tickets/{ticket_id}/kb/{article_id}", status_code=201)
-async def link_kb_to_ticket(ticket_id: str, article_id: str, db: Session = Depends(get_db)):
+async def link_kb_to_ticket(
+    ticket_id: str,
+    article_id: str,
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
+):
     ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
@@ -2506,12 +2611,23 @@ async def link_kb_to_ticket(ticket_id: str, article_id: str, db: Session = Depen
 
 
 @app.get("/tickets/{ticket_id}/kb", response_model=List[KbArticle])
-async def get_ticket_kb_links(ticket_id: str, db: Session = Depends(get_db)):
+async def get_ticket_kb_links(
+    ticket_id: str,
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(get_authenticated_user),
+):
+    ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    _authorize_ticket_analysis(user, ticket)
     links = db.query(TicketLinkRecord).filter(TicketLinkRecord.ticket_id == ticket_id).all()
     article_ids = [l.kb_article_id for l in links]
     if not article_ids:
         return []
-    return db.query(KbArticleRecord).filter(KbArticleRecord.id.in_(article_ids)).all()
+    query = db.query(KbArticleRecord).filter(KbArticleRecord.id.in_(article_ids))
+    if (user.role or "").lower() not in {"admin", "supervisor"}:
+        query = query.filter(KbArticleRecord.status == "published")
+    return query.all()
 
 
 # ── Custom ticket status / priority config ─────────────────────
@@ -2755,8 +2871,10 @@ async def get_user_recognitions(user_id: str, db: Session = Depends(get_db)):
 
 @app.post("/admin/sync/trigger")
 def trigger_sync(
-    _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
+    _reserve_ai_request(db, user.id, "itsm_sync")
     adapter = get_adapter()
     result = sync_tickets_from_external(adapter)
     return {"status": "completed", "result": result}
@@ -2766,7 +2884,8 @@ def trigger_sync(
 def fetch_sync(
     days: int = Query(7, ge=1, le=365, description="Fetch tickets updated in the last N days"),
     overwrite: bool = Query(False, description="Overwrite already-imported tickets from the source"),
-    _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
     """Manual "fetch by days" pull from the ITSM provider.
 
@@ -2776,19 +2895,22 @@ def fetch_sync(
     so re-running an overlapping window won't clobber local AI triage / status
     changes; pass overwrite=true to force-refresh them from the source.
     """
+    _reserve_ai_request(db, user.id, "itsm_fetch")
     adapter = get_adapter()
     result = fetch_tickets_by_days(adapter, days=days, overwrite=overwrite)
     return {"status": "completed", "result": result}
 
 
 @app.get("/admin/sync/status", response_model=SyncStatus)
-async def sync_status(_user: UserRecord = Depends(get_current_user)):
+async def sync_status(
+    _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
+):
     s = get_sync_status()
     return SyncStatus(
         provider=s.get("provider", "none"),
         last_synced_at=datetime.fromisoformat(s["last_synced_at"]) if s.get("last_synced_at") else None,
         last_status=s.get("last_status", "idle"),
-        last_error=s.get("last_error"),
+        last_error="sync_failed" if s.get("last_error") else None,
         total_synced=s.get("total_synced", 0),
     )
 
@@ -2798,13 +2920,15 @@ async def sync_status(_user: UserRecord = Depends(get_current_user)):
 @app.post("/admin/sync/agents")
 async def sync_agents(
     payload: dict = Body(default_factory=dict),
-    _user: UserRecord = Depends(require_role("admin", "supervisor")),
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
     """Fetch agents from the ITSM provider and create Tickety user accounts.
 
     Pulls every agent from GET /api/v2/agents (with rate‑limit pacing),
     then creates or updates a matching Tickety UserRecord + UserMappingRecord.
     Returns {created, updated, errors, total}."""
+    _reserve_ai_request(db, user.id, "itsm_agent_sync")
     adapter = get_adapter()
     result = await async_sync_agents_from_external(adapter, options=payload)
     changed = (
@@ -2830,7 +2954,7 @@ async def sync_agents(
 @app.get("/admin/agents")
 async def list_agents(
     db: Session = Depends(get_db),
-    _user: UserRecord = Depends(require_role("admin", "supervisor")),
+    _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
     """Return every user that has an external mapping (i.e. is an agent account)."""
     mappings = db.query(UserMappingRecord).all()
@@ -2855,7 +2979,9 @@ async def list_agents(
 # ── OAuth 2.0 ──────────────────────────────────────────────────
 
 @app.get("/oauth/status")
-async def oauth_status(_user: UserRecord = Depends(require_role("admin"))):
+async def oauth_status(
+    _user: UserRecord = Depends(require_protected_ai_role("admin")),
+):
     """Return whether OAuth is configured and a token is present."""
     from .integrations.registry import get_adapter as _ga
     ad = _ga()
@@ -2867,7 +2993,9 @@ async def oauth_status(_user: UserRecord = Depends(require_role("admin"))):
 
 
 @app.get("/oauth/authorize")
-async def oauth_authorize(_user: UserRecord = Depends(require_role("admin"))):
+async def oauth_authorize(
+    _user: UserRecord = Depends(require_protected_ai_role("admin")),
+):
     """Return the OAuth 2.0 authorization URL for the configured external ITSM provider."""
     from .integrations.registry import get_adapter as _ga
     ad = _ga()
@@ -2884,7 +3012,7 @@ async def oauth_callback(
     request: Request,
     code: str = Query(..., description="The authorisation code from the ITSM provider"),
     state: str = Query(..., description="OAuth state returned by the provider"),
-    _user: UserRecord = Depends(require_role("admin")),
+    _user: UserRecord = Depends(require_production_admin_callback_user),
 ):
     """Exchange the OAuth code for tokens and persist them."""
     saved_state = request.cookies.get(FRESHSERVICE_OAUTH_STATE_COOKIE)
@@ -2895,7 +3023,8 @@ async def oauth_callback(
     try:
         tokens = await ad.oauth_exchange_code(code)
     except Exception as e:
-        raise HTTPException(400, f"Token exchange failed: {e}")
+        print(f"[oauth] token exchange failed kind={type(e).__name__}")
+        raise HTTPException(400, "OAuth token exchange failed") from e
 
     access_token = tokens.get("access_token", "")
     refresh_token = tokens.get("refresh_token", "")
@@ -2903,10 +3032,14 @@ async def oauth_callback(
         raise HTTPException(400, "No access_token in response")
 
     # Persist tokens in the database so the adapter picks them up on restart.
-    settings_module.update_settings({
-        "FRESHSERVICE_OAUTH_ACCESS_TOKEN": access_token,
-        "FRESHSERVICE_OAUTH_REFRESH_TOKEN": refresh_token,
-    })
+    try:
+        settings_module.update_settings({
+            "FRESHSERVICE_OAUTH_ACCESS_TOKEN": access_token,
+            "FRESHSERVICE_OAUTH_REFRESH_TOKEN": refresh_token,
+        })
+    except Exception as exc:
+        print(f"[oauth] token persistence failed kind={type(exc).__name__}")
+        raise HTTPException(503, "OAuth token persistence failed") from None
     # Also patch env so the current process sees them immediately.
     os.environ["FRESHSERVICE_OAUTH_ACCESS_TOKEN"] = access_token
     os.environ["FRESHSERVICE_OAUTH_REFRESH_TOKEN"] = refresh_token
@@ -2920,32 +3053,42 @@ async def oauth_callback(
 
 
 @app.post("/oauth/refresh")
-async def oauth_refresh(_user: UserRecord = Depends(require_role("admin"))):
+async def oauth_refresh(
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(require_protected_ai_role("admin")),
+):
     """Manually refresh the OAuth access token."""
+    _reserve_ai_request(db, user.id, "itsm_oauth_refresh")
     from .integrations.registry import get_adapter as _ga
     ad = _ga()
     try:
         tokens = await ad.oauth_refresh()
     except Exception as e:
-        raise HTTPException(400, f"Token refresh failed: {e}")
+        print(f"[oauth] token refresh failed kind={type(e).__name__}")
+        raise HTTPException(400, "OAuth token refresh failed") from e
 
     access_token = tokens.get("access_token", "")
     refresh_token = tokens.get("refresh_token", "")
-    settings_module.update_settings({
-        "FRESHSERVICE_OAUTH_ACCESS_TOKEN": access_token,
-        "FRESHSERVICE_OAUTH_REFRESH_TOKEN": refresh_token,
-    })
+    try:
+        settings_module.update_settings({
+            "FRESHSERVICE_OAUTH_ACCESS_TOKEN": access_token,
+            "FRESHSERVICE_OAUTH_REFRESH_TOKEN": refresh_token,
+        })
+    except Exception as exc:
+        print(f"[oauth] token persistence failed kind={type(exc).__name__}")
+        raise HTTPException(503, "OAuth token persistence failed") from None
     return {"status": "refreshed", "expires_in": tokens.get("expires_in")}
 
 
 @app.post("/admin/sync/triage-all")
 async def triage_all_untriaged(
     db: Session = Depends(get_db),
-    _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
+    user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
     """Retroactively run AI triage on every ticket that hasn't been analysed yet.
     Useful after enabling auto‑triage or when tickets were imported before
     AI automation was turned on."""
+    _reserve_ai_request(db, user.id, "triage_all")
     untriaged = db.query(TicketRecord).filter(
         TicketRecord.ai_reasoning.is_(None)
     ).all()
@@ -2963,10 +3106,11 @@ async def triage_all_untriaged(
 @app.post("/admin/sync/repair")
 async def repair_ai_gaps(
     db: Session = Depends(get_db),
-    _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
+    user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
     """One‑time repair sweep: fill summary and resolution plan gaps for
     tickets that have triage data but are missing the later pipeline steps."""
+    _reserve_ai_request(db, user.id, "repair_ai_gaps")
     no_summary = db.query(TicketRecord).filter(
         TicketRecord.ai_reasoning.isnot(None),
         TicketRecord.summary.is_(None)
@@ -3024,6 +3168,9 @@ async def update_settings(
         return settings_module.update_settings(payload)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        print(f"[settings] persistence failed kind={type(exc).__name__}")
+        raise HTTPException(status_code=503, detail="Settings persistence failed") from None
 
 
 @app.get("/admin/llm/catalog")
@@ -3062,7 +3209,8 @@ async def llm_metrics(
 
 @app.post("/admin/llm/refresh-models")
 async def refresh_models(
-    _user: UserRecord = Depends(require_protected_ai_role("admin")),
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(require_protected_ai_role("admin")),
 ):
     """Fetch the latest available models from each configured LLM provider.
 
@@ -3070,6 +3218,7 @@ async def refresh_models(
     Only providers with a valid API key configured are queried; others are
     left with their preset defaults. Results are persisted so the catalog
     picks them up on restart."""
+    _reserve_ai_request(db, user.id, "refresh_model_catalog")
     from .llm_manager import fetch_live_models
     results = await fetch_live_models()
     return {
@@ -3267,6 +3416,84 @@ async def ticket_resolve(
 
 # ── Webhooks ─────────────────────────────────────────────────
 
+_WEBHOOK_DELIVERY_PREFIX = "WEBHOOK_DELIVERY_"
+
+
+def _claim_webhook_delivery(request: Request, raw_body: bytes) -> str:
+    """Atomically reject duplicate signed deliveries without retaining payloads."""
+    timestamp = (request.headers.get("x-freshservice-webhook-timestamp") or "").strip()
+    signature = (request.headers.get("x-freshservice-webhook-signature") or "").strip()
+    digest = hashlib.sha256(
+        timestamp.encode("ascii") + b"\0" + signature.encode("ascii") + b"\0" + raw_body
+    ).hexdigest()
+    key = f"{_WEBHOOK_DELIVERY_PREFIX}{digest}"
+    db = SessionLocal()
+    try:
+        db.add(SettingsRecord(
+            key=key, value=f"claimed:{int(time.time())}"
+        ))
+        db.flush()
+        max_age = _bounded_env_int("WEBHOOK_MAX_AGE_SECONDS", 300, 30, 3600)
+        db.query(SettingsRecord).filter(
+            SettingsRecord.key.like(f"{_WEBHOOK_DELIVERY_PREFIX}%"),
+            SettingsRecord.updated_at
+            < datetime.utcnow() - timedelta(seconds=max_age * 2),
+        ).delete(synchronize_session=False)
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Duplicate webhook delivery") from exc
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=503, detail="Webhook replay protection unavailable"
+        ) from exc
+    finally:
+        db.close()
+    return key
+
+
+def _complete_webhook_delivery(key: str) -> None:
+    db = SessionLocal()
+    try:
+        changed = db.query(SettingsRecord).filter(
+            SettingsRecord.key == key,
+            SettingsRecord.value.like("claimed:%"),
+        ).update(
+            {
+                SettingsRecord.value: f"completed:{int(time.time())}",
+                SettingsRecord.updated_at: datetime.utcnow(),
+            },
+            synchronize_session=False,
+        )
+        if changed != 1:
+            raise RuntimeError("webhook delivery claim is unavailable")
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=503, detail="Webhook replay protection unavailable"
+        ) from exc
+    finally:
+        db.close()
+
+
+def _release_webhook_delivery(key: str) -> None:
+    db = SessionLocal()
+    try:
+        db.query(SettingsRecord).filter(
+            SettingsRecord.key == key,
+            SettingsRecord.value.like("claimed:%"),
+        ).delete(synchronize_session=False)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=503, detail="Webhook replay protection unavailable"
+        ) from exc
+    finally:
+        db.close()
+
 @app.post("/webhooks/external")
 async def freshservice_webhook(request: Request):
     raw_body = await request.body()
@@ -3278,8 +3505,11 @@ async def freshservice_webhook(request: Request):
     event = adapter.parse_webhook(payload, dict(request.headers), raw_body=raw_body)
     if not event:
         raise HTTPException(status_code=400, detail="Invalid webhook payload")
-    ticket = handle_webhook_event(event, adapter)
-    if ticket:
+    delivery_key = _claim_webhook_delivery(request, raw_body)
+    try:
+        ticket = handle_webhook_event(event, adapter)
+        if not ticket:
+            raise RuntimeError("webhook event was not applied")
         db = SessionLocal()
         try:
             current_ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket.id).first()
@@ -3288,6 +3518,11 @@ async def freshservice_webhook(request: Request):
                 await _check_resolution_and_award(current_ticket, db=db)
         finally:
             db.close()
+    except Exception as exc:
+        _release_webhook_delivery(delivery_key)
+        print(f"[webhook] processing failed kind={type(exc).__name__}")
+        raise HTTPException(status_code=503, detail="Webhook processing failed") from exc
+    _complete_webhook_delivery(delivery_key)
     return {"status": "received", "ticket_id": ticket.id if ticket else None}
 
 
@@ -3387,7 +3622,7 @@ async def _check_resolution_and_award(ticket: TicketRecord, db: Optional[Session
         await _broadcast_notification(notification.model_dump(mode="json"))
 
     except Exception as e:
-        print(f"[award] error: {e}")
+        print(f"[award] error kind={type(e).__name__}")
         db.rollback()
     finally:
         if owns_db:
@@ -3772,12 +4007,24 @@ async def unlink_ticket_from_problem(problem_id: str, ticket_id: str, db: Sessio
 
 
 @app.get("/problems/{problem_id}/tickets", response_model=List[Ticket])
-async def get_problem_tickets(problem_id: str, db: Session = Depends(get_db)):
+async def get_problem_tickets(
+    problem_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(get_current_user),
+):
+    allowed_assignee_id = _ticket_scope_assignee_id(user)
     links = db.query(ProblemTicketLinkRecord).filter(ProblemTicketLinkRecord.problem_id == problem_id).all()
     ticket_ids = [l.ticket_id for l in links]
     if not ticket_ids:
         return []
-    return db.query(TicketRecord).filter(TicketRecord.id.in_(ticket_ids)).all()
+    query = db.query(TicketRecord).filter(TicketRecord.id.in_(ticket_ids))
+    if allowed_assignee_id is not None:
+        query = query.filter(or_(
+            TicketRecord.assignee_id.is_(None),
+            TicketRecord.assignee_id == allowed_assignee_id,
+        ))
+    return [_ticket_for_request(request, ticket) for ticket in query.all()]
 
 
 # ── Change Management ──────────────────────────────────────────
@@ -4294,7 +4541,7 @@ def _websocket_user(ws: WebSocket) -> Optional[UserRecord]:
 def _websocket_origin_allowed(ws: WebSocket) -> bool:
     origin = (ws.headers.get("origin") or "").strip().rstrip("/")
     if not origin:
-        return True
+        return False
     parsed = urllib.parse.urlparse(origin)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return False
@@ -4366,9 +4613,7 @@ async def ws_ticket_stream(ws: WebSocket, ticket_id: str):
 
 @app.websocket("/ws/notifications")
 async def ws_notifications(ws: WebSocket):
-    if _auth_required_for_request() and (
-        not _websocket_origin_allowed(ws) or not _websocket_user(ws)
-    ):
+    if not _websocket_origin_allowed(ws) or not _websocket_user(ws):
         await ws.close(code=1008)
         return
     await ws.accept()

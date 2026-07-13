@@ -11,7 +11,7 @@ from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
 
 from .database import KbArticleRecord, SessionLocal, TicketCommentRecord, TicketRecord
-from .privacy import redact_text
+from .privacy import configured_secret_values, redact_text
 
 
 _TRUE_VALUES = {"1", "true", "yes", "on", "enabled"}
@@ -35,7 +35,22 @@ def embedding_model() -> str:
 
 
 def _embedding_identity() -> str:
-    return f"{embedding_model()}#dimensions={_dimensions()}"
+    provider_kwargs = {
+        key: value
+        for key, value in _embedding_kwargs().items()
+        if key not in {"api_key", "access_token", "authorization"}
+    }
+    payload = json.dumps(
+        {
+            "version": "embedding-provider-v1",
+            "config": provider_kwargs,
+            "dimensions": _dimensions(),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return f"embedding-provider-v1:{hashlib.sha256(payload).hexdigest()}"
 
 
 def _dimensions() -> int:
@@ -127,7 +142,9 @@ async def _embed_text(text_value: str) -> Optional[list[float]]:
         except ValueError:
             max_chars = 32_000
         max_chars = max(4_000, min(max_chars, 120_000))
-        safe_input = redact_text(text_value)[:max_chars]
+        safe_input = redact_text(
+            text_value, configured_secret_values()
+        )[:max_chars]
         provider = resolve_provider(model)
         timeout = _embedding_timeout()
         deadline = time.monotonic() + timeout
@@ -284,6 +301,9 @@ async def _upsert_document(
 
     text_for_embedding = "\n".join([title, body]).strip()
     vector = await _embed_text(text_for_embedding)
+    current_embedding_identity = (
+        _embedding_identity() if embedding_enabled() else None
+    )
     params = {
         "source_type": source_type,
         "source_id": source_id,
@@ -293,7 +313,8 @@ async def _upsert_document(
         "metadata_json": json.dumps(metadata, default=str),
         "content_hash": content_hash,
         "embedding": _vector_literal(vector) if vector else None,
-        "embedding_model": _embedding_identity() if vector else None,
+        "embedding_model": current_embedding_identity if vector else None,
+        "current_embedding_identity": current_embedding_identity,
         "embedded_at": datetime.utcnow() if vector else None,
     }
     try:
@@ -317,16 +338,28 @@ async def _upsert_document(
                     content_hash = EXCLUDED.content_hash,
                     embedding = CASE
                         WHEN EXCLUDED.content_hash = ticket_search_documents.content_hash
+                         AND (
+                            :current_embedding_identity IS NULL
+                            OR ticket_search_documents.embedding_model = :current_embedding_identity
+                         )
                         THEN COALESCE(EXCLUDED.embedding, ticket_search_documents.embedding)
                         ELSE EXCLUDED.embedding
                     END,
                     embedding_model = CASE
                         WHEN EXCLUDED.content_hash = ticket_search_documents.content_hash
+                         AND (
+                            :current_embedding_identity IS NULL
+                            OR ticket_search_documents.embedding_model = :current_embedding_identity
+                         )
                         THEN COALESCE(EXCLUDED.embedding_model, ticket_search_documents.embedding_model)
                         ELSE EXCLUDED.embedding_model
                     END,
                     embedded_at = CASE
                         WHEN EXCLUDED.content_hash = ticket_search_documents.content_hash
+                         AND (
+                            :current_embedding_identity IS NULL
+                            OR ticket_search_documents.embedding_model = :current_embedding_identity
+                         )
                         THEN COALESCE(EXCLUDED.embedded_at, ticket_search_documents.embedded_at)
                         ELSE EXCLUDED.embedded_at
                     END,
@@ -589,12 +622,24 @@ def _missing_ticket_backfill_batch(db: Session, limit: int) -> list[TicketRecord
                 LEFT JOIN ticket_search_documents AS document
                   ON document.source_type = 'ticket'
                  AND document.source_id = source_ticket.id
+                 AND (
+                    :embedding_identity IS NULL
+                    OR (
+                        document.embedding IS NOT NULL
+                        AND document.embedding_model = :embedding_identity
+                    )
+                 )
                 WHERE document.source_id IS NULL
                 ORDER BY source_ticket.id
                 LIMIT :limit
                 """
             ),
-            {"limit": limit},
+            {
+                "limit": limit,
+                "embedding_identity": (
+                    _embedding_identity() if embedding_enabled() else None
+                ),
+            },
         ).scalars().all()
     ]
     if not source_ids:
@@ -633,13 +678,25 @@ def _missing_comment_backfill_batch(
                 LEFT JOIN ticket_search_documents AS document
                   ON document.source_type = 'comment'
                  AND document.source_id = CAST(source_comment.id AS text)
+                 AND (
+                    :embedding_identity IS NULL
+                    OR (
+                        document.embedding IS NOT NULL
+                        AND document.embedding_model = :embedding_identity
+                    )
+                 )
                 WHERE document.source_id IS NULL
                   {private_filter}
                 ORDER BY source_comment.id
                 LIMIT :limit
                 """
             ),
-            {"limit": limit},
+            {
+                "limit": limit,
+                "embedding_identity": (
+                    _embedding_identity() if embedding_enabled() else None
+                ),
+            },
         ).scalars().all()
     ]
     if not source_ids:
@@ -668,13 +725,25 @@ def _missing_kb_backfill_batch(db: Session, limit: int) -> list[KbArticleRecord]
                 LEFT JOIN ticket_search_documents AS document
                   ON document.source_type = 'kb_article'
                  AND document.source_id = source_article.id
+                 AND (
+                    :embedding_identity IS NULL
+                    OR (
+                        document.embedding IS NOT NULL
+                        AND document.embedding_model = :embedding_identity
+                    )
+                 )
                 WHERE source_article.status = 'published'
                   AND document.source_id IS NULL
                 ORDER BY source_article.id
                 LIMIT :limit
                 """
             ),
-            {"limit": limit},
+            {
+                "limit": limit,
+                "embedding_identity": (
+                    _embedding_identity() if embedding_enabled() else None
+                ),
+            },
         ).scalars().all()
     ]
     if not source_ids:
@@ -771,6 +840,9 @@ async def backfill_ticket_documents(
 
 def ticket_vector_status(db: Session) -> dict[str, Any]:
     ready = ticket_vector_store_ready(db)
+    current_embedding_identity = (
+        _embedding_identity() if ready and embedding_enabled() else None
+    )
     result = {
         "vector_store_ready": ready,
         "embedding_enabled": embedding_enabled(),
@@ -791,8 +863,17 @@ def ticket_vector_status(db: Session) -> dict[str, Any]:
             """
             SELECT
                 COUNT(*) AS documents,
-                COUNT(embedding) AS embedded_documents,
-                COUNT(*) FILTER (WHERE embedding IS NULL) AS stale_documents,
+                COUNT(embedding) FILTER (
+                    WHERE :embedding_identity IS NULL
+                       OR embedding_model = :embedding_identity
+                ) AS embedded_documents,
+                COUNT(*) FILTER (
+                    WHERE embedding IS NULL
+                       OR (
+                            :embedding_identity IS NOT NULL
+                            AND embedding_model IS DISTINCT FROM :embedding_identity
+                       )
+                ) AS stale_documents,
                 COUNT(*) FILTER (
                     WHERE source_type = 'ticket'
                       AND COALESCE(
@@ -806,6 +887,13 @@ def ticket_vector_status(db: Session) -> dict[str, Any]:
                     LEFT JOIN ticket_search_documents AS ticket_document
                       ON ticket_document.source_type = 'ticket'
                      AND ticket_document.source_id = source_ticket.id
+                     AND (
+                        :embedding_identity IS NULL
+                        OR (
+                            ticket_document.embedding IS NOT NULL
+                            AND ticket_document.embedding_model = :embedding_identity
+                        )
+                     )
                     WHERE ticket_document.source_id IS NULL
                 ) AS missing_ticket_documents,
                 (
@@ -814,6 +902,13 @@ def ticket_vector_status(db: Session) -> dict[str, Any]:
                     LEFT JOIN ticket_search_documents AS comment_document
                       ON comment_document.source_type = 'comment'
                      AND comment_document.source_id = CAST(source_comment.id AS text)
+                     AND (
+                        :embedding_identity IS NULL
+                        OR (
+                            comment_document.embedding IS NOT NULL
+                            AND comment_document.embedding_model = :embedding_identity
+                        )
+                     )
                     WHERE comment_document.source_id IS NULL
                       AND (
                         :include_private_comments
@@ -826,13 +921,23 @@ def ticket_vector_status(db: Session) -> dict[str, Any]:
                     LEFT JOIN ticket_search_documents AS kb_document
                       ON kb_document.source_type = 'kb_article'
                      AND kb_document.source_id = source_article.id
+                     AND (
+                        :embedding_identity IS NULL
+                        OR (
+                            kb_document.embedding IS NOT NULL
+                            AND kb_document.embedding_model = :embedding_identity
+                        )
+                     )
                     WHERE source_article.status = 'published'
                       AND kb_document.source_id IS NULL
                 ) AS missing_kb_documents
             FROM ticket_search_documents
             """
         ),
-        {"include_private_comments": private_comment_indexing_enabled()},
+        {
+            "include_private_comments": private_comment_indexing_enabled(),
+            "embedding_identity": current_embedding_identity,
+        },
     ).first()
     if row:
         result.update(
@@ -979,6 +1084,7 @@ async def retrieve_ticket_context(
                                1 - (embedding <=> CAST(:embedding AS vector)) AS score
                         FROM ticket_search_documents
                         WHERE embedding IS NOT NULL
+                          AND embedding_model = :embedding_identity
                           AND source_type = ANY(:source_types)
                           AND 1 - (embedding <=> CAST(:embedding AS vector)) >= :min_score
                           AND (
@@ -1000,6 +1106,7 @@ async def retrieve_ticket_context(
                     ),
                     {
                         "embedding": _vector_literal(query_embedding),
+                        "embedding_identity": _embedding_identity(),
                         "source_types": source_types,
                         "include_private_comments": include_private_comments,
                         "limit": min(100, limit * 4),

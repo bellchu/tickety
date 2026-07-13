@@ -65,6 +65,9 @@ class TicketListApiTests(unittest.TestCase):
                 db.close()
 
         main.app.dependency_overrides[get_db] = override_db
+        main.app.dependency_overrides[main.get_current_user] = lambda: UserRecord(
+            id="test-admin", name="Test Admin", role="admin", is_active=True
+        )
         self.auth_middleware_patch = patch.object(
             main,
             "_auth_required_for_request",

@@ -20,6 +20,7 @@ kubectl -n tickety create secret generic tickety-secrets \
   --from-literal=CORS_ALLOW_ORIGINS='https://support.example.com' \
   --from-literal=LLM_ALLOWED_PROVIDER_HOSTS='your-reviewed-provider.example.com' \
   --from-literal=WEBHOOK_SECRET='<generate-a-random-secret>' \
+  --from-literal=WEBHOOK_MAX_AGE_SECONDS=300 \
   --from-literal=ITSM_PROVIDER='jira' \
   --from-literal=SYNC_INTERVAL_SECONDS=60
 ```

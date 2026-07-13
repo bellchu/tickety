@@ -828,6 +828,40 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         finally:
             main.engine.llm = old_llm
 
+    def test_cache_rejects_artifact_after_provider_identity_changes(self):
+        old_llm = main.engine.llm
+        main.engine.llm = SimpleNamespace(
+            model_name="custom/test",
+            cache_identity="llm-provider-v1:" + "a" * 64,
+            allow_synthetic=False,
+            is_mock=False,
+        )
+        try:
+            with self.session_factory() as db, patch.dict(
+                os.environ, {"APP_MODE": "production"}, clear=False
+            ):
+                ticket = db.get(TicketRecord, "ticket-1")
+                ticket.ai_reasoning = "validated reasoning"
+                ticket.ai_status = "completed"
+                db.add(AIArtifactRecord(
+                    ticket_id=ticket.id,
+                    artifact="triage",
+                    input_hash=main._artifact_input_hash(ticket, "triage"),
+                    pipeline_version=main.AI_PIPELINE_VERSION,
+                    provider="custom",
+                    model=main._llm_cache_identity(),
+                    synthetic=False,
+                    content_hash="e" * 64,
+                    active=True,
+                ))
+                db.commit()
+                self.assertTrue(main._artifact_is_current(db, ticket, "triage"))
+
+                main.engine.llm.cache_identity = "llm-provider-v1:" + "b" * 64
+                self.assertFalse(main._artifact_is_current(db, ticket, "triage"))
+        finally:
+            main.engine.llm = old_llm
+
     def test_agent_retrieval_scope_excludes_other_agents_tickets(self):
         with self.session_factory() as db:
             own = db.get(TicketRecord, "ticket-1")

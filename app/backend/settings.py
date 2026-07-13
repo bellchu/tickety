@@ -119,6 +119,7 @@ _ALL_KEYS = [
     "JIRA_PROJECT_KEY",
     "JIRA_ISSUE_TYPE",
     "WEBHOOK_SECRET",
+    "WEBHOOK_MAX_AGE_SECONDS",
     "SYNC_INTERVAL_SECONDS",
     "NEXT_PUBLIC_API_URL",
     "NEXT_PUBLIC_WS_URL",
@@ -160,6 +161,7 @@ _READONLY_KEYS = {
     "LLM_ALLOW_PRIVATE_ENDPOINTS",
     "LLM_ALLOW_INSECURE_ENDPOINTS",
     "LLM_ALLOWED_PROVIDER_HOSTS",
+    "WEBHOOK_MAX_AGE_SECONDS",
 }
 
 _LLM_BASE_URL_KEYS = {
@@ -178,6 +180,7 @@ _PRODUCTION_ENV_ONLY_KEYS = (
     "CORS_ALLOW_ORIGINS",
     "COOKIE_SECURE",
     "COOKIE_SAMESITE",
+    "WEBHOOK_MAX_AGE_SECONDS",
     "LOGIN_REQUIRED",
     "DEFAULT_MODEL",
     "CUSTOM_PROVIDER_TYPE",
@@ -185,11 +188,47 @@ _PRODUCTION_ENV_ONLY_KEYS = (
     "CUSTOM_TEMPERATURE",
     "CUSTOM_MAX_TOKENS",
     "LLM_ALLOW_SYNTHETIC",
+    "LLM_REQUEST_TIMEOUT_SECONDS",
+    "LLM_OVERALL_TIMEOUT_SECONDS",
+    "LLM_MAX_PROMPT_CHARS",
+    "LLM_MAX_CONCURRENCY",
+    "LLM_PERSIST_METRICS",
+    "LLM_DAILY_TOKEN_BUDGET",
+    "LLM_PROVIDER_REQUESTS_PER_MINUTE",
+    "LLM_PROVIDER_TOKENS_PER_MINUTE",
     "LLM_ENFORCE_PROVIDER_LIMITS",
+    "AI_USER_REQUESTS_PER_MINUTE",
+    "AI_USER_REQUESTS_PER_DAY",
+    "AI_ANALYSIS_LEASE_SECONDS",
+    "AI_ANALYSIS_MAX_ATTEMPTS",
+    "AI_PIPELINE_TIMEOUT_SECONDS",
     "TICKET_EMBEDDING_ENABLED",
     "TICKET_EMBEDDING_MODEL",
     "TICKET_EMBEDDING_DIMENSIONS",
+    "TICKET_EMBEDDING_TIMEOUT_SECONDS",
+    "TICKET_EMBEDDING_MAX_CHARS",
+    "TICKET_EMBEDDING_MAX_COMMENTS_PER_REFRESH",
+    "TICKET_VECTOR_MIN_SCORE",
     "TICKET_EMBEDDING_API_BASE",
+    "AUTO_TRIAGE_ENABLED",
+    "AUTO_SUMMARIZE_ENABLED",
+    "AUTO_ROUTE_ENABLED",
+    "AUTO_RESOLVE_ENABLED",
+    "AUTO_SYSTEMIC_ENABLED",
+    "ITSM_PROVIDER",
+    "FRESHSERVICE_DOMAIN",
+    "FRESHWORKS_ORG_DOMAIN",
+    "FRESHSERVICE_WORKSPACE_ID",
+    "FRESHSERVICE_TICKET_INCLUDES",
+    "FRESHSERVICE_AGENT_STATE",
+    "FRESHSERVICE_OAUTH_CLIENT_ID",
+    "FRESHSERVICE_OAUTH_REDIRECT_URI",
+    "FRESHSERVICE_OAUTH_SCOPES",
+    "JIRA_BASE_URL",
+    "JIRA_EMAIL",
+    "JIRA_PROJECT_KEY",
+    "JIRA_ISSUE_TYPE",
+    "SYNC_INTERVAL_SECONDS",
     "SSO_ENABLED",
     "SSO_PROVIDER",
     "SSO_CLIENT_ID",
@@ -306,7 +345,9 @@ def _read_db_overrides() -> dict:
     """Return settings overrides stored in DB (key -> value)."""
     db = SessionLocal()
     try:
-        rows = db.query(SettingsRecord).all()
+        # SettingsRecord also carries bounded internal state. Never turn an
+        # arbitrary or legacy row into a process environment variable.
+        rows = db.query(SettingsRecord).filter(SettingsRecord.key.in_(_ALL_KEYS)).all()
         return {r.key: r.value for r in rows}
     except Exception:
         return {}
@@ -338,7 +379,7 @@ def load_settings_into_env():
     with _lock:
         overrides = _read_db_overrides()
         for key, value in overrides.items():
-            if key in _READONLY_KEYS or (
+            if key not in _ALL_KEYS or key in _READONLY_KEYS or (
                 is_production_mode() and key in _PRODUCTION_ENV_ONLY_KEYS
             ):
                 continue

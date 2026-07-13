@@ -1,5 +1,6 @@
 import os
 import asyncio
+import hashlib
 import json
 import httpx
 import math
@@ -12,7 +13,7 @@ from typing import Type
 from litellm import acompletion
 from dotenv import load_dotenv
 from pydantic import BaseModel, ValidationError
-from .privacy import redact_data, redact_text
+from .privacy import configured_secret_values, redact_data, redact_text
 
 load_dotenv()
 
@@ -39,6 +40,16 @@ load_dotenv()
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_MODELS = {"deepseek-v4-flash", "deepseek-v4-pro"}
 DEFAULT_MODEL = "deepseek-v4-flash"
+
+_TRUSTED_PROVIDER_BASES = {
+    DEEPSEEK_BASE_URL,
+    "https://openrouter.ai/api/v1",
+    "https://api.openai.com/v1",
+}
+_DEFAULT_PROVIDER_BASES = {
+    "openai": "https://api.openai.com/v1",
+}
+_CACHE_IDENTITY_VERSION = "llm-provider-v1"
 
 # A provider entry:
 #   label            : human label for the UI
@@ -537,6 +548,72 @@ def _parse_int(raw: str | None) -> int | None:
         return None
 
 
+def _validated_provider_kwargs(kwargs: dict) -> dict:
+    """Return the normalized provider snapshot used for every dispatch."""
+    normalized = dict(kwargs)
+    api_base = normalized.get("api_base")
+    if api_base:
+        canonical_base = api_base.rstrip("/")
+        if canonical_base not in _TRUSTED_PROVIDER_BASES:
+            from .settings import _validate_llm_base_url
+
+            canonical_base = _validate_llm_base_url(api_base)
+        normalized["api_base"] = canonical_base
+
+    configured_max_tokens = normalized.get("max_tokens")
+    if configured_max_tokens is not None:
+        try:
+            normalized["max_tokens"] = max(
+                64, min(int(configured_max_tokens), 4096)
+            )
+        except (TypeError, ValueError):
+            normalized.pop("max_tokens", None)
+
+    if "temperature" in normalized:
+        try:
+            temperature = float(normalized["temperature"])
+        except (TypeError, ValueError):
+            temperature = math.nan
+        if not math.isfinite(temperature) or not 0 <= temperature <= 2:
+            normalized.pop("temperature", None)
+        else:
+            # Avoid distinct identities for the equivalent -0.0 and 0.0.
+            normalized["temperature"] = 0.0 if temperature == 0 else temperature
+    return normalized
+
+
+def _provider_cache_identity(
+    provider: str, provider_kwargs: dict
+) -> str:
+    """Build an opaque identity for the effective provider configuration.
+
+    The complete configuration is hashed together so neither credentials nor
+    endpoint URLs are exposed in persisted artifact metadata.
+    """
+    # Credentials authenticate a dispatch but are not part of the model or
+    # endpoint behavior. Persisting even a stable digest derived from them
+    # would create an unnecessary secret verifier in ticket metadata.
+    cache_config = {
+        key: value
+        for key, value in provider_kwargs.items()
+        if key not in {"api_key", "access_token", "authorization"}
+    }
+    if not cache_config.get("api_base") and provider in _DEFAULT_PROVIDER_BASES:
+        cache_config["api_base"] = _DEFAULT_PROVIDER_BASES[provider]
+    payload = json.dumps(
+        {
+            "version": _CACHE_IDENTITY_VERSION,
+            "provider": provider,
+            "config": cache_config,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return f"{_CACHE_IDENTITY_VERSION}:{hashlib.sha256(payload).hexdigest()}"
+
+
 def _bounded_number(raw: str | None, default: float, minimum: float, maximum: float) -> float:
     try:
         value = float(raw) if raw not in (None, "") else default
@@ -555,6 +632,11 @@ def _bounded_prompt(text: str, limit: int) -> str:
     tail = min(4_000, limit // 4)
     head = limit - tail
     return f"{text[:head]}\n[... untrusted input truncated ...]\n{text[-tail:]}"
+
+
+def _configured_secret_values(_provider_cfg: dict | None = None) -> tuple[str, ...]:
+    """Read every deployment secret that must not cross an AI boundary."""
+    return configured_secret_values()
 
 
 def resolve_provider(model_name: str) -> str:
@@ -648,6 +730,7 @@ def _sanitize_fetched_models(data: dict) -> dict:
     sanitized = {}
     if not isinstance(data, dict):
         return sanitized
+    exact_secrets = _configured_secret_values()
     for provider, models in data.items():
         if provider not in PROVIDERS or not isinstance(models, list):
             continue
@@ -655,7 +738,13 @@ def _sanitize_fetched_models(data: dict) -> dict:
         for model in models[:_MAX_MODELS_PER_PROVIDER]:
             if not isinstance(model, dict):
                 continue
-            entry = _bounded_model_entry(model.get("id"), model.get("label"))
+            model_id = model.get("id")
+            label = model.get("label")
+            if isinstance(model_id, str):
+                model_id = redact_text(model_id, exact_secrets)
+            if isinstance(label, str):
+                label = redact_text(label, exact_secrets)
+            entry = _bounded_model_entry(model_id, label)
             if entry:
                 entries.append(entry)
         sanitized[provider] = entries
@@ -666,6 +755,7 @@ def _load_fetched_models() -> dict:
     """Load previously fetched model lists from the DB settings store."""
     global _FETCHED_MODELS_CACHE
     if _FETCHED_MODELS_CACHE:
+        _FETCHED_MODELS_CACHE = _sanitize_fetched_models(_FETCHED_MODELS_CACHE)
         return _FETCHED_MODELS_CACHE
     try:
         from .database import SessionLocal, SettingsRecord
@@ -708,7 +798,11 @@ def _save_fetched_models(data: dict):
 
 
 async def _fetch_openai_models(
-    api_key: str, base: str | None, *, prefix: str | None = None
+    api_key: str,
+    base: str | None,
+    *,
+    prefix: str | None = None,
+    provider: str,
 ) -> list[dict]:
     """Fetch GPT-family models from an OpenAI-compatible endpoint."""
     from .settings import _validate_llm_base_url
@@ -717,6 +811,7 @@ async def _fetch_openai_models(
     url = f"{validated_base}/models"
     headers = {"Authorization": f"Bearer {api_key}"}
     async with httpx.AsyncClient(timeout=15, follow_redirects=False) as cli:
+        _reserve_provider_capacity(provider, 1)
         data = await _get_json_limited(cli, url, headers)
     models = []
     raw_models = data.get("data", [])
@@ -746,7 +841,9 @@ async def fetch_live_models() -> dict:
     ds_key = os.getenv("DEEPSEEK_API_KEY")
     if ds_key and ds_key not in _PLACEHOLDER_KEYS:
         try:
-            results["deepseek"] = await _fetch_openai_models(ds_key, "https://api.deepseek.com/v1")
+            results["deepseek"] = await _fetch_openai_models(
+                ds_key, "https://api.deepseek.com/v1", provider="deepseek"
+            )
         except Exception as e:
             print(f"[llm] fetch deepseek models error kind={type(e).__name__}")
 
@@ -755,7 +852,10 @@ async def fetch_live_models() -> dict:
     if oai_key and oai_key not in _PLACEHOLDER_KEYS:
         try:
             results["openai"] = await _fetch_openai_models(
-                oai_key, os.getenv("OPENAI_API_BASE") or None, prefix="openai"
+                oai_key,
+                os.getenv("OPENAI_API_BASE") or None,
+                prefix="openai",
+                provider="openai",
             )
         except Exception as e:
             print(f"[llm] fetch openai models error kind={type(e).__name__}")
@@ -765,6 +865,7 @@ async def fetch_live_models() -> dict:
     if or_key and or_key not in _PLACEHOLDER_KEYS:
         try:
             async with httpx.AsyncClient(timeout=20, follow_redirects=False) as cli:
+                _reserve_provider_capacity("openrouter", 1)
                 data = await _get_json_limited(
                     cli,
                     "https://openrouter.ai/api/v1/models",
@@ -792,12 +893,17 @@ async def fetch_live_models() -> dict:
     if custom_key and custom_key not in _PLACEHOLDER_KEYS and custom_base:
         try:
             results["custom"] = await _fetch_openai_models(
-                custom_key, custom_base, prefix="custom"
+                custom_key,
+                custom_base,
+                prefix="custom",
+                provider="custom",
             )
         except Exception as e:
             print(f"[llm] fetch custom models error kind={type(e).__name__}")
 
-    # Persist
+    # Provider-controlled model labels are persisted and returned, so apply the
+    # same configured-secret boundary used for analysis output first.
+    results = _sanitize_fetched_models(results)
     if results:
         _save_fetched_models(results)
     return results
@@ -852,6 +958,14 @@ class LLMManager:
         self._semaphore = _provider_semaphore(self.provider, concurrency)
         self.max_concurrency = concurrency
 
+    @property
+    def cache_identity(self) -> str:
+        """Opaque cache key for the provider configuration used right now."""
+        provider_kwargs = _validated_provider_kwargs(
+            self.provider_cfg["build"](self, self.model_name)
+        )
+        return _provider_cache_identity(self.provider, provider_kwargs)
+
     # ── public API ─────────────────────────────────────────────
 
     async def analyze(
@@ -866,6 +980,7 @@ class LLMManager:
         _metric(requests=1)
         task_name = response_model.__name__ if response_model else "json_analysis"
         started = time.monotonic()
+        exact_secrets = _configured_secret_values(self.provider_cfg)
         if self.is_mock:
             if not self.allow_synthetic:
                 _metric(failures=1)
@@ -877,7 +992,8 @@ class LLMManager:
                 )
                 raise LLMUnavailableError("AI provider is not configured")
             result = redact_data(
-                self._validate_response(self._get_mock_response(prompt), response_model)
+                self._validate_response(self._get_mock_response(prompt), response_model),
+                exact_secrets,
             )
             _metric(successes=1, synthetic_results=1)
             _record_call(
@@ -889,10 +1005,13 @@ class LLMManager:
             return result
 
         json_mode = json_schema is not None or response_model is not None
-        safe_prompt = _bounded_prompt(redact_text(prompt), self.prompt_char_limit)
+        safe_prompt = _bounded_prompt(
+            redact_text(prompt, exact_secrets), self.prompt_char_limit
+        )
         trusted_policy = _SYSTEM_GUARD
         if system_prompt:
             trusted_policy = f"{_SYSTEM_GUARD}\n\nTRUSTED_TASK_POLICY:\n{system_prompt}"
+        trusted_policy = redact_text(trusted_policy, exact_secrets)
         messages = [
             {"role": "system", "content": trusted_policy},
             {"role": "user", "content": safe_prompt},
@@ -903,6 +1022,19 @@ class LLMManager:
             max_tokens=max_tokens,
             response_model=response_model,
         )
+        effective_api_key = kwargs.get("api_key")
+        if (
+            isinstance(effective_api_key, str)
+            and effective_api_key
+            and effective_api_key not in exact_secrets
+        ):
+            exact_secrets = (*exact_secrets, effective_api_key)
+            # Close the narrow environment-rotation window between the initial
+            # secret snapshot and construction of the effective provider args.
+            for message in messages:
+                message["content"] = redact_text(
+                    message.get("content") or "", exact_secrets
+                )
 
         last_err = None
         deadline = started + self.overall_timeout
@@ -956,7 +1088,9 @@ class LLMManager:
                     # content. Retry with the same prompt instead of crashing.
                     raise ValueError("model returned empty content")
                 parsed = self._parse_json(content)
-                validated = redact_data(self._validate_response(parsed, response_model))
+                validated = redact_data(
+                    self._validate_response(parsed, response_model), exact_secrets
+                )
                 usage = getattr(response, "usage", None)
                 prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
                 completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
@@ -1066,7 +1200,9 @@ class LLMManager:
         kwargs = {"model": self.model_name, "messages": messages}
         # Provider-specific routing (api_key / api_base / custom provider /
         # thinking-disabled etc.) comes from the catalog's build() lambda.
-        provider_kwargs = self.provider_cfg["build"](self, self.model_name)
+        provider_kwargs = _validated_provider_kwargs(
+            self.provider_cfg["build"](self, self.model_name)
+        )
         configured_max_tokens = provider_kwargs.pop("max_tokens", None)
         if configured_max_tokens is not None:
             try:
@@ -1076,26 +1212,6 @@ class LLMManager:
         kwargs.update(provider_kwargs)
         kwargs["max_tokens"] = max(64, min(task_max_tokens, 4096))
         kwargs["timeout"] = self.request_timeout
-        if "temperature" in kwargs:
-            try:
-                temperature = float(kwargs["temperature"])
-            except (TypeError, ValueError):
-                temperature = math.nan
-            if not math.isfinite(temperature) or not 0 <= temperature <= 2:
-                kwargs.pop("temperature", None)
-            else:
-                kwargs["temperature"] = temperature
-        trusted_bases = {
-            DEEPSEEK_BASE_URL,
-            "https://openrouter.ai/api/v1",
-            "https://api.openai.com/v1",
-        }
-        if kwargs.get("api_base") and kwargs["api_base"].rstrip("/") not in trusted_bases:
-            # Revalidate the effective destination immediately before dispatch;
-            # startup/update validation alone is insufficient for legacy values.
-            from .settings import _validate_llm_base_url
-
-            kwargs["api_base"] = _validate_llm_base_url(kwargs["api_base"])
         if response_model is not None and self.provider in {"openai", "azure"}:
             kwargs["response_format"] = {
                 "type": "json_schema",

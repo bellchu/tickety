@@ -166,11 +166,14 @@ routes require a real authenticated session and `APP_MODE=production`. Demo
 fallback identities are never accepted on those routes. Provider-origin
 changes also require the corresponding credential to be re-entered, preventing
 an existing key from being silently forwarded to a new destination. External
-webhooks are rejected unless `WEBHOOK_SECRET` is configured and the signature
-matches the raw request body.
+webhooks are rejected unless `WEBHOOK_SECRET` is configured, the
+`X-Freshservice-Webhook-Timestamp` is fresh, and the base64 HMAC-SHA256
+signature matches `timestamp + "." + raw_body`. Signed deliveries are claimed
+atomically so a captured request cannot be replayed.
 
-In production, credentials, provider/model routing, embedding destinations,
-CORS/cookie/login controls, webhook secrets, and SSO configuration are
+In production, credentials, provider/model routing, model and user budgets,
+automation toggles, embedding destinations, ITSM provider destinations,
+CORS/cookie/login controls, webhook controls, and SSO configuration are
 deployment-owned environment/Secret values. Database overrides for those keys
 are ignored, so a stale or previously compromised settings row cannot override
 the reviewed deployment configuration after restart.

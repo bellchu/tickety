@@ -174,11 +174,16 @@ class FreshserviceAdapter(BaseITSMAdapter):
                     row.value = value
                 else:
                     db.add(SettingsRecord(key=key, value=value))
-                os.environ[key] = value
             db.commit()
+            for key, value in updates.items():
+                os.environ[key] = value
         except Exception as exc:
             db.rollback()
-            print(f"[External] failed to persist refreshed OAuth token: {exc}")
+            print(
+                "[External] failed to persist refreshed OAuth token "
+                f"kind={type(exc).__name__}"
+            )
+            raise RuntimeError("OAuth token persistence failed") from exc
         finally:
             db.close()
 
@@ -188,7 +193,7 @@ class FreshserviceAdapter(BaseITSMAdapter):
         try:
             token_data = await self.oauth_refresh()
         except Exception as exc:
-            print(f"[External] OAuth refresh failed: {exc}")
+            print(f"[External] OAuth refresh failed kind={type(exc).__name__}")
             return False
         access_token = token_data.get("access_token")
         if not access_token:
@@ -463,6 +468,7 @@ class FreshserviceAdapter(BaseITSMAdapter):
         raw_body: bytes | None = None,
     ) -> Optional[WebhookEvent]:
         signature = headers.get("x-freshservice-webhook-signature", "")
+        timestamp = headers.get("x-freshservice-webhook-timestamp", "")
         if not self.webhook_secret or self.webhook_secret in {
             "your-webhook-secret",
             "change-me",
@@ -472,9 +478,25 @@ class FreshserviceAdapter(BaseITSMAdapter):
         if not signature:
             print("[External] webhook signature missing")
             return None
+        if not timestamp.isascii() or not timestamp.isdigit():
+            print("[External] webhook timestamp invalid")
+            return None
+        try:
+            timestamp_seconds = int(timestamp)
+            max_age = max(
+                30,
+                min(int(os.getenv("WEBHOOK_MAX_AGE_SECONDS", "300")), 3600),
+            )
+        except (TypeError, ValueError):
+            print("[External] webhook timestamp invalid")
+            return None
+        if timestamp_seconds <= 0 or abs(int(time.time()) - timestamp_seconds) > max_age:
+            print("[External] webhook timestamp expired")
+            return None
         body = raw_body if raw_body is not None else str(payload).encode()
+        signed_body = timestamp.encode("ascii") + b"." + body
         expected = base64.b64encode(
-            hmac.new(self.webhook_secret.encode(), body, hashlib.sha256).digest()
+            hmac.new(self.webhook_secret.encode(), signed_body, hashlib.sha256).digest()
         ).decode()
         if not hmac.compare_digest(signature, expected):
             print("[External] webhook signature mismatch")

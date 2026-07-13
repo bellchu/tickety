@@ -276,7 +276,7 @@ def _sync_job():
         result = sync_tickets_from_external(adapter)
         print(f"[sync_worker] {adapter.provider_name}: {result}")
     except Exception as e:
-        print(f"[sync_worker] error: {e}")
+        print(f"[sync_worker] error kind={type(e).__name__}")
 
 
 def start_sync_worker() -> bool:

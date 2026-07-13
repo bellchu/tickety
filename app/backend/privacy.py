@@ -1,5 +1,7 @@
 import ipaddress
+import os
 import re
+from collections.abc import Iterable
 
 
 _SECRET_KEY = (
@@ -67,21 +69,78 @@ def _redact_ipv6(match: re.Match) -> str:
         return candidate
 
 
-def redact_text(text: str) -> str:
+def configured_secret_values() -> tuple[str, ...]:
+    """Return every configured deployment secret for exact boundary redaction."""
+    from .settings import _PLACEHOLDER_VALUES, _SENSITIVE_KEYS
+
+    values = {
+        value
+        for key, value in os.environ.items()
+        if (
+            key in _SENSITIVE_KEYS
+            or re.search(r"(?:^|_)(?:API_?KEY|KEY|SECRET|TOKEN|PASSWORD)$", key)
+        )
+        and value
+        and value not in _PLACEHOLDER_VALUES
+        and value != "****"
+    }
+    return tuple(sorted(values, key=len, reverse=True))
+
+
+def _normalize_exact_secrets(exact_secrets: Iterable[str]) -> tuple[str, ...]:
+    """Return unique literal secrets in safest replacement order."""
+    return tuple(sorted(
+        {
+            secret
+            for secret in exact_secrets
+            if isinstance(secret, str) and secret
+        },
+        key=len,
+        reverse=True,
+    ))
+
+
+def _redact_exact_secrets(text: str, exact_secrets: tuple[str, ...]) -> str:
     value = text or ""
+    for secret in exact_secrets:
+        value = value.replace(secret, "[secret]")
+    return value
+
+
+def _redact_text(text: str, exact_secrets: tuple[str, ...]) -> str:
+    # Provider keys are opaque and need not match a recognizable key format or
+    # appear next to a label. Replace their configured values literally before
+    # applying the heuristic patterns below.
+    value = _redact_exact_secrets(text, exact_secrets)
     for pattern, replacement in _REDACTIONS:
         value = pattern.sub(replacement, value)
     return _IPV6_CANDIDATE.sub(_redact_ipv6, value)
 
 
-def redact_data(value):
+def redact_text(text: str, exact_secrets: Iterable[str] = ()) -> str:
+    return _redact_text(text, _normalize_exact_secrets(exact_secrets))
+
+
+def redact_data(value, exact_secrets: Iterable[str] = ()):
     """Recursively sanitize generated/provider data before persistence/return."""
+    return _redact_data(value, _normalize_exact_secrets(exact_secrets))
+
+
+def _redact_data(value, exact_secrets: tuple[str, ...]):
     if isinstance(value, str):
-        return redact_text(value)
+        return _redact_text(value, exact_secrets)
     if isinstance(value, list):
-        return [redact_data(item) for item in value]
+        return [_redact_data(item, exact_secrets) for item in value]
     if isinstance(value, tuple):
-        return tuple(redact_data(item) for item in value)
+        return tuple(_redact_data(item, exact_secrets) for item in value)
     if isinstance(value, dict):
-        return {key: redact_data(item) for key, item in value.items()}
+        redacted = {}
+        for key, item in value.items():
+            safe_key = (
+                _redact_exact_secrets(key, exact_secrets)
+                if isinstance(key, str)
+                else key
+            )
+            redacted[safe_key] = _redact_data(item, exact_secrets)
+        return redacted
     return value

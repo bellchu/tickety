@@ -183,7 +183,7 @@ def sync_tickets_from_external(adapter=None) -> dict:
                 if ticket and ext.updated_at:
                     max_persisted_updated_at = max(max_persisted_updated_at or ext.updated_at, ext.updated_at)
             except Exception as e:
-                print(f"[sync] error upserting ticket {ext.external_id}: {e}")
+                print(f"[sync] ticket upsert failed kind={type(e).__name__}")
                 # A flush/commit failure leaves the SQLAlchemy session in a
                 # failed transaction. Reset it before processing the next
                 # ticket so one bad record cannot poison the rest of the
@@ -210,10 +210,10 @@ def sync_tickets_from_external(adapter=None) -> dict:
         ).first()
         if sync_state:
             sync_state.last_status = "error"
-            sync_state.last_error = str(e)
+            sync_state.last_error = f"sync_failed:{type(e).__name__}"
             db.commit()
         result["errors"] += 1
-        print(f"[sync] fatal error: {e}")
+        print(f"[sync] fatal error kind={type(e).__name__}")
     finally:
         db.close()
 
@@ -269,7 +269,7 @@ def fetch_tickets_by_days(adapter=None, days: int = 7, overwrite: bool = False) 
                 if ticket and ext.updated_at:
                     max_persisted_updated_at = max(max_persisted_updated_at or ext.updated_at, ext.updated_at)
             except Exception as e:
-                print(f"[fetch] error upserting ticket {ext.external_id}: {e}")
+                print(f"[fetch] ticket upsert failed kind={type(e).__name__}")
                 result["errors"] += 1
 
         # Record a successful manual fetch on the sync state so the worker's
@@ -319,10 +319,10 @@ def fetch_tickets_by_days(adapter=None, days: int = 7, overwrite: bool = False) 
         ).first()
         if sync_state:
             sync_state.last_status = "error"
-            sync_state.last_error = str(e)
+            sync_state.last_error = f"fetch_failed:{type(e).__name__}"
             db.commit()
         result["errors"] += 1
-        print(f"[fetch] fatal error: {e}")
+        print(f"[fetch] fatal error kind={type(e).__name__}")
     finally:
         db.close()
 
@@ -357,7 +357,7 @@ def handle_webhook_event(event: WebhookEvent, adapter=None) -> Optional[TicketRe
         db.commit()
         return ticket
     except Exception as e:
-        print(f"[webhook] error: {e}")
+        print(f"[webhook] apply failed kind={type(e).__name__}")
         db.rollback()
         return None
     finally:
@@ -673,8 +673,8 @@ def _import_external_agents(adapter, raw_agents: list[dict[str, Any]], options: 
                     if isinstance(raw_agent, dict)
                     else "unknown"
                 )
-                detail = f"Agent {agent_id}: {e}"
-                print(f"[agents] error processing agent {agent_id}: {e}")
+                detail = f"agent_processing_failed:{type(e).__name__}"
+                print(f"[agents] processing failed kind={type(e).__name__}")
                 db.rollback()
                 result["errors"] += 1
                 result["error_details"].append(detail)
@@ -683,9 +683,9 @@ def _import_external_agents(adapter, raw_agents: list[dict[str, Any]], options: 
             result["tickets_reassigned"] = _reconcile_ticket_assignees(db, adapter.provider_name)
 
     except Exception as e:
-        print(f"[agents] fatal error: {e}")
+        print(f"[agents] fatal error kind={type(e).__name__}")
         result["errors"] += 1
-        result["error_details"].append(str(e))
+        result["error_details"].append(f"agent_sync_failed:{type(e).__name__}")
     finally:
         db.close()
     return result
@@ -711,10 +711,10 @@ async def async_sync_agents_from_external(adapter=None, options: Optional[dict[s
     try:
         raw_agents = await adapter.fetch_agents()
     except Exception as e:
-        print(f"[agents] fatal error: {e}")
+        print(f"[agents] fatal error kind={type(e).__name__}")
         result = _empty_agent_sync_result()
         result["errors"] += 1
-        result["error_details"].append(str(e))
+        result["error_details"].append(f"agent_fetch_failed:{type(e).__name__}")
         return result
     return _import_external_agents(adapter, raw_agents, options=options)
 

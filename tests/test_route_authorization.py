@@ -30,7 +30,12 @@ class RouteAuthorizationTests(unittest.TestCase):
                 UserRecord(id="admin", name="Admin", role="admin", is_active=True),
                 UserRecord(id="supervisor", name="Supervisor", role="supervisor", is_active=True),
                 UserRecord(id="agent", name="Agent", role="agent", is_active=True),
-                TicketRecord(id="ticket-1", subject="Production incident"),
+                TicketRecord(
+                    id="ticket-1",
+                    subject="Production incident",
+                    recommended_solution="stale generated guidance",
+                    ai_status="complete",
+                ),
                 TicketCategoryRecord(name="Network"),
             ])
             db.commit()
@@ -62,6 +67,7 @@ class RouteAuthorizationTests(unittest.TestCase):
                 return db.get(UserRecord, role)
 
         main.app.dependency_overrides[main.get_current_user] = current_user
+        main.app.dependency_overrides[main.get_protected_ai_user] = current_user
 
     def test_agent_cannot_permanently_delete_ticket(self):
         self._as_role("agent")
@@ -132,7 +138,10 @@ class RouteAuthorizationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["updated"], 1)
         with self.session_factory() as db:
-            self.assertEqual(db.get(TicketRecord, "ticket-1").category, "Network")
+            ticket = db.get(TicketRecord, "ticket-1")
+            self.assertEqual(ticket.category, "Network")
+            self.assertIsNone(ticket.recommended_solution)
+            self.assertEqual(ticket.ai_status, "partial")
 
     def test_middleware_policy_matches_route_policy(self):
         self.assertEqual(

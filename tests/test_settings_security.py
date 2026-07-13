@@ -8,6 +8,18 @@ from app.backend import main, settings, ticket_vectors, worker
 
 
 class SettingsSecurityTests(unittest.TestCase):
+    def setUp(self):
+        # The developer's local .env may intentionally be production-like;
+        # individual tests opt into production explicitly when required.
+        self.environment = patch.dict(os.environ, {
+            "APP_MODE": "demo",
+            "LLM_ALLOWED_PROVIDER_HOSTS": "",
+        }, clear=False)
+        self.environment.start()
+
+    def tearDown(self):
+        self.environment.stop()
+
     def test_invalid_nonempty_app_mode_fails_closed(self):
         with (
             patch.dict(os.environ, {"APP_MODE": "prodution"}, clear=False),
@@ -195,6 +207,13 @@ class SettingsSecurityTests(unittest.TestCase):
                 "OPENAI_API_KEY": "reviewed-deployment-key",
                 "CORS_ALLOW_ORIGINS": "https://tickety.example",
                 "OPENAI_API_BASE": "",
+                "AUTO_TRIAGE_ENABLED": "false",
+                "LLM_DAILY_TOKEN_BUDGET": "500000",
+                "LLM_MAX_CONCURRENCY": "4",
+                "ITSM_PROVIDER": "",
+                "FRESHSERVICE_DOMAIN": "support.example.com",
+                "JIRA_BASE_URL": "https://jira.example.com",
+                "SYNC_INTERVAL_SECONDS": "60",
                 "OPENROUTER_API_BASE": "",
                 "AZURE_API_BASE": "",
                 "AZURE_AI_API_BASE": "",
@@ -204,23 +223,70 @@ class SettingsSecurityTests(unittest.TestCase):
             patch.object(settings, "_read_db_overrides", return_value={
                 "OPENAI_API_KEY": "stale-database-key",
                 "CORS_ALLOW_ORIGINS": "*",
+                "AUTO_TRIAGE_ENABLED": "true",
+                "LLM_DAILY_TOKEN_BUDGET": "100000000",
+                "LLM_MAX_CONCURRENCY": "32",
+                "ITSM_PROVIDER": "freshservice",
+                "FRESHSERVICE_DOMAIN": "attacker.example",
+                "JIRA_BASE_URL": "https://attacker.example",
+                "SYNC_INTERVAL_SECONDS": "1",
             }),
         ):
             settings.load_settings_into_env()
             self.assertEqual(os.environ["OPENAI_API_KEY"], "reviewed-deployment-key")
             self.assertEqual(os.environ["CORS_ALLOW_ORIGINS"], "https://tickety.example")
+            self.assertEqual(os.environ["AUTO_TRIAGE_ENABLED"], "false")
+            self.assertEqual(os.environ["LLM_DAILY_TOKEN_BUDGET"], "500000")
+            self.assertEqual(os.environ["LLM_MAX_CONCURRENCY"], "4")
+            self.assertEqual(os.environ["ITSM_PROVIDER"], "")
+            self.assertEqual(os.environ["FRESHSERVICE_DOMAIN"], "support.example.com")
+            self.assertEqual(os.environ["JIRA_BASE_URL"], "https://jira.example.com")
+            self.assertEqual(os.environ["SYNC_INTERVAL_SECONDS"], "60")
 
     def test_production_settings_update_cannot_change_deployment_owned_ai_keys(self):
         with (
             patch.dict(os.environ, {
                 "APP_MODE": "production",
                 "OPENAI_API_KEY": "reviewed-deployment-key",
+                "AUTO_TRIAGE_ENABLED": "false",
+                "LLM_DAILY_TOKEN_BUDGET": "500000",
+                "ITSM_PROVIDER": "",
+                "FRESHSERVICE_DOMAIN": "support.example.com",
             }, clear=False),
             patch.object(settings, "_write_db_overrides") as write_overrides,
         ):
-            settings.update_settings({"OPENAI_API_KEY": "runtime-attacker-key"})
+            settings.update_settings({
+                "OPENAI_API_KEY": "runtime-attacker-key",
+                "AUTO_TRIAGE_ENABLED": "true",
+                "LLM_DAILY_TOKEN_BUDGET": "100000000",
+                "ITSM_PROVIDER": "freshservice",
+                "FRESHSERVICE_DOMAIN": "attacker.example",
+            })
             self.assertEqual(os.environ["OPENAI_API_KEY"], "reviewed-deployment-key")
+            self.assertEqual(os.environ["AUTO_TRIAGE_ENABLED"], "false")
+            self.assertEqual(os.environ["LLM_DAILY_TOKEN_BUDGET"], "500000")
+            self.assertEqual(os.environ["ITSM_PROVIDER"], "")
+            self.assertEqual(os.environ["FRESHSERVICE_DOMAIN"], "support.example.com")
             write_overrides.assert_not_called()
+
+    def test_unknown_database_rows_never_become_environment_variables(self):
+        os.environ.pop("TICKET_INDEX_PRIVATE_COMMENTS", None)
+        with (
+            patch.object(settings, "_read_db_overrides", return_value={
+                "TICKET_INDEX_PRIVATE_COMMENTS": "true",
+            }),
+            patch.dict(os.environ, {
+                "APP_MODE": "production",
+                "OPENAI_API_BASE": "",
+                "OPENROUTER_API_BASE": "",
+                "AZURE_API_BASE": "",
+                "AZURE_AI_API_BASE": "",
+                "CUSTOM_API_BASE": "",
+                "TICKET_EMBEDDING_API_BASE": "",
+            }, clear=False),
+        ):
+            settings.load_settings_into_env()
+        self.assertNotIn("TICKET_INDEX_PRIVATE_COMMENTS", os.environ)
 
     def test_production_startup_never_runs_demo_seed_with_stale_flag(self):
         old_manager = main.llm_mgr

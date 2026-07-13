@@ -320,6 +320,11 @@ class TicketVectorEvidenceTests(unittest.IsolatedAsyncioTestCase):
                 return_value="openai/test-embedding",
             ),
             patch.object(ticket_vectors, "_dimensions", return_value=1536),
+            patch.object(
+                ticket_vectors,
+                "_embedding_identity",
+                return_value="embedding-provider-v1:current",
+            ),
         ):
             status = ticket_vectors.ticket_vector_status(db)
 
@@ -334,7 +339,10 @@ class TicketVectorEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("LEFT JOIN ticket_search_documents", query)
         self.assertEqual(
             db.execute.call_args.args[1],
-            {"include_private_comments": False},
+            {
+                "include_private_comments": False,
+                "embedding_identity": "embedding-provider-v1:current",
+            },
         )
 
     def test_unavailable_store_preserves_status_shape_with_zero_legacy_count(self):
