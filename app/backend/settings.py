@@ -1,4 +1,6 @@
 import os
+import math
+import re
 import threading
 import ipaddress
 import socket
@@ -14,6 +16,7 @@ load_dotenv()
 _ENV_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".env")
 
 _SENSITIVE_KEYS = {
+    "DATABASE_URL",
     "DEEPSEEK_API_KEY",
     "OPENAI_API_KEY",
     "OPENAI_API_BASE",
@@ -54,6 +57,7 @@ _ALL_KEYS = [
     "COOKIE_SAMESITE",
     "LLM_ALLOW_PRIVATE_ENDPOINTS",
     "LLM_ALLOW_INSECURE_ENDPOINTS",
+    "LLM_ALLOWED_PROVIDER_HOSTS",
     # LLM provider keys (multi-provider; see llm_manager.PROVIDERS)
     "DEEPSEEK_API_KEY",
     "OPENAI_API_KEY",
@@ -155,6 +159,7 @@ _READONLY_KEYS = {
     "NEXT_PUBLIC_WS_URL",
     "LLM_ALLOW_PRIVATE_ENDPOINTS",
     "LLM_ALLOW_INSECURE_ENDPOINTS",
+    "LLM_ALLOWED_PROVIDER_HOSTS",
 }
 
 _LLM_BASE_URL_KEYS = {
@@ -166,6 +171,35 @@ _LLM_BASE_URL_KEYS = {
     "TICKET_EMBEDDING_API_BASE",
 }
 
+_PRODUCTION_ENV_ONLY_KEYS = (
+    _SENSITIVE_KEYS
+    - {"FRESHSERVICE_OAUTH_ACCESS_TOKEN", "FRESHSERVICE_OAUTH_REFRESH_TOKEN"}
+) | _LLM_BASE_URL_KEYS | {
+    "CORS_ALLOW_ORIGINS",
+    "COOKIE_SECURE",
+    "COOKIE_SAMESITE",
+    "LOGIN_REQUIRED",
+    "DEFAULT_MODEL",
+    "CUSTOM_PROVIDER_TYPE",
+    "CUSTOM_API_VERSION",
+    "CUSTOM_TEMPERATURE",
+    "CUSTOM_MAX_TOKENS",
+    "LLM_ALLOW_SYNTHETIC",
+    "LLM_ENFORCE_PROVIDER_LIMITS",
+    "TICKET_EMBEDDING_ENABLED",
+    "TICKET_EMBEDDING_MODEL",
+    "TICKET_EMBEDDING_DIMENSIONS",
+    "TICKET_EMBEDDING_API_BASE",
+    "SSO_ENABLED",
+    "SSO_PROVIDER",
+    "SSO_CLIENT_ID",
+    "SSO_CLIENT_SECRET",
+    "SSO_DISCOVERY_URL",
+    "SSO_REDIRECT_URI",
+    "SSO_ALLOWED_DOMAINS",
+    "SSO_AUTO_PROVISION",
+}
+
 _lock = threading.Lock()
 _loaded = False
 
@@ -175,18 +209,43 @@ def _truthy(value: Optional[str]) -> bool:
 
 
 def _validate_llm_base_url(value: str) -> str:
+    if not value or value != value.strip() or any(ord(char) < 32 for char in value):
+        raise ValueError("LLM base URL contains invalid whitespace or control characters")
     parsed = urlparse(value)
     if parsed.scheme not in {"https", "http"} or not parsed.hostname:
         raise ValueError("LLM base URL must be an absolute HTTP(S) URL")
     if parsed.username or parsed.password:
         raise ValueError("LLM base URL must not contain credentials")
+    if parsed.query or parsed.fragment:
+        raise ValueError("LLM base URL must not contain a query string or fragment")
     if parsed.scheme != "https" and not _truthy(os.getenv("LLM_ALLOW_INSECURE_ENDPOINTS")):
         raise ValueError("LLM base URL must use HTTPS")
-
-    if _truthy(os.getenv("LLM_ALLOW_PRIVATE_ENDPOINTS")):
-        return value.rstrip("/")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("LLM base URL contains an invalid port") from exc
+    if (
+        port not in {None, 443}
+        and not _truthy(os.getenv("LLM_ALLOW_INSECURE_ENDPOINTS"))
+    ):
+        raise ValueError("LLM base URL must use the standard HTTPS port")
 
     hostname = parsed.hostname.lower().rstrip(".")
+    if (os.getenv("APP_MODE") or "demo").strip().lower() == "production":
+        allowed_hosts = {
+            "api.openai.com",
+            "openrouter.ai",
+            "api.deepseek.com",
+            *{
+                host.strip().lower().rstrip(".")
+                for host in (os.getenv("LLM_ALLOWED_PROVIDER_HOSTS") or "").split(",")
+                if host.strip()
+            },
+        }
+        if hostname not in allowed_hosts:
+            raise ValueError("LLM base URL hostname is not in LLM_ALLOWED_PROVIDER_HOSTS")
+    if _truthy(os.getenv("LLM_ALLOW_PRIVATE_ENDPOINTS")):
+        return value.rstrip("/")
     if hostname == "localhost" or hostname.endswith((".localhost", ".local", ".internal")):
         raise ValueError("LLM base URL must not target a local hostname")
     try:
@@ -210,8 +269,13 @@ def get_bool(key: str, default: bool = False, aliases: tuple[str, ...] = ()) -> 
 
 
 def app_mode() -> str:
-    mode = os.getenv("APP_MODE", "demo").strip().lower()
-    return mode if mode in {"demo", "production"} else "demo"
+    raw_mode = os.getenv("APP_MODE")
+    if raw_mode is None or not raw_mode.strip():
+        return "demo"
+    mode = raw_mode.strip().lower()
+    if mode not in {"demo", "production"}:
+        raise ValueError("APP_MODE must be either 'demo' or 'production'")
+    return mode
 
 
 def is_demo_mode() -> bool:
@@ -223,9 +287,11 @@ def is_production_mode() -> bool:
 
 
 def automation_enabled(key: str, legacy_alias: Optional[str] = None) -> bool:
-    """AI automation defaults on in demo, off in production unless enabled."""
+    """AI automation is opt-in in every mode to prevent surprise external I/O."""
+    if is_demo_mode():
+        return False
     aliases = (legacy_alias,) if legacy_alias else ()
-    return get_bool(key, default=is_demo_mode(), aliases=aliases)
+    return get_bool(key, default=False, aliases=aliases)
 
 
 def _mask(value: Optional[str]) -> str:
@@ -233,9 +299,7 @@ def _mask(value: Optional[str]) -> str:
         return ""
     if value in _PLACEHOLDER_VALUES:
         return ""
-    if len(value) <= 4:
-        return "****"
-    return value[:4] + "****"
+    return "****"
 
 
 def _read_db_overrides() -> dict:
@@ -274,6 +338,10 @@ def load_settings_into_env():
     with _lock:
         overrides = _read_db_overrides()
         for key, value in overrides.items():
+            if key in _READONLY_KEYS or (
+                is_production_mode() and key in _PRODUCTION_ENV_ONLY_KEYS
+            ):
+                continue
             if value is not None:
                 if key in _LLM_BASE_URL_KEYS and value:
                     value = _validate_llm_base_url(value)
@@ -305,9 +373,47 @@ def get_settings() -> dict:
 
 def update_settings(payload: dict) -> dict:
     with _lock:
+        base_url_credentials = {
+            "OPENAI_API_BASE": "OPENAI_API_KEY",
+            "OPENROUTER_API_BASE": "OPENROUTER_API_KEY",
+            "AZURE_API_BASE": "AZURE_API_KEY",
+            "AZURE_AI_API_BASE": "AZURE_AI_API_KEY",
+            "CUSTOM_API_BASE": "CUSTOM_API_KEY",
+        }
+        embedding_model = (os.getenv("TICKET_EMBEDDING_MODEL") or "").strip()
+        if embedding_model.startswith("openai/"):
+            base_url_credentials["TICKET_EMBEDDING_API_BASE"] = "OPENAI_API_KEY"
+        elif embedding_model.startswith("custom/"):
+            base_url_credentials["TICKET_EMBEDDING_API_BASE"] = "CUSTOM_API_KEY"
+        for base_key, credential_key in base_url_credentials.items():
+            if base_key not in payload:
+                continue
+            proposed_base = str(payload.get(base_key) or "").strip().rstrip("/")
+            current_base = str(os.getenv(base_key) or "").strip().rstrip("/")
+            if not proposed_base or "****" in proposed_base:
+                continue
+            current_credential = os.getenv(credential_key)
+            replacement = payload.get(credential_key)
+            replacement_is_real = (
+                isinstance(replacement, str)
+                and bool(replacement.strip())
+                and "****" not in replacement
+                and replacement.strip() not in _PLACEHOLDER_VALUES
+            )
+            if (
+                proposed_base != current_base
+                and current_credential
+                and current_credential not in _PLACEHOLDER_VALUES
+                and not replacement_is_real
+            ):
+                raise ValueError(
+                    f"Changing {base_key} requires re-entering {credential_key}"
+                )
         updates = {}
         for key in _ALL_KEYS:
-            if key not in payload or key in _READONLY_KEYS:
+            if key not in payload or key in _READONLY_KEYS or (
+                is_production_mode() and key in _PRODUCTION_ENV_ONLY_KEYS
+            ):
                 continue
             new_val = payload.get(key)
             if new_val is None:
@@ -329,11 +435,30 @@ def update_settings(payload: dict) -> dict:
                 from .llm_manager import resolve_provider
 
                 resolve_provider(new_val)
+            if key == "CUSTOM_TEMPERATURE" and new_val:
+                try:
+                    temperature = float(new_val)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("Custom temperature must be a number from 0 to 2") from exc
+                if not math.isfinite(temperature) or not 0 <= temperature <= 2:
+                    raise ValueError("Custom temperature must be a number from 0 to 2")
+            if key == "CUSTOM_MAX_TOKENS" and new_val:
+                try:
+                    custom_max_tokens = int(new_val)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("Custom max tokens must be an integer from 64 to 4096") from exc
+                if not 64 <= custom_max_tokens <= 4096:
+                    raise ValueError("Custom max tokens must be an integer from 64 to 4096")
+            if key == "CUSTOM_PROVIDER_TYPE" and new_val and not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", new_val
+            ):
+                raise ValueError("Custom provider type contains unsupported characters")
             updates[key] = new_val
-            os.environ[key] = new_val
 
         if updates:
             _write_db_overrides(updates)
+            for key, value in updates.items():
+                os.environ[key] = value
             _reset_runtime()
 
     return get_settings()

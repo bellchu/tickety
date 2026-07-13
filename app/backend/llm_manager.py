@@ -2,7 +2,9 @@ import os
 import asyncio
 import json
 import httpx
+import math
 import random
+import re
 import threading
 import time
 import secrets
@@ -10,7 +12,7 @@ from typing import Type
 from litellm import acompletion
 from dotenv import load_dotenv
 from pydantic import BaseModel, ValidationError
-from .privacy import redact_text
+from .privacy import redact_data, redact_text
 
 load_dotenv()
 
@@ -347,6 +349,8 @@ def _reserve_provider_request(provider: str, estimated_tokens: int) -> None:
 
 
 def _provider_controls_enabled() -> bool:
+    if (os.getenv("APP_MODE") or "demo").strip().lower() == "production":
+        return True
     configured = os.getenv("LLM_ENFORCE_PROVIDER_LIMITS")
     if configured is not None:
         return _enabled(configured)
@@ -556,6 +560,8 @@ def _bounded_prompt(text: str, limit: int) -> str:
 def resolve_provider(model_name: str) -> str:
     """Return the provider id for a given litellm model string."""
     m = (model_name or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}", m):
+        raise ValueError("Unsupported LLM model identifier format")
     for pid in _PROVIDER_ORDER:
         cfg = PROVIDERS.get(pid)
         if cfg and cfg["match"](m):
@@ -604,8 +610,56 @@ def get_llm_catalog() -> dict:
 # ── Live model fetching ──────────────────────────────────────────────
 
 _FETCHED_MODELS_CACHE: dict = {}
+_MAX_MODEL_RESPONSE_BYTES = 2_000_000
+_MAX_MODELS_PER_PROVIDER = 1_000
 
 _PLACEHOLDER_KEYS = {"", None, "sk-your-key-here", "your-key-here"}
+
+
+def _bounded_model_entry(model_id, label, *, prefix: str | None = None) -> dict | None:
+    if not isinstance(model_id, str) or not model_id.strip():
+        return None
+    model_id = model_id.strip()
+    if prefix and not model_id.startswith(f"{prefix}/"):
+        model_id = f"{prefix}/{model_id}"
+    if len(model_id) > 200 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}", model_id):
+        return None
+    safe_label = str(label or model_id).strip()[:200]
+    return {"id": model_id, "label": safe_label or model_id}
+
+
+async def _get_json_limited(client: httpx.AsyncClient, url: str, headers: dict) -> dict:
+    chunks = []
+    total = 0
+    async with client.stream("GET", url, headers=headers) as response:
+        response.raise_for_status()
+        async for chunk in response.aiter_bytes():
+            total += len(chunk)
+            if total > _MAX_MODEL_RESPONSE_BYTES:
+                raise ValueError("provider model catalog response is too large")
+            chunks.append(chunk)
+    payload = json.loads(b"".join(chunks))
+    if not isinstance(payload, dict):
+        raise ValueError("provider model catalog must be a JSON object")
+    return payload
+
+
+def _sanitize_fetched_models(data: dict) -> dict:
+    sanitized = {}
+    if not isinstance(data, dict):
+        return sanitized
+    for provider, models in data.items():
+        if provider not in PROVIDERS or not isinstance(models, list):
+            continue
+        entries = []
+        for model in models[:_MAX_MODELS_PER_PROVIDER]:
+            if not isinstance(model, dict):
+                continue
+            entry = _bounded_model_entry(model.get("id"), model.get("label"))
+            if entry:
+                entries.append(entry)
+        sanitized[provider] = entries
+    return sanitized
 
 
 def _load_fetched_models() -> dict:
@@ -616,10 +670,14 @@ def _load_fetched_models() -> dict:
     try:
         from .database import SessionLocal, SettingsRecord
         db = SessionLocal()
-        row = db.query(SettingsRecord).filter(SettingsRecord.key == "LLM_FETCHED_MODELS").first()
-        db.close()
-        if row and row.value:
-            _FETCHED_MODELS_CACHE = json.loads(row.value)
+        try:
+            row = db.query(SettingsRecord).filter(SettingsRecord.key == "LLM_FETCHED_MODELS").first()
+            if row and row.value and len(row.value) <= _MAX_MODEL_RESPONSE_BYTES:
+                loaded = json.loads(row.value)
+                if isinstance(loaded, dict):
+                    _FETCHED_MODELS_CACHE = _sanitize_fetched_models(loaded)
+        finally:
+            db.close()
     except Exception:
         pass
     return _FETCHED_MODELS_CACHE
@@ -628,17 +686,23 @@ def _load_fetched_models() -> dict:
 def _save_fetched_models(data: dict):
     """Persist fetched model lists to the DB settings store."""
     global _FETCHED_MODELS_CACHE
+    data = _sanitize_fetched_models(data)
     _FETCHED_MODELS_CACHE = data
     try:
         from .database import SessionLocal, SettingsRecord
         db = SessionLocal()
-        row = db.query(SettingsRecord).filter(SettingsRecord.key == "LLM_FETCHED_MODELS").first()
-        if row:
-            row.value = json.dumps(data)
-        else:
-            db.add(SettingsRecord(key="LLM_FETCHED_MODELS", value=json.dumps(data)))
-        db.commit()
-        db.close()
+        try:
+            serialized = json.dumps(data)
+            if len(serialized) > _MAX_MODEL_RESPONSE_BYTES:
+                raise ValueError("provider model catalog cache is too large")
+            row = db.query(SettingsRecord).filter(SettingsRecord.key == "LLM_FETCHED_MODELS").first()
+            if row:
+                row.value = serialized
+            else:
+                db.add(SettingsRecord(key="LLM_FETCHED_MODELS", value=serialized))
+            db.commit()
+        finally:
+            db.close()
     except Exception as e:
         print(f"[llm] failed to save fetched models kind={type(e).__name__}")
 
@@ -653,16 +717,22 @@ async def _fetch_openai_models(
     url = f"{validated_base}/models"
     headers = {"Authorization": f"Bearer {api_key}"}
     async with httpx.AsyncClient(timeout=15, follow_redirects=False) as cli:
-        resp = await cli.get(url, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
+        data = await _get_json_limited(cli, url, headers)
     models = []
-    for m in data.get("data", []):
+    raw_models = data.get("data", [])
+    if not isinstance(raw_models, list):
+        raise ValueError("provider model catalog data must be a list")
+    for m in raw_models[:_MAX_MODELS_PER_PROVIDER]:
+        if not isinstance(m, dict):
+            continue
         mid = m.get("id", "")
+        if not isinstance(mid, str):
+            continue
         # Filter to relevant chat/instruction models
         if any(p in mid.lower() for p in ("gpt-", "o1", "o3", "o4", "claude", "gemini", "deepseek-")):
-            model_id = f"{prefix}/{mid}" if prefix and not mid.startswith(f"{prefix}/") else mid
-            models.append({"id": model_id, "label": mid})
+            entry = _bounded_model_entry(mid, mid, prefix=prefix)
+            if entry:
+                models.append(entry)
     return sorted(models, key=lambda x: x["id"])
 
 
@@ -695,19 +765,23 @@ async def fetch_live_models() -> dict:
     if or_key and or_key not in _PLACEHOLDER_KEYS:
         try:
             async with httpx.AsyncClient(timeout=20, follow_redirects=False) as cli:
-                resp = await cli.get(
+                data = await _get_json_limited(
+                    cli,
                     "https://openrouter.ai/api/v1/models",
-                    headers={"Authorization": f"Bearer {or_key}"},
+                    {"Authorization": f"Bearer {or_key}"},
                 )
-                resp.raise_for_status()
-                data = resp.json()
             or_models = []
-            for m in data.get("data", []):
+            raw_models = data.get("data", [])
+            if not isinstance(raw_models, list):
+                raise ValueError("provider model catalog data must be a list")
+            for m in raw_models[:_MAX_MODELS_PER_PROVIDER]:
+                if not isinstance(m, dict):
+                    continue
                 mid = m.get("id", "")
                 label = m.get("name", mid)
-                if mid and not mid.startswith("openrouter/"):
-                    mid = f"openrouter/{mid}"
-                or_models.append({"id": mid, "label": label})
+                entry = _bounded_model_entry(mid, label, prefix="openrouter")
+                if entry:
+                    or_models.append(entry)
             results["openrouter"] = sorted(or_models, key=lambda x: x["label"].lower())
         except Exception as e:
             print(f"[llm] fetch openrouter models error kind={type(e).__name__}")
@@ -750,7 +824,19 @@ class LLMManager:
         primary_key = self.provider_cfg["env_keys"][0]["key"]
         self.api_key = os.getenv(primary_key)
         self.is_mock = self.api_key in _PLACEHOLDER_VALUES
-        self.allow_synthetic = _enabled(os.getenv("LLM_ALLOW_SYNTHETIC"))
+        if self.provider == "custom" and not self.is_mock:
+            custom_base = (os.getenv("CUSTOM_API_BASE") or "").strip()
+            if not custom_base:
+                raise ValueError(
+                    "CUSTOM_API_BASE is required when CUSTOM_API_KEY is configured"
+                )
+            from .settings import _validate_llm_base_url
+
+            _validate_llm_base_url(custom_base)
+        self.allow_synthetic = (
+            _enabled(os.getenv("LLM_ALLOW_SYNTHETIC"))
+            and (os.getenv("APP_MODE") or "demo").strip().lower() != "production"
+        )
         self.request_timeout = _bounded_number(
             os.getenv("LLM_REQUEST_TIMEOUT_SECONDS"), 30.0, 5.0, 120.0
         )
@@ -790,7 +876,9 @@ class LLMManager:
                     error_code="provider_not_configured",
                 )
                 raise LLMUnavailableError("AI provider is not configured")
-            result = self._validate_response(self._get_mock_response(prompt), response_model)
+            result = redact_data(
+                self._validate_response(self._get_mock_response(prompt), response_model)
+            )
             _metric(successes=1, synthetic_results=1)
             _record_call(
                 provider=self.provider, model=self.model_name, task=task_name,
@@ -802,8 +890,11 @@ class LLMManager:
 
         json_mode = json_schema is not None or response_model is not None
         safe_prompt = _bounded_prompt(redact_text(prompt), self.prompt_char_limit)
+        trusted_policy = _SYSTEM_GUARD
+        if system_prompt:
+            trusted_policy = f"{_SYSTEM_GUARD}\n\nTRUSTED_TASK_POLICY:\n{system_prompt}"
         messages = [
-            {"role": "system", "content": system_prompt or _SYSTEM_GUARD},
+            {"role": "system", "content": trusted_policy},
             {"role": "user", "content": safe_prompt},
         ]
         kwargs = self._build_kwargs(
@@ -817,7 +908,7 @@ class LLMManager:
         deadline = started + self.overall_timeout
         # UTF-8 bytes are a conservative model-independent upper bound when a
         # provider tokenizer is unavailable; output is bounded by max_tokens.
-        estimated_tokens = max_tokens + max(1, sum(
+        estimated_tokens = int(kwargs["max_tokens"]) + max(1, sum(
             len(str(message.get("content") or "").encode("utf-8"))
             for message in messages
         ))
@@ -865,7 +956,7 @@ class LLMManager:
                     # content. Retry with the same prompt instead of crashing.
                     raise ValueError("model returned empty content")
                 parsed = self._parse_json(content)
-                validated = self._validate_response(parsed, response_model)
+                validated = redact_data(self._validate_response(parsed, response_model))
                 usage = getattr(response, "usage", None)
                 prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
                 completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
@@ -971,15 +1062,29 @@ class LLMManager:
         max_tokens: int = 1024,
         response_model: Type[BaseModel] | None = None,
     ) -> dict:
-        kwargs = {
-            "model": self.model_name,
-            "messages": messages,
-            "max_tokens": max(64, min(int(max_tokens), 4096)),
-            "timeout": self.request_timeout,
-        }
+        task_max_tokens = max(64, min(int(max_tokens), 4096))
+        kwargs = {"model": self.model_name, "messages": messages}
         # Provider-specific routing (api_key / api_base / custom provider /
         # thinking-disabled etc.) comes from the catalog's build() lambda.
-        kwargs.update(self.provider_cfg["build"](self, self.model_name))
+        provider_kwargs = self.provider_cfg["build"](self, self.model_name)
+        configured_max_tokens = provider_kwargs.pop("max_tokens", None)
+        if configured_max_tokens is not None:
+            try:
+                task_max_tokens = min(task_max_tokens, int(configured_max_tokens))
+            except (TypeError, ValueError):
+                pass
+        kwargs.update(provider_kwargs)
+        kwargs["max_tokens"] = max(64, min(task_max_tokens, 4096))
+        kwargs["timeout"] = self.request_timeout
+        if "temperature" in kwargs:
+            try:
+                temperature = float(kwargs["temperature"])
+            except (TypeError, ValueError):
+                temperature = math.nan
+            if not math.isfinite(temperature) or not 0 <= temperature <= 2:
+                kwargs.pop("temperature", None)
+            else:
+                kwargs["temperature"] = temperature
         trusted_bases = {
             DEEPSEEK_BASE_URL,
             "https://openrouter.ai/api/v1",
@@ -1014,6 +1119,10 @@ class LLMManager:
 
     @staticmethod
     def _parse_json(content: str) -> dict:
+        if not isinstance(content, str):
+            raise ValueError("model response content must be text")
+        if len(content) > 64_000:
+            raise ValueError("model response exceeded the maximum size")
         text = content.strip()
         # Tolerate code-fenced JSON ```json ... ``` just in case.
         if text.startswith("```"):
@@ -1021,7 +1130,15 @@ class LLMManager:
             if text.lower().startswith("json"):
                 text = text[4:]
             text = text.strip()
-        return json.loads(text)
+        def reject_duplicate_keys(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError(f"duplicate JSON key: {key}")
+                result[key] = value
+            return result
+
+        return json.loads(text, object_pairs_hook=reject_duplicate_keys)
 
     # ── offline fallback ───────────────────────────────────────
 

@@ -70,6 +70,8 @@ def _auto_triage_job():
     """Background scanner: pick up tickets with missing AI data and fill
     the gaps — triage first, then summary, then resolution. Processes up
     to 10 tickets per 30‑second sweep."""
+    if not settings_module.is_production_mode():
+        return
     try:
         db = SessionLocal()
         auto_triage = settings_module.automation_enabled("AUTO_TRIAGE_ENABLED", "AUTO_TRIAGE")

@@ -29,6 +29,10 @@ spec:
         - podSelector:
             matchLabels:
               app: postgres
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tickety
+              app.kubernetes.io/component: postgres
       ports:
         - protocol: TCP
           port: 5432
@@ -54,3 +58,68 @@ spec:
               - 203.0.113.0/24
               - 224.0.0.0/4
               - 240.0.0.0/4
+      ports:
+        - protocol: TCP
+          port: 443
+---
+# Public/remote manifests use the standard app.kubernetes.io label set while
+# the local OrbStack manifests retain their shorter historical labels.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend-safe-egress-standard-labels
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: tickety
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [backend, backend-worker]
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tickety
+              app.kubernetes.io/component: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 0.0.0.0/8
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.0.0.0/24
+              - 192.0.2.0/24
+              - 192.88.99.0/24
+              - 192.168.0.0/16
+              - 198.18.0.0/15
+              - 198.51.100.0/24
+              - 203.0.113.0/24
+              - 224.0.0.0/4
+              - 240.0.0.0/4
+      ports:
+        - protocol: TCP
+          port: 443

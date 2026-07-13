@@ -49,8 +49,10 @@ def _completion(payload):
 
 class LLMContractTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.provider_controls = patch.dict(
-            os.environ, {"LLM_ENFORCE_PROVIDER_LIMITS": "false"}, clear=False
+        # Provider contract tests mock transport and do not use the shared DB;
+        # production itself now enforces provider controls unconditionally.
+        self.provider_controls = patch.object(
+            llm_module, "_provider_controls_enabled", return_value=False
         )
         self.provider_controls.start()
 
@@ -346,7 +348,10 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         old_llm = main.engine.llm
         main.engine.llm = InvalidLLM()
         try:
-            with self.session_factory() as db:
+            with (
+                self.session_factory() as db,
+                patch.object(main.settings_module, "is_production_mode", return_value=True),
+            ):
                 ticket = db.get(TicketRecord, "ticket-1")
                 original_priority = ticket.priority
                 with self.assertRaises(LLMInvalidOutputError):
@@ -460,7 +465,10 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         old_llm = main.engine.llm
         main.engine.llm = fake
         try:
-            with self.session_factory() as db:
+            with (
+                self.session_factory() as db,
+                patch.object(main.settings_module, "is_production_mode", return_value=True),
+            ):
                 ticket = db.get(TicketRecord, "ticket-1")
                 ticket.ai_reasoning = "scope: single user; triage is current"
                 ticket.ai_status = "queued"
@@ -606,6 +614,7 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         process = AsyncMock()
         with (
             patch.object(sync_worker, "SessionLocal", self.session_factory),
+            patch.object(sync_worker.settings_module, "is_production_mode", return_value=True),
             patch.object(sync_worker.settings_module, "automation_enabled", return_value=False),
             patch.object(main, "_auto_process", new=process),
         ):
@@ -623,6 +632,7 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         process = AsyncMock()
         with (
             patch.object(sync_worker, "SessionLocal", self.session_factory),
+            patch.object(sync_worker.settings_module, "is_production_mode", return_value=True),
             patch.object(sync_worker.settings_module, "automation_enabled", return_value=True),
             patch.object(main, "_auto_process", new=process),
         ):
@@ -640,6 +650,7 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         process = AsyncMock()
         with (
             patch.object(sync_worker, "SessionLocal", self.session_factory),
+            patch.object(sync_worker.settings_module, "is_production_mode", return_value=True),
             patch.object(sync_worker.settings_module, "automation_enabled", return_value=True),
             patch.object(main, "_auto_process", new=process),
         ):
@@ -657,6 +668,7 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         process = AsyncMock()
         with (
             patch.object(sync_worker, "SessionLocal", self.session_factory),
+            patch.object(sync_worker.settings_module, "is_production_mode", return_value=True),
             patch.object(sync_worker.settings_module, "automation_enabled", return_value=True),
             patch.object(main, "_auto_process", new=process),
         ):
@@ -678,6 +690,8 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 main,
                 "_reserve_ai_request",
                 side_effect=HTTPException(status_code=429, detail="limited"),
+            ), patch.object(
+                main.settings_module, "is_production_mode", return_value=True
             ):
                 await main._auto_process(ticket, db, force=True)
             db.refresh(ticket)
@@ -785,6 +799,35 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         finally:
             main.engine.llm = old_llm
 
+    def test_cache_rejects_artifact_from_previous_pipeline_version(self):
+        old_llm = main.engine.llm
+        main.engine.llm = SimpleNamespace(
+            model_name="custom/test", allow_synthetic=False, is_mock=False
+        )
+        try:
+            with self.session_factory() as db, patch.dict(
+                os.environ, {"APP_MODE": "production"}, clear=False
+            ):
+                ticket = db.get(TicketRecord, "ticket-1")
+                ticket.ai_reasoning = "legacy unredacted reasoning"
+                ticket.ai_status = "completed"
+                db.add(AIArtifactRecord(
+                    ticket_id=ticket.id,
+                    artifact="triage",
+                    input_hash=main._artifact_input_hash(ticket, "triage"),
+                    pipeline_version="2026-07-12.1",
+                    provider="custom",
+                    model="custom/test",
+                    synthetic=False,
+                    content_hash="d" * 64,
+                    active=True,
+                ))
+                db.commit()
+
+                self.assertFalse(main._artifact_is_current(db, ticket, "triage"))
+        finally:
+            main.engine.llm = old_llm
+
     def test_agent_retrieval_scope_excludes_other_agents_tickets(self):
         with self.session_factory() as db:
             own = db.get(TicketRecord, "ticket-1")
@@ -876,6 +919,7 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(ticket_vectors, "ticket_vector_store_ready", return_value=True),
             patch.dict(os.environ, {
+                "APP_MODE": "production",
                 "TICKET_EMBEDDING_ENABLED": "true",
                 "TICKET_EMBEDDING_MODEL": "openai/new-model",
                 "TICKET_EMBEDDING_DIMENSIONS": "1536",
@@ -887,7 +931,7 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         results = [
             {"source_type": "comment", "metadata": {"is_private": True}, "snippet": "secret"},
             {"source_type": "comment", "metadata": {"is_private": False}, "snippet": "public"},
-            {"source_type": "ticket", "metadata": {}, "snippet": "ticket"},
+            {"source_type": "ticket", "metadata": {"evidence_version": 2}, "snippet": "ticket"},
         ]
         filtered = ticket_vectors._filter_private_results(results, False)
         self.assertEqual([item["snippet"] for item in filtered], ["public", "ticket"])

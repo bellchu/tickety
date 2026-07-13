@@ -18,6 +18,7 @@ kubectl -n tickety create secret generic tickety-secrets \
   --from-literal=DATABASE_URL='postgresql+psycopg2://tickety:<url-encoded-password>@postgres:5432/tickety' \
   --from-literal=FRONTEND_URL='https://support.example.com' \
   --from-literal=CORS_ALLOW_ORIGINS='https://support.example.com' \
+  --from-literal=LLM_ALLOWED_PROVIDER_HOSTS='your-reviewed-provider.example.com' \
   --from-literal=WEBHOOK_SECRET='<generate-a-random-secret>' \
   --from-literal=ITSM_PROVIDER='jira' \
   --from-literal=SYNC_INTERVAL_SECONDS=60
@@ -35,6 +36,7 @@ Apply `network-policy.yaml` with the workloads (for example,
 `kubectl apply -n tickety-standalone -f k8s/network-policy.yaml` for a public
 standalone namespace). It restricts backend and worker
 egress to cluster DNS, the Tickety Postgres pod, and public IPv4 destinations.
+Public provider egress is limited to TCP 443.
 This is the connection-time SSRF/DNS-rebinding boundary for configurable AI
 and ITSM endpoints; clusters must use a CNI that enforces Kubernetes
 NetworkPolicy. The canonical local deployment runs
@@ -42,6 +44,20 @@ NetworkPolicy. The canonical local deployment runs
 blocked while public HTTPS remains available. Target-specific deployment
 workflows must run the same check with their namespace. Private AI endpoints require a deliberately reviewed policy
 change rather than only an application setting.
+
+Before exposing a database that has ever run in demo mode, provision a real
+administrator or reviewed SSO bootstrap path. Production startup disables the
+fixed `u-alice`, `u-bob`, and `u-carol` demo identities, erases their known
+passwords, and revokes their sessions. Rotate every configured AI-provider
+credential when upgrading an installation that was previously reachable in
+demo mode, and audit the stored provider origins before enabling AI traffic.
+
+After an upgrade that changes retrieval evidence, call the protected
+`POST /ticket-intelligence/backfill` endpoint in batches and require
+`GET /ticket-intelligence/status` to report zero legacy and missing ticket,
+comment, and published-KB documents before enabling retrieval-backed AI. Each
+call is bounded to 500 records per source; repeat it until the status converges.
+If embeddings are enabled, confirm provider budget before a forced backfill.
 
 OrbStack's built-in local Kubernetes networking currently accepts but does not
 enforce NetworkPolicy. The local `deploy.sh` therefore reports that limitation

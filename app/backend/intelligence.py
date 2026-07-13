@@ -31,6 +31,7 @@ from sqlalchemy.orm import Session
 from .database import TicketRecord, UserRecord
 from .llm_manager import LLMManager
 from .ai_contracts import ResolutionAnalysis, TicketSummary
+from .privacy import redact_text
 
 # ── Tunables ──────────────────────────────────────────────────────────────
 
@@ -272,9 +273,9 @@ async def summarize_ticket(
     prompt = _SUMMARY_PROMPT.format(
         ticket_json=json.dumps(
             {
-                "subject": ticket.subject,
-                "description": ticket.description or "",
-                "triage_reasoning": ticket.ai_reasoning or "",
+                "subject": redact_text(ticket.subject),
+                "description": redact_text(ticket.description or ""),
+                "triage_reasoning": redact_text(ticket.ai_reasoning or ""),
             },
             ensure_ascii=False,
         ),
@@ -321,12 +322,12 @@ async def recommend_resolution(
     prompt = _RESOLUTION_PROMPT.format(
         ticket_json=json.dumps(
             {
-                "subject": ticket.subject,
-                "description": ticket.description or "",
+                "subject": redact_text(ticket.subject),
+                "description": redact_text(ticket.description or ""),
                 "category": ticket.category or "Other",
                 "priority": ticket.priority or "P3",
                 "sentiment": ticket.sentiment or "Neutral",
-                "triage_reasoning": ticket.ai_reasoning or "",
+                "triage_reasoning": redact_text(ticket.ai_reasoning or ""),
             },
             ensure_ascii=False,
         ),
@@ -436,7 +437,11 @@ def _jaccard(a: set, b: set) -> float:
 
 from collections import Counter
 def systemic_issues(db, cluster_threshold: int = 3, similarity_cutoff: float = 0.25) -> dict:
-    tickets = db.query(TicketRecord).all()
+    # Pairwise similarity is O(n^2); bound the working set so one request
+    # cannot monopolize an API worker on an arbitrarily large installation.
+    tickets = db.query(TicketRecord).order_by(
+        TicketRecord.updated_at.desc()
+    ).limit(500).all()
     if len(tickets) < 2:
         return {"clusters": [], "total_tickets": len(tickets)}
 

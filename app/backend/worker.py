@@ -7,6 +7,7 @@ from . import settings as settings_module
 from .database import init_db
 from .database import SessionLocal
 from . import ticket_vectors
+from .production_security import disable_seeded_demo_identities
 from .sync_worker import process_role, start_sync_worker, stop_sync_worker
 
 
@@ -15,6 +16,10 @@ def run() -> int:
     settings_module.load_settings_into_env()
     cleanup_db = SessionLocal()
     try:
+        if settings_module.is_production_mode():
+            disabled_demo_users = disable_seeded_demo_identities(cleanup_db)
+            if disabled_demo_users:
+                print(f"[security] disabled_seeded_demo_users={disabled_demo_users}")
         ticket_vectors.purge_private_comment_documents(cleanup_db)
     finally:
         cleanup_db.close()

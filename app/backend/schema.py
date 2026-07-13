@@ -339,7 +339,7 @@ class TicketComment(BaseModel):
 
 
 class TicketCommentCreate(BaseModel):
-    body: str = Field(..., min_length=1)
+    body: str = Field(..., min_length=1, max_length=20_000)
     is_private: bool = False
 
 
@@ -380,7 +380,7 @@ class BulkAction(BaseModel):
 
 
 class TicketIntelligenceBackfillRequest(BaseModel):
-    limit: int = Field(200, ge=1, le=5000)
+    limit: int = Field(200, ge=1, le=500)
     include_comments: bool = True
     include_kb: bool = True
     force: bool = False
@@ -496,20 +496,20 @@ class KbArticle(BaseModel):
 
 class KbArticleCreate(BaseModel):
     title: str = Field(..., min_length=1, max_length=200)
-    content: str = ""
-    category: Optional[str] = None
-    tags: Optional[str] = None
-    status: str = "draft"
+    content: str = Field("", max_length=100_000)
+    category: Optional[str] = Field(None, max_length=120)
+    tags: Optional[str] = Field(None, max_length=1_000)
+    status: Literal["draft", "published", "archived"] = "draft"
     reviewer_id: Optional[str] = None
     review_due_at: Optional[datetime] = None
 
 
 class KbArticleUpdate(BaseModel):
-    title: Optional[str] = None
-    content: Optional[str] = None
-    category: Optional[str] = None
-    tags: Optional[str] = None
-    status: Optional[str] = None
+    title: Optional[str] = Field(None, min_length=1, max_length=200)
+    content: Optional[str] = Field(None, max_length=100_000)
+    category: Optional[str] = Field(None, max_length=120)
+    tags: Optional[str] = Field(None, max_length=1_000)
+    status: Optional[Literal["draft", "published", "archived"]] = None
     reviewer_id: Optional[str] = None
     review_due_at: Optional[datetime] = None
 

@@ -463,20 +463,22 @@ class FreshserviceAdapter(BaseITSMAdapter):
         raw_body: bytes | None = None,
     ) -> Optional[WebhookEvent]:
         signature = headers.get("x-freshservice-webhook-signature", "")
-        if not self.webhook_secret and os.getenv("APP_MODE", "demo").lower() == "production":
-            print("[External] webhook secret missing in production")
+        if not self.webhook_secret or self.webhook_secret in {
+            "your-webhook-secret",
+            "change-me",
+        }:
+            print("[External] webhook secret is not configured")
             return None
-        if self.webhook_secret and not signature:
+        if not signature:
             print("[External] webhook signature missing")
             return None
-        if self.webhook_secret and signature:
-            body = raw_body if raw_body is not None else str(payload).encode()
-            expected = base64.b64encode(
-                hmac.new(self.webhook_secret.encode(), body, hashlib.sha256).digest()
-            ).decode()
-            if not hmac.compare_digest(signature, expected):
-                print("[External] webhook signature mismatch")
-                return None
+        body = raw_body if raw_body is not None else str(payload).encode()
+        expected = base64.b64encode(
+            hmac.new(self.webhook_secret.encode(), body, hashlib.sha256).digest()
+        ).decode()
+        if not hmac.compare_digest(signature, expected):
+            print("[External] webhook signature mismatch")
+            return None
 
         ticket_data = payload.get("ticket", payload.get("data", {}))
         ext_id = str(ticket_data.get("id", ""))

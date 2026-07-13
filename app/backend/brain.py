@@ -3,6 +3,7 @@ import json
 from .ai_contracts import SuggestedReply, TriageAnalysis
 from .llm_manager import LLMManager
 from .prompts import Triage_PROMPT, REPLY_PROMPT
+from .privacy import redact_text
 
 MOOD_TO_EMOJI = {
     "critical": "😡",
@@ -41,8 +42,8 @@ class IntelligenceEngine:
         triage_prompt = Triage_PROMPT.format(
             ticket_json=json.dumps(
                 {
-                    "subject": ticket_data.get("subject") or "",
-                    "description": ticket_data.get("description") or "",
+                    "subject": redact_text(ticket_data.get("subject") or ""),
+                    "description": redact_text(ticket_data.get("description") or ""),
                 },
                 ensure_ascii=False,
             ),
@@ -63,12 +64,12 @@ class IntelligenceEngine:
             reply_prompt = REPLY_PROMPT.format(
                 ticket_json=json.dumps(
                     {
-                        "subject": ticket_data.get("subject") or "",
-                        "description": ticket_data.get("description") or "",
+                        "subject": redact_text(ticket_data.get("subject") or ""),
+                        "description": redact_text(ticket_data.get("description") or ""),
                     },
                     ensure_ascii=False,
                 ),
-                kb_json=json.dumps({"evidence": kb_info}, ensure_ascii=False),
+                kb_json=json.dumps({"evidence": redact_text(kb_info)}, ensure_ascii=False),
             )
             reply_analysis = await self.llm.analyze(
                 reply_prompt,
