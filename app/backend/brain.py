@@ -1,8 +1,12 @@
-import asyncio
-import json
 from .ai_contracts import SuggestedReply, TriageAnalysis
-from .llm_manager import LLMManager
-from .prompts import Triage_PROMPT, REPLY_PROMPT
+from .ai_input import (
+    UnsafeAIAdviceError,
+    canonical_bounded_json,
+    prompt_char_limit,
+    validate_semantic_advice,
+)
+from .llm_manager import LLMInvalidOutputError, LLMManager
+from .prompts import REPLY_SYSTEM_PROMPT, TRIAGE_SYSTEM_PROMPT
 from .privacy import redact_text
 
 MOOD_TO_EMOJI = {
@@ -39,43 +43,59 @@ class IntelligenceEngine:
         self.llm = llm_manager
 
     async def process_ticket(self, ticket_data: dict, kb_info: str = "") -> dict:
-        triage_prompt = Triage_PROMPT.format(
-            ticket_json=json.dumps(
-                {
-                    "subject": redact_text(ticket_data.get("subject") or ""),
-                    "description": redact_text(ticket_data.get("description") or ""),
-                },
-                ensure_ascii=False,
-            ),
+        triage_prompt = canonical_bounded_json(
+            {
+                "subject": redact_text(ticket_data.get("subject") or ""),
+                "description": redact_text(ticket_data.get("description") or ""),
+            },
+            max_chars=prompt_char_limit(self.llm),
+            field_limits={"subject": 1_000, "description": 20_000},
         )
-        # Pass json_schema (truthy) so the LLM manager enables DeepSeek JSON Output
-        # (response_format=json_object) for reliable structured triage results.
         analysis = await self.llm.analyze(
             triage_prompt,
             response_model=TriageAnalysis,
+            system_prompt=TRIAGE_SYSTEM_PROMPT,
             max_tokens=600,
         )
+        try:
+            validate_semantic_advice(analysis)
+        except UnsafeAIAdviceError as exc:
+            raise LLMInvalidOutputError(
+                "AI provider returned unsafe triage output"
+            ) from exc
 
         analysis["complexity"] = calculate_complexity(
             analysis["priority"], analysis["sentiment"]
         )
 
         if analysis.get("action") == "respond" and kb_info:
-            reply_prompt = REPLY_PROMPT.format(
-                ticket_json=json.dumps(
-                    {
-                        "subject": redact_text(ticket_data.get("subject") or ""),
-                        "description": redact_text(ticket_data.get("description") or ""),
-                    },
-                    ensure_ascii=False,
-                ),
-                kb_json=json.dumps({"evidence": redact_text(kb_info)}, ensure_ascii=False),
+            reply_prompt = canonical_bounded_json(
+                {
+                    "ticket_subject": redact_text(ticket_data.get("subject") or ""),
+                    "ticket_description": redact_text(
+                        ticket_data.get("description") or ""
+                    ),
+                    "knowledge_base_evidence": redact_text(kb_info),
+                },
+                max_chars=prompt_char_limit(self.llm),
+                field_limits={
+                    "ticket_subject": 1_000,
+                    "ticket_description": 18_000,
+                    "knowledge_base_evidence": 8_000,
+                },
             )
             reply_analysis = await self.llm.analyze(
                 reply_prompt,
                 response_model=SuggestedReply,
+                system_prompt=REPLY_SYSTEM_PROMPT,
                 max_tokens=800,
             )
+            try:
+                validate_semantic_advice(reply_analysis)
+            except UnsafeAIAdviceError as exc:
+                raise LLMInvalidOutputError(
+                    "AI provider returned unsafe suggested advice"
+                ) from exc
             analysis["suggested_response"] = reply_analysis.get("suggested_response")
 
         return analysis

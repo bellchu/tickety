@@ -77,13 +77,16 @@ def _auto_triage_job():
         auto_triage = settings_module.automation_enabled("AUTO_TRIAGE_ENABLED", "AUTO_TRIAGE")
         auto_summary = settings_module.automation_enabled("AUTO_SUMMARIZE_ENABLED")
         auto_resolution = settings_module.automation_enabled("AUTO_RESOLVE_ENABLED")
-        # Portal tickets are anonymous, attacker-controlled input. They may be
-        # analysed only after an authenticated action explicitly queues them;
-        # never let the background gap scanner turn public ticket creation
-        # into an indirect provider-spend or worker-starvation primitive.
-        trusted_automatic_source = or_(
+        # Only Tickety-owned records are eligible for implicit gap scanning.
+        # A provider-authenticated sync or webhook proves transport integrity,
+        # not that requester-controlled ticket text is safe AI input. External
+        # and Portal tickets must therefore be explicitly queued by an
+        # authenticated workflow before the worker will process them. The
+        # separate queued query above intentionally remains source-agnostic so
+        # those reviewed requests, including expired claims, can make progress.
+        internal_automatic_source = or_(
             TicketRecord.external_source.is_(None),
-            TicketRecord.external_source != "portal",
+            TicketRecord.external_source.in_(["manual", "standalone"]),
         )
         queued = db.query(TicketRecord).filter(
             or_(
@@ -101,7 +104,7 @@ def _auto_triage_job():
         # Find tickets missing ANY AI data (prioritize untriaged first)
         untriaged = (
             db.query(TicketRecord).filter(
-                trusted_automatic_source,
+                internal_automatic_source,
                 TicketRecord.ai_reasoning.is_(None),
                 or_(
                     TicketRecord.ai_status.is_(None),
@@ -112,7 +115,7 @@ def _auto_triage_job():
         )
         no_summary = (
             db.query(TicketRecord).filter(
-                trusted_automatic_source,
+                internal_automatic_source,
                 TicketRecord.ai_reasoning.isnot(None),
                 TicketRecord.summary.is_(None),
                 or_(
@@ -128,7 +131,7 @@ def _auto_triage_job():
         )
         no_resolution = (
             db.query(TicketRecord).filter(
-                trusted_automatic_source,
+                internal_automatic_source,
                 TicketRecord.ai_reasoning.isnot(None),
                 TicketRecord.summary.isnot(None),
                 TicketRecord.recommended_solution.is_(None),

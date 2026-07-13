@@ -4,10 +4,11 @@ import json
 import os
 import re
 import time
+import unicodedata
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Optional
 
-from sqlalchemy import or_, text
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from .database import KbArticleRecord, SessionLocal, TicketCommentRecord, TicketRecord
@@ -17,6 +18,99 @@ from .privacy import configured_secret_values, redact_text
 _TRUE_VALUES = {"1", "true", "yes", "on", "enabled"}
 _DEFAULT_EMBEDDING_MODEL = "openai/text-embedding-3-small"
 _WORD_RE = re.compile(r"[a-z0-9][a-z0-9._-]{1,}", re.IGNORECASE)
+_PORTAL_SOURCE = "portal"
+_AUTHORITY_PRIORITY = {
+    "external_report": 1,
+    "authenticated_report": 2,
+    "internal_comment": 3,
+    "published_kb": 4,
+}
+_PER_TICKET_CANDIDATE_LIMIT = 2
+_KEYWORD_DOCUMENT_SQL = """
+to_tsvector(
+    'simple'::regconfig,
+    COALESCE(document.title, '') || ' ' ||
+    LEFT(COALESCE(document.body, ''), 20000)
+)
+"""
+_KEYWORD_QUERY_SQL = "plainto_tsquery('simple'::regconfig, :keyword_query)"
+
+
+def _candidate_pool_limits(limit: int) -> tuple[int, int]:
+    """Bound ticket/comment work while reserving room for published knowledge."""
+    non_kb = min(300, max(40, int(limit) * 8))
+    kb = min(100, max(10, int(limit) * 3))
+    return non_kb, kb
+
+
+def _is_portal_ticket(ticket: TicketRecord | None) -> bool:
+    return bool(
+        ticket
+        and (getattr(ticket, "external_source", None) or "").strip().lower()
+        == _PORTAL_SOURCE
+    )
+
+
+def _kb_article_approved(article: KbArticleRecord | None) -> bool:
+    if not article or article.status != "published" or not article.reviewer_id:
+        return False
+    return article.author_id is None or article.reviewer_id != article.author_id
+
+
+def _kb_metadata_approved(metadata: dict[str, Any]) -> bool:
+    reviewer_id = metadata.get("reviewer_id")
+    author_id = metadata.get("author_id")
+    return bool(
+        metadata.get("status") == "published"
+        and reviewer_id
+        and (author_id is None or reviewer_id != author_id)
+    )
+
+
+def _ticket_document_payload(ticket: TicketRecord) -> dict[str, Any]:
+    return {
+        "source_type": "ticket",
+        "source_id": str(ticket.id),
+        "ticket_id": str(ticket.id),
+        "title": ticket.subject or "",
+        "body": ticket.description or "",
+        "metadata": _ticket_metadata(ticket),
+    }
+
+
+def _comment_document_payload(comment: TicketCommentRecord) -> dict[str, Any]:
+    return {
+        "source_type": "comment",
+        "source_id": str(comment.id),
+        "ticket_id": str(comment.ticket_id),
+        "title": f"Ticket comment on {comment.ticket_id}",
+        "body": comment.body or "",
+        "metadata": {
+            "is_private": bool(comment.is_private),
+            "author_id": comment.author_id,
+            "author_name": comment.author_name,
+            "created_at": comment.created_at,
+        },
+    }
+
+
+def _kb_document_payload(article: KbArticleRecord) -> dict[str, Any]:
+    return {
+        "source_type": "kb_article",
+        "source_id": str(article.id),
+        "ticket_id": None,
+        "title": article.title or "",
+        "body": article.content or "",
+        "metadata": {
+            "slug": article.slug,
+            "category": article.category,
+            "tags": article.tags,
+            "status": article.status,
+            "author_id": article.author_id,
+            "reviewer_id": article.reviewer_id,
+            "updated_at": article.updated_at,
+        },
+    }
 
 
 def embedding_enabled() -> bool:
@@ -244,13 +338,144 @@ def purge_private_comment_documents(db: Session) -> int:
         return 0
     result = db.execute(text(
         """
-        DELETE FROM ticket_search_documents
-        WHERE source_type = 'comment'
-          AND COALESCE((CAST(metadata_json AS jsonb)->>'is_private')::boolean, false) = true
+        DELETE FROM ticket_search_documents AS document
+        WHERE document.source_type = 'comment'
+          AND EXISTS (
+              SELECT 1
+              FROM ticket_comments AS source_comment
+              WHERE CAST(source_comment.id AS text) = document.source_id
+                AND COALESCE(source_comment.is_private, false) = true
+          )
         """
     ))
     db.commit()
     return int(result.rowcount or 0)
+
+
+def purge_portal_ticket_documents(db: Session) -> int:
+    """Remove every derived document attached to an untrusted portal ticket."""
+    if not _ticket_document_table_exists(db):
+        return 0
+    result = db.execute(text(
+        """
+        DELETE FROM ticket_search_documents
+        WHERE ticket_id IN (
+            SELECT id
+            FROM tickets
+            WHERE LOWER(COALESCE(external_source, '')) = 'portal'
+        )
+        """
+    ))
+    db.commit()
+    return int(result.rowcount or 0)
+
+
+def purge_unapproved_kb_documents(db: Session) -> int:
+    """Remove KB artifacts whose current source lacks independent approval."""
+    if not _ticket_document_table_exists(db):
+        return 0
+    result = db.execute(text(
+        """
+        DELETE FROM ticket_search_documents AS document
+        WHERE document.source_type = 'kb_article'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM kb_articles AS source_article
+              WHERE source_article.id = document.source_id
+                AND source_article.status = 'published'
+                AND source_article.reviewer_id IS NOT NULL
+                AND (
+                    source_article.author_id IS NULL
+                    OR source_article.reviewer_id <> source_article.author_id
+                )
+          )
+        """
+    ))
+    db.commit()
+    return int(result.rowcount or 0)
+
+
+def _delete_source_document(
+    db: Session,
+    source_type: str,
+    source_id: str,
+    *,
+    expected_content_hash: Optional[str] = None,
+) -> None:
+    hash_predicate = (
+        " AND content_hash = :expected_content_hash"
+        if expected_content_hash is not None
+        else ""
+    )
+    params = {"source_type": source_type, "source_id": source_id}
+    if expected_content_hash is not None:
+        params["expected_content_hash"] = expected_content_hash
+    db.execute(
+        text(
+            "DELETE FROM ticket_search_documents "
+            "WHERE source_type = :source_type AND source_id = :source_id"
+            + hash_predicate
+        ),
+        params,
+    )
+
+
+def _authoritative_document_snapshot(
+    db: Session,
+    source_type: str,
+    source_id: str,
+    *,
+    for_update: bool,
+) -> Optional[dict[str, Any]]:
+    """Rebuild a document solely from its current authoritative source row.
+
+    Search rows are derived artifacts.  They must never decide whether a KB
+    article is published, a comment is private, or a ticket is portal-originated.
+    """
+    if source_type == "ticket":
+        query = db.query(TicketRecord).filter(TicketRecord.id == source_id)
+        if for_update:
+            query = query.populate_existing().with_for_update()
+        ticket = query.first()
+        if not ticket or _is_portal_ticket(ticket):
+            return None
+        return _ticket_document_payload(ticket)
+
+    if source_type == "comment":
+        try:
+            numeric_source_id = int(source_id)
+        except (TypeError, ValueError):
+            return None
+        query = db.query(TicketCommentRecord).filter(
+            TicketCommentRecord.id == numeric_source_id
+        )
+        if for_update:
+            query = query.populate_existing().with_for_update()
+        comment = query.first()
+        if not comment:
+            return None
+        ticket_query = db.query(TicketRecord).filter(
+            TicketRecord.id == comment.ticket_id
+        )
+        if for_update:
+            ticket_query = ticket_query.populate_existing().with_for_update()
+        parent_ticket = ticket_query.first()
+        if not parent_ticket or _is_portal_ticket(parent_ticket):
+            return None
+        if comment.is_private and not private_comment_indexing_enabled():
+            return None
+        return _comment_document_payload(comment)
+
+    if source_type == "kb_article":
+        query = db.query(KbArticleRecord).filter(KbArticleRecord.id == source_id)
+        if for_update:
+            query = query.populate_existing().with_for_update()
+        article = query.first()
+        if not _kb_article_approved(article):
+            return None
+        return _kb_document_payload(article)
+
+    return None
 
 
 def _row_current(db: Session, source_type: str, source_id: str, content_hash: str) -> bool:
@@ -286,6 +511,7 @@ async def _upsert_document(
     body: str,
     metadata: dict[str, Any],
     force: bool = False,
+    verify_source: bool = False,
 ) -> bool:
     if not ticket_vector_store_ready(db):
         return False
@@ -293,14 +519,81 @@ async def _upsert_document(
     title = (title or "").strip()
     body = (body or "").strip()
     content_hash = _document_hash(title, body, metadata)
+    if verify_source:
+        initial_snapshot = _authoritative_document_snapshot(
+            db, source_type, source_id, for_update=False
+        )
+        if initial_snapshot is None:
+            _delete_source_document(db, source_type, source_id)
+            db.commit()
+            return False
+        initial_hash = _document_hash(
+            (initial_snapshot["title"] or "").strip(),
+            (initial_snapshot["body"] or "").strip(),
+            initial_snapshot["metadata"],
+        )
+        if initial_hash != content_hash:
+            _delete_source_document(
+                db,
+                source_type,
+                source_id,
+                expected_content_hash=content_hash,
+            )
+            db.commit()
+            return False
     current = not force and _row_current(db, source_type, source_id, content_hash)
     # End the read transaction before awaiting an external embedding provider.
     db.commit()
     if current:
+        if verify_source:
+            current_snapshot = _authoritative_document_snapshot(
+                db, source_type, source_id, for_update=True
+            )
+            if current_snapshot is None:
+                _delete_source_document(db, source_type, source_id)
+            else:
+                current_hash = _document_hash(
+                    (current_snapshot["title"] or "").strip(),
+                    (current_snapshot["body"] or "").strip(),
+                    current_snapshot["metadata"],
+                )
+                if current_hash != content_hash:
+                    _delete_source_document(
+                        db,
+                        source_type,
+                        source_id,
+                        expected_content_hash=content_hash,
+                    )
+            db.commit()
         return False
 
     text_for_embedding = "\n".join([title, body]).strip()
     vector = await _embed_text(text_for_embedding)
+    if verify_source:
+        # The provider call deliberately runs without a database transaction.
+        # Re-read and lock the source after it returns so an older delayed writer
+        # cannot resurrect an archived KB row or overwrite a newer edit.
+        current_snapshot = _authoritative_document_snapshot(
+            db, source_type, source_id, for_update=True
+        )
+        if current_snapshot is None:
+            _delete_source_document(db, source_type, source_id)
+            db.commit()
+            return False
+        current_hash = _document_hash(
+            (current_snapshot["title"] or "").strip(),
+            (current_snapshot["body"] or "").strip(),
+            current_snapshot["metadata"],
+        )
+        if current_hash != content_hash:
+            _delete_source_document(
+                db,
+                source_type,
+                source_id,
+                expected_content_hash=content_hash,
+            )
+            db.commit()
+            return False
     current_embedding_identity = (
         _embedding_identity() if embedding_enabled() else None
     )
@@ -398,16 +691,20 @@ async def upsert_ticket_document(db: Session, ticket: TicketRecord, force: bool 
     # Retrieval evidence must remain independent source material.  Feeding
     # generated summaries/reasoning/plans back into the evidence index lets a
     # model cite its own earlier output as if it were authoritative input.
-    body = ticket.description or ""
+    if _is_portal_ticket(ticket):
+        if _ticket_document_table_exists(db):
+            db.execute(
+                text("DELETE FROM ticket_search_documents WHERE ticket_id = :ticket_id"),
+                {"ticket_id": str(ticket.id)},
+            )
+            db.commit()
+        return False
+    payload = _ticket_document_payload(ticket)
     return await _upsert_document(
         db,
-        source_type="ticket",
-        source_id=ticket.id,
-        ticket_id=ticket.id,
-        title=ticket.subject,
-        body=body,
-        metadata=_ticket_metadata(ticket),
+        **payload,
         force=force,
+        verify_source=True,
     )
 
 
@@ -425,23 +722,14 @@ async def upsert_comment_document(db: Session, comment: TicketCommentRecord, for
         return False
     return await _upsert_document(
         db,
-        source_type="comment",
-        source_id=str(comment.id),
-        ticket_id=comment.ticket_id,
-        title=f"Ticket comment on {comment.ticket_id}",
-        body=comment.body,
-        metadata={
-            "is_private": comment.is_private,
-            "author_id": comment.author_id,
-            "author_name": comment.author_name,
-            "created_at": comment.created_at,
-        },
+        **_comment_document_payload(comment),
         force=force,
+        verify_source=True,
     )
 
 
 async def upsert_kb_document(db: Session, article: KbArticleRecord, force: bool = False) -> bool:
-    if article.status != "published":
+    if not _kb_article_approved(article):
         if ticket_vector_store_ready(db):
             db.execute(
                 text(
@@ -454,19 +742,9 @@ async def upsert_kb_document(db: Session, article: KbArticleRecord, force: bool 
         return False
     return await _upsert_document(
         db,
-        source_type="kb_article",
-        source_id=article.id,
-        ticket_id=None,
-        title=article.title,
-        body=article.content or "",
-        metadata={
-            "slug": article.slug,
-            "category": article.category,
-            "tags": article.tags,
-            "status": article.status,
-            "updated_at": article.updated_at,
-        },
+        **_kb_document_payload(article),
         force=force,
+        verify_source=True,
     )
 
 
@@ -479,6 +757,14 @@ async def refresh_ticket_documents(
     deadline_monotonic: Optional[float] = None,
 ) -> int:
     changed = 0
+    if _is_portal_ticket(ticket):
+        if _ticket_document_table_exists(db):
+            db.execute(
+                text("DELETE FROM ticket_search_documents WHERE ticket_id = :ticket_id"),
+                {"ticket_id": str(ticket.id)},
+            )
+            db.commit()
+        return 0
     if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
         raise asyncio.TimeoutError("ticket intelligence refresh deadline exceeded")
     if heartbeat:
@@ -563,15 +849,12 @@ def _legacy_ticket_backfill_batch(db: Session, limit: int) -> list[TicketRecord]
                 SELECT source_id
                 FROM ticket_search_documents
                 WHERE source_type = 'ticket'
-                  AND COALESCE(
-                    CAST(metadata_json AS jsonb)->>'evidence_version',
-                    ''
-                  ) <> '2'
+                  AND COALESCE(metadata_json, '') NOT LIKE :evidence_marker
                 ORDER BY source_id
                 LIMIT :limit
                 """
             ),
-            {"limit": limit},
+            {"limit": limit, "evidence_marker": '%"evidence_version": 2%'},
         ).scalars().all()
     ]
     if not source_ids:
@@ -579,7 +862,9 @@ def _legacy_ticket_backfill_batch(db: Session, limit: int) -> list[TicketRecord]
     tickets_by_id = {
         str(ticket.id): ticket
         for ticket in db.query(TicketRecord).filter(
-            TicketRecord.id.in_(source_ids)
+            TicketRecord.id.in_(source_ids),
+            func.lower(func.coalesce(TicketRecord.external_source, ""))
+            != _PORTAL_SOURCE,
         ).all()
     }
     missing_source_ids = [
@@ -595,13 +880,13 @@ def _legacy_ticket_backfill_batch(db: Session, limit: int) -> list[TicketRecord]
                 DELETE FROM ticket_search_documents
                 WHERE source_type = 'ticket'
                   AND source_id = ANY(:source_ids)
-                  AND COALESCE(
-                    CAST(metadata_json AS jsonb)->>'evidence_version',
-                    ''
-                  ) <> '2'
+                  AND COALESCE(metadata_json, '') NOT LIKE :evidence_marker
                 """
             ),
-            {"source_ids": missing_source_ids},
+            {
+                "source_ids": missing_source_ids,
+                "evidence_marker": '%"evidence_version": 2%',
+            },
         )
         db.commit()
     return [
@@ -628,8 +913,9 @@ def _missing_ticket_backfill_batch(db: Session, limit: int) -> list[TicketRecord
                         document.embedding IS NOT NULL
                         AND document.embedding_model = :embedding_identity
                     )
-                 )
+                )
                 WHERE document.source_id IS NULL
+                  AND LOWER(COALESCE(source_ticket.external_source, '')) <> 'portal'
                 ORDER BY source_ticket.id
                 LIMIT :limit
                 """
@@ -675,6 +961,8 @@ def _missing_comment_backfill_batch(
                 f"""
                 SELECT CAST(source_comment.id AS text)
                 FROM ticket_comments AS source_comment
+                JOIN tickets AS source_ticket
+                  ON source_ticket.id = source_comment.ticket_id
                 LEFT JOIN ticket_search_documents AS document
                   ON document.source_type = 'comment'
                  AND document.source_id = CAST(source_comment.id AS text)
@@ -686,6 +974,7 @@ def _missing_comment_backfill_batch(
                     )
                  )
                 WHERE document.source_id IS NULL
+                  AND LOWER(COALESCE(source_ticket.external_source, '')) <> 'portal'
                   {private_filter}
                 ORDER BY source_comment.id
                 LIMIT :limit
@@ -733,6 +1022,11 @@ def _missing_kb_backfill_batch(db: Session, limit: int) -> list[KbArticleRecord]
                     )
                  )
                 WHERE source_article.status = 'published'
+                  AND source_article.reviewer_id IS NOT NULL
+                  AND (
+                    source_article.author_id IS NULL
+                    OR source_article.reviewer_id <> source_article.author_id
+                  )
                   AND document.source_id IS NULL
                 ORDER BY source_article.id
                 LIMIT :limit
@@ -753,6 +1047,11 @@ def _missing_kb_backfill_batch(db: Session, limit: int) -> list[KbArticleRecord]
         for article in db.query(KbArticleRecord).filter(
             KbArticleRecord.id.in_(source_ids),
             KbArticleRecord.status == "published",
+            KbArticleRecord.reviewer_id.isnot(None),
+            (
+                KbArticleRecord.author_id.is_(None)
+                | (KbArticleRecord.reviewer_id != KbArticleRecord.author_id)
+            ),
         ).all()
     }
     return [
@@ -777,20 +1076,25 @@ async def backfill_ticket_documents(
         "comments_seen": 0,
         "kb_seen": 0,
         "documents_changed": 0,
+        "portal_documents_purged": 0,
+        "unapproved_kb_documents_purged": 0,
     }
     if not result["vector_store_ready"]:
         return result
 
     if not private_comment_indexing_enabled():
         purge_private_comment_documents(db)
+    result["portal_documents_purged"] = purge_portal_ticket_documents(db)
+    result["unapproved_kb_documents_purged"] = purge_unapproved_kb_documents(db)
 
     tickets = _legacy_ticket_backfill_batch(db, limit)
     if not tickets:
         tickets = _missing_ticket_backfill_batch(db, limit)
     if not tickets:
-        tickets = db.query(TicketRecord).order_by(
-            TicketRecord.updated_at.desc()
-        ).limit(limit).all()
+        tickets = db.query(TicketRecord).filter(
+            func.lower(func.coalesce(TicketRecord.external_source, ""))
+            != _PORTAL_SOURCE
+        ).order_by(TicketRecord.updated_at.desc()).limit(limit).all()
     for ticket in tickets:
         result["tickets_seen"] += 1
         if await upsert_ticket_document(db, ticket, force=force):
@@ -803,7 +1107,12 @@ async def backfill_ticket_documents(
             limit,
             include_private=include_private,
         )
-        comments_query = db.query(TicketCommentRecord)
+        comments_query = db.query(TicketCommentRecord).join(
+            TicketRecord, TicketRecord.id == TicketCommentRecord.ticket_id
+        ).filter(
+            func.lower(func.coalesce(TicketRecord.external_source, ""))
+            != _PORTAL_SOURCE
+        )
         if not include_private:
             comments_query = comments_query.filter(
                 TicketCommentRecord.is_private.is_(False)
@@ -818,17 +1127,15 @@ async def backfill_ticket_documents(
                 result["documents_changed"] += 1
 
     if include_kb:
-        # Remove legacy draft/archived rows before rebuilding the published set.
-        db.execute(text(
-            "DELETE FROM ticket_search_documents "
-            "WHERE source_type = 'kb_article' "
-            "AND COALESCE(CAST(metadata_json AS jsonb)->>'status', '') <> 'published'"
-        ))
-        db.commit()
         articles = _missing_kb_backfill_batch(db, limit)
         if not articles:
             articles = db.query(KbArticleRecord).filter(
-                KbArticleRecord.status == "published"
+                KbArticleRecord.status == "published",
+                KbArticleRecord.reviewer_id.isnot(None),
+                (
+                    KbArticleRecord.author_id.is_(None)
+                    | (KbArticleRecord.reviewer_id != KbArticleRecord.author_id)
+                ),
             ).order_by(KbArticleRecord.updated_at.desc()).limit(limit).all()
         for article in articles:
             result["kb_seen"] += 1
@@ -876,10 +1183,7 @@ def ticket_vector_status(db: Session) -> dict[str, Any]:
                 ) AS stale_documents,
                 COUNT(*) FILTER (
                     WHERE source_type = 'ticket'
-                      AND COALESCE(
-                        CAST(metadata_json AS jsonb)->>'evidence_version',
-                        ''
-                      ) <> '2'
+                      AND COALESCE(metadata_json, '') NOT LIKE :evidence_marker
                 ) AS legacy_ticket_documents,
                 (
                     SELECT COUNT(*)
@@ -927,8 +1231,13 @@ def ticket_vector_status(db: Session) -> dict[str, Any]:
                             kb_document.embedding IS NOT NULL
                             AND kb_document.embedding_model = :embedding_identity
                         )
-                     )
+                    )
                     WHERE source_article.status = 'published'
+                      AND source_article.reviewer_id IS NOT NULL
+                      AND (
+                        source_article.author_id IS NULL
+                        OR source_article.reviewer_id <> source_article.author_id
+                      )
                       AND kb_document.source_id IS NULL
                 ) AS missing_kb_documents
             FROM ticket_search_documents
@@ -937,6 +1246,7 @@ def ticket_vector_status(db: Session) -> dict[str, Any]:
         {
             "include_private_comments": private_comment_indexing_enabled(),
             "embedding_identity": current_embedding_identity,
+            "evidence_marker": '%"evidence_version": 2%',
         },
     ).first()
     if row:
@@ -976,17 +1286,127 @@ def _keyword_score(query_terms: set[str], title: str, body: str, metadata: dict[
     return round((matches / len(query_terms)) + (title_boost * 0.25), 4)
 
 
+def _evidence_authority(source_type: str, metadata: dict[str, Any]) -> str:
+    if source_type == "kb_article":
+        return "published_kb" if _kb_metadata_approved(metadata) else "unapproved_kb"
+    if source_type == "comment":
+        return "internal_comment"
+    external_source = str(metadata.get("external_source") or "").strip().lower()
+    if external_source and external_source != "manual":
+        return "external_report"
+    return "authenticated_report"
+
+
+def _provenance(
+    source_type: str,
+    source_id: str,
+    ticket_id: Optional[str],
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    authority = _evidence_authority(source_type, metadata)
+    provenance = {
+        "authority": authority,
+        "source_type": source_type,
+        "source_id": str(source_id),
+        "ticket_id": str(ticket_id) if ticket_id is not None else None,
+    }
+    if authority == "external_report":
+        provenance["external_source"] = str(metadata.get("external_source") or "")
+    return provenance
+
+
+def _normalized_evidence_key(item: dict[str, Any]) -> str:
+    raw = str(item.get("snippet") or item.get("title") or "")
+    normalized = unicodedata.normalize("NFKC", raw).casefold()
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if not normalized:
+        normalized = (
+            f"{item.get('source_type', '')}:{item.get('source_id', '')}"
+        )
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _diversify_results(
+    results: list[dict[str, Any]], limit: int
+) -> list[dict[str, Any]]:
+    """Suppress normalized duplicates and cap ticket dominance after ranking."""
+    unique: list[dict[str, Any]] = []
+    fingerprint_indexes: dict[str, int] = {}
+    for item in results:
+        fingerprint = _normalized_evidence_key(item)
+        existing_index = fingerprint_indexes.get(fingerprint)
+        if existing_index is None:
+            fingerprint_indexes[fingerprint] = len(unique)
+            unique.append(item)
+            continue
+        existing = unique[existing_index]
+        existing_priority = _AUTHORITY_PRIORITY.get(
+            str(existing.get("authority") or ""), 0
+        )
+        candidate_priority = _AUTHORITY_PRIORITY.get(
+            str(item.get("authority") or ""), 0
+        )
+        if candidate_priority > existing_priority:
+            unique[existing_index] = item
+
+    diversified: list[dict[str, Any]] = []
+    per_ticket: dict[str, int] = {}
+    for item in unique:
+        ticket_id = item.get("ticket_id")
+        if ticket_id is not None:
+            ticket_key = str(ticket_id)
+            if per_ticket.get(ticket_key, 0) >= 2:
+                continue
+            per_ticket[ticket_key] = per_ticket.get(ticket_key, 0) + 1
+        diversified.append(item)
+    selected = diversified[:limit]
+    if (
+        selected
+        and not any(item.get("source_type") == "kb_article" for item in selected)
+    ):
+        trusted_kb = next(
+            (
+                item
+                for item in diversified[limit:]
+                if item.get("authority") == "published_kb"
+            ),
+            None,
+        )
+        if trusted_kb is not None:
+            selected[-1] = trusted_kb
+    return selected
+
+
 def _shape_result(row: Any, score: float, method: str) -> dict[str, Any]:
     metadata = _parse_metadata(getattr(row, "metadata_json", None))
+    source_type = str(row.source_type)
+    source_id = str(row.source_id)
+    ticket_id = getattr(row, "ticket_id", None)
+    if source_type == "ticket" and hasattr(row, "authoritative_external_source"):
+        # Retrieval SQL resolves this from the current ticket row. A copied
+        # document metadata value must not be able to upgrade external content
+        # to an authenticated Tickety report.
+        metadata["external_source"] = (
+            getattr(row, "authoritative_external_source", None) or ""
+        )
+    provenance = _provenance(
+        source_type, source_id, ticket_id, metadata
+    )
+    # Compute these values from authoritative fields; never trust similarly
+    # named values copied from a search row's metadata JSON.
+    metadata["authority"] = provenance["authority"]
+    metadata["provenance"] = provenance
     return {
-        "source_type": row.source_type,
-        "source_id": str(row.source_id),
-        "ticket_id": getattr(row, "ticket_id", None),
+        "source_type": source_type,
+        "source_id": source_id,
+        "ticket_id": ticket_id,
         "title": row.title or "",
         "snippet": ((row.body or "")[:700]).strip(),
         "score": round(float(score or 0), 4),
         "match_method": method,
         "metadata": metadata,
+        "authority": provenance["authority"],
+        "provenance": provenance,
     }
 
 
@@ -998,16 +1418,30 @@ def _filter_private_results(
         for item in results
         if (
             item.get("source_type") != "kb_article"
-            or (item.get("metadata") or {}).get("status") == "published"
+            or _kb_metadata_approved(item.get("metadata") or {})
         )
         and (
             item.get("source_type") != "ticket"
             or (item.get("metadata") or {}).get("evidence_version") == 2
         )
         and (
-            include_private_comments
-            or item.get("source_type") != "comment"
-            or not bool((item.get("metadata") or {}).get("is_private"))
+            item.get("source_type") != "ticket"
+            or str((item.get("metadata") or {}).get("external_source") or "")
+            .strip()
+            .lower()
+            != _PORTAL_SOURCE
+        )
+        and (
+            item.get("source_type") != "comment"
+            or (
+                isinstance(
+                    (item.get("metadata") or {}).get("is_private"), bool
+                )
+                and (
+                    include_private_comments
+                    or (item.get("metadata") or {}).get("is_private") is False
+                )
+            )
         )
     ]
 
@@ -1017,7 +1451,7 @@ def _filter_ticket_scope(
     results: list[dict[str, Any]],
     allowed_assignee_id: Optional[str],
 ) -> list[dict[str, Any]]:
-    """Keep KB evidence plus tickets the agent may operate on."""
+    """Keep KB evidence plus non-portal tickets assigned to this exact agent."""
     if allowed_assignee_id is None:
         return results
     ticket_ids = {
@@ -1031,10 +1465,9 @@ def _filter_ticket_scope(
         str(ticket_id)
         for ticket_id, in db.query(TicketRecord.id).filter(
             TicketRecord.id.in_(ticket_ids),
-            or_(
-                TicketRecord.assignee_id.is_(None),
-                TicketRecord.assignee_id == allowed_assignee_id,
-            ),
+            TicketRecord.assignee_id == allowed_assignee_id,
+            func.lower(func.coalesce(TicketRecord.external_source, ""))
+            != _PORTAL_SOURCE,
         ).all()
     }
     return [
@@ -1049,9 +1482,64 @@ def _parse_metadata(raw_metadata: Any) -> dict[str, Any]:
     if not raw_metadata:
         return {}
     try:
-        return json.loads(raw_metadata)
+        decoded = json.loads(raw_metadata)
+        return decoded if isinstance(decoded, dict) else {}
     except Exception:
         return {}
+
+
+_AUTHORITATIVE_RETRIEVAL_PREDICATE = """
+AND (
+    (
+        document.source_type = 'ticket'
+        AND EXISTS (
+            SELECT 1
+            FROM tickets AS source_ticket
+            WHERE source_ticket.id = document.source_id
+              AND document.ticket_id = source_ticket.id
+              AND LOWER(COALESCE(source_ticket.external_source, '')) <> 'portal'
+              AND (
+                    :allowed_assignee_id IS NULL
+                    OR source_ticket.assignee_id = :allowed_assignee_id
+              )
+        )
+    )
+    OR (
+        document.source_type = 'comment'
+        AND EXISTS (
+            SELECT 1
+            FROM ticket_comments AS source_comment
+            JOIN tickets AS source_ticket
+              ON source_ticket.id = source_comment.ticket_id
+            WHERE CAST(source_comment.id AS text) = document.source_id
+              AND document.ticket_id = source_ticket.id
+              AND LOWER(COALESCE(source_ticket.external_source, '')) <> 'portal'
+              AND (
+                    :allowed_assignee_id IS NULL
+                    OR source_ticket.assignee_id = :allowed_assignee_id
+              )
+              AND (
+                    :include_private_comments
+                    OR COALESCE(source_comment.is_private, false) = false
+              )
+        )
+    )
+    OR (
+        document.source_type = 'kb_article'
+        AND EXISTS (
+            SELECT 1
+            FROM kb_articles AS source_article
+            WHERE source_article.id = document.source_id
+              AND source_article.status = 'published'
+              AND source_article.reviewer_id IS NOT NULL
+              AND (
+                    source_article.author_id IS NULL
+                    OR source_article.reviewer_id <> source_article.author_id
+              )
+        )
+    )
+)
+"""
 
 
 async def retrieve_ticket_context(
@@ -1072,48 +1560,103 @@ async def retrieve_ticket_context(
         )
     # Do not hold a database connection while awaiting the embedding provider.
     db.commit()
+    non_kb_candidate_limit, kb_candidate_limit = _candidate_pool_limits(limit)
 
     if embedding_enabled():
         query_embedding = await _embed_text(query)
         if query_embedding:
             try:
-                rows = db.execute(
+                common_params = {
+                    "embedding": _vector_literal(query_embedding),
+                    "embedding_identity": _embedding_identity(),
+                    "source_types": source_types,
+                    "include_private_comments": include_private_comments,
+                    "allowed_assignee_id": allowed_assignee_id,
+                    "min_score": _minimum_vector_score(),
+                }
+                non_kb_rows = db.execute(
                     text(
-                        """
-                        SELECT source_type, source_id, ticket_id, title, body, metadata_json,
-                               1 - (embedding <=> CAST(:embedding AS vector)) AS score
-                        FROM ticket_search_documents
-                        WHERE embedding IS NOT NULL
-                          AND embedding_model = :embedding_identity
-                          AND source_type = ANY(:source_types)
-                          AND 1 - (embedding <=> CAST(:embedding AS vector)) >= :min_score
-                          AND (
-                            :include_private_comments
-                            OR source_type <> 'comment'
-                            OR COALESCE((CAST(metadata_json AS jsonb)->>'is_private')::boolean, false) = false
-                          )
-                          AND (
-                            source_type <> 'kb_article'
-                            OR COALESCE(CAST(metadata_json AS jsonb)->>'status', '') = 'published'
-                          )
-                          AND (
-                            source_type <> 'ticket'
-                            OR COALESCE(CAST(metadata_json AS jsonb)->>'evidence_version', '') = '2'
-                          )
-                        ORDER BY embedding <=> CAST(:embedding AS vector)
-                        LIMIT :limit
+                        f"""
+                        WITH ranked_non_kb AS (
+                            SELECT document.source_type, document.source_id,
+                                   document.ticket_id, document.title,
+                                   document.body, document.metadata_json,
+                                   CASE WHEN document.source_type = 'ticket' THEN (
+                                       SELECT source_ticket.external_source
+                                       FROM tickets AS source_ticket
+                                       WHERE source_ticket.id = document.source_id
+                                       LIMIT 1
+                                   ) END AS authoritative_external_source,
+                                   1 - (
+                                       document.embedding <=> CAST(:embedding AS vector)
+                                   ) AS score,
+                                   ROW_NUMBER() OVER (
+                                       PARTITION BY document.ticket_id
+                                       ORDER BY
+                                           document.embedding <=> CAST(:embedding AS vector),
+                                           document.updated_at DESC,
+                                           document.source_type,
+                                           document.source_id
+                                   ) AS ticket_candidate_rank
+                            FROM ticket_search_documents AS document
+                            WHERE document.embedding IS NOT NULL
+                              AND document.embedding_model = :embedding_identity
+                              AND document.source_type = ANY(:source_types)
+                              AND document.source_type IN ('ticket', 'comment')
+                              AND 1 - (
+                                  document.embedding <=> CAST(:embedding AS vector)
+                              ) >= :min_score
+                              {_AUTHORITATIVE_RETRIEVAL_PREDICATE}
+                        )
+                        SELECT source_type, source_id, ticket_id, title, body,
+                               metadata_json, authoritative_external_source, score
+                        FROM ranked_non_kb
+                        WHERE ticket_candidate_rank <= :per_ticket_candidate_limit
+                        ORDER BY score DESC, source_type, source_id
+                        LIMIT :non_kb_candidate_limit
                         """
                     ),
                     {
-                        "embedding": _vector_literal(query_embedding),
-                        "embedding_identity": _embedding_identity(),
-                        "source_types": source_types,
-                        "include_private_comments": include_private_comments,
-                        "limit": min(100, limit * 4),
-                        "min_score": _minimum_vector_score(),
+                        **common_params,
+                        "per_ticket_candidate_limit": _PER_TICKET_CANDIDATE_LIMIT,
+                        "non_kb_candidate_limit": non_kb_candidate_limit,
                     },
                 ).all()
+                kb_rows = db.execute(
+                    text(
+                        f"""
+                        SELECT document.source_type, document.source_id,
+                               document.ticket_id, document.title, document.body,
+                               document.metadata_json,
+                               NULL AS authoritative_external_source,
+                               1 - (
+                                   document.embedding <=> CAST(:embedding AS vector)
+                               ) AS score
+                        FROM ticket_search_documents AS document
+                        WHERE document.embedding IS NOT NULL
+                          AND document.embedding_model = :embedding_identity
+                          AND document.source_type = 'kb_article'
+                          AND document.source_type = ANY(:source_types)
+                          AND 1 - (
+                              document.embedding <=> CAST(:embedding AS vector)
+                          ) >= :min_score
+                          {_AUTHORITATIVE_RETRIEVAL_PREDICATE}
+                        ORDER BY document.embedding <=> CAST(:embedding AS vector),
+                                 document.updated_at DESC, document.source_id
+                        LIMIT :kb_candidate_limit
+                        """
+                    ),
+                    {**common_params, "kb_candidate_limit": kb_candidate_limit},
+                ).all()
+                rows = [*non_kb_rows, *kb_rows]
                 shaped = [_shape_result(row, row.score, "vector") for row in rows]
+                shaped.sort(
+                    key=lambda item: (
+                        float(item.get("score") or 0),
+                        _AUTHORITY_PRIORITY.get(str(item.get("authority") or ""), 0),
+                    ),
+                    reverse=True,
+                )
                 shaped = _filter_ticket_scope(
                     db,
                     _filter_private_results(shaped, include_private_comments),
@@ -1122,48 +1665,111 @@ async def retrieve_ticket_context(
                 return {
                     "query": query,
                     "match_method": "vector",
-                    "results": shaped[:limit],
+                    "results": _diversify_results(shaped, limit),
                 }
             except Exception as e:
                 db.rollback()
                 print(f"[vectors] vector search failed; using keyword fallback kind={type(e).__name__}")
 
-    terms = _terms(query)
-    rows = db.execute(
+    terms = set(sorted(_terms(query))[:32])
+    if not terms:
+        return {"query": query, "match_method": "keyword", "results": []}
+    common_params = {
+        "source_types": source_types,
+        "include_private_comments": include_private_comments,
+        "allowed_assignee_id": allowed_assignee_id,
+        "keyword_query": " ".join(sorted(terms)),
+    }
+    non_kb_rows = db.execute(
         text(
-            """
-            SELECT source_type, source_id, ticket_id, title, body, metadata_json
-            FROM ticket_search_documents
-            WHERE source_type = ANY(:source_types)
-              AND (
-                :include_private_comments
-                OR source_type <> 'comment'
-                OR COALESCE((CAST(metadata_json AS jsonb)->>'is_private')::boolean, false) = false
-              )
-              AND (
-                source_type <> 'kb_article'
-                OR COALESCE(CAST(metadata_json AS jsonb)->>'status', '') = 'published'
-              )
-              AND (
-                source_type <> 'ticket'
-                OR COALESCE(CAST(metadata_json AS jsonb)->>'evidence_version', '') = '2'
-              )
-            ORDER BY updated_at DESC
-            LIMIT 500
+            f"""
+            WITH matched_non_kb AS MATERIALIZED (
+                SELECT document.source_type, document.source_id,
+                       document.ticket_id, document.title, document.body,
+                       document.metadata_json, document.updated_at,
+                       CASE WHEN document.source_type = 'ticket' THEN (
+                           SELECT source_ticket.external_source
+                           FROM tickets AS source_ticket
+                           WHERE source_ticket.id = document.source_id
+                           LIMIT 1
+                       ) END AS authoritative_external_source,
+                       ts_rank_cd(
+                           {_KEYWORD_DOCUMENT_SQL}, {_KEYWORD_QUERY_SQL}
+                       ) AS keyword_match_score
+                FROM ticket_search_documents AS document
+                WHERE document.source_type = ANY(:source_types)
+                  AND document.source_type IN ('ticket', 'comment')
+                  AND {_KEYWORD_DOCUMENT_SQL} @@ {_KEYWORD_QUERY_SQL}
+                  {_AUTHORITATIVE_RETRIEVAL_PREDICATE}
+            ),
+            ranked_non_kb AS (
+                SELECT matched_non_kb.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY matched_non_kb.ticket_id
+                           ORDER BY matched_non_kb.keyword_match_score DESC,
+                                    matched_non_kb.updated_at DESC,
+                                    matched_non_kb.source_type,
+                                    matched_non_kb.source_id
+                       ) AS ticket_candidate_rank
+                FROM matched_non_kb
+            )
+            SELECT source_type, source_id, ticket_id, title, body,
+                   metadata_json, authoritative_external_source,
+                   keyword_match_score
+            FROM ranked_non_kb
+            WHERE ticket_candidate_rank <= :per_ticket_candidate_limit
+            ORDER BY keyword_match_score DESC, updated_at DESC,
+                     source_type, source_id
+            LIMIT :non_kb_candidate_limit
             """
         ),
         {
-            "source_types": source_types,
-            "include_private_comments": include_private_comments,
+            **common_params,
+            "per_ticket_candidate_limit": _PER_TICKET_CANDIDATE_LIMIT,
+            "non_kb_candidate_limit": non_kb_candidate_limit,
         },
     ).all()
+    kb_rows = db.execute(
+        text(
+            f"""
+            WITH matched_kb AS MATERIALIZED (
+                SELECT document.source_type, document.source_id,
+                       document.ticket_id, document.title, document.body,
+                       document.metadata_json, document.updated_at,
+                       NULL AS authoritative_external_source,
+                       ts_rank_cd(
+                           {_KEYWORD_DOCUMENT_SQL}, {_KEYWORD_QUERY_SQL}
+                       ) AS keyword_match_score
+                FROM ticket_search_documents AS document
+                WHERE document.source_type = 'kb_article'
+                  AND document.source_type = ANY(:source_types)
+                  AND {_KEYWORD_DOCUMENT_SQL} @@ {_KEYWORD_QUERY_SQL}
+                  {_AUTHORITATIVE_RETRIEVAL_PREDICATE}
+            )
+            SELECT source_type, source_id, ticket_id, title, body,
+                   metadata_json, authoritative_external_source,
+                   keyword_match_score
+            FROM matched_kb
+            ORDER BY keyword_match_score DESC, updated_at DESC, source_id
+            LIMIT :kb_candidate_limit
+            """
+        ),
+        {**common_params, "kb_candidate_limit": kb_candidate_limit},
+    ).all()
+    rows = [*non_kb_rows, *kb_rows]
     scored = []
     for row in rows:
         metadata = _parse_metadata(getattr(row, "metadata_json", None))
         score = _keyword_score(terms, row.title, row.body, metadata)
         scored.append(_shape_result(row, score, "keyword"))
     scored = [item for item in scored if item["score"] > 0]
-    scored.sort(key=lambda item: item["score"], reverse=True)
+    scored.sort(
+        key=lambda item: (
+            float(item.get("score") or 0),
+            _AUTHORITY_PRIORITY.get(str(item.get("authority") or ""), 0),
+        ),
+        reverse=True,
+    )
     scored = _filter_ticket_scope(
         db,
         _filter_private_results(scored, include_private_comments),
@@ -1172,7 +1778,7 @@ async def retrieve_ticket_context(
     return {
         "query": query,
         "match_method": "keyword",
-        "results": scored[:limit],
+        "results": _diversify_results(scored, limit),
     }
 
 
@@ -1184,20 +1790,28 @@ def _fallback_from_core_tables(
     *,
     allowed_assignee_id: Optional[str] = None,
 ) -> dict[str, Any]:
-    terms = _terms(query)
+    terms = set(sorted(_terms(query))[:32])
     candidates: list[dict[str, Any]] = []
     if "ticket" not in source_types:
         return {"query": query, "match_method": "keyword", "results": []}
     ticket_query = db.query(TicketRecord)
+    ticket_query = ticket_query.filter(
+        func.lower(func.coalesce(TicketRecord.external_source, ""))
+        != _PORTAL_SOURCE
+    )
     if allowed_assignee_id is not None:
-        ticket_query = ticket_query.filter(or_(
-            TicketRecord.assignee_id.is_(None),
-            TicketRecord.assignee_id == allowed_assignee_id,
-        ))
+        ticket_query = ticket_query.filter(
+            TicketRecord.assignee_id == allowed_assignee_id
+        )
     for ticket in ticket_query.order_by(TicketRecord.updated_at.desc()).limit(500).all():
         metadata = _ticket_metadata(ticket)
         score = _keyword_score(terms, ticket.subject, ticket.description or "", metadata)
         if score > 0:
+            provenance = _provenance(
+                "ticket", str(ticket.id), str(ticket.id), metadata
+            )
+            metadata["authority"] = provenance["authority"]
+            metadata["provenance"] = provenance
             candidates.append(
                 {
                     "source_type": "ticket",
@@ -1208,7 +1822,13 @@ def _fallback_from_core_tables(
                     "score": score,
                     "match_method": "keyword",
                     "metadata": metadata,
+                    "authority": provenance["authority"],
+                    "provenance": provenance,
                 }
             )
     candidates.sort(key=lambda item: item["score"], reverse=True)
-    return {"query": query, "match_method": "keyword", "results": candidates[:limit]}
+    return {
+        "query": query,
+        "match_method": "keyword",
+        "results": _diversify_results(candidates, limit),
+    }

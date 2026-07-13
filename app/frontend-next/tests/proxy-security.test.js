@@ -100,7 +100,9 @@ test("request proxy strips hop headers but preserves auth and browser origin sig
       upgrade: "websocket",
       "x-private-hop": "must-not-cross-proxy",
       "x-forwarded-host": "attacker.invalid",
+      "x-forwarded-for": "203.0.113.99",
       "x-forwarded-proto": "http",
+      "cf-connecting-ip": "203.0.113.98",
     }),
     "tickety.situ.io",
     "https",
@@ -112,6 +114,8 @@ test("request proxy strips hop headers but preserves auth and browser origin sig
     "transfer-encoding",
     "upgrade",
     "x-private-hop",
+    "x-forwarded-for",
+    "cf-connecting-ip",
   ]) {
     assert.equal(headers.has(name), false);
   }

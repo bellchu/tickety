@@ -25,6 +25,7 @@ export interface Ticket {
   ai_error: string | null;
   ai_synthetic: boolean;
   ai_suggested_priority: string | null;
+  ai_suggested_category: string | null;
   ticket_type: string;
   impact: string | null;
   urgency: string | null;
@@ -617,7 +618,6 @@ export interface KbArticleCreateInput {
   category?: string;
   tags?: string;
   status: string;
-  reviewer_id?: string | null;
   review_due_at?: string | null;
 }
 

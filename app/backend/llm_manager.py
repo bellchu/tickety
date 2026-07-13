@@ -228,6 +228,12 @@ class LLMInvalidOutputError(LLMAnalysisError):
     pass
 
 
+class LLMInvalidInputError(LLMAnalysisError):
+    """Raised before dispatch when a prompt cannot be safely contained."""
+
+    pass
+
+
 def _metric(**increments: int) -> None:
     with _METRICS_LOCK:
         for key, value in increments.items():
@@ -629,9 +635,10 @@ def _enabled(raw: str | None) -> bool:
 def _bounded_prompt(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
-    tail = min(4_000, limit // 4)
-    head = limit - tail
-    return f"{text[:head]}\n[... untrusted input truncated ...]\n{text[-tail:]}"
+    # Never slice a rendered prompt. For structured input, doing so can cut a
+    # quoted value in half and turn its remaining tail into prompt syntax.
+    # Callers must bound untrusted fields before serialization.
+    raise LLMInvalidInputError("AI input exceeded the safe prompt size")
 
 
 def _configured_secret_values(_provider_cfg: dict | None = None) -> tuple[str, ...]:
@@ -992,7 +999,9 @@ class LLMManager:
                 )
                 raise LLMUnavailableError("AI provider is not configured")
             result = redact_data(
-                self._validate_response(self._get_mock_response(prompt), response_model),
+                self._validate_response(
+                    self._get_mock_response(prompt, response_model), response_model
+                ),
                 exact_secrets,
             )
             _metric(successes=1, synthetic_results=1)
@@ -1258,18 +1267,24 @@ class LLMManager:
 
     # ── offline fallback ───────────────────────────────────────
 
-    def _get_mock_response(self, prompt: str) -> dict:
+    def _get_mock_response(
+        self, prompt: str, response_model: Type[BaseModel] | None = None
+    ) -> dict:
         text = str(prompt).lower()
+        response_name = response_model.__name__ if response_model else ""
         non_triage_task = any(marker in text for marker in (
             "concrete resolution plan",
             "summarize the following",
             "draft a professional",
             "background ticket database analyst",
         ))
-        if not non_triage_task and (
-            "triage" in text
-            or "analyze the following it support ticket" in text
-            or "analyze the it support ticket" in text
+        if response_name == "TriageAnalysis" or (
+            not non_triage_task
+            and (
+                "triage" in text
+                or "analyze the following it support ticket" in text
+                or "analyze the it support ticket" in text
+            )
         ):
             wide_scope = any(
                 marker in text
@@ -1323,15 +1338,19 @@ class LLMManager:
                 "action": "respond",
                 "reasoning": "scope: single user; this is a routine support request.",
             }
-        elif "draft a professional" in text or "reply_prompt" in text.lower():
+        elif (
+            response_name == "SuggestedReply"
+            or "draft a professional" in text
+            or "reply_prompt" in text.lower()
+        ):
             return {
                 "suggested_response": "Thank you for reaching out. We've reviewed your request and are working on it. We'll get back to you with an update shortly."
             }
-        elif "summarize the following" in text:
+        elif response_name == "TicketSummary" or "summarize the following" in text:
             return {
                 "summary": "The requester reported an IT support issue that requires review. No verified remediation has been recorded yet."
             }
-        elif "concrete resolution plan" in text:
+        elif response_name == "ResolutionAnalysis" or "concrete resolution plan" in text:
             return {
                 "root_cause_hypothesis": "The available ticket evidence is insufficient to confirm a root cause.",
                 "resolution_steps": [
@@ -1344,16 +1363,12 @@ class LLMManager:
                 "escalation_advice": "Escalate with diagnostics if the documented remediation does not restore service.",
                 "preventive_note": "Document the confirmed cause and remediation after resolution.",
             }
-        elif "background ticket database analyst" in text:
+        elif response_name == "TicketIntelligenceAnswer" or "background ticket database analyst" in text:
             return {
                 "answer": "The retrieved ticket evidence contains a potentially relevant support issue.",
                 "answer_citations": ["S1"],
                 "findings": [{
                     "text": "A matching ticket record was retrieved for review.",
-                    "citations": ["S1"],
-                }],
-                "recommended_actions": [{
-                    "text": "Review the cited ticket before taking operational action.",
                     "citations": ["S1"],
                 }],
                 "confidence": "low",

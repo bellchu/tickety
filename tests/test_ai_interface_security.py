@@ -974,6 +974,7 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
         with (
             patch.dict(os.environ, {"WEBHOOK_SECRET": secret}, clear=False),
             patch.dict(main.get_adapter.__globals__["_ADAPTERS"], {}, clear=True),
+            patch.object(main, "_auto_process", new=AsyncMock()) as auto_process,
             patch.object(
                 main,
                 "handle_webhook_event",
@@ -986,6 +987,7 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
         self.assertEqual(first.status_code, 200, first.text)
         self.assertEqual(replay.status_code, 409, replay.text)
         self.assertEqual(replay.json(), {"detail": "Duplicate webhook delivery"})
+        auto_process.assert_not_awaited()
 
     def test_failed_webhook_processing_releases_claim_for_provider_retry(self):
         raw_body = b'{"ticket":{"id":456},"event":"ticket_updated"}'
@@ -1680,11 +1682,11 @@ class PromptContainmentTests(unittest.IsolatedAsyncioTestCase):
         })
 
         prompt = llm.analyze.await_args.args[0]
-        encoded = prompt.split("UNTRUSTED_TICKET_JSON:\n", 1)[1].split(
-            "\n\nReturn exactly", 1
-        )[0]
-        decoded = json.loads(encoded)
+        decoded = json.loads(prompt)
         self.assertEqual(decoded["description"], malicious)
+        system_prompt = llm.analyze.await_args.kwargs["system_prompt"]
+        self.assertIn("untrusted JSON data object", system_prompt)
+        self.assertNotIn(malicious, system_prompt)
         self.assertEqual(result["action"], "route")
         self.assertNotIn("tool_calls", result)
 
@@ -1866,7 +1868,11 @@ class RetrievalEvidenceContractTests(unittest.IsolatedAsyncioTestCase):
             {
                 "source_type": "kb_article",
                 "source_id": "published",
-                "metadata": {"status": "published"},
+                "metadata": {
+                    "status": "published",
+                    "author_id": "author-a",
+                    "reviewer_id": "reviewer-b",
+                },
             },
             {
                 "source_type": "kb_article",

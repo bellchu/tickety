@@ -71,6 +71,7 @@ class Ticket(BaseModel):
     ai_error: Optional[str] = None
     ai_synthetic: bool = False
     ai_suggested_priority: Optional[str] = None
+    ai_suggested_category: Optional[str] = None
 
 
 class AIAnalysis(BaseModel):
@@ -158,32 +159,32 @@ class SyncStatus(BaseModel):
 class TicketCreate(BaseModel):
     subject: str = Field(..., min_length=1, max_length=200)
     description: str = Field("", max_length=20_000)
-    reporter: str = ""
-    priority: str = "P3"
+    reporter: str = Field("", max_length=320)
+    priority: str = Field("P3", min_length=1, max_length=32)
     ticket_type: Literal["incident", "request"] = "incident"
-    impact: Optional[str] = None
-    urgency: Optional[str] = None
-    service_id: Optional[str] = None
-    asset_id: Optional[str] = None
+    impact: Optional[str] = Field(None, max_length=120)
+    urgency: Optional[str] = Field(None, max_length=120)
+    service_id: Optional[str] = Field(None, max_length=255)
+    asset_id: Optional[str] = Field(None, max_length=255)
 
 
 class ExternalTicket(BaseModel):
-    external_id: str
-    subject: str
+    external_id: str = Field(..., min_length=1, max_length=255)
+    subject: str = Field(..., min_length=1, max_length=500)
     description: str = Field(..., max_length=100_000)
-    reporter: str
-    priority: str
-    status: str
-    assignee_id: Optional[str] = None
+    reporter: str = Field(..., max_length=320)
+    priority: str = Field(..., min_length=1, max_length=32)
+    status: str = Field(..., min_length=1, max_length=120)
+    assignee_id: Optional[str] = Field(None, max_length=255)
     updated_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
     resolved_at: Optional[datetime] = None
     due_by: Optional[datetime] = None
     fr_due_by: Optional[datetime] = None
-    ticket_type: Optional[str] = None
-    requester_email: Optional[str] = None
-    external_workspace_id: Optional[str] = None
-    url: Optional[str] = None
+    ticket_type: Optional[str] = Field(None, max_length=120)
+    requester_email: Optional[str] = Field(None, max_length=320)
+    external_workspace_id: Optional[str] = Field(None, max_length=255)
+    url: Optional[str] = Field(None, max_length=2_048)
 
 
 class WebhookEvent(BaseModel):
@@ -308,18 +309,18 @@ class RecommendedSolution(BaseModel):
 class TicketUpdate(BaseModel):
     subject: Optional[str] = Field(None, min_length=1, max_length=200)
     description: Optional[str] = Field(None, max_length=20_000)
-    status: Optional[str] = None
-    workflow_status: Optional[str] = None
-    ai_review_state: Optional[str] = None
-    priority: Optional[str] = None
+    status: Optional[str] = Field(None, max_length=120)
+    workflow_status: Optional[str] = Field(None, max_length=120)
+    ai_review_state: Optional[str] = Field(None, max_length=120)
+    priority: Optional[str] = Field(None, max_length=32)
     ticket_type: Optional[Literal["incident", "request"]] = None
-    impact: Optional[str] = None
-    urgency: Optional[str] = None
-    assignee_id: Optional[str] = None
-    service_id: Optional[str] = None
-    asset_id: Optional[str] = None
-    category: Optional[str] = None
-    tags: Optional[str] = None
+    impact: Optional[str] = Field(None, max_length=120)
+    urgency: Optional[str] = Field(None, max_length=120)
+    assignee_id: Optional[str] = Field(None, max_length=255)
+    service_id: Optional[str] = Field(None, max_length=255)
+    asset_id: Optional[str] = Field(None, max_length=255)
+    category: Optional[str] = Field(None, max_length=120)
+    tags: Optional[str] = Field(None, max_length=1_000)
     response_due_at: Optional[datetime] = None
     resolution_due_at: Optional[datetime] = None
     due_by: Optional[datetime] = None
@@ -394,6 +395,13 @@ class TicketIntelligenceSearchResult(BaseModel):
     snippet: str = ""
     score: float = 0.0
     match_method: str = "keyword"
+    citation_id: Optional[str] = None
+    authority: Literal[
+        "published_kb",
+        "internal_comment",
+        "external_report",
+        "authenticated_report",
+    ] = "authenticated_report"
     metadata: dict = Field(default_factory=dict)
 
 
@@ -420,6 +428,11 @@ class TicketIntelligenceAnalysisRequest(BaseModel):
         return value
 
 
+class GroundedAnalysisResult(BaseModel):
+    text: str = Field(..., min_length=1, max_length=1_000)
+    citations: List[str] = Field(..., min_length=1, max_length=10)
+
+
 class TicketIntelligenceAnalysisResponse(BaseModel):
     question: str
     match_method: str = "keyword"
@@ -429,6 +442,8 @@ class TicketIntelligenceAnalysisResponse(BaseModel):
     citations: List[str] = Field(default_factory=list)
     confidence: Literal["high", "medium", "low"] = "low"
     context: List[TicketIntelligenceSearchResult] = Field(default_factory=list)
+    grounded_findings: List[GroundedAnalysisResult] = Field(default_factory=list)
+    grounded_recommended_actions: List[GroundedAnalysisResult] = Field(default_factory=list)
 
 
 # ── Authentication ──────────────────────────────────────────────
@@ -509,7 +524,6 @@ class KbArticleCreate(BaseModel):
     category: Optional[str] = Field(None, max_length=120)
     tags: Optional[str] = Field(None, max_length=1_000)
     status: Literal["draft", "published", "archived"] = "draft"
-    reviewer_id: Optional[str] = None
     review_due_at: Optional[datetime] = None
 
 
@@ -519,7 +533,6 @@ class KbArticleUpdate(BaseModel):
     category: Optional[str] = Field(None, max_length=120)
     tags: Optional[str] = Field(None, max_length=1_000)
     status: Optional[Literal["draft", "published", "archived"]] = None
-    reviewer_id: Optional[str] = None
     review_due_at: Optional[datetime] = None
 
 
@@ -940,8 +953,8 @@ class TimeEntryCreate(BaseModel):
 class PortalTicketCreate(BaseModel):
     subject: str = Field(..., min_length=1, max_length=200)
     description: str = Field("", max_length=20_000)
-    reporter: str = Field(..., min_length=1)
-    priority: str = "P3"
+    reporter: str = Field(..., min_length=1, max_length=320)
+    priority: str = Field("P3", min_length=1, max_length=32)
 
 class PortalTicketOut(BaseModel):
     id: str

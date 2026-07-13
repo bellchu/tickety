@@ -240,9 +240,12 @@ class TicketVectorEvidenceTests(unittest.IsolatedAsyncioTestCase):
         batch = ticket_vectors._legacy_ticket_backfill_batch(db, 25)
 
         self.assertEqual([ticket.id for ticket in batch], ["legacy-b", "legacy-a"])
-        self.assertEqual(db.execute.call_args.args[1], {"limit": 25})
+        self.assertEqual(db.execute.call_args.args[1], {
+            "limit": 25,
+            "evidence_marker": '%"evidence_version": 2%',
+        })
         query = str(db.execute.call_args.args[0])
-        self.assertIn("evidence_version", query)
+        self.assertIn("NOT LIKE :evidence_marker", query)
 
     def test_legacy_backfill_batch_removes_orphaned_search_artifacts(self):
         db = MagicMock()
@@ -258,7 +261,10 @@ class TicketVectorEvidenceTests(unittest.IsolatedAsyncioTestCase):
         delete_call = db.execute.call_args_list[1]
         self.assertIn("DELETE FROM ticket_search_documents", str(delete_call.args[0]))
         self.assertEqual(
-            delete_call.args[1], {"source_ids": ["orphaned-ticket"]}
+            delete_call.args[1], {
+                "source_ids": ["orphaned-ticket"],
+                "evidence_marker": '%"evidence_version": 2%',
+            }
         )
         db.commit.assert_called_once()
 
@@ -335,13 +341,14 @@ class TicketVectorEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["missing_kb_documents"], 6)
         query = str(db.execute.call_args.args[0])
         self.assertIn("source_type = 'ticket'", query)
-        self.assertIn("evidence_version", query)
+        self.assertIn("NOT LIKE :evidence_marker", query)
         self.assertIn("LEFT JOIN ticket_search_documents", query)
         self.assertEqual(
             db.execute.call_args.args[1],
             {
                 "include_private_comments": False,
                 "embedding_identity": "embedding-provider-v1:current",
+                "evidence_marker": '%"evidence_version": 2%',
             },
         )
 

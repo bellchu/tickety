@@ -50,6 +50,7 @@ class TicketRecord(Base):
     ai_error = Column(String, nullable=True)
     ai_synthetic = Column(Boolean, nullable=False, default=False)
     ai_suggested_priority = Column(String, nullable=True)
+    ai_suggested_category = Column(String, nullable=True)
 
     # Standalone ticketing fields
     ticket_type = Column(String, default="incident")  # incident | request
@@ -611,6 +612,13 @@ def _ensure_ticket_search_documents():
                 "ON ticket_search_documents (source_type, source_id)"
             )
             conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_ticket_search_documents_fts "
+                "ON ticket_search_documents USING GIN ("
+                "to_tsvector('simple'::regconfig, "
+                "COALESCE(title, '') || ' ' || LEFT(COALESCE(body, ''), 20000))"
+                ")"
+            )
+            conn.exec_driver_sql(
                 "CREATE INDEX IF NOT EXISTS ix_ticket_search_documents_embedding "
                 "ON ticket_search_documents USING hnsw (embedding vector_cosine_ops)"
             )
@@ -649,6 +657,7 @@ def _ensure_columns():
         "ai_error": "VARCHAR",
         "ai_synthetic": "BOOLEAN DEFAULT 0",
         "ai_suggested_priority": "VARCHAR",
+        "ai_suggested_category": "VARCHAR",
         "ticket_type": "VARCHAR DEFAULT 'incident'",
         "impact": "VARCHAR",
         "urgency": "VARCHAR",

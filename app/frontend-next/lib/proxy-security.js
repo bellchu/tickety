@@ -123,6 +123,16 @@ function sanitizedProxyRequestHeaders(source, forwardedHost, forwardedProto) {
   const headers = new Headers(source);
   for (const header of connectionOptionHeaders(headers)) headers.delete(header);
   for (const header of HOP_BY_HOP_REQUEST_HEADERS) headers.delete(header);
+  // Caller-controlled network identity must not cross the application proxy.
+  // Tickety uses application-owned global/reporter quotas instead of trusting
+  // forwarding headers that may be spoofed on a directly reachable origin.
+  for (const header of [
+    "cf-connecting-ip",
+    "forwarded",
+    "true-client-ip",
+    "x-forwarded-for",
+    "x-real-ip",
+  ]) headers.delete(header);
   headers.set("x-forwarded-host", forwardedHost);
   headers.set("x-forwarded-proto", forwardedProto);
   return headers;

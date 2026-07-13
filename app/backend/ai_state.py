@@ -24,7 +24,6 @@ def invalidate_ticket_ai(ticket) -> None:
     """
     _deactivate_artifacts(ticket, {"triage", "summary", "resolution"})
     ticket.sentiment = None
-    ticket.category = None
     ticket.mood = None
     ticket.complexity = 1
     ticket.ai_reasoning = None
@@ -47,6 +46,7 @@ def invalidate_ticket_ai(ticket) -> None:
     ticket.ai_error = None
     ticket.ai_synthetic = False
     ticket.ai_suggested_priority = None
+    ticket.ai_suggested_category = None
 
 
 def invalidate_ticket_resolution(ticket) -> None:

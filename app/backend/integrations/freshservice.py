@@ -298,6 +298,20 @@ class FreshserviceAdapter(BaseITSMAdapter):
             url=self.build_ticket_url(str(raw.get("id", ""))),
         )
 
+    def _parse_ticket_batch(self, raw_tickets: list) -> List[ExternalTicket]:
+        """Validate provider records independently so one poison record cannot
+        discard otherwise valid tickets from the same page."""
+        parsed: List[ExternalTicket] = []
+        for raw in raw_tickets:
+            try:
+                parsed.append(self._parse_ticket(raw))
+            except Exception as exc:
+                print(
+                    "[External] Freshservice ticket parse skipped "
+                    f"kind={type(exc).__name__}"
+                )
+        return parsed
+
     # ── Rate-limit aware request helper ─────────────────────────────
     #
     # External ITSM rate limit pacing
@@ -410,8 +424,12 @@ class FreshserviceAdapter(BaseITSMAdapter):
                     raise RuntimeError(f"Freshservice still rate-limited on page {page}")
                 resp.raise_for_status()
                 data = resp.json()
+                if not isinstance(data, dict):
+                    raise RuntimeError("Freshservice ticket response must be an object")
                 tickets = data.get("tickets", [])
-                out.extend(self._parse_ticket(t) for t in tickets)
+                if not isinstance(tickets, list):
+                    raise RuntimeError("Freshservice tickets must be a list")
+                out.extend(self._parse_ticket_batch(tickets))
                 # No next-page link header => last page reached.
                 if not self._parse_link_next(resp.headers.get("link"), self.base_url):
                     break

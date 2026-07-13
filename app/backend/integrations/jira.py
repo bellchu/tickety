@@ -151,6 +151,20 @@ class JiraAdapter(BaseITSMAdapter):
             url=self.build_ticket_url(str(raw.get("key") or "")),
         )
 
+    def _parse_issue_batch(self, raw_issues: list) -> List[ExternalTicket]:
+        """Validate issues independently so malformed requester content cannot
+        abort a whole provider page."""
+        parsed: List[ExternalTicket] = []
+        for raw in raw_issues:
+            try:
+                parsed.append(self._parse_issue(raw))
+            except Exception as exc:
+                print(
+                    "[Jira] ticket parse skipped "
+                    f"kind={type(exc).__name__}"
+                )
+        return parsed
+
     async def fetch_new_tickets(self, since: Optional[datetime] = None) -> List[ExternalTicket]:
         return await self.fetch_tickets_since(since)
 
@@ -189,8 +203,12 @@ class JiraAdapter(BaseITSMAdapter):
                 )
                 resp.raise_for_status()
                 data = resp.json()
+                if not isinstance(data, dict):
+                    raise RuntimeError("Jira search response must be an object")
                 issues = data.get("issues", [])
-                out.extend(self._parse_issue(issue) for issue in issues)
+                if not isinstance(issues, list):
+                    raise RuntimeError("Jira issues must be a list")
+                out.extend(self._parse_issue_batch(issues))
                 next_page_token = data.get("nextPageToken")
                 if data.get("isLast") or not next_page_token or not issues:
                     break

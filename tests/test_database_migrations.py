@@ -43,7 +43,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             for table_name, table in Base.metadata.tables.items():
                 actual_columns = {column["name"] for column in inspector.get_columns(table_name)}
                 self.assertEqual(actual_columns, set(table.columns.keys()), table_name)
-            self.assertEqual(self._current_revision(engine), "0004")
+            self.assertEqual(self._current_revision(engine), "0005")
             command.check(self.config)
         finally:
             engine.dispose()
@@ -66,6 +66,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             ticket_columns = {column["name"] for column in inspector.get_columns("tickets")}
             self.assertIn("portal_access_token_hash", ticket_columns)
             self.assertIn("portal_access_expires_at", ticket_columns)
+            self.assertIn("ai_suggested_category", ticket_columns)
             indexes = {index["name"]: index for index in inspector.get_indexes("tickets")}
             self.assertTrue(indexes["ix_tickets_portal_access_token_hash"]["unique"])
             with engine.connect() as connection:
@@ -82,7 +83,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertEqual(user["name"], "Legacy User")
             self.assertEqual(user["role"], "agent")
             self.assertTrue(user["is_active"])
-            self.assertEqual(self._current_revision(engine), "0004")
+            self.assertEqual(self._current_revision(engine), "0005")
         finally:
             engine.dispose()
 
@@ -103,6 +104,44 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertEqual(row["ai_status"], "legacy_stale")
             self.assertEqual(row["ai_error"], "provenance_unknown")
             self.assertIsNone(row["ai_source_hash"])
+        finally:
+            engine.dispose()
+
+    def test_proven_ai_category_is_moved_but_later_human_category_is_preserved(self):
+        command.upgrade(self.config, "0004")
+        engine = create_engine(self.url)
+        try:
+            with engine.begin() as connection:
+                connection.execute(text(
+                    "INSERT INTO tickets "
+                    "(id, subject, category, ai_reasoning, ai_generated_at) VALUES "
+                    "('ai-category', 'AI classified', 'Software', 'reason', "
+                    "'2026-07-12 10:00:00'), "
+                    "('human-category', 'Human corrected', 'Network', 'reason', "
+                    "'2026-07-12 10:00:00')"
+                ))
+                connection.execute(text(
+                    "INSERT INTO ticket_audit_log "
+                    "(ticket_id, field, old_value, new_value, changed_by, changed_at) "
+                    "VALUES ('human-category', 'category', 'Software', 'Network', "
+                    "'Reviewer', '2026-07-12 11:00:00')"
+                ))
+
+            command.upgrade(self.config, "head")
+            with engine.connect() as connection:
+                rows = {
+                    row["id"]: row
+                    for row in connection.execute(text(
+                        "SELECT id, category, ai_suggested_category FROM tickets "
+                        "WHERE id IN ('ai-category', 'human-category')"
+                    )).mappings()
+                }
+            self.assertIsNone(rows["ai-category"]["category"])
+            self.assertEqual(
+                rows["ai-category"]["ai_suggested_category"], "Software"
+            )
+            self.assertEqual(rows["human-category"]["category"], "Network")
+            self.assertIsNone(rows["human-category"]["ai_suggested_category"])
         finally:
             engine.dispose()
 

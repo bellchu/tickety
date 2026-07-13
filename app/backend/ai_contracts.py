@@ -53,5 +53,4 @@ class TicketIntelligenceAnswer(StrictAIModel):
     answer: LongText
     answer_citations: list[str] = Field(min_length=1, max_length=10)
     findings: list[GroundedItem] = Field(default_factory=list, max_length=12)
-    recommended_actions: list[GroundedItem] = Field(default_factory=list, max_length=12)
     confidence: Literal["high", "medium", "low"] = "low"

@@ -10,6 +10,9 @@ from ..database import (
     UserRecord,
 )
 from ..schema import ExternalTicket, WebhookEvent
+# Kept as a module attribute for compatibility with integrations/tests that
+# patch it. External persistence deliberately never calls it: provider ticket
+# text must be reviewed or explicitly promoted before entering shared RAG.
 from ..ticket_vectors import refresh_ticket_documents_background
 from ..ai_state import invalidate_ticket_ai, invalidate_ticket_resolution
 from .registry import get_adapter
@@ -87,7 +90,6 @@ def _upsert_ticket(db: Session, ext: ExternalTicket, provider: str, overwrite: b
             existing.status = existing.workflow_status or ext.status
         db.commit()
         db.refresh(existing)
-        refresh_ticket_documents_background(db, existing)
         return "updated", existing
 
     new_ticket = TicketRecord(
@@ -120,7 +122,6 @@ def _upsert_ticket(db: Session, ext: ExternalTicket, provider: str, overwrite: b
     db.add(new_ticket)
     db.commit()
     db.refresh(new_ticket)
-    refresh_ticket_documents_background(db, new_ticket)
     return "new", new_ticket
 
 
