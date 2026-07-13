@@ -128,6 +128,10 @@ remain suggestions until a human applies the audited workflow action.
 Automatic AI agents do not run in demo mode. In production they are opt-in;
 set the specific `AUTO_*_ENABLED=true` controls only after authentication,
 budgets, provider destinations, and egress policy are verified.
+Anonymous self-service Portal tickets are never selected by the automatic AI
+gap scanner. A scoped authenticated user must explicitly request analysis, or
+an administrator/supervisor must explicitly queue it, before the worker may
+send Portal content to an AI provider.
 
 Analysis is keyed by ticket input, model, and pipeline version. A durable claim
 prevents API and worker processes from paying for the same analysis, unchanged
@@ -146,6 +150,8 @@ AI_PIPELINE_TIMEOUT_SECONDS=900
 TICKET_EMBEDDING_MAX_COMMENTS_PER_REFRESH=50
 AI_USER_REQUESTS_PER_MINUTE=10
 AI_USER_REQUESTS_PER_DAY=200
+ANALYTICS_USER_REQUESTS_PER_MINUTE=60
+ANALYTICS_USER_REQUESTS_PER_DAY=5000
 MAX_REQUEST_BODY_BYTES=1048576
 AI_METRICS_RETENTION_DAYS=30
 AI_ARTIFACT_RETENTION_DAYS=90
@@ -170,6 +176,8 @@ webhooks are rejected unless `WEBHOOK_SECRET` is configured, the
 `X-Freshservice-Webhook-Timestamp` is fresh, and the base64 HMAC-SHA256
 signature matches `timestamp + "." + raw_body`. Signed deliveries are claimed
 atomically so a captured request cannot be replayed.
+OAuth callback state is likewise single-use, bounded, and charged to the
+authenticated administrator's request budget before token exchange.
 
 In production, credentials, provider/model routing, model and user budgets,
 automation toggles, embedding destinations, ITSM provider destinations,

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Literal
 from datetime import datetime
 
@@ -407,8 +407,17 @@ class TicketIntelligenceAnalysisRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=1000)
     limit: int = Field(8, ge=1, le=30)
     source_types: List[Literal["ticket", "comment", "kb_article"]] = Field(
-        default_factory=lambda: ["ticket", "comment", "kb_article"]
+        default_factory=lambda: ["ticket", "comment", "kb_article"],
+        min_length=1,
+        max_length=3,
     )
+
+    @field_validator("source_types")
+    @classmethod
+    def source_types_must_be_unique(cls, value):
+        if len(value) != len(set(value)):
+            raise ValueError("source_types must not contain duplicates")
+        return value
 
 
 class TicketIntelligenceAnalysisResponse(BaseModel):
@@ -512,6 +521,10 @@ class KbArticleUpdate(BaseModel):
     status: Optional[Literal["draft", "published", "archived"]] = None
     reviewer_id: Optional[str] = None
     review_due_at: Optional[datetime] = None
+
+
+class KbFeedbackCreate(BaseModel):
+    helpful: bool = Field(..., strict=True)
 
 
 # ── Custom status / priority config ─────────────────────────────

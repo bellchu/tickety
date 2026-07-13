@@ -14,6 +14,10 @@
 const http = require("http");
 const next = require("next");
 const httpProxy = require("http-proxy");
+const {
+  createWebSocketUpgradeHandler,
+  webSocketProxyErrorKind,
+} = require("./lib/ws-proxy-security");
 
 const dev = process.env.NODE_ENV !== "production";
 const port = parseInt(process.env.PORT || "3000", 10);
@@ -36,7 +40,10 @@ app.prepare().then(() => {
   });
 
   proxy.on("error", (err, _req, target) => {
-    console.error("[ws-proxy] error:", err.message, "target:", target && target.url);
+    console.error(
+      "[ws-proxy] error kind=",
+      webSocketProxyErrorKind(err),
+    );
     // If the socket is still open, destroy it so the client reconnects.
     const sock = target && target.socket;
     if (sock && !sock.destroyed) sock.destroy();
@@ -49,21 +56,13 @@ app.prepare().then(() => {
   });
 
   // WebSocket upgrade handling.
-  server.on("upgrade", (req, socket, head) => {
-    const url = req.url || "";
-    if (url.startsWith("/ws/")) {
-      proxy.ws(req, socket, head);
-    } else {
-      // Only /ws/* is proxied; refuse anything else.
-      socket.destroy();
-    }
-  });
+  server.on("upgrade", createWebSocketUpgradeHandler(proxy));
 
   server.listen(port, hostname, (err) => {
     if (err) throw err;
     console.log(
       `> Ready on http://${hostname}:${port} (dev=${dev}) ` +
-        `ws proxy /ws/* -> ${BACKEND}`
+        "ws proxy /ws/* enabled"
     );
   });
 });

@@ -77,6 +77,14 @@ def _auto_triage_job():
         auto_triage = settings_module.automation_enabled("AUTO_TRIAGE_ENABLED", "AUTO_TRIAGE")
         auto_summary = settings_module.automation_enabled("AUTO_SUMMARIZE_ENABLED")
         auto_resolution = settings_module.automation_enabled("AUTO_RESOLVE_ENABLED")
+        # Portal tickets are anonymous, attacker-controlled input. They may be
+        # analysed only after an authenticated action explicitly queues them;
+        # never let the background gap scanner turn public ticket creation
+        # into an indirect provider-spend or worker-starvation primitive.
+        trusted_automatic_source = or_(
+            TicketRecord.external_source.is_(None),
+            TicketRecord.external_source != "portal",
+        )
         queued = db.query(TicketRecord).filter(
             or_(
                 TicketRecord.ai_status == "queued",
@@ -93,6 +101,7 @@ def _auto_triage_job():
         # Find tickets missing ANY AI data (prioritize untriaged first)
         untriaged = (
             db.query(TicketRecord).filter(
+                trusted_automatic_source,
                 TicketRecord.ai_reasoning.is_(None),
                 or_(
                     TicketRecord.ai_status.is_(None),
@@ -103,6 +112,7 @@ def _auto_triage_job():
         )
         no_summary = (
             db.query(TicketRecord).filter(
+                trusted_automatic_source,
                 TicketRecord.ai_reasoning.isnot(None),
                 TicketRecord.summary.is_(None),
                 or_(
@@ -118,6 +128,7 @@ def _auto_triage_job():
         )
         no_resolution = (
             db.query(TicketRecord).filter(
+                trusted_automatic_source,
                 TicketRecord.ai_reasoning.isnot(None),
                 TicketRecord.summary.isnot(None),
                 TicketRecord.recommended_solution.is_(None),

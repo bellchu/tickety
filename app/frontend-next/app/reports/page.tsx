@@ -96,15 +96,18 @@ export default function ReportsPage() {
         <div className="card-surface p-5">
           <h2 className="text-sm font-semibold text-ink-700 mb-4">Tickets by Category</h2>
           {categoryQuery.isLoading ? <ChartSkeleton /> : categoryQuery.isError ? <SectionError onRetry={() => void categoryQuery.refetch()} /> : categoryData.length > 0 ? (
-            <ResponsiveContainer width="100%" height={220}>
-              <PieChart>
-                <Pie data={categoryData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={80} innerRadius={40}>
-                  {categoryData.map((_, i) => <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />)}
-                </Pie>
-                <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8 }} />
-                <Legend wrapperStyle={{ fontSize: 11 }} />
-              </PieChart>
-            </ResponsiveContainer>
+            <div className="space-y-4">
+              {byCategory?.truncated && <Alert variant="warning" title="Category view is limited" className="text-xs">Showing {categoryData.length.toLocaleString()} of {byCategory.total_categories.toLocaleString()} categories. Counts are exact for the categories shown.</Alert>}
+              <ResponsiveContainer width="100%" height={220}>
+                <PieChart>
+                  <Pie data={categoryData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={80} innerRadius={40}>
+                    {categoryData.map((_, i) => <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />)}
+                  </Pie>
+                  <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8 }} />
+                  <Legend wrapperStyle={{ fontSize: 11 }} />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
           ) : <EmptyChart />}
         </div>
 
@@ -154,17 +157,20 @@ export default function ReportsPage() {
       <div className="card-surface p-5">
         <h2 className="text-sm font-semibold text-ink-700 mb-4">Avg Resolution Time by Category (hours)</h2>
         {resolutionQuery.isLoading ? <ChartSkeleton /> : resolutionQuery.isError ? <SectionError onRetry={() => void resolutionQuery.refetch()} /> : resolutionData.length > 0 ? (
-          <ResponsiveContainer width="100%" height={220}>
-            <BarChart data={resolutionData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#E8E1D6" vertical={false} />
-              <XAxis dataKey="category" tick={{ fontSize: 10, fill: "#9B9084" }} />
-              <YAxis tick={{ fontSize: 10, fill: "#9B9084" }} />
-              <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #E8E1D6" }} />
-              <Bar dataKey="hours" radius={[4, 4, 0, 0]}>
-                {resolutionData.map((_, i) => <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />)}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
+          <div className="space-y-4">
+            {resolutionTime?.truncated && <Alert variant="warning" title="Resolution averages are sampled" className="text-xs">Calculated from the latest {resolutionTime.analyzed_tickets.toLocaleString()} of {resolutionTime.total_matching_tickets.toLocaleString()} matching resolved tickets.</Alert>}
+            <ResponsiveContainer width="100%" height={220}>
+              <BarChart data={resolutionData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#E8E1D6" vertical={false} />
+                <XAxis dataKey="category" tick={{ fontSize: 10, fill: "#9B9084" }} />
+                <YAxis tick={{ fontSize: 10, fill: "#9B9084" }} />
+                <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #E8E1D6" }} />
+                <Bar dataKey="hours" radius={[4, 4, 0, 0]}>
+                  {resolutionData.map((_, i) => <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />)}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
         ) : <EmptyChart />}
       </div>
       </>}

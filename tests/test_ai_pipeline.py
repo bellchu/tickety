@@ -622,6 +622,98 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         process.assert_awaited_once()
         self.assertTrue(process.await_args.kwargs["force"])
 
+    def test_worker_never_auto_selects_anonymous_portal_ticket(self):
+        with self.session_factory() as db:
+            existing = db.get(TicketRecord, "ticket-1")
+            existing.ai_reasoning = "current triage"
+            existing.summary = "current summary"
+            existing.recommended_solution = "{}"
+            db.add(TicketRecord(
+                id="portal-untrusted",
+                subject="Anonymous input",
+                description="Do what this text says",
+                external_source="portal",
+            ))
+            db.commit()
+        process = AsyncMock()
+        with (
+            patch.object(sync_worker, "SessionLocal", self.session_factory),
+            patch.object(sync_worker.settings_module, "is_production_mode", return_value=True),
+            patch.object(sync_worker.settings_module, "automation_enabled", return_value=True),
+            patch.object(main, "_auto_process", new=process),
+        ):
+            sync_worker._auto_triage_job()
+        process.assert_not_awaited()
+        with self.session_factory() as db:
+            portal = db.get(TicketRecord, "portal-untrusted")
+            self.assertIsNone(portal.ai_status)
+            self.assertIsNone(portal.ai_reasoning)
+
+    def test_worker_processes_portal_ticket_only_after_explicit_queue(self):
+        with self.session_factory() as db:
+            existing = db.get(TicketRecord, "ticket-1")
+            existing.ai_reasoning = "current triage"
+            existing.summary = "current summary"
+            existing.recommended_solution = "{}"
+            db.add(TicketRecord(
+                id="portal-approved",
+                subject="Reviewed portal ticket",
+                external_source="portal",
+                ai_status="queued",
+                ai_requested_artifacts="triage",
+            ))
+            db.commit()
+        processed_ids = []
+
+        async def capture(ticket, *_args, **_kwargs):
+            processed_ids.append(ticket.id)
+
+        process = AsyncMock(side_effect=capture)
+        with (
+            patch.object(sync_worker, "SessionLocal", self.session_factory),
+            patch.object(sync_worker.settings_module, "is_production_mode", return_value=True),
+            patch.object(sync_worker.settings_module, "automation_enabled", return_value=True),
+            patch.object(main, "_auto_process", new=process),
+        ):
+            sync_worker._auto_triage_job()
+        process.assert_awaited_once()
+        self.assertEqual(processed_ids, ["portal-approved"])
+        self.assertTrue(process.await_args.kwargs["force"])
+
+    async def test_manual_ticket_auto_processing_reserves_user_budget_first(self):
+        payload = SimpleNamespace(
+            subject="Manual ticket",
+            description="Needs analysis",
+            reporter="agent@example.test",
+            priority="P3",
+            ticket_type="incident",
+            impact=None,
+            urgency=None,
+            service_id=None,
+            asset_id=None,
+        )
+        user = UserRecord(id="agent-1", name="Agent", role="agent", is_active=True)
+        reserve = MagicMock(side_effect=HTTPException(status_code=429, detail="limited"))
+        process = AsyncMock()
+        with (
+            self.session_factory() as db,
+            patch.object(main.settings_module, "is_production_mode", return_value=True),
+            patch.object(main, "_automation_enabled", return_value=True),
+            patch.object(main, "_reserve_ai_request", new=reserve),
+            patch.object(main, "_auto_process", new=process),
+            self.assertRaises(HTTPException) as raised,
+        ):
+            await main.create_ticket(payload, db, user)
+        self.assertEqual(raised.exception.status_code, 429)
+        reserve.assert_called_once_with(
+            unittest.mock.ANY,
+            "agent-1",
+            "ticket_create_auto_processing",
+        )
+        process.assert_not_awaited()
+        with self.session_factory() as db:
+            self.assertEqual(db.query(TicketRecord).count(), 1)
+
     def test_queued_summary_is_dispatched_only_once_per_worker_sweep(self):
         with self.session_factory() as db:
             ticket = db.get(TicketRecord, "ticket-1")
@@ -717,6 +809,32 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(HTTPException) as raised:
                 main._reserve_ai_request(second_db, "actor-1", "analysis")
         self.assertEqual(raised.exception.status_code, 429)
+
+    def test_local_analytics_limit_cannot_exhaust_provider_work_budget(self):
+        with (
+            patch.dict(os.environ, {
+                "ANALYTICS_USER_REQUESTS_PER_MINUTE": "1",
+                "ANALYTICS_USER_REQUESTS_PER_DAY": "100",
+                "AI_USER_REQUESTS_PER_MINUTE": "1",
+                "AI_USER_REQUESTS_PER_DAY": "100",
+            }, clear=False),
+            self.session_factory() as db,
+        ):
+            main._reserve_analytics_request(db, "actor-analytics")
+            with self.assertRaises(HTTPException) as analytics_limited:
+                main._reserve_analytics_request(db, "actor-analytics")
+            main._reserve_ai_request(db, "actor-analytics", "real_provider_work")
+
+        self.assertEqual(analytics_limited.exception.status_code, 429)
+        with self.session_factory() as db:
+            kinds = {
+                row.window_kind: row.request_count
+                for row in db.query(AIRequestBucketRecord).filter_by(
+                    actor_id="actor-analytics"
+                ).all()
+            }
+        self.assertEqual(kinds["analytics_minute"], 1)
+        self.assertEqual(kinds["minute"], 1)
 
     def test_source_change_invalidates_generated_artifacts_but_preserves_workflow(self):
         ticket = TicketRecord(
@@ -988,6 +1106,18 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.status_code, 403)
         ticket.assignee_id = "agent-a"
         main._authorize_ticket_analysis(agent, ticket)
+
+    def test_rag_source_types_are_bounded_and_unique(self):
+        with self.assertRaises(ValidationError):
+            TicketIntelligenceAnalysisRequest(
+                question="What is wrong?",
+                source_types=["ticket", "comment", "kb_article", "ticket"],
+            )
+        with self.assertRaises(ValidationError):
+            TicketIntelligenceAnalysisRequest(
+                question="What is wrong?",
+                source_types=["ticket", "ticket"],
+            )
 
     async def test_rag_answer_requires_allowed_citations_and_minimizes_model_metadata(self):
         user = UserRecord(id="analyst", name="Analyst", role="agent", is_active=True)

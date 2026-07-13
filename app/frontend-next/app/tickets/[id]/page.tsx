@@ -527,9 +527,10 @@ function IntelligencePanel({
             {route.recommended_name ? (
               <p className="text-sm text-ink-600">
                 Recommended: <span className="font-semibold">{route.recommended_name}</span>
-                <span className="text-ink-500"> — {route.reasoning}</span>
+                {route.reasoning && <span className="text-ink-500"> — {route.reasoning}</span>}
               </p>
             ) : <p className="text-xs text-ink-400">No engineers available.</p>}
+            {route.candidate_pool_truncated && <Alert variant="warning" title="Candidate pool is sampled" className="text-xs">Compared {route.analyzed_users.toLocaleString()} of {route.total_users.toLocaleString()} user profiles; the recommendation is not global.</Alert>}
             <div className="flex flex-wrap gap-1.5">
               {route.candidates.map((c) => (
                 <span key={c.user_id} className="text-xs px-2 py-1 rounded border border-linen-400 text-ink-600">

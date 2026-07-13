@@ -467,6 +467,13 @@ class FreshserviceAdapter(BaseITSMAdapter):
         headers: dict,
         raw_body: bytes | None = None,
     ) -> Optional[WebhookEvent]:
+        body = raw_body if raw_body is not None else str(payload).encode()
+        if not self.verify_webhook_signature(headers, body):
+            return None
+        return self.parse_verified_webhook(payload)
+
+    def verify_webhook_signature(self, headers: dict, raw_body: bytes) -> bool:
+        """Authenticate the raw delivery before any JSON parser sees it."""
         signature = headers.get("x-freshservice-webhook-signature", "")
         timestamp = headers.get("x-freshservice-webhook-timestamp", "")
         if not self.webhook_secret or self.webhook_secret in {
@@ -474,13 +481,13 @@ class FreshserviceAdapter(BaseITSMAdapter):
             "change-me",
         }:
             print("[External] webhook secret is not configured")
-            return None
+            return False
         if not signature:
             print("[External] webhook signature missing")
-            return None
+            return False
         if not timestamp.isascii() or not timestamp.isdigit():
             print("[External] webhook timestamp invalid")
-            return None
+            return False
         try:
             timestamp_seconds = int(timestamp)
             max_age = max(
@@ -489,20 +496,26 @@ class FreshserviceAdapter(BaseITSMAdapter):
             )
         except (TypeError, ValueError):
             print("[External] webhook timestamp invalid")
-            return None
+            return False
         if timestamp_seconds <= 0 or abs(int(time.time()) - timestamp_seconds) > max_age:
             print("[External] webhook timestamp expired")
-            return None
-        body = raw_body if raw_body is not None else str(payload).encode()
-        signed_body = timestamp.encode("ascii") + b"." + body
+            return False
+        signed_body = timestamp.encode("ascii") + b"." + raw_body
         expected = base64.b64encode(
             hmac.new(self.webhook_secret.encode(), signed_body, hashlib.sha256).digest()
         ).decode()
         if not hmac.compare_digest(signature, expected):
             print("[External] webhook signature mismatch")
-            return None
+            return False
+        return True
 
+    @staticmethod
+    def parse_verified_webhook(payload: dict) -> Optional[WebhookEvent]:
+        if not isinstance(payload, dict):
+            return None
         ticket_data = payload.get("ticket", payload.get("data", {}))
+        if not isinstance(ticket_data, dict):
+            return None
         ext_id = str(ticket_data.get("id", ""))
         if not ext_id:
             return None

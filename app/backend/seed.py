@@ -662,7 +662,7 @@ def run_seed():
         print(f"Seed: inserted {len(USERS)} users, {len(TICKETS)} tickets, {len(RECOGNITIONS_SEED)} recognitions.")
     except Exception as e:
         db.rollback()
-        print(f"Seed error: {e}")
+        print(f"Seed error kind={type(e).__name__}")
         raise
     finally:
         db.close()

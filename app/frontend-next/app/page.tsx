@@ -207,6 +207,8 @@ export default function DashboardPage() {
 
   const pulse = slaQuery.isError
     ? { label: "Partial operational view", body: "SLA intelligence is unavailable; ticket volume remains current.", tone: "warning" as const }
+    : slaQuery.data?.truncated
+    ? { label: "Partial operational view", body: `SLA signals cover ${slaQuery.data.analyzed_tickets} of ${slaQuery.data.count} open tickets.`, tone: "warning" as const }
     : breached > 0
     ? { label: "Intervention required", body: `${breached} open ${breached === 1 ? "request has" : "requests have"} breached an SLA target.`, tone: "danger" as const }
     : atRisk > 0 || p1Count > 0
@@ -264,6 +266,13 @@ export default function DashboardPage() {
           <Button onClick={() => setNewTicketOpen(true)} leadingIcon={<Plus className="h-4 w-4" />}>New ticket</Button>
         </div>
       </header>
+
+      {(priorityQuery.data?.truncated || slaQuery.data?.truncated) && (
+        <Alert variant="warning" title="Operational intelligence is sampled" className="text-xs">
+          {priorityQuery.data?.truncated ? `Priority ranking covers ${priorityQuery.data.analyzed_tickets.toLocaleString()} of ${priorityQuery.data.backlog_size.toLocaleString()} open tickets. ` : ""}
+          {slaQuery.data?.truncated ? `SLA figures cover ${slaQuery.data.analyzed_tickets.toLocaleString()} of ${slaQuery.data.count.toLocaleString()} open tickets.` : ""}
+        </Alert>
+      )}
 
       <section aria-labelledby="operational-pulse-title" className="overflow-hidden rounded-2xl bg-ink-700 text-linen-50 shadow-[var(--shadow-raised)]">
         <div className="grid gap-6 p-5 sm:p-7 lg:grid-cols-[1.3fr_0.7fr] lg:items-center">

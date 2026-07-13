@@ -16,7 +16,7 @@ from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconn
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import case, desc, func, or_, text
+from sqlalchemy import and_, case, desc, func, or_, text
 from sqlalchemy.exc import IntegrityError
 
 from .database import (
@@ -47,7 +47,7 @@ from .schema import (
     TicketIntelligenceAnalysisRequest, TicketIntelligenceAnalysisResponse,
     TicketIntelligenceBackfillRequest, TicketIntelligenceSearchResponse,
     LoginRequest, UserCreate, UserUpdate, AuthResponse, UserOut,
-    KbArticle, KbArticleCreate, KbArticleUpdate,
+    KbArticle, KbArticleCreate, KbArticleUpdate, KbFeedbackCreate,
     TicketStatusConfig, TicketStatusConfigCreate,
     TicketPriorityConfig, TicketPriorityConfigCreate,
     NotificationConfig, NotificationConfigUpdate,
@@ -215,6 +215,8 @@ def _roles_required_for_request(path: str, method: str) -> Optional[set[str]]:
         return {"admin", "supervisor"}
     if method.upper() == "GET" and path == "/users":
         return {"admin", "supervisor"}
+    if unsafe and path.startswith("/kb/") and path.endswith("/feedback"):
+        return None
     if unsafe and path.startswith((
         "/categories",
         "/projects",
@@ -592,6 +594,14 @@ async def list_tickets(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0, le=1_000_000),
 ):
+    if getattr(request.state, "demo_fallback", False):
+        # Anonymous demo responses redact these model-generated values. Do not
+        # retain them as query or ordering oracles after redaction.
+        if category or sort == "complexity":
+            raise HTTPException(
+                status_code=403,
+                detail="AI-derived ticket filters require authentication",
+            )
     allowed_assignee_id = _ticket_scope_assignee_id(user)
     q = db.query(TicketRecord)
     if allowed_assignee_id is not None:
@@ -784,48 +794,54 @@ def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int
     return max(minimum, min(value, maximum))
 
 
+def _increment_request_bucket(
+    db: Session,
+    actor_id: str,
+    window_kind: str,
+    window_start: datetime,
+) -> int:
+    values = {
+        "actor_id": actor_id,
+        "window_kind": window_kind,
+        "window_start": window_start,
+        "request_count": 1,
+    }
+    dialect = db.bind.dialect.name
+    if dialect == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert
+    elif dialect == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert
+    else:
+        row = db.query(AIRequestBucketRecord).filter_by(
+            actor_id=actor_id,
+            window_kind=window_kind,
+            window_start=window_start,
+        ).with_for_update().first()
+        if row:
+            row.request_count += 1
+        else:
+            row = AIRequestBucketRecord(**values)
+            db.add(row)
+        db.flush()
+        return row.request_count
+    statement = insert(AIRequestBucketRecord).values(**values)
+    statement = statement.on_conflict_do_update(
+        index_elements=["actor_id", "window_kind", "window_start"],
+        set_={"request_count": AIRequestBucketRecord.request_count + 1},
+    ).returning(AIRequestBucketRecord.request_count)
+    return int(db.execute(statement).scalar_one())
+
+
 def _reserve_ai_request(db: Session, actor_id: str, task: str) -> None:
-    """Durable per-user request budget shared by every API replica."""
+    """Durable per-user provider-work budget shared by every API replica."""
     now = datetime.utcnow()
     per_minute = _bounded_env_int("AI_USER_REQUESTS_PER_MINUTE", 10, 1, 120)
     per_day = _bounded_env_int("AI_USER_REQUESTS_PER_DAY", 200, 1, 10_000)
     minute_start = now.replace(second=0, microsecond=0)
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
-    def increment_bucket(window_kind: str, window_start: datetime) -> int:
-        values = {
-            "actor_id": actor_id,
-            "window_kind": window_kind,
-            "window_start": window_start,
-            "request_count": 1,
-        }
-        dialect = db.bind.dialect.name
-        if dialect == "postgresql":
-            from sqlalchemy.dialects.postgresql import insert
-        elif dialect == "sqlite":
-            from sqlalchemy.dialects.sqlite import insert
-        else:
-            row = db.query(AIRequestBucketRecord).filter_by(
-                actor_id=actor_id,
-                window_kind=window_kind,
-                window_start=window_start,
-            ).with_for_update().first()
-            if row:
-                row.request_count += 1
-            else:
-                row = AIRequestBucketRecord(**values)
-                db.add(row)
-            db.flush()
-            return row.request_count
-        statement = insert(AIRequestBucketRecord).values(**values)
-        statement = statement.on_conflict_do_update(
-            index_elements=["actor_id", "window_kind", "window_start"],
-            set_={"request_count": AIRequestBucketRecord.request_count + 1},
-        ).returning(AIRequestBucketRecord.request_count)
-        return int(db.execute(statement).scalar_one())
-
-    minute_count = increment_bucket("minute", minute_start)
-    day_count = increment_bucket("day", day_start)
+    minute_count = _increment_request_bucket(db, actor_id, "minute", minute_start)
+    day_count = _increment_request_bucket(db, actor_id, "day", day_start)
     if minute_count > per_minute:
         db.rollback()
         raise HTTPException(status_code=429, detail="ai_rate_limit_exceeded", headers={"Retry-After": "60"})
@@ -833,6 +849,44 @@ def _reserve_ai_request(db: Session, actor_id: str, task: str) -> None:
         db.rollback()
         raise HTTPException(status_code=429, detail="ai_daily_budget_exceeded", headers={"Retry-After": "3600"})
     db.add(AIUsageEventRecord(actor_id=actor_id, task=task, created_at=now))
+    db.commit()
+
+
+def _reserve_analytics_request(db: Session, actor_id: str) -> None:
+    """Rate-limit local analytics without spending the provider-work budget."""
+    now = datetime.utcnow()
+    per_minute = _bounded_env_int(
+        "ANALYTICS_USER_REQUESTS_PER_MINUTE", 60, 1, 600
+    )
+    per_day = _bounded_env_int(
+        "ANALYTICS_USER_REQUESTS_PER_DAY", 5_000, 1, 100_000
+    )
+    minute_count = _increment_request_bucket(
+        db,
+        actor_id,
+        "analytics_minute",
+        now.replace(second=0, microsecond=0),
+    )
+    day_count = _increment_request_bucket(
+        db,
+        actor_id,
+        "analytics_day",
+        now.replace(hour=0, minute=0, second=0, microsecond=0),
+    )
+    if minute_count > per_minute:
+        db.rollback()
+        raise HTTPException(
+            status_code=429,
+            detail="analytics_rate_limit_exceeded",
+            headers={"Retry-After": "60"},
+        )
+    if day_count > per_day:
+        db.rollback()
+        raise HTTPException(
+            status_code=429,
+            detail="analytics_daily_limit_exceeded",
+            headers={"Retry-After": "3600"},
+        )
     db.commit()
 
 
@@ -898,6 +952,27 @@ async def update_ticket(
         and getattr(ticket, field, None) != getattr(payload, field)
         for field in document_fields
     )
+    analysis_input_changed = any(
+        getattr(payload, field, None) is not None
+        and getattr(ticket, field, None) != getattr(payload, field)
+        for field in {"subject", "description"}
+    )
+    resolution_input_changed = any(
+        getattr(payload, field, None) is not None
+        and getattr(ticket, field, None) != getattr(payload, field)
+        for field in {"priority", "category"}
+    )
+    if settings_module.is_production_mode() and (
+        (
+            analysis_input_changed
+            and _automation_enabled("AUTO_TRIAGE_ENABLED", "AUTO_TRIAGE")
+        )
+        or (
+            resolution_input_changed
+            and _automation_enabled("AUTO_RESOLVE_ENABLED")
+        )
+    ):
+        _reserve_ai_request(db, user.id, "ticket_update_auto_processing")
     _reserve_embedding_request(
         db,
         user,
@@ -905,8 +980,6 @@ async def update_ticket(
         eligible=document_input_changed,
     )
     actor_name = user.name
-    analysis_input_changed = False
-    resolution_input_changed = False
     # Track changes for audit log
     for field in [
         "subject", "description", "status", "workflow_status", "ai_review_state",
@@ -917,10 +990,6 @@ async def update_ticket(
         if val is not None:
             old = getattr(ticket, field, None)
             if old != val:
-                if field in {"subject", "description"}:
-                    analysis_input_changed = True
-                elif field in {"priority", "category"}:
-                    resolution_input_changed = True
                 db.add(TicketAuditLogRecord(
                     ticket_id=ticket.id, field=field,
                     old_value=str(old) if old else None,
@@ -968,14 +1037,19 @@ async def list_comments(
     ticket_id: str,
     db: Session = Depends(get_db),
     user: UserRecord = Depends(get_authenticated_user),
+    limit: int = Query(default=200, ge=1, le=500),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
 ):
     ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
     _authorize_ticket_analysis(user, ticket)
-    return db.query(TicketCommentRecord).filter(
+    comments = db.query(TicketCommentRecord).filter(
         TicketCommentRecord.ticket_id == ticket_id
-    ).order_by(TicketCommentRecord.created_at.asc()).all()
+    ).order_by(
+        TicketCommentRecord.created_at.desc(), TicketCommentRecord.id.desc()
+    ).offset(offset).limit(limit).all()
+    return list(reversed(comments))
 
 
 @app.post("/tickets/{ticket_id}/comments", response_model=TicketComment, status_code=201)
@@ -1015,10 +1089,22 @@ async def add_comment(
 # ── Ticket audit log ──────────────────────────────────────────
 
 @app.get("/tickets/{ticket_id}/audit", response_model=List[TicketAuditEntry])
-async def get_audit_log(ticket_id: str, db: Session = Depends(get_db)):
+async def get_audit_log(
+    ticket_id: str,
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(get_authenticated_user),
+    limit: int = Query(default=200, ge=1, le=500),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
+):
+    ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    _authorize_ticket_analysis(user, ticket)
     return db.query(TicketAuditLogRecord).filter(
         TicketAuditLogRecord.ticket_id == ticket_id
-    ).order_by(TicketAuditLogRecord.changed_at.desc()).all()
+    ).order_by(
+        TicketAuditLogRecord.changed_at.desc(), TicketAuditLogRecord.id.desc()
+    ).offset(offset).limit(limit).all()
 
 
 # ── Ticket categories ────────────────────────────────────────
@@ -1055,9 +1141,8 @@ async def delete_category(cat_id: int, db: Session = Depends(get_db)):
 @app.post("/tickets/bulk")
 async def bulk_action(
     payload: BulkAction,
-    request: Request,
     db: Session = Depends(get_db),
-    _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
+    user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
     """Apply an action to multiple tickets at once.
     Actions: assign, close, set_priority, set_category."""
@@ -1089,10 +1174,21 @@ async def bulk_action(
         if payload.value not in allowed_priorities:
             raise HTTPException(status_code=422, detail="Priority does not exist")
 
+    if (
+        payload.action in {"set_priority", "set_category"}
+        and any(
+            getattr(ticket, "priority" if payload.action == "set_priority" else "category")
+            != payload.value
+            for ticket in tickets
+        )
+        and settings_module.is_production_mode()
+        and _automation_enabled("AUTO_RESOLVE_ENABLED")
+    ):
+        _reserve_ai_request(db, user.id, "ticket_bulk_auto_processing")
+
     count = 0
     changed_ticket_ids: set[str] = set()
-    actor = getattr(getattr(request, "state", None), "current_user", None)
-    actor_name = actor.name if actor else "System"
+    actor_name = user.name
 
     def record_change(ticket: TicketRecord, field: str, new_value):
         old = getattr(ticket, field, None)
@@ -1141,6 +1237,14 @@ async def create_ticket(
 ):
     """Create a ticket by hand (no ITSM sync). Auto-triaged if enabled."""
     import uuid as _uuid
+    if (
+        settings_module.is_production_mode()
+        and _automation_enabled("AUTO_TRIAGE_ENABLED", "AUTO_TRIAGE")
+    ):
+        # Manual creation can immediately invoke the LLM pipeline. Charge the
+        # authenticated caller before persisting the ticket so this indirect
+        # path cannot bypass the per-user AI request budget.
+        _reserve_ai_request(db, user.id, "ticket_create_auto_processing")
     _reserve_embedding_request(db, user, "ticket_create_embedding")
     ticket = TicketRecord(
         id=str(_uuid.uuid4()),
@@ -2415,10 +2519,13 @@ def _slugify(title: str) -> str:
 
 @app.get("/kb", response_model=List[KbArticle])
 async def list_kb_articles(
+    response: Response,
     db: Session = Depends(get_db),
-    search: Optional[str] = None,
-    category: Optional[str] = None,
-    status: Optional[str] = None,
+    search: Optional[str] = Query(default=None, max_length=200),
+    category: Optional[str] = Query(default=None, max_length=100),
+    status: Optional[str] = Query(default=None, max_length=50),
+    limit: int = Query(default=500, ge=1, le=500),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
     user: UserRecord = Depends(get_authenticated_user),
 ):
     if status and status != "published" and user.role not in {"admin", "supervisor"}:
@@ -2431,23 +2538,36 @@ async def list_kb_articles(
     if category:
         q = q.filter(KbArticleRecord.category == category)
     if search:
-        q = q.filter(KbArticleRecord.title.ilike(f"%{search}%"))
-    articles = q.order_by(desc(KbArticleRecord.updated_at)).all()
-    # Enrich with author names
+        escaped_search = search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        if escaped_search:
+            q = q.filter(KbArticleRecord.title.ilike(f"%{escaped_search}%", escape="\\"))
+    page = q.order_by(
+        desc(KbArticleRecord.updated_at), KbArticleRecord.id.asc()
+    ).offset(offset).limit(limit + 1).all()
+    has_more = len(page) > limit
+    articles = page[:limit]
+    response.headers["X-Page-Limit"] = str(limit)
+    response.headers["X-Page-Offset"] = str(offset)
+    response.headers["X-Has-More"] = str(has_more).lower()
+    author_ids = {article.author_id for article in articles if article.author_id}
+    author_names = dict(
+        db.query(UserRecord.id, UserRecord.name)
+        .filter(UserRecord.id.in_(author_ids))
+        .all()
+    ) if author_ids else {}
     for a in articles:
-        if a.author_id:
-            u = db.query(UserRecord).filter(UserRecord.id == a.author_id).first()
-            a.__dict__["author_name"] = u.name if u else None
-        else:
-            a.__dict__["author_name"] = None
+        a.__dict__["author_name"] = author_names.get(a.author_id)
     return articles
 
 
 @app.get("/kb/categories")
-async def list_kb_categories(db: Session = Depends(get_db)):
+async def list_kb_categories(
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(get_authenticated_user),
+):
     rows = db.query(KbArticleRecord.category).filter(
         KbArticleRecord.category.isnot(None), KbArticleRecord.status == "published"
-    ).distinct().all()
+    ).distinct().order_by(KbArticleRecord.category.asc()).limit(200).all()
     return {"categories": [r[0] for r in rows if r[0]]}
 
 
@@ -2574,12 +2694,19 @@ async def delete_kb_article(
 
 
 @app.post("/kb/{article_id}/feedback")
-async def kb_feedback(article_id: str, payload: dict, db: Session = Depends(get_db)):
-    helpful = payload.get("helpful", True)
+async def kb_feedback(
+    article_id: str,
+    payload: KbFeedbackCreate,
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(get_authenticated_user),
+):
+    if (user.role or "").lower() not in {"admin", "supervisor", "agent"}:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    _reserve_analytics_request(db, user.id)
     article = db.query(KbArticleRecord).filter(KbArticleRecord.id == article_id).first()
     if not article:
         raise HTTPException(status_code=404, detail="Article not found")
-    if helpful:
+    if payload.helpful:
         article.helpful += 1
     else:
         article.not_helpful += 1
@@ -2615,19 +2742,23 @@ async def get_ticket_kb_links(
     ticket_id: str,
     db: Session = Depends(get_db),
     user: UserRecord = Depends(get_authenticated_user),
+    limit: int = Query(default=500, ge=1, le=500),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
 ):
     ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
     _authorize_ticket_analysis(user, ticket)
-    links = db.query(TicketLinkRecord).filter(TicketLinkRecord.ticket_id == ticket_id).all()
+    links = db.query(TicketLinkRecord).filter(
+        TicketLinkRecord.ticket_id == ticket_id
+    ).order_by(TicketLinkRecord.id.asc()).offset(offset).limit(limit).all()
     article_ids = [l.kb_article_id for l in links]
     if not article_ids:
         return []
     query = db.query(KbArticleRecord).filter(KbArticleRecord.id.in_(article_ids))
     if (user.role or "").lower() not in {"admin", "supervisor"}:
         query = query.filter(KbArticleRecord.status == "published")
-    return query.all()
+    return query.order_by(KbArticleRecord.id.asc()).limit(limit).all()
 
 
 # ── Custom ticket status / priority config ─────────────────────
@@ -2758,11 +2889,25 @@ async def reports_volume(db: Session = Depends(get_db)):
 
 
 @app.get("/reports/by-category")
-async def reports_by_category(db: Session = Depends(get_db)):
+async def reports_by_category(
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
+):
+    _reserve_analytics_request(db, user.id)
+    total_categories = int(db.query(
+        func.count(func.distinct(TicketRecord.category))
+    ).filter(TicketRecord.category.isnot(None)).scalar() or 0)
     rows = db.query(
         TicketRecord.category, func.count().label("count")
-    ).filter(TicketRecord.category.isnot(None)).group_by(TicketRecord.category).all()
-    return {"categories": [r.category for r in rows], "counts": [r.count for r in rows]}
+    ).filter(TicketRecord.category.isnot(None)).group_by(
+        TicketRecord.category
+    ).order_by(func.count().desc()).limit(100).all()
+    return {
+        "categories": [r.category for r in rows],
+        "counts": [r.count for r in rows],
+        "total_categories": total_categories,
+        "truncated": total_categories > len(rows),
+    }
 
 
 @app.get("/reports/by-status")
@@ -2790,12 +2935,18 @@ async def reports_sla_compliance(db: Session = Depends(get_db)):
 
 
 @app.get("/reports/resolution-time")
-async def reports_resolution_time(db: Session = Depends(get_db)):
+async def reports_resolution_time(
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
+):
     """Avg resolution time by category."""
-    rows = db.query(TicketRecord).filter(
+    _reserve_analytics_request(db, user.id)
+    query = db.query(TicketRecord).filter(
         TicketRecord.resolved_at.isnot(None),
         TicketRecord.category.isnot(None),
-    ).all()
+    )
+    total_matching = query.count()
+    rows = query.order_by(TicketRecord.resolved_at.desc()).limit(500).all()
     by_cat = {}
     for t in rows:
         start = t.external_created_at or t.created_at
@@ -2805,7 +2956,13 @@ async def reports_resolution_time(db: Session = Depends(get_db)):
         hours = (end - start).total_seconds() / 3600
         cat = t.category
         by_cat.setdefault(cat, []).append(hours)
-    return {"categories": list(by_cat.keys()), "avg_hours": [round(sum(v) / len(v), 1) for v in by_cat.values()]}
+    return {
+        "categories": list(by_cat.keys()),
+        "avg_hours": [round(sum(v) / len(v), 1) for v in by_cat.values()],
+        "total_matching_tickets": total_matching,
+        "analyzed_tickets": len(rows),
+        "truncated": total_matching > len(rows),
+    }
 
 
 # ── User / Engagement ────────────────────────────────────────
@@ -3010,14 +3167,46 @@ async def oauth_authorize(
 @app.get("/oauth/callback")
 async def oauth_callback(
     request: Request,
-    code: str = Query(..., description="The authorisation code from the ITSM provider"),
-    state: str = Query(..., description="OAuth state returned by the provider"),
-    _user: UserRecord = Depends(require_production_admin_callback_user),
+    code: str = Query(
+        ...,
+        min_length=1,
+        max_length=2048,
+        pattern=r"^[\x21-\x7e]+$",
+        description="The authorisation code from the ITSM provider",
+    ),
+    state: str = Query(
+        ...,
+        min_length=32,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9_-]+$",
+        description="OAuth state returned by the provider",
+    ),
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(require_production_admin_callback_user),
 ):
     """Exchange the OAuth code for tokens and persist them."""
     saved_state = request.cookies.get(FRESHSERVICE_OAUTH_STATE_COOKIE)
     if not saved_state or not hmac.compare_digest(saved_state, state):
         raise HTTPException(status_code=400, detail="Invalid OAuth state")
+    state_key = f"OAUTH_STATE_USED_{hashlib.sha256(state.encode('ascii')).hexdigest()}"
+    try:
+        db.add(SettingsRecord(key=state_key, value=str(int(time.time()))))
+        db.flush()
+        db.query(SettingsRecord).filter(
+            SettingsRecord.key.like("OAUTH_STATE_USED_%"),
+            SettingsRecord.updated_at < datetime.utcnow() - timedelta(hours=1),
+        ).delete(synchronize_session=False)
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Invalid OAuth state") from exc
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail="OAuth state protection unavailable",
+        ) from exc
+    _reserve_ai_request(db, user.id, "itsm_oauth_callback")
     from .integrations.registry import get_adapter as _ga
     ad = _ga()
     try:
@@ -3084,19 +3273,25 @@ async def oauth_refresh(
 async def triage_all_untriaged(
     db: Session = Depends(get_db),
     user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
+    limit: int = Query(default=100, ge=1, le=500),
 ):
     """Retroactively run AI triage on every ticket that hasn't been analysed yet.
     Useful after enabling auto‑triage or when tickets were imported before
     AI automation was turned on."""
     _reserve_ai_request(db, user.id, "triage_all")
     untriaged = db.query(TicketRecord).filter(
-        TicketRecord.ai_reasoning.is_(None)
-    ).all()
+        TicketRecord.ai_reasoning.is_(None),
+        or_(
+            TicketRecord.ai_status.is_(None),
+            TicketRecord.ai_status.notin_(["dead_letter", "failed", "running", "queued"]),
+        ),
+    ).order_by(
+        TicketRecord.created_at.asc(), TicketRecord.id.asc()
+    ).limit(limit).all()
     for ticket in untriaged:
         ticket.ai_status = "queued"
         ticket.ai_started_at = None
         ticket.ai_error = None
-        ticket.ai_attempts = 0
         ticket.ai_next_attempt_at = None
         ticket.ai_requested_artifacts = "triage"
     db.commit()
@@ -3107,25 +3302,37 @@ async def triage_all_untriaged(
 async def repair_ai_gaps(
     db: Session = Depends(get_db),
     user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
+    limit: int = Query(default=100, ge=1, le=500),
 ):
     """One‑time repair sweep: fill summary and resolution plan gaps for
     tickets that have triage data but are missing the later pipeline steps."""
     _reserve_ai_request(db, user.id, "repair_ai_gaps")
-    no_summary = db.query(TicketRecord).filter(
-        TicketRecord.ai_reasoning.isnot(None),
-        TicketRecord.summary.is_(None)
-    ).all()
-    no_resolution = db.query(TicketRecord).filter(
-        TicketRecord.ai_reasoning.isnot(None),
-        TicketRecord.recommended_solution.is_(None)
-    ).all()
-    legacy_stale = db.query(TicketRecord).filter(
-        TicketRecord.ai_status == "legacy_stale"
-    ).all()
-
-    queued = {
-        ticket.id: ticket for ticket in [*no_summary, *no_resolution, *legacy_stale]
-    }
+    candidates = db.query(TicketRecord).filter(
+        or_(
+            and_(TicketRecord.ai_reasoning.isnot(None), TicketRecord.summary.is_(None)),
+            and_(
+                TicketRecord.ai_reasoning.isnot(None),
+                TicketRecord.recommended_solution.is_(None),
+            ),
+            TicketRecord.ai_status == "legacy_stale",
+        ),
+        or_(
+            TicketRecord.ai_status.is_(None),
+            TicketRecord.ai_status.notin_(["dead_letter", "failed", "running", "queued"]),
+        ),
+    ).order_by(
+        TicketRecord.updated_at.asc(), TicketRecord.id.asc()
+    ).limit(limit).all()
+    no_summary = [
+        ticket for ticket in candidates
+        if ticket.ai_reasoning is not None and ticket.summary is None
+    ]
+    no_resolution = [
+        ticket for ticket in candidates
+        if ticket.ai_reasoning is not None and ticket.recommended_solution is None
+    ]
+    legacy_stale = [ticket for ticket in candidates if ticket.ai_status == "legacy_stale"]
+    queued = {ticket.id: ticket for ticket in candidates}
     summary_ids = {ticket.id for ticket in no_summary}
     resolution_ids = {ticket.id for ticket in no_resolution}
     legacy_ids = {ticket.id for ticket in legacy_stale}
@@ -3140,7 +3347,6 @@ async def repair_ai_gaps(
         ticket.ai_status = "queued"
         ticket.ai_started_at = None
         ticket.ai_error = None
-        ticket.ai_attempts = 0
         ticket.ai_next_attempt_at = None
         ticket.ai_requested_artifacts = ",".join(artifacts)
     db.commit()
@@ -3231,12 +3437,34 @@ async def refresh_models(
 
 # ── Intelligence (SupportLogic-style ambient agents) ──────────
 
+_INTELLIGENCE_ROW_LIMIT = 500
+
+
+def _open_ticket_query(db: Session):
+    return db.query(TicketRecord).filter(or_(
+        TicketRecord.status.is_(None),
+        func.lower(TicketRecord.status).notin_(["closed", "resolved", "cancelled"]),
+    ))
+
+
+def _intelligence_candidate_order():
+    return (
+        case(
+            {"P1": 1, "Urgent": 1, "P2": 2, "High": 2, "P3": 3, "Medium": 3},
+            value=TicketRecord.priority,
+            else_=4,
+        ).asc(),
+        TicketRecord.created_at.asc().nullsfirst(),
+        TicketRecord.id.asc(),
+    )
+
 @app.get("/intelligence/alerts")
 async def intel_alerts(
     db: Session = Depends(get_db),
     _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
     """Proactive Alert Agent: unified feed of cases needing attention now."""
+    _reserve_analytics_request(db, _user.id)
     return intel.proactive_alerts(db)
 
 
@@ -3246,8 +3474,13 @@ async def intel_prioritize(
     _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
     """Prioritization Agent: open backlog ranked by composite urgency/impact/risk."""
+    _reserve_analytics_request(db, _user.id)
     now = datetime.utcnow()
-    open_tickets = [t for t in db.query(TicketRecord).all() if intel._open(t)]
+    open_query = _open_ticket_query(db)
+    total_open = open_query.count()
+    open_tickets = open_query.order_by(
+        *_intelligence_candidate_order()
+    ).limit(_INTELLIGENCE_ROW_LIMIT).all()
     ranked = []
     for t in open_tickets:
         ranked.append({
@@ -3262,7 +3495,13 @@ async def intel_prioritize(
             "score": intel.prioritize_score(t, now),
         })
     ranked.sort(key=lambda r: r["score"], reverse=True)
-    return {"generated_at": now.isoformat(), "backlog_size": len(ranked), "ranked": ranked}
+    return {
+        "generated_at": now.isoformat(),
+        "backlog_size": total_open,
+        "analyzed_tickets": len(open_tickets),
+        "truncated": total_open > len(open_tickets),
+        "ranked": ranked,
+    }
 
 
 @app.get("/intelligence/sla")
@@ -3271,10 +3510,22 @@ async def intel_sla(
     _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
     """SLA Agent: SLA clock state for every open ticket."""
+    _reserve_analytics_request(db, _user.id)
     now = datetime.utcnow()
-    rows = [intel.sla_status(t, now) for t in db.query(TicketRecord).all() if intel._open(t)]
+    open_query = _open_ticket_query(db)
+    total_open = open_query.count()
+    candidates = open_query.order_by(
+        *_intelligence_candidate_order()
+    ).limit(_INTELLIGENCE_ROW_LIMIT).all()
+    rows = [intel.sla_status(ticket, now) for ticket in candidates]
     rows.sort(key=lambda r: r["remaining_hours"])
-    return {"generated_at": now.isoformat(), "count": len(rows), "items": rows}
+    return {
+        "generated_at": now.isoformat(),
+        "count": total_open,
+        "analyzed_tickets": len(candidates),
+        "truncated": total_open > len(candidates),
+        "items": rows,
+    }
 
 
 @app.get("/intelligence/trends")
@@ -3283,6 +3534,7 @@ async def intel_trends(
     _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
     """Text Analytics Agent: category/sentiment distribution + top terms."""
+    _reserve_analytics_request(db, _user.id)
     return intel.trends(db)
 
 
@@ -3295,7 +3547,7 @@ async def intel_systemic(
     """Systemic Issue Detection: cluster similar tickets and surface broad
     business‑impact patterns. Returns clusters ranked by impact score, each
     with shared keywords, sample tickets, and priority/risk stats."""
-    _reserve_ai_request(db, _user.id, "systemic_analysis")
+    _reserve_analytics_request(db, _user.id)
     return intel.systemic_issues(db, cluster_threshold=min_cluster)
 
 
@@ -3305,39 +3557,73 @@ async def agent_workload(
     _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
     """Agent workload: open tickets per agent + resolution metrics."""
-    users = db.query(UserRecord).all()
+    _reserve_analytics_request(db, _user.id)
+    total_users = db.query(UserRecord).count()
+    users = db.query(UserRecord).order_by(
+        UserRecord.tier.desc(),
+        UserRecord.impact_points.desc(),
+        UserRecord.id.asc(),
+    ).limit(
+        _INTELLIGENCE_ROW_LIMIT
+    ).all()
+    user_ids = [user.id for user in users]
+    open_counts = dict(db.query(
+        TicketRecord.resolved_by,
+        func.count(TicketRecord.id),
+    ).filter(
+        TicketRecord.resolved_by.in_(user_ids),
+        TicketRecord.status.notin_(["Closed", "Resolved"]),
+    ).group_by(TicketRecord.resolved_by).all()) if user_ids else {}
+    resolved_counts = dict(db.query(
+        TicketRecord.resolved_by,
+        func.count(TicketRecord.id),
+    ).filter(
+        TicketRecord.resolved_by.in_(user_ids),
+    ).group_by(TicketRecord.resolved_by).all()) if user_ids else {}
+    duration_query = db.query(
+        TicketRecord.resolved_by,
+        TicketRecord.resolved_at,
+        TicketRecord.created_at,
+    ).filter(
+        TicketRecord.resolved_by.in_(user_ids),
+        TicketRecord.resolved_at.isnot(None),
+        TicketRecord.created_at.isnot(None),
+    )
+    total_duration_rows = duration_query.count() if user_ids else 0
+    resolved_rows = duration_query.order_by(
+        TicketRecord.resolved_at.desc()
+    ).limit(5_000).all() if user_ids else []
+    duration_totals: dict[str, tuple[float, int]] = {}
+    for resolved_by, resolved_at, created_at in resolved_rows:
+        total_seconds, count = duration_totals.get(resolved_by, (0.0, 0))
+        duration_totals[resolved_by] = (
+            total_seconds + (resolved_at - created_at).total_seconds(),
+            count + 1,
+        )
     result = []
     for u in users:
-        open_count = db.query(TicketRecord).filter(
-            TicketRecord.resolved_by == u.id,
-            TicketRecord.status.notin_(["Closed", "Resolved"]),
-        ).count()
-        total_resolved = db.query(TicketRecord).filter(
-            TicketRecord.resolved_by == u.id,
-        ).count()
-        resolved_tickets = db.query(TicketRecord).filter(
-            TicketRecord.resolved_by == u.id,
-            TicketRecord.resolved_at.isnot(None),
-            TicketRecord.created_at.isnot(None),
-        ).all()
         avg_hours = 0.0
-        if resolved_tickets:
-            total_s = sum(
-                (t.resolved_at - t.created_at).total_seconds()
-                for t in resolved_tickets
-            )
-            avg_hours = round(total_s / len(resolved_tickets) / 3600, 1)
+        if u.id in duration_totals:
+            total_seconds, duration_count = duration_totals[u.id]
+            avg_hours = round(total_seconds / duration_count / 3600, 1)
         result.append({
             "user_id": u.id,
             "name": u.name,
-            "open_tickets": open_count,
-            "total_resolved": total_resolved,
+            "open_tickets": int(open_counts.get(u.id, 0)),
+            "total_resolved": int(resolved_counts.get(u.id, 0)),
             "avg_resolution_hours": avg_hours,
             "impact_points": u.impact_points,
             "tier": u.tier,
         })
     result.sort(key=lambda r: r["open_tickets"], reverse=True)
-    return {"agents": result}
+    return {
+        "agents": result,
+        "total_users": total_users,
+        "analyzed_users": len(users),
+        "users_truncated": total_users > len(users),
+        "duration_rows_analyzed": len(resolved_rows),
+        "duration_rows_truncated": total_duration_rows > len(resolved_rows),
+    }
 
 @app.get("/intelligence/health/{reporter}")
 async def intel_health(
@@ -3346,6 +3632,9 @@ async def intel_health(
     _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
     """Account Health Agent: per-reporter health score + churn-risk band."""
+    if len(reporter) > 320:
+        raise HTTPException(status_code=422, detail="Reporter identifier is too long")
+    _reserve_analytics_request(db, _user.id)
     result = intel.account_health(db, reporter)
     if result["health_score"] is None:
         raise HTTPException(status_code=404, detail="No tickets for that reporter")
@@ -3363,6 +3652,7 @@ async def intel_route(
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
     _authorize_ticket_analysis(_user, ticket)
+    _reserve_analytics_request(db, _user.id)
     return intel.recommend_assignee(db, ticket)
 
 
@@ -3497,12 +3787,15 @@ def _release_webhook_delivery(key: str) -> None:
 @app.post("/webhooks/external")
 async def freshservice_webhook(request: Request):
     raw_body = await request.body()
+    adapter = get_adapter("freshservice")
+    request_headers = dict(request.headers)
+    if not adapter.verify_webhook_signature(request_headers, raw_body):
+        raise HTTPException(status_code=400, detail="Invalid webhook payload")
     try:
         payload = json.loads(raw_body.decode("utf-8") or "{}")
-    except json.JSONDecodeError:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, TypeError):
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
-    adapter = get_adapter("freshservice")
-    event = adapter.parse_webhook(payload, dict(request.headers), raw_body=raw_body)
+    event = adapter.parse_verified_webhook(payload)
     if not event:
         raise HTTPException(status_code=400, detail="Invalid webhook payload")
     delivery_key = _claim_webhook_delivery(request, raw_body)
@@ -4545,12 +4838,21 @@ def _websocket_origin_allowed(ws: WebSocket) -> bool:
     parsed = urllib.parse.urlparse(origin)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return False
+    allowed = {
+        value.rstrip("/") for value in _cors_allow_origins() if value != "*"
+    }
+    if origin in allowed:
+        return True
+    # Production WebSockets never trust forwarding headers as an origin
+    # allowlist. The reviewed deployment must declare every browser origin.
+    if settings_module.is_production_mode():
+        return False
     forwarded_host = (ws.headers.get("x-forwarded-host") or "").split(",")[0].strip()
     forwarded_proto = (ws.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
     host = forwarded_host or (ws.headers.get("host") or "").strip()
     if host and origin == f"{forwarded_proto or 'https'}://{host}".rstrip("/"):
         return True
-    return origin in _cors_allow_origins()
+    return False
 
 
 @app.websocket("/ws/tickets/{ticket_id}/stream")

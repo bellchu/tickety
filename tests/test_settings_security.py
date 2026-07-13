@@ -1,7 +1,9 @@
 import asyncio
+import io
 import os
 import socket
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import MagicMock, patch
 
 from app.backend import main, settings, ticket_vectors, worker
@@ -47,6 +49,32 @@ class SettingsSecurityTests(unittest.TestCase):
             "AUTO_TRIAGE_ENABLED": "true",
         }, clear=False):
             self.assertFalse(settings.automation_enabled("AUTO_TRIAGE_ENABLED"))
+
+    def test_runtime_reset_logs_only_exception_kinds(self):
+        from app.backend.integrations import registry
+        from app.backend import sync_worker
+
+        secret = "credential-that-must-not-be-logged"
+        output = io.StringIO()
+        with (
+            patch.object(
+                registry,
+                "_ADAPTERS",
+                MagicMock(clear=MagicMock(side_effect=RuntimeError(secret))),
+            ),
+            patch.object(
+                sync_worker,
+                "stop_sync_worker",
+                side_effect=RuntimeError(secret),
+            ),
+            patch.object(main, "LLMManager", side_effect=RuntimeError(secret)),
+            redirect_stdout(output),
+        ):
+            settings._reset_runtime()
+
+        logged = output.getvalue()
+        self.assertNotIn(secret, logged)
+        self.assertEqual(logged.count("kind=RuntimeError"), 3)
 
     def test_llm_base_urls_reject_credentials_and_private_targets(self):
         with patch.dict(os.environ, {
@@ -210,6 +238,8 @@ class SettingsSecurityTests(unittest.TestCase):
                 "AUTO_TRIAGE_ENABLED": "false",
                 "LLM_DAILY_TOKEN_BUDGET": "500000",
                 "LLM_MAX_CONCURRENCY": "4",
+                "ANALYTICS_USER_REQUESTS_PER_MINUTE": "60",
+                "ANALYTICS_USER_REQUESTS_PER_DAY": "5000",
                 "ITSM_PROVIDER": "",
                 "FRESHSERVICE_DOMAIN": "support.example.com",
                 "JIRA_BASE_URL": "https://jira.example.com",
@@ -226,6 +256,8 @@ class SettingsSecurityTests(unittest.TestCase):
                 "AUTO_TRIAGE_ENABLED": "true",
                 "LLM_DAILY_TOKEN_BUDGET": "100000000",
                 "LLM_MAX_CONCURRENCY": "32",
+                "ANALYTICS_USER_REQUESTS_PER_MINUTE": "600",
+                "ANALYTICS_USER_REQUESTS_PER_DAY": "100000",
                 "ITSM_PROVIDER": "freshservice",
                 "FRESHSERVICE_DOMAIN": "attacker.example",
                 "JIRA_BASE_URL": "https://attacker.example",
@@ -238,6 +270,8 @@ class SettingsSecurityTests(unittest.TestCase):
             self.assertEqual(os.environ["AUTO_TRIAGE_ENABLED"], "false")
             self.assertEqual(os.environ["LLM_DAILY_TOKEN_BUDGET"], "500000")
             self.assertEqual(os.environ["LLM_MAX_CONCURRENCY"], "4")
+            self.assertEqual(os.environ["ANALYTICS_USER_REQUESTS_PER_MINUTE"], "60")
+            self.assertEqual(os.environ["ANALYTICS_USER_REQUESTS_PER_DAY"], "5000")
             self.assertEqual(os.environ["ITSM_PROVIDER"], "")
             self.assertEqual(os.environ["FRESHSERVICE_DOMAIN"], "support.example.com")
             self.assertEqual(os.environ["JIRA_BASE_URL"], "https://jira.example.com")
@@ -250,6 +284,7 @@ class SettingsSecurityTests(unittest.TestCase):
                 "OPENAI_API_KEY": "reviewed-deployment-key",
                 "AUTO_TRIAGE_ENABLED": "false",
                 "LLM_DAILY_TOKEN_BUDGET": "500000",
+                "ANALYTICS_USER_REQUESTS_PER_MINUTE": "60",
                 "ITSM_PROVIDER": "",
                 "FRESHSERVICE_DOMAIN": "support.example.com",
             }, clear=False),
@@ -259,12 +294,14 @@ class SettingsSecurityTests(unittest.TestCase):
                 "OPENAI_API_KEY": "runtime-attacker-key",
                 "AUTO_TRIAGE_ENABLED": "true",
                 "LLM_DAILY_TOKEN_BUDGET": "100000000",
+                "ANALYTICS_USER_REQUESTS_PER_MINUTE": "600",
                 "ITSM_PROVIDER": "freshservice",
                 "FRESHSERVICE_DOMAIN": "attacker.example",
             })
             self.assertEqual(os.environ["OPENAI_API_KEY"], "reviewed-deployment-key")
             self.assertEqual(os.environ["AUTO_TRIAGE_ENABLED"], "false")
             self.assertEqual(os.environ["LLM_DAILY_TOKEN_BUDGET"], "500000")
+            self.assertEqual(os.environ["ANALYTICS_USER_REQUESTS_PER_MINUTE"], "60")
             self.assertEqual(os.environ["ITSM_PROVIDER"], "")
             self.assertEqual(os.environ["FRESHSERVICE_DOMAIN"], "support.example.com")
             write_overrides.assert_not_called()

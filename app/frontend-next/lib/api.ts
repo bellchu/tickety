@@ -195,12 +195,19 @@ export const api = {
     }),
   deleteUser: (id: string) => fetchAPI<{ status: string }>(`/users/${id}`, { method: "DELETE" }),
   // Knowledge Base
-  getKbArticles: (search?: string, category?: string) => {
+  getKbArticles: async (search?: string, category?: string) => {
     const params = new URLSearchParams();
     if (search) params.set("search", search);
     if (category) params.set("category", category);
-    const qs = params.toString();
-    return fetchAPI<import("./types").KbArticle[]>(`/kb${qs ? "?" + qs : ""}`);
+    params.set("limit", "500");
+    params.set("offset", "0");
+    const { data, response } = await fetchAPIResponse<import("./types").KbArticle[]>(
+      `/kb?${params.toString()}`,
+    );
+    return {
+      articles: data,
+      hasMore: response.headers.get("x-has-more") === "true",
+    };
   },
   getKbArticle: (id: string) => fetchAPI<import("./types").KbArticle>(`/kb/${id}`),
   createKbArticle: (payload: import("./types").KbArticleCreateInput) =>
@@ -232,12 +239,13 @@ export const api = {
   // Reports
   getReportSummary: () => fetchAPI<import("./types").ReportSummary>("/reports/summary"),
   getReportVolume: () => fetchAPI<{ days: string[]; counts: number[] }>("/reports/volume"),
-  getReportByCategory: () => fetchAPI<{ categories: string[]; counts: number[] }>("/reports/by-category"),
+  getReportByCategory: () =>
+    fetchAPI<import("./types").ReportByCategoryResponse>("/reports/by-category"),
   getReportByStatus: () => fetchAPI<{ statuses: string[]; counts: number[] }>("/reports/by-status"),
   getReportSlaCompliance: () =>
     fetchAPI<Record<string, { total: number; breached: number; compliance: number }>>("/reports/sla-compliance"),
   getReportResolutionTime: () =>
-    fetchAPI<{ categories: string[]; avg_hours: number[] }>("/reports/resolution-time"),
+    fetchAPI<import("./types").ReportResolutionTimeResponse>("/reports/resolution-time"),
   // Projects
   getProjects: () => fetchAPI<import("./types").Project[]>("/projects"),
   createProject: (payload: { name: string; key: string; description?: string; lead_id?: string }) =>

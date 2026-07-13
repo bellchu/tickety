@@ -47,6 +47,7 @@ WORKDIR /app
 COPY --from=frontend-builder /frontend/package.json /frontend/package-lock.json* ./
 COPY --from=frontend-builder /frontend/next.config.js ./
 COPY --from=frontend-builder /frontend/server.js ./
+COPY --from=frontend-builder /frontend/lib/ws-proxy-security.js ./lib/ws-proxy-security.js
 COPY --from=frontend-builder /frontend/tsconfig.json ./
 COPY --from=frontend-builder /frontend/tailwind.config.ts ./
 COPY --from=frontend-builder /frontend/postcss.config.js ./

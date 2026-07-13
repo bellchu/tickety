@@ -88,6 +88,8 @@ _ALL_KEYS = [
     "LLM_ENFORCE_PROVIDER_LIMITS",
     "AI_USER_REQUESTS_PER_MINUTE",
     "AI_USER_REQUESTS_PER_DAY",
+    "ANALYTICS_USER_REQUESTS_PER_MINUTE",
+    "ANALYTICS_USER_REQUESTS_PER_DAY",
     "AI_ANALYSIS_LEASE_SECONDS",
     "AI_ANALYSIS_MAX_ATTEMPTS",
     "AI_PIPELINE_TIMEOUT_SECONDS",
@@ -199,6 +201,8 @@ _PRODUCTION_ENV_ONLY_KEYS = (
     "LLM_ENFORCE_PROVIDER_LIMITS",
     "AI_USER_REQUESTS_PER_MINUTE",
     "AI_USER_REQUESTS_PER_DAY",
+    "ANALYTICS_USER_REQUESTS_PER_MINUTE",
+    "ANALYTICS_USER_REQUESTS_PER_DAY",
     "AI_ANALYSIS_LEASE_SECONDS",
     "AI_ANALYSIS_MAX_ATTEMPTS",
     "AI_PIPELINE_TIMEOUT_SECONDS",
@@ -511,18 +515,18 @@ def _reset_runtime():
         from .integrations import registry
         registry._ADAPTERS.clear()
     except Exception as e:
-        print(f"[settings] clear adapters error: {e}")
+        print(f"[settings] clear adapters error kind={type(e).__name__}")
 
     try:
         from . import sync_worker
         sync_worker.stop_sync_worker()
         sync_worker.start_sync_worker()
     except Exception as e:
-        print(f"[settings] restart sync worker error: {e}")
+        print(f"[settings] restart sync worker error kind={type(e).__name__}")
 
     try:
         from . import main as main_module
         main_module.llm_mgr = main_module.LLMManager()
         main_module.engine.llm = main_module.llm_mgr
     except Exception as e:
-        print(f"[settings] reset llm manager error: {e}")
+        print(f"[settings] reset llm manager error kind={type(e).__name__}")

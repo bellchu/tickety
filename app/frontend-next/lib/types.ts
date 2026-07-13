@@ -279,6 +279,8 @@ export interface SlaStatusItem {
 export interface IntelSlaResponse {
   generated_at: string;
   count: number;
+  analyzed_tickets: number;
+  truncated: boolean;
   items: SlaStatusItem[];
 }
 
@@ -297,11 +299,16 @@ export interface PrioritizedTicket {
 export interface IntelPrioritizeResponse {
   generated_at: string;
   backlog_size: number;
+  analyzed_tickets: number;
+  truncated: boolean;
   ranked: PrioritizedTicket[];
 }
 
 export interface IntelAlertsResponse {
   generated_at: string;
+  total_open_tickets: number;
+  analyzed_tickets: number;
+  truncated: boolean;
   summary: {
     escalation_prone: number;
     sla_at_risk: number;
@@ -314,6 +321,8 @@ export interface IntelAlertsResponse {
 
 export interface IntelTrendsResponse {
   total_tickets: number;
+  analyzed_tickets: number;
+  truncated: boolean;
   by_category: Record<string, number>;
   by_sentiment: Record<string, number>;
   by_status: Record<string, number>;
@@ -329,6 +338,8 @@ export interface AccountHealth {
   total: number;
   avg_escalation_risk: number;
   negative_sentiment_ratio: number;
+  analyzed_tickets: number;
+  truncated: boolean;
 }
 
 export interface RouteCandidate {
@@ -343,10 +354,32 @@ export interface RouteCandidate {
 
 export interface RouteRecommendation {
   recommended_user_id: string | null;
-  recommended_name: string | null;
-  reasoning: string;
-  tier_needed: number;
+  recommended_name?: string | null;
+  reasoning?: string;
+  tier_needed?: number;
   candidates: RouteCandidate[];
+  total_users: number;
+  analyzed_users: number;
+  candidate_pool_truncated: boolean;
+}
+
+export interface WorkloadAgent {
+  user_id: string;
+  name: string;
+  tier: number;
+  open_tickets: number;
+  total_resolved: number;
+  avg_resolution_hours: number;
+  impact_points: number;
+}
+
+export interface IntelWorkloadResponse {
+  agents: WorkloadAgent[];
+  total_users: number;
+  analyzed_users: number;
+  users_truncated: boolean;
+  duration_rows_analyzed: number;
+  duration_rows_truncated: boolean;
 }
 
 export interface TicketSummary {
@@ -463,11 +496,28 @@ export interface SystemicCluster {
 export interface SystemicIssuesResponse {
   clusters: SystemicCluster[];
   total_tickets: number;
+  analyzed_tickets: number;
+  truncated: boolean;
   clustered_tickets: number;
   parameters: {
     similarity_cutoff: number;
     min_cluster_size: number;
   };
+}
+
+export interface ReportByCategoryResponse {
+  categories: string[];
+  counts: number[];
+  total_categories: number;
+  truncated: boolean;
+}
+
+export interface ReportResolutionTimeResponse {
+  categories: string[];
+  avg_hours: number[];
+  total_matching_tickets: number;
+  analyzed_tickets: number;
+  truncated: boolean;
 }
 
 // ── Standalone ticketing types ────────────────────────────────

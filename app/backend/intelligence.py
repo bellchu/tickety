@@ -26,6 +26,7 @@ from collections import Counter
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
+from sqlalchemy import case, func, or_
 from sqlalchemy.orm import Session
 
 from .database import TicketRecord, UserRecord
@@ -79,6 +80,8 @@ _STOPWORDS = {
     "could", "would", "should", "my", "our", "your", "have", "has", "had",
     "do", "does", "did", "will", "if", "then", "so", "than", "too", "very",
 }
+
+_MAX_ANALYTICS_ROWS = 500
 
 
 # ── helpers ───────────────────────────────────────────────────────────────
@@ -207,9 +210,21 @@ def recommend_assignee(
     NOT from `complexity`/sentiment. Escalation risk only nudges a preference
     toward a higher tier; it never forces one.
     """
-    users = db.query(UserRecord).all()
+    total_users = db.query(UserRecord).count()
+    users = db.query(UserRecord).order_by(
+        UserRecord.tier.desc(),
+        UserRecord.impact_points.desc(),
+        UserRecord.momentum.desc(),
+        UserRecord.id.asc(),
+    ).limit(_MAX_ANALYTICS_ROWS).all()
     if not users:
-        return {"recommended_user_id": None, "candidates": []}
+        return {
+            "recommended_user_id": None,
+            "candidates": [],
+            "total_users": total_users,
+            "analyzed_users": 0,
+            "candidate_pool_truncated": False,
+        }
 
     risk = escalation_risk(ticket)
     complexity = ticket.complexity or 1
@@ -248,6 +263,9 @@ def recommend_assignee(
             f"does not raise the tier floor)."
         ),
         "candidates": candidates[:5],
+        "total_users": total_users,
+        "analyzed_users": len(users),
+        "candidate_pool_truncated": total_users > len(users),
     }
 
 
@@ -343,24 +361,29 @@ async def recommend_resolution(
 
 def account_health(db: Session, reporter: str) -> Dict[str, Any]:
     """Per-reporter health score (churn-risk proxy) from their ticket history."""
-    tickets = db.query(TicketRecord).filter(TicketRecord.reporter == reporter).all()
-    if not tickets:
+    query = db.query(TicketRecord).filter(TicketRecord.reporter == reporter)
+    total = query.count()
+    if not total:
         return {"reporter": reporter, "health_score": None, "churn_risk": "unknown",
                 "open": 0, "total": 0}
+    open_n = query.filter(or_(
+        TicketRecord.status.is_(None),
+        func.lower(TicketRecord.status).notin_(["closed", "resolved", "cancelled"]),
+    )).count()
+    resolved_n = query.filter(TicketRecord.resolved_at.isnot(None)).count()
+    tickets = query.order_by(
+        TicketRecord.updated_at.desc().nullslast(), TicketRecord.id.asc()
+    ).limit(_MAX_ANALYTICS_ROWS).all()
 
-    total = len(tickets)
-    open_tickets = [t for t in tickets if _open(t)]
-    open_n = len(open_tickets)
-    resolved = [t for t in tickets if t.resolved_at]
-    resolved_n = len(resolved)
-    avg_risk = sum(escalation_risk(t) for t in tickets) / total
+    analyzed = len(tickets)
+    avg_risk = sum(escalation_risk(t) for t in tickets) / analyzed
 
     # Sentiment pain: count negative sentiments.
     pain = sum(
         1 for t in tickets
         if (t.sentiment or "") in {"Business-Critical", "High-Impact"}
     )
-    pain_ratio = pain / total
+    pain_ratio = pain / analyzed
 
     # Health = 100 - risk-driven penalties.
     health = 100 - (avg_risk * 0.5) - (pain_ratio * 30) - (min(open_n, 5) * 4)
@@ -382,6 +405,8 @@ def account_health(db: Session, reporter: str) -> Dict[str, Any]:
         "total": total,
         "avg_escalation_risk": round(avg_risk, 1),
         "negative_sentiment_ratio": round(pain_ratio, 2),
+        "analyzed_tickets": analyzed,
+        "truncated": total > analyzed,
     }
 
 
@@ -390,7 +415,10 @@ def account_health(db: Session, reporter: str) -> Dict[str, Any]:
 def trends(db: Session, limit_terms: int = 15) -> Dict[str, Any]:
     """Aggregate trends across all tickets: category & sentiment distribution,
     status counts, and top keywords (lightweight VOC)."""
-    tickets = db.query(TicketRecord).all()
+    total_tickets = db.query(TicketRecord).count()
+    tickets = db.query(TicketRecord).order_by(
+        TicketRecord.updated_at.desc().nullslast(), TicketRecord.id.asc()
+    ).limit(_MAX_ANALYTICS_ROWS).all()
 
     categories = Counter()
     sentiments = Counter()
@@ -414,7 +442,9 @@ def trends(db: Session, limit_terms: int = 15) -> Dict[str, Any]:
             word_counter[tok] += 1
 
     return {
-        "total_tickets": len(tickets),
+        "total_tickets": total_tickets,
+        "analyzed_tickets": len(tickets),
+        "truncated": total_tickets > len(tickets),
         "by_category": dict(categories.most_common()),
         "by_sentiment": dict(sentiments.most_common()),
         "by_status": dict(statuses.most_common()),
@@ -439,11 +469,22 @@ from collections import Counter
 def systemic_issues(db, cluster_threshold: int = 3, similarity_cutoff: float = 0.25) -> dict:
     # Pairwise similarity is O(n^2); bound the working set so one request
     # cannot monopolize an API worker on an arbitrarily large installation.
+    total_tickets = db.query(TicketRecord).count()
     tickets = db.query(TicketRecord).order_by(
-        TicketRecord.updated_at.desc()
+        TicketRecord.updated_at.desc().nullslast(), TicketRecord.id.asc()
     ).limit(500).all()
     if len(tickets) < 2:
-        return {"clusters": [], "total_tickets": len(tickets)}
+        return {
+            "clusters": [],
+            "total_tickets": total_tickets,
+            "analyzed_tickets": len(tickets),
+            "truncated": total_tickets > len(tickets),
+            "clustered_tickets": 0,
+            "parameters": {
+                "similarity_cutoff": similarity_cutoff,
+                "min_cluster_size": cluster_threshold,
+            },
+        }
 
     keywords = {t.id: _ticket_keywords(t) for t in tickets}
     ids = list(keywords.keys())
@@ -494,7 +535,9 @@ def systemic_issues(db, cluster_threshold: int = 3, similarity_cutoff: float = 0
     results.sort(key=lambda c: c["business_impact_score"], reverse=True)
     return {
         "clusters": results,
-        "total_tickets": len(tickets),
+        "total_tickets": total_tickets,
+        "analyzed_tickets": len(tickets),
+        "truncated": total_tickets > len(tickets),
         "clustered_tickets": sum(c["ticket_count"] for c in results),
         "parameters": {"similarity_cutoff": similarity_cutoff, "min_cluster_size": cluster_threshold},
     }
@@ -503,7 +546,20 @@ def proactive_alerts(db: Session, now: Optional[datetime] = None) -> Dict[str, A
     """Unified feed of cases needing human attention right now:
     escalation-prone, SLA at-risk, and SLA-breached tickets."""
     now = now or datetime.utcnow()
-    open_tickets = [t for t in db.query(TicketRecord).all() if _open(t)]
+    open_query = db.query(TicketRecord).filter(or_(
+        TicketRecord.status.is_(None),
+        func.lower(TicketRecord.status).notin_(["closed", "resolved", "cancelled"]),
+    ))
+    total_open = open_query.count()
+    open_tickets = open_query.order_by(
+        case(
+            {"P1": 1, "Urgent": 1, "P2": 2, "High": 2, "P3": 3, "Medium": 3},
+            value=TicketRecord.priority,
+            else_=4,
+        ).asc(),
+        TicketRecord.created_at.asc().nullsfirst(),
+        TicketRecord.id.asc(),
+    ).limit(_MAX_ANALYTICS_ROWS).all()
 
     escalate_prone = []
     sla_at_risk = []
@@ -526,6 +582,9 @@ def proactive_alerts(db: Session, now: Optional[datetime] = None) -> Dict[str, A
 
     return {
         "generated_at": now.isoformat(),
+        "total_open_tickets": total_open,
+        "analyzed_tickets": len(open_tickets),
+        "truncated": total_open > len(open_tickets),
         "summary": {
             "escalation_prone": len(escalate_prone),
             "sla_at_risk": len(sla_at_risk),
