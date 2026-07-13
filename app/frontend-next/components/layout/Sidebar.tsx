@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { canAccessAdministration } from "@/lib/auth";
 import { TicketyLogo } from "@/components/layout/TicketyLogo";
 import { SyncIndicator } from "@/components/layout/SyncIndicator";
 import { ProductIcon } from "@/components/icons/ProductIcon";
@@ -49,7 +50,9 @@ export function Sidebar({
   onClose?: () => void;
 }) {
   const pathname = usePathname();
-  const { data: me } = useQuery({ queryKey: ["me"], queryFn: api.getMe });
+  const { data: me } = useQuery({ queryKey: ["auth-me"], queryFn: api.getAuthMe, retry: false });
+  const canAccessAdmin = canAccessAdministration(me);
+  const isDemoFallback = me?.auth_kind === "demo_fallback";
 
   return (
     <aside
@@ -109,9 +112,11 @@ export function Sidebar({
       </nav>
 
       <div className="space-y-0.5 border-t border-white/10 p-3">
-        <div className="px-3 py-1.5 text-slate-400 [&_*]:!text-slate-400">
-          <SyncIndicator />
-        </div>
+        {canAccessAdmin && (
+          <div className="px-3 py-1.5 text-slate-400 [&_*]:!text-slate-400">
+            <SyncIndicator enabled={canAccessAdmin} />
+          </div>
+        )}
 
         <Link
           href="/profile"
@@ -125,31 +130,35 @@ export function Sidebar({
           )}
         >
           <ProductIcon icon={User} active={pathname.startsWith("/profile")} />
-          <span className="flex-1 truncate">{me?.name || "Profile"}</span>
+          <span className="flex-1 truncate">
+            {isDemoFallback ? "Demo workspace" : me?.name || "Profile"}
+          </span>
           {me && (
             <span className="rounded-full border border-white/15 px-1.5 py-0.5 text-[10px] font-medium text-slate-400">
-              T{me.tier}
+              {isDemoFallback ? "DEMO" : `T${me.tier}`}
             </span>
           )}
         </Link>
 
-        <Link
-          href="/settings"
-          onClick={onClose}
-          aria-current={pathname.startsWith("/settings") ? "page" : undefined}
-          className={cn(
-            "group flex min-h-10 items-center gap-3 rounded-md px-3 py-2 text-[13px] transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#3D5AFE]",
-            pathname.startsWith("/settings")
-              ? "font-medium text-[#F2F5F8]"
-              : "font-normal text-[#9AA5B3] hover:bg-white/[0.035] hover:text-[#E7EBF0]"
-          )}
-        >
-          <ProductIcon
-            icon={SettingsIcon}
-            active={pathname.startsWith("/settings")}
-          />
-          Settings
-        </Link>
+        {canAccessAdmin && (
+          <Link
+            href="/settings"
+            onClick={onClose}
+            aria-current={pathname.startsWith("/settings") ? "page" : undefined}
+            className={cn(
+              "group flex min-h-10 items-center gap-3 rounded-md px-3 py-2 text-[13px] transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#3D5AFE]",
+              pathname.startsWith("/settings")
+                ? "font-medium text-[#F2F5F8]"
+                : "font-normal text-[#9AA5B3] hover:bg-white/[0.035] hover:text-[#E7EBF0]"
+            )}
+          >
+            <ProductIcon
+              icon={SettingsIcon}
+              active={pathname.startsWith("/settings")}
+            />
+            Settings
+          </Link>
+        )}
       </div>
     </aside>
   );

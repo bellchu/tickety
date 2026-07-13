@@ -567,6 +567,11 @@ export interface UserOut {
   last_login_at: string | null;
 }
 
+export interface AuthContext extends UserOut {
+  auth_kind: "session" | "demo_fallback";
+  app_mode: "demo" | "production";
+}
+
 export interface AuthResponse {
   token?: string | null;
   user: UserOut;

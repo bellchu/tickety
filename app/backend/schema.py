@@ -470,6 +470,11 @@ class UserOut(BaseModel):
         from_attributes = True
 
 
+class AuthContext(UserOut):
+    auth_kind: Literal["session", "demo_fallback"]
+    app_mode: Literal["demo", "production"]
+
+
 class UserCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=120)
     email: str = Field(..., min_length=3)

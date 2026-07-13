@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api";
+import { api, APIError } from "@/lib/api";
+import { canAccessAdministration, isDemoAdministrationContext } from "@/lib/auth";
 import { Settings as SettingsType, LlmCatalog, LlmProvider, TicketCategory, BuildInfo, SyncAgentsOptions } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import {
@@ -147,7 +148,11 @@ function ensureHttpsUrl(value: string) {
 }
 
 function isAuthError(error: unknown) {
-  return error instanceof Error && error.message.toLowerCase().includes("not authenticated");
+  return error instanceof APIError && error.status === 401;
+}
+
+function isForbiddenError(error: unknown) {
+  return error instanceof APIError && error.status === 403;
 }
 
 const CATEGORY_COLORS = [
@@ -182,12 +187,27 @@ async function postMaintenanceAction(path: string) {
 export default function SettingsPage() {
   const router = useRouter();
   const queryClient = useQueryClient();
-  const settingsQuery = useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
-  const catalogQuery = useQuery({ queryKey: ["llm-catalog"], queryFn: api.getLlmCatalog });
+  const authQuery = useQuery({ queryKey: ["auth-me"], queryFn: api.getAuthMe, retry: false });
+  const canAccessSettings = canAccessAdministration(authQuery.data);
+  const settingsQuery = useQuery({
+    queryKey: ["settings"],
+    queryFn: api.getSettings,
+    enabled: canAccessSettings,
+  });
+  const catalogQuery = useQuery({
+    queryKey: ["llm-catalog"],
+    queryFn: api.getLlmCatalog,
+    enabled: canAccessSettings,
+  });
   const { data, isLoading, error: settingsError } = settingsQuery;
   const { data: catalog, error: catalogError } = catalogQuery;
   const { data: version } = useQuery({ queryKey: ["version"], queryFn: api.getVersion, staleTime: Infinity });
-  const { data: syncStatus } = useQuery({ queryKey: ["sync-status"], queryFn: api.getSyncStatus, refetchInterval: 30000 });
+  const { data: syncStatus } = useQuery({
+    queryKey: ["sync-status"],
+    queryFn: api.getSyncStatus,
+    refetchInterval: 30000,
+    enabled: canAccessSettings,
+  });
 
   const [form, setForm] = useState<Partial<SettingsType>>({});
   const [saved, setSaved] = useState(false);
@@ -220,7 +240,7 @@ export default function SettingsPage() {
     },
   });
 
-  const authError = isAuthError(settingsError) || isAuthError(catalogError) || isAuthError(mutation.error);
+  const authError = isAuthError(authQuery.error) || isAuthError(settingsError) || isAuthError(catalogError) || isAuthError(mutation.error);
 
   useEffect(() => {
     if (authError) {
@@ -355,7 +375,7 @@ export default function SettingsPage() {
     mutation.mutate(payload);
   };
 
-  if (isLoading) {
+  if (authQuery.isLoading || (canAccessSettings && isLoading)) {
     return (
       <div className="space-y-5" aria-busy="true" aria-label="Loading administration settings">
         <Skeleton className="h-12 w-72" />
@@ -370,6 +390,40 @@ export default function SettingsPage() {
       <div className="flex items-center justify-center py-20 text-ink-400">
         <RefreshCw className="w-5 h-5 animate-spin mr-2" /> Opening sign in…
       </div>
+    );
+  }
+
+  if (authQuery.error) {
+    return (
+      <ErrorState
+        title="Session status could not be checked"
+        description="Tickety could not determine whether this session may access administration controls."
+        actionLabel="Retry session check"
+        onRetry={() => void authQuery.refetch()}
+        retrying={authQuery.isFetching}
+      />
+    );
+  }
+
+  if (isDemoAdministrationContext(authQuery.data)) {
+    return <DemoAdministrationState version={version} />;
+  }
+
+  if (!canAccessSettings) {
+    return (
+      <ErrorState
+        title="Administrator access required"
+        description="System settings are available only to a signed-in administrator. Your current session does not have permission to view or change them."
+      />
+    );
+  }
+
+  if (isForbiddenError(settingsError)) {
+    return (
+      <ErrorState
+        title="Administrator access required"
+        description="System settings are available only to a signed-in administrator. Your current session does not have permission to view or change them."
+      />
     );
   }
 
@@ -895,6 +949,46 @@ export default function SettingsPage() {
           </div>
         </div>
       </form>
+    </div>
+  );
+}
+
+function DemoAdministrationState({ version }: { version?: BuildInfo }) {
+  return (
+    <div className="mx-auto max-w-5xl space-y-8">
+      <header className="flex items-start gap-4 border-b border-linen-300 pb-6">
+        <div className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-[var(--color-primary-soft)] text-semantic-primary">
+          <SettingsIcon className="h-5 w-5" aria-hidden="true" />
+        </div>
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-semantic-primary">Administration</p>
+          <h1 className="mt-1 text-3xl font-semibold tracking-[-0.03em] text-ink-700">System settings</h1>
+          <p className="mt-2 text-sm leading-6 text-ink-500">Administration controls are intentionally isolated from the public demo workspace.</p>
+        </div>
+      </header>
+
+      <div className="rounded-xl border border-blue-400/30 bg-blue-400/5 p-6 sm:p-8" role="status">
+        <div className="flex items-start gap-4">
+          <div className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-white text-blue-500 shadow-sm">
+            <ShieldCheck className="h-5 w-5" aria-hidden="true" />
+          </div>
+          <div className="max-w-2xl">
+            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-blue-600">Public demo protection</p>
+            <h2 className="mt-1 text-xl font-semibold text-ink-700">Administration is locked in demo mode</h2>
+            <p className="mt-2 text-sm leading-6 text-ink-500">
+              The demo identity can explore Tickety workflows, but configuration, credentials, integrations, and AI provider controls remain unavailable. A production deployment with a private administrator account is required to manage these settings.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <SettingsSection title="Runtime information" subtitle="This public information confirms which application build is running.">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <InfoTile label="Mode" value="Demo" />
+          <InfoTile label="Version" value={version?.version || "—"} />
+          <InfoTile label="Build SHA" value={version?.build_sha || "—"} mono />
+        </div>
+      </SettingsSection>
     </div>
   );
 }

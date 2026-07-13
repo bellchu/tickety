@@ -233,6 +233,48 @@ class ProtectedAIRouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
 
+    def test_real_admin_session_cannot_read_or_write_settings_in_demo(self):
+        self.client.cookies.set(main.SESSION_COOKIE, "real-session")
+        headers = {"Sec-Fetch-Site": "same-origin"}
+        with (
+            patch.object(main.settings_module, "is_production_mode", return_value=False),
+            patch.object(main.settings_module, "get_settings") as get_settings,
+            patch.object(main.settings_module, "update_settings") as update_settings,
+        ):
+            read = self.client.get("/admin/settings", headers=headers)
+            write = self.client.put(
+                "/admin/settings",
+                headers=headers,
+                json={"LLM_PROVIDER": "malicious"},
+            )
+
+        for response in (read, write):
+            self.assertEqual(response.status_code, 403, response.text)
+            self.assertEqual(
+                response.json(),
+                {"detail": "AI API is disabled in demo mode"},
+            )
+        get_settings.assert_not_called()
+        update_settings.assert_not_called()
+
+    def test_auth_context_distinguishes_demo_fallback_from_real_session(self):
+        with (
+            patch.object(main.settings_module, "is_demo_mode", return_value=True),
+            patch.object(main.settings_module, "get_bool", return_value=False),
+            patch.object(main.settings_module, "app_mode", return_value="demo"),
+        ):
+            fallback = self.client.get("/auth/me")
+
+            self.client.cookies.set(main.SESSION_COOKIE, "real-session")
+            session = self.client.get("/auth/me")
+
+        self.assertEqual(fallback.status_code, 200, fallback.text)
+        self.assertEqual(fallback.json()["auth_kind"], "demo_fallback")
+        self.assertEqual(fallback.json()["app_mode"], "demo")
+        self.assertEqual(session.status_code, 200, session.text)
+        self.assertEqual(session.json()["auth_kind"], "session")
+        self.assertEqual(session.json()["app_mode"], "demo")
+
     def test_anonymous_demo_ticket_browsing_redacts_ai_artifacts(self):
         with (
             patch.object(main.settings_module, "is_demo_mode", return_value=True),

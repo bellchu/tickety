@@ -47,7 +47,7 @@ from .schema import (
     TicketCategory, TicketCategoryCreate, TicketAuditEntry, BulkAction,
     TicketIntelligenceAnalysisRequest, TicketIntelligenceAnalysisResponse,
     TicketIntelligenceBackfillRequest, TicketIntelligenceSearchResponse,
-    LoginRequest, UserCreate, UserUpdate, AuthResponse, UserOut,
+    LoginRequest, UserCreate, UserUpdate, AuthResponse, AuthContext, UserOut,
     KbArticle, KbArticleCreate, KbArticleUpdate, KbFeedbackCreate,
     TicketStatusConfig, TicketStatusConfigCreate,
     TicketPriorityConfig, TicketPriorityConfigCreate,
@@ -106,7 +106,7 @@ from .production_security import (
 
 # Single source of truth for the backend version. Bump when shipping user-visible
 # changes. Build SHA/time are injected at image build time (see Dockerfile).
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 BUILD_SHA = os.getenv("TICKETY_BUILD_SHA", "local")
 BUILD_TIME = os.getenv("TICKETY_BUILD_TIME", "")
 
@@ -2321,9 +2321,20 @@ async def logout(request: Request, db: Session = Depends(get_db)):
     return resp
 
 
-@app.get("/auth/me", response_model=UserOut)
-async def auth_me(user: UserRecord = Depends(get_current_user)):
-    return user
+@app.get("/auth/me", response_model=AuthContext)
+async def auth_me(
+    request: Request,
+    user: UserRecord = Depends(get_current_user),
+):
+    return {
+        **UserOut.model_validate(user).model_dump(mode="json"),
+        "auth_kind": (
+            "demo_fallback"
+            if getattr(request.state, "demo_fallback", False)
+            else "session"
+        ),
+        "app_mode": settings_module.app_mode(),
+    }
 
 
 # ── SSO (OIDC) ──────────────────────────────────────────────────

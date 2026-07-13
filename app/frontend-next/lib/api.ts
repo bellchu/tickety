@@ -179,7 +179,7 @@ export const api = {
       body: JSON.stringify({ email, password }),
     }),
   logout: () => fetchAPI<{ status: string }>("/auth/logout", { method: "POST" }),
-  getAuthMe: () => fetchAPI<import("./types").UserOut>("/auth/me"),
+  getAuthMe: () => fetchAPI<import("./types").AuthContext>("/auth/me"),
   getSsoConfig: () => fetchAPI<{ enabled: boolean; provider: string }>("/auth/sso/config"),
   // Users / Agents CRUD
   getUsers: () => fetchAPI<import("./types").UserOut[]>("/users"),
