@@ -44,6 +44,6 @@ kubectl run "$RESTRICTED" -n "$NAMESPACE" --rm --attach --restart=Never \
   --image=tickety-backend:latest --image-pull-policy=Never \
   --labels=app=backend \
   --command -- python -c \
-  "import urllib.request; urllib.request.urlopen('https://example.com', timeout=10).read(1)"
+  "import urllib.request; urllib.request.urlopen('https://github.com', timeout=10).read(1)"
 
 echo "NetworkPolicy enforcement verified in namespace $NAMESPACE."

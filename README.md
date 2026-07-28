@@ -1,6 +1,6 @@
 <div align="center">
   <img src="https://img.shields.io/badge/python-3.11-blue" alt="Python 3.11">
-  <img src="https://img.shields.io/badge/next.js-14.2-black" alt="Next.js 14">
+  <img src="https://img.shields.io/badge/next.js-15.5-black" alt="Next.js 15.5">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT">
 </div>
 
@@ -28,7 +28,7 @@ Tickety — ITSM platform with built-in AI. Runs standalone or connects to an ex
 | Layer | Tech |
 |---|---|
 | Backend | Python 3.11 · FastAPI · SQLAlchemy · APScheduler |
-| Frontend | Next.js 14 · Tailwind CSS · TanStack Query · Recharts |
+| Frontend | Next.js 15.5 · Tailwind CSS · TanStack Query · Recharts |
 | AI | LiteLLM (DeepSeek · OpenAI · OpenRouter · Azure · Custom) |
 | Database | PostgreSQL |
 | Infra | Docker · Kubernetes · OrbStack |
