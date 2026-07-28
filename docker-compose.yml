@@ -1,57 +1,110 @@
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    image: ${POSTGRES_IMAGE:-pgvector/pgvector:pg16}
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: tickety
-      POSTGRES_PASSWORD: tickety
-      POSTGRES_DB: tickety
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: ${POSTGRES_USER:-tickety}
+      # The demo default is safe because Postgres is private to this Compose
+      # network. Set a unique value (and DATABASE_URL) before production use.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tickety}
+      POSTGRES_DB: ${POSTGRES_DB:-tickety}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U tickety"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
       timeout: 3s
-      retries: 5
+      retries: 12
+      start_period: 10s
+
+  migrate:
+    build:
+      context: .
+      target: backend
+    command: ["alembic", "upgrade", "head"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Override this with a URL-encoded DATABASE_URL if POSTGRES_PASSWORD
+      # contains reserved URL characters.
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://tickety:tickety@postgres:5432/tickety}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "on-failure:3"
 
   backend:
     build:
       context: .
       target: backend
-    command: uvicorn app.backend.main:app --host 0.0.0.0 --port 8000
-    volumes:
-      - ./app:/app/app
-    env_file: .env
+    command: ["uvicorn", "app.backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
     environment:
-      - DATABASE_URL=postgresql+psycopg2://tickety:tickety@postgres:5432/tickety
-    ports:
-      - "8000:8000"
+      APP_MODE: ${APP_MODE:-demo}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://tickety:tickety@postgres:5432/tickety}
+      TICKETY_PROCESS_ROLE: api
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  worker:
+    build:
+      context: .
+      target: backend
+    command: ["python", "-m", "app.backend.worker"]
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      APP_MODE: ${APP_MODE:-demo}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://tickety:tickety@postgres:5432/tickety}
+      TICKETY_PROCESS_ROLE: worker
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; os.kill(1, 0)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   frontend:
     build:
       context: .
       target: frontend
-    command: npm run start -- --port 3000
-    volumes:
-      - ./app/frontend-next:/app/app/frontend-next
+    command: ["node", "server.js"]
+    restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "${TICKETY_PORT:-3000}:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
-      - NEXT_PUBLIC_WS_URL=ws://localhost:8000
-      # Server-only (non-NEXT_PUBLIC) backend address for the /api and /ws
-      # proxies in server.js. NEXT_PUBLIC_* vars are inlined at build time and
-      # ignored at runtime; the frontend container reaches the backend via the
-      # compose service name, not localhost.
-      - BACKEND_URL=http://backend:8000
-      - PORT=3000
-      - HOSTNAME=0.0.0.0
+      # Browser traffic stays same-origin; these server-only values let the
+      # Next.js HTTP and WebSocket proxies reach the private API service.
+      BACKEND_URL: http://backend:8000
+      SITE_URL: ${FRONTEND_URL:-}
+      MAX_REQUEST_BODY_BYTES: ${MAX_REQUEST_BODY_BYTES:-1048576}
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health/ready').then((response) => { if (!response.ok) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
 
 volumes:
   pgdata:

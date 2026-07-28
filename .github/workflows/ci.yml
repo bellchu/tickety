@@ -89,7 +89,7 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_*.py' -v
 
   manifests:
-    name: Kubernetes manifests
+    name: Deployment artifacts
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -107,25 +107,16 @@ jobs:
       - name: Install manifest decoder
         run: python -m pip install --disable-pip-version-check PyYAML==6.0.3
 
-      - name: Validate manifest decoding
+      - name: Install Helm
         run: |
-          python - <<'PY'
-          from pathlib import Path
-          import yaml
+          helm_version=3.17.3
+          helm_archive="helm-v${helm_version}-linux-amd64.tar.gz"
+          helm_sha256=ee88b3c851ae6466a3de507f7be73fe94d54cbf2987cbaa3d1a3832ea331f2cd
+          curl --fail --silent --show-error --location --retry 3 \
+            "https://get.helm.sh/${helm_archive}" --output "/tmp/${helm_archive}"
+          printf '%s  %s\n' "$helm_sha256" "/tmp/${helm_archive}" | sha256sum --check --strict
+          tar --extract --gzip --file "/tmp/${helm_archive}" --directory /tmp
+          install --mode=0755 /tmp/linux-amd64/helm /usr/local/bin/helm
 
-          count = 0
-          for path in sorted(Path("k8s").glob("*.yaml")):
-              for index, document in enumerate(yaml.safe_load_all(path.read_text()), start=1):
-                  if document is None:
-                      continue
-                  if not isinstance(document, dict):
-                      raise SystemExit(f"{path}:{index}: document must be a mapping")
-                  for field in ("apiVersion", "kind", "metadata"):
-                      if field not in document:
-                          raise SystemExit(f"{path}:{index}: missing {field}")
-                  metadata = document["metadata"]
-                  if not isinstance(metadata, dict) or not metadata.get("name"):
-                      raise SystemExit(f"{path}:{index}: missing metadata.name")
-                  count += 1
-          print(f"Decoded {count} Kubernetes resources.")
-          PY
+      - name: Validate deployment configuration
+        run: ./scripts/validate-deployment.sh --require-docker --require-helm --require-kubectl --require-yaml

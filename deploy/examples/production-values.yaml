@@ -1,0 +1,35 @@
+# Copy this file outside the repository, replace every example hostname, and
+# keep real credentials in a secret manager or an uncommitted values file.
+
+config:
+  appMode: production
+  seedDemoData: "false"
+  loginRequired: true
+  frontendUrl: https://support.example.com
+  corsAllowOrigins: https://support.example.com
+  cookieSecure: true
+  cookieSameSite: lax
+
+frontend:
+  service:
+    type: ClusterIP
+
+ingress:
+  enabled: true
+  className: nginx
+  host: support.example.com
+  tls:
+    - secretName: tickety-tls
+      hosts:
+        - support.example.com
+
+postgresql:
+  enabled: true
+  persistence:
+    enabled: true
+    size: 20Gi
+    # Set the storage class required by your cluster, such as managed-csi on AKS.
+    storageClass: ""
+
+# Examples only; add real values through a secret manager or private values file.
+secrets: {}

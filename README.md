@@ -31,7 +31,7 @@ Tickety — ITSM platform with built-in AI. Runs standalone or connects to an ex
 | Frontend | Next.js 15.5 · Tailwind CSS · TanStack Query · Recharts |
 | AI | LiteLLM (DeepSeek · OpenAI · OpenRouter · Azure · Custom) |
 | Database | PostgreSQL |
-| Infra | Docker · Kubernetes · OrbStack |
+| Infra | Docker Compose · Kubernetes · Helm · AKS |
 
 ## Quick start
 
@@ -44,10 +44,13 @@ uv pip compile requirements.txt --universal --python-version 3.11 --output-file 
 ```
 
 ```bash
-cp .env.example .env   # configure DATABASE_URL (and your preferred LLM keys)
-docker compose up -d    # or ./deploy.sh for K8s
+./deploy.sh docker
 open http://localhost:3000
 ```
+
+This starts the demo configuration, including PostgreSQL and migrations. For
+production Docker, Kubernetes/Helm, AKS/ACR, external PostgreSQL, upgrades, or
+data-retention instructions, see the [deployment guide](docs/deployment.md).
 
 > **Demo mode is on by default.** Public browsing does not require login. Sign in
 > with the seeded administrator to configure the workspace and use protected AI,

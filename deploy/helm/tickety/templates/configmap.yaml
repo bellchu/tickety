@@ -1,0 +1,25 @@
+{{- $frontendUrl := include "tickety.frontendUrl" . }}
+{{- $corsAllowOrigins := default $frontendUrl .Values.config.corsAllowOrigins }}
+{{- if and (eq .Values.config.appMode "production") (not (hasPrefix "https://" $frontendUrl)) }}
+  {{- fail "production config requires an HTTPS config.frontendUrl or a TLS-enabled ingress" }}
+{{- end }}
+{{- if and (eq .Values.config.appMode "production") (eq (trim $corsAllowOrigins) "*") }}
+  {{- fail "production config.corsAllowOrigins cannot be '*'" }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "tickety.configName" . }}
+  labels:
+    {{- include "tickety.labels" . | nindent 4 }}
+data:
+  APP_MODE: {{ .Values.config.appMode | quote }}
+  SEED_DEMO_DATA: {{ .Values.config.seedDemoData | quote }}
+  LOGIN_REQUIRED: {{ .Values.config.loginRequired | quote }}
+  FRONTEND_URL: {{ $frontendUrl | quote }}
+  CORS_ALLOW_ORIGINS: {{ $corsAllowOrigins | quote }}
+  COOKIE_SECURE: {{ .Values.config.cookieSecure | quote }}
+  COOKIE_SAMESITE: {{ .Values.config.cookieSameSite | quote }}
+  {{- range $key, $value := .Values.config.extra }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
