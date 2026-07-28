@@ -342,11 +342,17 @@ def is_production_mode() -> bool:
 
 
 def automation_enabled(key: str, legacy_alias: Optional[str] = None) -> bool:
-    """AI automation is opt-in in every mode to prevent surprise external I/O."""
-    if is_demo_mode():
-        return False
+    """Return whether an automatic AI workflow is explicitly enabled.
+
+    Demo installations may use real providers, but background automation is
+    only safe once the demo is access-controlled.  Explicitly queued work is
+    handled separately by the worker and intentionally does not use this
+    gate.
+    """
     aliases = (legacy_alias,) if legacy_alias else ()
-    return get_bool(key, default=False, aliases=aliases)
+    if not get_bool(key, default=False, aliases=aliases):
+        return False
+    return not is_demo_mode() or get_bool("LOGIN_REQUIRED", default=False)
 
 
 def _mask(value: Optional[str]) -> str:

@@ -3,6 +3,7 @@
 import { useState, useEffect, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { canAccessProtectedIntelligence } from "@/lib/auth";
 import type { RouteRecommendation, ResolutionPlan, Ticket, TicketAnalysisResult, TicketAuditEntry, TicketComment, UserOut } from "@/lib/types";
 import { useParams } from "next/navigation";
 import { AIThinkingStream } from "@/components/ticket/AIThinkingStream";
@@ -235,7 +236,7 @@ function AgentActionPanel({ ticket }: { ticket: Ticket }) {
   }, [ticket]);
 
   const meQuery = useQuery({ queryKey: ["auth-me"], queryFn: api.getAuthMe, retry: false });
-  const canManageAssignment = meQuery.data?.role === "admin" || meQuery.data?.role === "supervisor";
+  const canManageAssignment = canAccessProtectedIntelligence(meQuery.data);
   const usersQuery = useQuery<UserOut[]>({ queryKey: ["users"], queryFn: api.getUsers, enabled: canManageAssignment, retry: false });
   const commentsQuery = useQuery<TicketComment[]>({
     queryKey: ["ticket-comments", ticket.id],

@@ -114,9 +114,18 @@ def _kb_document_payload(article: KbArticleRecord) -> dict[str, Any]:
 
 
 def embedding_enabled() -> bool:
-    if (os.getenv("APP_MODE") or "demo").strip().lower() != "production":
+    """Whether provider-backed embeddings may be refreshed.
+
+    Demo mode supports embeddings after an admin explicitly enables them, but
+    requires authenticated access before a background refresh can send ticket
+    content to the configured provider.
+    """
+    enabled = (os.getenv("TICKET_EMBEDDING_ENABLED", "") or "").strip().lower() in _TRUE_VALUES
+    if not enabled:
         return False
-    return (os.getenv("TICKET_EMBEDDING_ENABLED", "") or "").strip().lower() in _TRUE_VALUES
+    is_demo = (os.getenv("APP_MODE") or "demo").strip().lower() == "demo"
+    login_required = (os.getenv("LOGIN_REQUIRED", "") or "").strip().lower() in _TRUE_VALUES
+    return not is_demo or login_required
 
 
 def private_comment_indexing_enabled() -> bool:

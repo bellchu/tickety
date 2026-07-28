@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Search, ShieldCheck, Trash2, UserCog, Users } from "lucide-react";
 import { Alert, Badge, Button, ConfirmDialog, Dialog, EmptyState, ErrorState, IconButton, Skeleton } from "@/components/ui";
 import { api } from "@/lib/api";
+import { canAccessAdministration, isDemoContext } from "@/lib/auth";
 import type { UserCreateInput, UserOut } from "@/lib/types";
 
 const ROLES = [
@@ -26,7 +27,10 @@ function initials(name: string) {
 
 export default function AgentsPage() {
   const queryClient = useQueryClient();
-  const usersQuery = useQuery({ queryKey: ["users"], queryFn: api.getUsers });
+  const authQuery = useQuery({ queryKey: ["auth-me"], queryFn: api.getAuthMe, retry: false });
+  const canManageUsers = canAccessAdministration(authQuery.data);
+  const isDemoMode = isDemoContext(authQuery.data);
+  const usersQuery = useQuery({ queryKey: ["users"], queryFn: api.getUsers, enabled: canManageUsers });
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<UserOut | null>(null);
   const [deactivating, setDeactivating] = useState<UserOut | null>(null);
@@ -66,6 +70,18 @@ export default function AgentsPage() {
     return activeUsers.filter((user) => [user.name, user.email ?? "", user.title ?? "", user.role].some((value) => value.toLowerCase().includes(term)));
   }, [activeUsers, search]);
   const retrying = usersQuery.isFetching && !usersQuery.isLoading;
+
+  if (authQuery.isLoading) {
+    return <div className="mx-auto max-w-7xl space-y-6" aria-busy="true" aria-label="Checking user management access"><Skeleton className="h-28 w-full" /><Skeleton className="h-80 w-full" /></div>;
+  }
+
+  if (authQuery.isError) {
+    return <ErrorState title="User management access could not be checked" description="Your session could not be verified, so no user account data was requested." actionLabel="Retry access check" onRetry={() => void authQuery.refetch()} retrying={authQuery.isFetching} />;
+  }
+
+  if (!canManageUsers) {
+    return <EmptyState className="mx-auto min-h-72 max-w-2xl" icon={<ShieldCheck className="h-5 w-5" />} title={isDemoMode ? "Demo administrator access required" : "Administrator access required"} description={isDemoMode ? "Sign in with an active demo administrator account to manage users, roles, and access." : "Only active administrators can manage users, roles, and access."} />;
+  }
 
   return (
     <div className="mx-auto max-w-7xl space-y-6">
@@ -140,7 +156,7 @@ export default function AgentsPage() {
         )}
       </section>
 
-      <UserFormDialog open={formOpen || Boolean(editing)} user={editing} onOpenChange={(open) => { if (!open) { setFormOpen(false); setEditing(null); createMutation.reset(); updateMutation.reset(); } }} onSubmit={(payload) => editing ? updateMutation.mutate({ id: editing.id, payload }) : createMutation.mutate(payload)} pending={createMutation.isPending || updateMutation.isPending} error={createMutation.error || updateMutation.error} />
+      <UserFormDialog open={formOpen || Boolean(editing)} user={editing} demoMode={isDemoMode} onOpenChange={(open) => { if (!open) { setFormOpen(false); setEditing(null); createMutation.reset(); updateMutation.reset(); } }} onSubmit={(payload) => editing ? updateMutation.mutate({ id: editing.id, payload }) : createMutation.mutate(payload)} pending={createMutation.isPending || updateMutation.isPending} error={createMutation.error || updateMutation.error} />
       <ConfirmDialog open={Boolean(deactivating)} onOpenChange={(open) => { if (!open) { setDeactivating(null); deactivateMutation.reset(); } }} title="Deactivate agent access?" description={`${deactivating?.name ?? "This agent"} will no longer appear in the active roster or receive new assignments. Historical work remains available.`} confirmLabel="Deactivate agent" destructive pending={deactivateMutation.isPending} onConfirm={() => { if (deactivating) deactivateMutation.mutate(deactivating.id); }} />
       {deactivateMutation.isError && <Alert variant="danger" title="Deactivation failed">{deactivateMutation.error instanceof Error ? deactivateMutation.error.message : "Please try again."}</Alert>}
     </div>
@@ -155,7 +171,7 @@ function AgentCard({ user, onEdit, onDeactivate }: { user: UserOut; onEdit: () =
   return <article className="p-4"><div className="flex items-start justify-between gap-3"><AgentIdentity user={user} /><div className="flex gap-1"><IconButton size="sm" aria-label={`Edit ${user.name}`} icon={<UserCog className="h-4 w-4" />} onClick={onEdit} /><IconButton size="sm" aria-label={`Deactivate ${user.name}`} icon={<Trash2 className="h-4 w-4" />} onClick={onDeactivate} /></div></div><div className="mt-4 flex flex-wrap items-center gap-2"><Badge variant={roleVariant(user.role)} dot>{user.role}</Badge><Badge>T{user.tier}</Badge><span className="text-xs text-ink-500">{user.impact_points.toLocaleString()} impact</span><span className="text-xs text-ink-500">{user.title || "Title not set"}</span></div></article>;
 }
 
-function UserFormDialog({ open, user, onOpenChange, onSubmit, pending, error }: { open: boolean; user: UserOut | null; onOpenChange: (open: boolean) => void; onSubmit: (payload: UserCreateInput) => void; pending: boolean; error: unknown }) {
+function UserFormDialog({ open, user, demoMode, onOpenChange, onSubmit, pending, error }: { open: boolean; user: UserOut | null; demoMode: boolean; onOpenChange: (open: boolean) => void; onSubmit: (payload: UserCreateInput) => void; pending: boolean; error: unknown }) {
   const [name, setName] = useState(user?.name ?? "");
   const [email, setEmail] = useState(user?.email ?? "");
   const [title, setTitle] = useState(user?.title ?? "");
@@ -164,7 +180,7 @@ function UserFormDialog({ open, user, onOpenChange, onSubmit, pending, error }: 
   const key = user?.id ?? "new";
   const errorMessage = error instanceof Error ? error.message : error ? String(error) : null;
   return <Dialog key={key} open={open} onOpenChange={onOpenChange} title={user ? "Edit agent" : "Add agent"} description={user ? "Update this agent’s profile and access role." : "Create an operational account. Required fields are marked."} dismissible={!pending} closeOnBackdrop={!pending} footer={<><Button variant="secondary" onClick={() => onOpenChange(false)} disabled={pending}>Cancel</Button><Button onClick={() => onSubmit({ name: name.trim(), email: email.trim(), title: title.trim() || undefined, role, password: password || undefined })} pending={pending} pendingLabel={user ? "Saving…" : "Creating…"} disabled={!name.trim() || !email.trim()}>{user ? "Save changes" : "Create agent"}</Button></>}>
-    <div className="space-y-4">{errorMessage && <Alert variant="danger" title="Changes were not saved">{errorMessage}</Alert>}<Field label="Name" required><input className="input-base" autoComplete="name" value={name} onChange={(event) => setName(event.target.value)} required /></Field><Field label="Email" required><input className="input-base" type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} required /></Field><Field label="Title"><input className="input-base" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Support engineer" /></Field><Field label="Role" required><select className="input-base" value={role} onChange={(event) => setRole(event.target.value)}>{ROLES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></Field><Field label={user ? "New password" : "Password"} hint={user ? "Leave blank to keep the current password." : "Leave blank to let the service generate a password."}><input className="input-base" type="password" autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} /></Field></div>
+    <div className="space-y-4">{errorMessage && <Alert variant="danger" title="Changes were not saved">{errorMessage}</Alert>}<Field label="Name" required><input className="input-base" autoComplete="name" value={name} onChange={(event) => setName(event.target.value)} required /></Field><Field label="Email" required><input className="input-base" type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} required /></Field><Field label="Title"><input className="input-base" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Support engineer" /></Field><Field label="Role" required><select className="input-base" value={role} onChange={(event) => setRole(event.target.value)}>{ROLES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></Field>{(!user || !demoMode) && <Field label={user ? "New password" : "Password"} hint={user ? "Leave blank to keep the current password." : "Leave blank to let the service generate a password."}><input className="input-base" type="password" autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} /></Field>}{user && demoMode && <p className="rounded-lg border border-linen-400 bg-linen-100 px-3 py-2 text-xs leading-5 text-ink-500">Password changes are unavailable in demo mode. You can still update this account’s profile, role, and access status.</p>}</div>
   </Dialog>;
 }
 

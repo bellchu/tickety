@@ -157,9 +157,17 @@ class ProtectedAIRouteTests(unittest.TestCase):
             db.add(UserRecord(
                 id="real-admin", name="Real Admin", role="admin", is_active=True
             ))
+            db.add(UserRecord(
+                id="real-agent", name="Real Agent", role="agent", is_active=True
+            ))
             db.add(SessionRecord(
                 token="real-session",
                 user_id="real-admin",
+                expires_at=datetime.utcnow() + timedelta(hours=1),
+            ))
+            db.add(SessionRecord(
+                token="agent-session",
+                user_id="real-agent",
                 expires_at=datetime.utcnow() + timedelta(hours=1),
             ))
             db.add(TicketRecord(
@@ -184,23 +192,28 @@ class ProtectedAIRouteTests(unittest.TestCase):
             main, "_auth_required_for_request", return_value=False
         )
         self.auth_middleware_patch.start()
+        self.session_local_patch = patch.object(main, "SessionLocal", self.session_factory)
+        self.session_local_patch.start()
         self.client = TestClient(main.app)
 
     def tearDown(self):
+        self.session_local_patch.stop()
         self.auth_middleware_patch.stop()
         main.app.dependency_overrides.clear()
         self.engine.dispose()
 
-    def test_protected_ai_user_never_accepts_demo_mode(self):
-        user = UserRecord(id="admin", name="Admin", role="admin", is_active=True)
-        with (
-            patch.object(main.settings_module, "is_production_mode", return_value=False),
-            self.assertRaises(HTTPException) as raised,
-        ):
-            main.get_protected_ai_user(user)
+    def test_protected_ai_user_allows_demo_admin_but_not_demo_non_admin(self):
+        admin = UserRecord(id="admin", name="Admin", role="admin", is_active=True)
+        agent = UserRecord(id="agent", name="Agent", role="agent", is_active=True)
+        with patch.object(main.settings_module, "is_demo_mode", return_value=True):
+            self.assertIs(main.get_protected_ai_user(admin), admin)
+            with self.assertRaises(HTTPException) as raised:
+                main.get_protected_ai_user(agent)
 
         self.assertEqual(raised.exception.status_code, 403)
-        self.assertEqual(raised.exception.detail, "AI API is disabled in demo mode")
+        self.assertEqual(
+            raised.exception.detail, "Demo AI access requires an admin session"
+        )
 
     def test_no_session_ai_and_admin_routes_fail_even_in_demo_mode(self):
         with patch.object(
@@ -217,9 +230,19 @@ class ProtectedAIRouteTests(unittest.TestCase):
                 "/oauth/callback?code=invalid&state=invalid",
             ):
                 with self.subTest(path=path):
-                    response = self.client.get(path)
+                    response = self.client.get(
+                        path, headers={"Sec-Fetch-Site": "same-origin"}
+                    )
                     self.assertEqual(response.status_code, 401)
                     self.assertEqual(response.json(), {"detail": "Not authenticated"})
+
+            response = self.client.patch(
+                "/service-requests/request-1/approval",
+                json={"approved": True},
+                headers={"Sec-Fetch-Site": "same-origin"},
+            )
+            self.assertEqual(response.status_code, 401)
+            self.assertEqual(response.json(), {"detail": "Not authenticated"})
 
     def test_real_admin_session_reaches_protected_route_only_in_production(self):
         self.client.cookies.set(main.SESSION_COOKIE, "real-session")
@@ -233,7 +256,7 @@ class ProtectedAIRouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
 
-    def test_real_admin_session_cannot_read_or_write_settings_in_demo(self):
+    def test_real_admin_session_can_read_or_write_settings_in_demo(self):
         self.client.cookies.set(main.SESSION_COOKIE, "real-session")
         headers = {"Sec-Fetch-Site": "same-origin"}
         with (
@@ -241,6 +264,8 @@ class ProtectedAIRouteTests(unittest.TestCase):
             patch.object(main.settings_module, "get_settings") as get_settings,
             patch.object(main.settings_module, "update_settings") as update_settings,
         ):
+            get_settings.return_value = {}
+            update_settings.return_value = {}
             read = self.client.get("/admin/settings", headers=headers)
             write = self.client.put(
                 "/admin/settings",
@@ -248,14 +273,10 @@ class ProtectedAIRouteTests(unittest.TestCase):
                 json={"LLM_PROVIDER": "malicious"},
             )
 
-        for response in (read, write):
-            self.assertEqual(response.status_code, 403, response.text)
-            self.assertEqual(
-                response.json(),
-                {"detail": "AI API is disabled in demo mode"},
-            )
-        get_settings.assert_not_called()
-        update_settings.assert_not_called()
+        self.assertEqual(read.status_code, 200, read.text)
+        self.assertEqual(write.status_code, 200, write.text)
+        get_settings.assert_called_once()
+        update_settings.assert_called_once_with({"LLM_PROVIDER": "malicious"})
 
     def test_auth_context_distinguishes_demo_fallback_from_real_session(self):
         with (
@@ -362,19 +383,75 @@ class ProtectedAIRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json(), {"detail": "Invalid request origin"})
 
-    def test_authenticated_demo_session_cannot_start_or_complete_oauth(self):
+    def test_authenticated_demo_admin_session_can_start_or_complete_oauth(self):
         self.client.cookies.set(main.SESSION_COOKIE, "real-session")
+        adapter = MagicMock(
+            oauth_configured=True,
+            oauth_access_token="access-token",
+            domain="demo.example",
+        )
+        adapter.oauth_authorization_url.return_value = "https://provider.example/authorize"
         with patch.object(
             main.settings_module, "is_production_mode", return_value=False
-        ):
+        ), patch("app.backend.integrations.registry.get_adapter", return_value=adapter):
             for path in (
                 "/oauth/status",
                 "/oauth/authorize",
                 "/oauth/callback?code=invalid&state=invalid",
             ):
                 with self.subTest(path=path):
-                    response = self.client.get(path)
-                    self.assertEqual(response.status_code, 403)
+                    response = self.client.get(
+                        path, headers={"Sec-Fetch-Site": "same-origin"}
+                    )
+                    self.assertNotEqual(response.status_code, 403, response.text)
+
+    def test_demo_non_admin_session_cannot_use_protected_routes(self):
+        self.client.cookies.set(main.SESSION_COOKIE, "agent-session")
+        with patch.object(main.settings_module, "is_production_mode", return_value=False):
+            for path in ("/admin/settings", "/oauth/status", "/intelligence/alerts"):
+                with self.subTest(path=path):
+                    response = self.client.get(path, headers={"Sec-Fetch-Site": "same-origin"})
+                    self.assertEqual(response.status_code, 403, response.text)
+
+    def test_demo_admin_can_open_ticket_websocket_but_agent_cannot(self):
+        with patch.dict(os.environ, {"APP_MODE": "demo"}, clear=False):
+            self.client.cookies.set(main.SESSION_COOKIE, "real-session")
+            with self.client.websocket_connect(
+                "/ws/tickets/unreviewed-demo-queue/stream",
+                headers={"Origin": "https://testserver"},
+            ) as websocket:
+                self.assertEqual(websocket.receive_json()["type"], "progress")
+
+            self.client.cookies.set(main.SESSION_COOKIE, "agent-session")
+            with self.assertRaises(WebSocketDisconnect) as raised:
+                with self.client.websocket_connect(
+                    "/ws/tickets/unreviewed-demo-queue/stream",
+                    headers={"Origin": "https://testserver"},
+                ):
+                    pass
+        self.assertEqual(raised.exception.code, 1008)
+
+    def test_demo_user_password_changes_are_rejected_but_creation_is_allowed(self):
+        self.client.cookies.set(main.SESSION_COOKIE, "real-session")
+        with patch.dict(os.environ, {"APP_MODE": "demo"}, clear=False):
+            update = self.client.patch(
+                "/users/real-agent", json={"password": "new-password"}
+            )
+            create = self.client.post(
+                "/users",
+                json={
+                    "name": "Initial Password",
+                    "email": "initial@example.test",
+                    "role": "agent",
+                    "password": "initial-password",
+                },
+            )
+
+        self.assertEqual(update.status_code, 403, update.text)
+        self.assertEqual(
+            update.json(), {"detail": "Password changes are disabled in demo mode"}
+        )
+        self.assertEqual(create.status_code, 201, create.text)
 
     def test_production_transition_invalidates_seeded_demo_credentials_and_sessions(self):
         with self.session_factory() as db:
@@ -1864,7 +1941,7 @@ class RetrievalEvidenceContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("provider-a.example", baseline)
         self.assertNotIn("first-opaque-key", baseline)
 
-    async def test_demo_embedding_setting_never_dispatches_to_provider(self):
+    async def test_demo_embedding_requires_login_before_provider_dispatch(self):
         provider = AsyncMock()
         with (
             patch.dict(os.environ, {
@@ -1879,6 +1956,36 @@ class RetrievalEvidenceContractTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(vector)
         provider.assert_not_awaited()
+
+    async def test_authenticated_demo_embedding_dispatches_to_provider(self):
+        provider = AsyncMock(return_value={
+            "data": [{"embedding": [0.25, 0.75]}],
+            "usage": {"total_tokens": 2},
+        })
+        with (
+            patch.dict(os.environ, {
+                "APP_MODE": "demo",
+                "LOGIN_REQUIRED": "true",
+                "TICKET_EMBEDDING_ENABLED": "true",
+                "TICKET_EMBEDDING_MODEL": "openai/test-embedding",
+                "TICKET_EMBEDDING_DIMENSIONS": "2",
+                "OPENAI_API_KEY": "configured-test-key",
+                "LLM_ENFORCE_PROVIDER_LIMITS": "false",
+            }, clear=False),
+            patch("litellm.aembedding", new=provider),
+            patch("app.backend.llm_manager._try_acquire_provider_lease", return_value="1:test-owner"),
+            patch("app.backend.llm_manager._reserve_provider_capacity", return_value=2),
+            patch("app.backend.llm_manager._settle_provider_tokens"),
+            patch("app.backend.llm_manager._release_provider_lease"),
+        ):
+            vector = await ticket_vectors._embed_text("demo ticket evidence")
+
+        self.assertEqual(vector, [0.25, 0.75])
+        provider.assert_awaited_once()
+
+    def test_demo_provider_controls_default_enabled(self):
+        with patch.dict(os.environ, {"APP_MODE": "demo"}, clear=True):
+            self.assertTrue(_provider_controls_enabled())
 
     async def test_ticket_document_excludes_generated_ai_fields(self):
         ticket = TicketRecord(

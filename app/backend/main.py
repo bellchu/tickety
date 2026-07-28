@@ -261,7 +261,7 @@ def _roles_required_for_request(path: str, method: str) -> Optional[set[str]]:
         return {"admin", "supervisor"}
     if method.upper() == "DELETE" and path.startswith("/tickets/"):
         return {"admin", "supervisor"}
-    if method.upper() == "GET" and path == "/users":
+    if path == "/users" or (unsafe and path.startswith("/users/")):
         return {"admin", "supervisor"}
     if unsafe and path.startswith("/kb/") and path.endswith("/feedback"):
         return None
@@ -269,6 +269,7 @@ def _roles_required_for_request(path: str, method: str) -> Optional[set[str]]:
         "/categories",
         "/projects",
         "/services",
+        "/service-requests",
         "/problems",
         "/changes",
         "/assets",
@@ -360,9 +361,9 @@ def get_protected_ai_user(
     user: UserRecord = Depends(get_authenticated_user),
     _origin: None = Depends(require_protected_ai_origin),
 ) -> UserRecord:
-    """Require production mode before exposing externally-triggered AI I/O."""
-    if not settings_module.is_production_mode():
-        raise HTTPException(status_code=403, detail="AI API is disabled in demo mode")
+    """Require a real session for protected AI; demos additionally require admin."""
+    if settings_module.is_demo_mode() and (user.role or "").lower() != "admin":
+        raise HTTPException(status_code=403, detail="Demo AI access requires an admin session")
     return user
 
 
@@ -383,12 +384,10 @@ def require_protected_ai_role(*roles: str):
     return checker
 
 
-def require_production_admin_callback_user(
+def require_admin_callback_user(
     user: UserRecord = Depends(get_authenticated_user),
 ) -> UserRecord:
-    """Authenticate OAuth callbacks without rejecting the provider redirect."""
-    if not settings_module.is_production_mode():
-        raise HTTPException(status_code=403, detail="OAuth is disabled in demo mode")
+    """Authenticate admin OAuth callbacks without rejecting provider redirects."""
     if (user.role or "").lower() != "admin":
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     return user
@@ -489,7 +488,11 @@ async def require_auth_by_default(request: Request, call_next):
     if request.method == "OPTIONS" or _is_public_http_path(request.url.path):
         return await call_next(request)
 
-    if not _auth_required_for_request():
+    roles = _roles_required_for_request(request.url.path, request.method)
+    # Local demos may allow anonymous browsing, but privileged routes must
+    # always be backed by a real session.  Do not let the demo fallback
+    # identity reach administration, configuration, or OAuth flows.
+    if not _auth_required_for_request() and not roles:
         return await call_next(request)
 
     if request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"} and not _request_origin_allowed(request):
@@ -500,8 +503,13 @@ async def require_auth_by_default(request: Request, call_next):
         user = _resolve_request_user(request, db, allow_demo=False)
         if not user:
             return JSONResponse({"detail": "Not authenticated"}, status_code=401)
-        roles = _roles_required_for_request(request.url.path, request.method)
         if roles and user.role not in roles:
+            return JSONResponse({"detail": "Insufficient permissions"}, status_code=403)
+        if (
+            roles
+            and settings_module.is_demo_mode()
+            and (user.role or "").lower() != "admin"
+        ):
             return JSONResponse({"detail": "Insufficient permissions"}, status_code=403)
         request.state.current_user = user
     finally:
@@ -1188,7 +1196,7 @@ async def update_ticket(
     )
     if document_input_changed:
         _reserve_index_write_request(db, user.id)
-    if settings_module.is_production_mode() and (
+    if (
         (
             analysis_input_changed
             and _automation_enabled("AUTO_TRIAGE_ENABLED", "AUTO_TRIAGE")
@@ -1425,7 +1433,6 @@ async def bulk_action(
             != payload.value
             for ticket in tickets
         )
-        and settings_module.is_production_mode()
         and _automation_enabled("AUTO_RESOLVE_ENABLED")
     ):
         _reserve_ai_request(db, user.id, "ticket_bulk_auto_processing")
@@ -1482,10 +1489,7 @@ async def create_ticket(
     """Create a ticket by hand (no ITSM sync). Auto-triaged if enabled."""
     import uuid as _uuid
     _reserve_index_write_request(db, user.id)
-    if (
-        settings_module.is_production_mode()
-        and _automation_enabled("AUTO_TRIAGE_ENABLED", "AUTO_TRIAGE")
-    ):
+    if _automation_enabled("AUTO_TRIAGE_ENABLED", "AUTO_TRIAGE"):
         # Manual creation can immediately invoke the LLM pipeline. Charge the
         # authenticated caller before persisting the ticket so this indirect
         # path cannot bypass the per-user AI request budget.
@@ -1560,8 +1564,6 @@ def _schedule_ai_retry(
 
 async def _auto_process(ticket: TicketRecord, db, force: bool = False):
     """Worker/webhook adapter for the shared claimed artifact orchestrator."""
-    if not settings_module.is_production_mode():
-        return
     if not force and not _automation_enabled("AUTO_TRIAGE_ENABLED", "AUTO_TRIAGE"):
         return
     requested = {
@@ -2861,6 +2863,11 @@ async def update_user(
     user = db.query(UserRecord).filter(UserRecord.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    if payload.password and settings_module.is_demo_mode():
+        raise HTTPException(
+            status_code=403,
+            detail="Password changes are disabled in demo mode",
+        )
     if payload.role is not None:
         if _user.role != "admin":
             raise HTTPException(status_code=403, detail="Only admins can change roles")
@@ -3676,7 +3683,7 @@ async def oauth_callback(
         description="OAuth state returned by the provider",
     ),
     db: Session = Depends(get_db),
-    user: UserRecord = Depends(require_production_admin_callback_user),
+    user: UserRecord = Depends(require_admin_callback_user),
 ):
     """Exchange the OAuth code for tokens and persist them."""
     saved_state = request.cookies.get(FRESHSERVICE_OAUTH_STATE_COOKIE)
@@ -5355,11 +5362,14 @@ def _websocket_origin_allowed(ws: WebSocket) -> bool:
 
 @app.websocket("/ws/tickets/{ticket_id}/stream")
 async def ws_ticket_stream(ws: WebSocket, ticket_id: str):
-    if not settings_module.is_production_mode() or not _websocket_origin_allowed(ws):
+    if not _websocket_origin_allowed(ws):
         await ws.close(code=1008)
         return
     ws_user = _websocket_user(ws)
     if not ws_user:
+        await ws.close(code=1008)
+        return
+    if settings_module.is_demo_mode() and (ws_user.role or "").lower() != "admin":
         await ws.close(code=1008)
         return
     await ws.accept()
@@ -5413,7 +5423,15 @@ async def ws_ticket_stream(ws: WebSocket, ticket_id: str):
 
 @app.websocket("/ws/notifications")
 async def ws_notifications(ws: WebSocket):
-    if not _websocket_origin_allowed(ws) or not _websocket_user(ws):
+    ws_user = _websocket_user(ws)
+    if (
+        not _websocket_origin_allowed(ws)
+        or not ws_user
+        or (
+            settings_module.is_demo_mode()
+            and (ws_user.role or "").lower() != "admin"
+        )
+    ):
         await ws.close(code=1008)
         return
     await ws.accept()

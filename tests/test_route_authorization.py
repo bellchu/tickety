@@ -54,9 +54,21 @@ class RouteAuthorizationTests(unittest.TestCase):
             return_value=False,
         )
         self.auth_middleware_patch.start()
+        # These tests exercise endpoint dependencies with explicit user
+        # overrides. Privileged-route middleware now independently requires a
+        # cookie-backed session in demo mode, so bypass only that duplicate
+        # middleware role check in this focused dependency contract suite.
+        self.roles_policy = main._roles_required_for_request
+        self.middleware_roles_patch = patch.object(
+            main,
+            "_roles_required_for_request",
+            return_value=None,
+        )
+        self.middleware_roles_patch.start()
         self.client = TestClient(main.app)
 
     def tearDown(self):
+        self.middleware_roles_patch.stop()
         self.auth_middleware_patch.stop()
         main.app.dependency_overrides.clear()
         self.engine.dispose()
@@ -145,15 +157,19 @@ class RouteAuthorizationTests(unittest.TestCase):
 
     def test_middleware_policy_matches_route_policy(self):
         self.assertEqual(
-            main._roles_required_for_request("/tickets/ticket-1", "DELETE"),
+            self.roles_policy("/tickets/ticket-1", "DELETE"),
             {"admin", "supervisor"},
         )
         self.assertEqual(
-            main._roles_required_for_request("/users", "GET"),
+            self.roles_policy("/users", "GET"),
             {"admin", "supervisor"},
         )
         self.assertEqual(
-            main._roles_required_for_request("/tickets/bulk", "POST"),
+            self.roles_policy("/tickets/bulk", "POST"),
+            {"admin", "supervisor"},
+        )
+        self.assertEqual(
+            self.roles_policy("/service-requests/request-1/approval", "PATCH"),
             {"admin", "supervisor"},
         )
 

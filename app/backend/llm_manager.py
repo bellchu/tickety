@@ -371,9 +371,10 @@ def _provider_controls_enabled() -> bool:
     configured = os.getenv("LLM_ENFORCE_PROVIDER_LIMITS")
     if configured is not None:
         return _enabled(configured)
-    return (os.getenv("APP_MODE") or "demo").strip().lower() == "production" or bool(
-        (os.getenv("TICKETY_PROCESS_ROLE") or "").strip()
-    )
+    # Demo mode can now dispatch to real providers.  Keep shared daily and
+    # per-minute budgets on by default there as well; an operator may still
+    # explicitly disable them for an isolated local environment.
+    return True
 
 
 def _reserve_provider_capacity(provider: str, estimated_tokens: int) -> int:

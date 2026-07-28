@@ -26,7 +26,7 @@ import { Alert, Badge, Button, EmptyState, ErrorState, Skeleton } from "@/compon
 import { api } from "@/lib/api";
 import {
   canAccessProtectedIntelligence,
-  hasProtectedProductionSession,
+  canCreateTickets,
   isDemoContext,
 } from "@/lib/auth";
 import {
@@ -175,7 +175,7 @@ export default function DashboardPage() {
   const [newTicketOpen, setNewTicketOpen] = useState(false);
   const authQuery = useQuery({ queryKey: ["auth-me"], queryFn: api.getAuthMe, retry: false });
   const canUseIntelligence = canAccessProtectedIntelligence(authQuery.data);
-  const canCreateTicket = hasProtectedProductionSession(authQuery.data);
+  const canCreateTicket = canCreateTickets(authQuery.data);
   const demoWorkspace = isDemoContext(authQuery.data);
 
   const ticketsQuery = useQuery({ queryKey: ["tickets"], queryFn: api.getTickets });
@@ -329,9 +329,7 @@ export default function DashboardPage() {
           >
             Export CSV
           </Button>
-          {canCreateTicket && (
-            <Button onClick={() => setNewTicketOpen(true)} leadingIcon={<Plus className="h-4 w-4" />}>New ticket</Button>
-          )}
+          {canCreateTicket && <Button onClick={() => setNewTicketOpen(true)} leadingIcon={<Plus className="h-4 w-4" />}>New ticket</Button>}
         </div>
       </header>
 

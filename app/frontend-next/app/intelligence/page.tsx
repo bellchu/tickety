@@ -46,7 +46,7 @@ export default function IntelligencePage() {
 
   if (!canAccessIntelligence) {
     const demo = isDemoContext(authQuery.data);
-    return <div className="mx-auto max-w-7xl space-y-6"><IntelligenceHeader /><EmptyState icon={<ShieldCheck className="h-5 w-5" />} title={demo ? "Intelligence is locked in demo mode" : "Administrator or supervisor access required"} description={demo ? "Protected intelligence is intentionally disabled in this sample workspace. Ticket and service views remain available, and no intelligence requests are sent." : "This page is available only to authenticated administrators and supervisors in production."} /></div>;
+    return <div className="mx-auto max-w-7xl space-y-6"><IntelligenceHeader /><EmptyState icon={<ShieldCheck className="h-5 w-5" />} title={demo ? "Demo administrator access required" : "Administrator or supervisor access required"} description={demo ? "Sign in with an active demo administrator account to view protected intelligence. Public demo sessions and demo supervisors do not send intelligence requests." : "This page is available only to authenticated administrators and supervisors in production."} /></div>;
   }
 
   return <div className="mx-auto max-w-7xl space-y-6"><IntelligenceHeader /><AlertsPanel /><div className="grid gap-6 lg:grid-cols-2"><PriorityPanel /><SlaPanel /></div><div className="grid gap-6 lg:grid-cols-2"><TrendsPanel /><HealthPanel /></div><div className="grid gap-6 lg:grid-cols-2"><WorkloadPanel /><SystemicPanel /></div></div>;

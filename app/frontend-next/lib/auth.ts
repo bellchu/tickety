@@ -12,19 +12,36 @@ export function hasProtectedProductionSession(context?: AuthContext | null) {
   );
 }
 
-export function canAccessAdministration(context?: AuthContext | null) {
+/** True only for an active, authenticated administrator in either runtime mode. */
+export function canUseAdministrativeFeatures(context?: AuthContext | null) {
   return Boolean(
-    hasProtectedProductionSession(context) &&
+    context?.auth_kind === "session" &&
+    context.is_active === true &&
     normalizedRole(context) === "admin"
   );
+}
+
+export function hasDemoAdministratorSession(context?: AuthContext | null) {
+  return Boolean(
+    canUseAdministrativeFeatures(context) && context?.app_mode === "demo"
+  );
+}
+
+export function canAccessAdministration(context?: AuthContext | null) {
+  return canUseAdministrativeFeatures(context);
 }
 
 export function canAccessProtectedIntelligence(context?: AuthContext | null) {
   const role = normalizedRole(context);
   return Boolean(
-    hasProtectedProductionSession(context) &&
-    (role === "admin" || role === "supervisor")
+    hasDemoAdministratorSession(context) ||
+    (hasProtectedProductionSession(context) &&
+      (role === "admin" || role === "supervisor"))
   );
+}
+
+export function canCreateTickets(context?: AuthContext | null) {
+  return hasProtectedProductionSession(context) || hasDemoAdministratorSession(context);
 }
 
 export function isDemoContext(context?: AuthContext | null) {
@@ -35,5 +52,7 @@ export function isDemoContext(context?: AuthContext | null) {
 }
 
 export function isDemoAdministrationContext(context?: AuthContext | null) {
-  return isDemoContext(context);
+  return Boolean(
+    isDemoContext(context) && !hasDemoAdministratorSession(context)
+  );
 }

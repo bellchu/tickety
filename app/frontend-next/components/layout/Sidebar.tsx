@@ -87,7 +87,10 @@ export function Sidebar({
       </div>
 
       <nav aria-label="Workspace" className="flex-1 space-y-0.5 overflow-y-auto px-3 pb-4">
-        {navItems.filter((item) => item.href !== "/intelligence" || canAccessIntelligence).map((item) => {
+        {navItems.filter((item) => (
+          (item.href !== "/intelligence" || canAccessIntelligence) &&
+          (item.href !== "/agents" || canAccessAdmin)
+        )).map((item) => {
           const Icon = item.icon;
           const active =
             pathname === item.href ||
@@ -141,7 +144,7 @@ export function Sidebar({
           )}
         </Link>
 
-        {canAccessAdmin && (
+        {(canAccessAdmin || isDemoWorkspace) && (
           <Link
             href="/settings"
             onClick={onClose}
@@ -157,7 +160,7 @@ export function Sidebar({
               icon={SettingsIcon}
               active={pathname.startsWith("/settings")}
             />
-            Settings
+            Settings{!canAccessAdmin && <span className="sr-only"> (sign in as a demo administrator to manage settings)</span>}
           </Link>
         )}
       </div>

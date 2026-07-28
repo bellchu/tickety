@@ -621,6 +621,23 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         process.assert_awaited_once()
         self.assertTrue(process.await_args.kwargs["force"])
 
+    def test_demo_worker_recovers_durable_queued_analysis_when_automation_is_off(self):
+        """An admin-approved durable queue must not depend on demo automation."""
+        with self.session_factory() as db:
+            ticket = db.get(TicketRecord, "ticket-1")
+            ticket.ai_status = "queued"
+            db.commit()
+        process = AsyncMock()
+        with (
+            patch.object(sync_worker, "SessionLocal", self.session_factory),
+            patch.object(sync_worker.settings_module, "is_demo_mode", return_value=True),
+            patch.object(sync_worker.settings_module, "automation_enabled", return_value=False),
+            patch.object(main, "_auto_process", new=process),
+        ):
+            sync_worker._auto_triage_job()
+        process.assert_awaited_once()
+        self.assertTrue(process.await_args.kwargs["force"])
+
     def test_worker_never_auto_selects_anonymous_portal_ticket(self):
         with self.session_factory() as db:
             existing = db.get(TicketRecord, "ticket-1")

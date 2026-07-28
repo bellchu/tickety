@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { Alert, Badge, Button, Dialog, EmptyState, ErrorState, IconButton, Skeleton } from "@/components/ui";
 import { api } from "@/lib/api";
+import { canAccessProtectedIntelligence } from "@/lib/auth";
 import type { Ticket, TicketListSort } from "@/lib/types";
 import { cn, formatTimeAgo } from "@/lib/utils";
 
@@ -114,7 +115,7 @@ function LoadingQueue() {
   );
 }
 
-export function TicketList({ onCreate }: { onCreate: () => void }) {
+export function TicketList({ onCreate }: { onCreate?: () => void }) {
   const queryClient = useQueryClient();
   const selectAllRef = useRef<HTMLInputElement>(null);
   const [searchInput, setSearchInput] = useState("");
@@ -178,7 +179,7 @@ export function TicketList({ onCreate }: { onCreate: () => void }) {
     placeholderData: (previous) => previous,
   });
   const meQuery = useQuery({ queryKey: ["auth-me"], queryFn: api.getAuthMe, retry: false });
-  const canBulk = meQuery.data?.role === "admin" || meQuery.data?.role === "supervisor";
+  const canBulk = canAccessProtectedIntelligence(meQuery.data);
   const categoriesQuery = useQuery({ queryKey: ["ticket-categories"], queryFn: api.getCategories, retry: false });
   const usersQuery = useQuery({ queryKey: ["users"], queryFn: api.getUsers, enabled: canBulk, retry: false });
 
@@ -302,7 +303,7 @@ export function TicketList({ onCreate }: { onCreate: () => void }) {
         </div>
         <div className="flex flex-col gap-2 sm:flex-row">
           <Button variant="secondary" onClick={() => exportPage(tickets)} disabled={!tickets.length || pageQuery.isLoading || pageTransitioning} leadingIcon={<Download className="h-4 w-4" />}>Export page</Button>
-          <Button onClick={onCreate} leadingIcon={<Plus className="h-4 w-4" />}>New ticket</Button>
+          {onCreate && <Button onClick={onCreate} leadingIcon={<Plus className="h-4 w-4" />}>New ticket</Button>}
         </div>
       </header>
 
@@ -370,7 +371,7 @@ export function TicketList({ onCreate }: { onCreate: () => void }) {
       {pageQuery.isLoading || pageTransitioning ? <LoadingQueue /> : pageQuery.isError ? (
         <ErrorState title="Tickets could not be loaded" description="The queue is unavailable, so no ticket data is being shown. Check the connection and retry." actionLabel="Retry queue" onRetry={() => void pageQuery.refetch()} retrying={pageQuery.isFetching} />
       ) : tickets.length === 0 ? (
-        <EmptyState title={activeFilterCount || search ? "No tickets match this view" : "No tickets yet"} description={activeFilterCount || search ? "Try removing a filter or changing the search terms." : "Create a ticket to start the support queue."} icon={<Inbox className="h-5 w-5" />} action={<Button variant="secondary" onClick={activeFilterCount || search ? clearFilters : onCreate}>{activeFilterCount || search ? "Clear filters" : "Create ticket"}</Button>} />
+        <EmptyState title={activeFilterCount || search ? "No tickets match this view" : "No tickets yet"} description={activeFilterCount || search ? "Try removing a filter or changing the search terms." : onCreate ? "Create a ticket to start the support queue." : "No tickets are available in this workspace."} icon={<Inbox className="h-5 w-5" />} action={activeFilterCount || search ? <Button variant="secondary" onClick={clearFilters}>Clear filters</Button> : onCreate ? <Button variant="secondary" onClick={onCreate}>Create ticket</Button> : undefined} />
       ) : (
         <>
           <div className="hidden overflow-hidden rounded-2xl border border-linen-400 bg-linen-50 shadow-sm md:block">

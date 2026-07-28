@@ -49,12 +49,21 @@ docker compose up -d    # or ./deploy.sh for K8s
 open http://localhost:3000
 ```
 
-> **Demo mode is on by default.** No login is required, but AI and protected
-> administration routes are disabled. To require authentication, configure the
-> deployment for production as described in [Production mode](#production-mode).
+> **Demo mode is on by default.** Public browsing does not require login. Sign in
+> with the seeded administrator to configure the workspace and use protected AI,
+> intelligence, integration, maintenance, ticket, and IAM features. Demo agents,
+> supervisors, and the anonymous fallback remain blocked from those protected
+> features.
 
-**Default demo accounts** (when login is required):
+**Default demo accounts** (also available for an explicit demo sign-in):
 `alice@company.com` / `bob@company.com` / `carol@company.com` — password `tickety123`
+
+Alice is the seeded demo administrator. Existing-user password changes are
+disabled in demo mode; IAM administrators can still create users with an initial
+password and manage profiles, roles, and account status. Automatic AI and
+embedding workflows require `LOGIN_REQUIRED=true` in demo mode in addition to
+their individual enable flags; explicitly requested admin operations remain
+available without changing the public browsing mode.
 
 ## LLM Providers
 
@@ -173,9 +182,10 @@ are allowed by default. Prompt-free
 latency, retry, token, failure, and synthetic-result counters are available to
 admins and supervisors at `GET /admin/llm/metrics`.
 
-Externally triggered AI, intelligence, provider settings, and AI maintenance
-routes require a real authenticated session and `APP_MODE=production`. Demo
-fallback identities are never accepted on those routes. Provider-origin
+Externally triggered AI, intelligence, provider settings, integrations, and AI
+maintenance routes require a real authenticated session. In demo mode they are
+limited to administrators; production retains its existing role permissions.
+Demo fallback identities are never accepted on those routes. Provider-origin
 changes also require the corresponding credential to be re-entered, preventing
 an existing key from being silently forwarded to a new destination. External
 webhooks are rejected unless `WEBHOOK_SECRET` is configured, the
@@ -199,9 +209,10 @@ environment/Secret and roll out the affected workloads.
 
 ## Production mode
 
-Tickety ships in **demo mode** for local, read-oriented evaluation. Billable or
-sensitive AI routes are disabled in that mode. For production, set deployment
-environment/Secret values before starting the workloads:
+Tickety ships in **demo mode** for evaluation with anonymous read access and an
+explicitly authenticated administrator feature path. Production remains the
+required mode for private deployments and deployment-managed security controls.
+Set deployment environment/Secret values before starting production workloads:
 
 `APP_MODE` is deployment-owned and cannot be changed through the settings API.
 Production mode never creates the fixed demo accounts or sample data, even if

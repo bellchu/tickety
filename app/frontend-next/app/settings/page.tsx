@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, APIError } from "@/lib/api";
@@ -291,7 +292,7 @@ export default function SettingsPage() {
     const value = form[key as keyof SettingsType] as string | undefined;
     if (value === "true") return true;
     if (value === "false") return false;
-    return appMode !== "production";
+    return false;
   };
   const keyReady = (key: string) => {
     const setFlag = data?.[`${key}__set`];
@@ -895,6 +896,19 @@ export default function SettingsPage() {
           )}
         </SettingsSection>
 
+        <SettingsSection title="User & IAM" subtitle="Manage who can access Tickety and what operational permissions they receive.">
+          <div className="rounded-xl border border-linen-400 bg-linen-100 p-4 sm:p-5">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+              <div className="max-w-2xl">
+                <div className="flex items-center gap-2 text-sm font-semibold text-ink-700"><Users className="h-4 w-4 text-semantic-primary" aria-hidden="true" />Team access management</div>
+                <p className="mt-2 text-sm leading-6 text-ink-500">Add, update, and deactivate team accounts from the agent roster. Admins manage configuration and access; supervisors oversee queues and intelligence in production; agents work assigned tickets.</p>
+                {appMode === "demo" && <p className="mt-3 text-xs leading-5 text-ink-400">Demo administrators can manage roles and account status. Existing account passwords are not editable in demo mode.</p>}
+              </div>
+              <Link href="/agents" className="inline-flex min-h-10 shrink-0 items-center justify-center rounded-lg bg-semantic-primary px-4 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-semantic-primary-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2">Manage users &amp; roles</Link>
+            </div>
+          </div>
+        </SettingsSection>
+
         {/* ═══ Custom Statuses ═══ */}
         <StatusConfigSection />
 
@@ -963,7 +977,7 @@ function DemoAdministrationState({ version }: { version?: BuildInfo }) {
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.12em] text-semantic-primary">Administration</p>
           <h1 className="mt-1 text-3xl font-semibold tracking-[-0.03em] text-ink-700">System settings</h1>
-          <p className="mt-2 text-sm leading-6 text-ink-500">Administration controls are intentionally isolated from the public demo workspace.</p>
+          <p className="mt-2 text-sm leading-6 text-ink-500">Sign in with a demo administrator account to configure this demo workspace.</p>
         </div>
       </header>
 
@@ -973,10 +987,10 @@ function DemoAdministrationState({ version }: { version?: BuildInfo }) {
             <ShieldCheck className="h-5 w-5" aria-hidden="true" />
           </div>
           <div className="max-w-2xl">
-            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-blue-600">Public demo protection</p>
-            <h2 className="mt-1 text-xl font-semibold text-ink-700">Administration is locked in demo mode</h2>
+            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-blue-600">Demo administrator access</p>
+            <h2 className="mt-1 text-xl font-semibold text-ink-700">Sign in to manage this demo</h2>
             <p className="mt-2 text-sm leading-6 text-ink-500">
-              The demo identity can explore Tickety workflows, but configuration, credentials, integrations, and AI provider controls remain unavailable. A production deployment with a private administrator account is required to manage these settings.
+              Configuration, integrations, and user access are available to an active demo administrator. The public demo session and demo supervisors remain read-only for protected administration features.
             </p>
           </div>
         </div>

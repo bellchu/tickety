@@ -43,12 +43,19 @@ class SettingsSecurityTests(unittest.TestCase):
         self.assertTrue(result["DATABASE_URL__set"])
         self.assertNotIn("database-password", result["DATABASE_URL"])
 
-    def test_demo_mode_cannot_enable_automatic_ai_from_stale_settings(self):
+    def test_demo_mode_requires_login_for_automatic_ai(self):
         with patch.dict(os.environ, {
             "APP_MODE": "demo",
             "AUTO_TRIAGE_ENABLED": "true",
         }, clear=False):
             self.assertFalse(settings.automation_enabled("AUTO_TRIAGE_ENABLED"))
+
+        with patch.dict(os.environ, {
+            "APP_MODE": "demo",
+            "LOGIN_REQUIRED": "true",
+            "AUTO_TRIAGE_ENABLED": "true",
+        }, clear=False):
+            self.assertTrue(settings.automation_enabled("AUTO_TRIAGE_ENABLED"))
 
     def test_runtime_reset_logs_only_exception_kinds(self):
         from app.backend.integrations import registry
