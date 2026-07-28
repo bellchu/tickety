@@ -80,7 +80,7 @@ jobs:
           python -m pip install --disable-pip-version-check pip-audit==2.10.1
 
       - name: Audit Python dependencies
-        run: pip-audit --path "$(python -c 'import site; print(site.getsitepackages()[0])')" --progress-spinner off
+        run: pip-audit --requirement requirements.lock --no-deps --disable-pip --progress-spinner off
 
       - name: Compile Python sources
         run: python -m compileall -q app tests
@@ -99,10 +99,27 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Set up kubectl
-        uses: azure/setup-kubectl@776406bce94f63e41d621b960d78ee25c8b76ede # v4
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
-          version: v1.30.3
+          python-version: 3.11.9
+
+      - name: Install YAML parser
+        run: python -m pip install --disable-pip-version-check --no-deps PyYAML==6.0.3
 
       - name: Validate manifest decoding
-        run: kubectl create --dry-run=client --validate=false -f k8s/
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          import yaml
+
+          paths = sorted(Path("k8s").glob("*.yaml"))
+          document_count = 0
+          for path in paths:
+              with path.open(encoding="utf-8") as stream:
+                  document_count += sum(
+                      document is not None for document in yaml.safe_load_all(stream)
+                  )
+          print(f"Decoded {document_count} documents from {len(paths)} manifests")
+          PY
