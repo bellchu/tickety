@@ -75,12 +75,12 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --disable-pip-version-check pip==24.2
+          python -m pip install --disable-pip-version-check pip==26.1.2 setuptools==83.0.0
           python -m pip install --disable-pip-version-check -r requirements.lock
           python -m pip install --disable-pip-version-check pip-audit==2.10.1
 
       - name: Audit Python dependencies
-        run: pip-audit --requirement requirements.lock --no-deps --disable-pip --progress-spinner off
+        run: pip-audit --requirement requirements.lock --progress-spinner off
 
       - name: Compile Python sources
         run: python -m compileall -q app tests
@@ -104,22 +104,28 @@ jobs:
         with:
           python-version: 3.11.9
 
-      - name: Install YAML parser
-        run: python -m pip install --disable-pip-version-check --no-deps PyYAML==6.0.3
+      - name: Install manifest decoder
+        run: python -m pip install --disable-pip-version-check PyYAML==6.0.3
 
       - name: Validate manifest decoding
         run: |
           python - <<'PY'
           from pathlib import Path
-
           import yaml
 
-          paths = sorted(Path("k8s").glob("*.yaml"))
-          document_count = 0
-          for path in paths:
-              with path.open(encoding="utf-8") as stream:
-                  document_count += sum(
-                      document is not None for document in yaml.safe_load_all(stream)
-                  )
-          print(f"Decoded {document_count} documents from {len(paths)} manifests")
+          count = 0
+          for path in sorted(Path("k8s").glob("*.yaml")):
+              for index, document in enumerate(yaml.safe_load_all(path.read_text()), start=1):
+                  if document is None:
+                      continue
+                  if not isinstance(document, dict):
+                      raise SystemExit(f"{path}:{index}: document must be a mapping")
+                  for field in ("apiVersion", "kind", "metadata"):
+                      if field not in document:
+                          raise SystemExit(f"{path}:{index}: missing {field}")
+                  metadata = document["metadata"]
+                  if not isinstance(metadata, dict) or not metadata.get("name"):
+                      raise SystemExit(f"{path}:{index}: missing metadata.name")
+                  count += 1
+          print(f"Decoded {count} Kubernetes resources.")
           PY
