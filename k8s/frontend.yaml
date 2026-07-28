@@ -46,10 +46,13 @@ spec:
         # the route handler reads this non-public var at request time instead.
         - name: BACKEND_URL
           value: "http://backend-service:8000"
-        # Server-only public origin for absolute metadata URLs. This manifest is
-        # the local OrbStack target exposed by frontend-service on port 17000.
+        # Server-only public origin for absolute metadata URLs. Keep it aligned
+        # with the backend's deployment-owned FRONTEND_URL setting.
         - name: SITE_URL
-          value: "http://localhost:17000"
+          valueFrom:
+            secretKeyRef:
+              name: tickety-secrets
+              key: FRONTEND_URL
         startupProbe:
           httpGet:
             path: /
@@ -117,3 +120,22 @@ spec:
       name: http
       port: 17000
       targetPort: 3000
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: frontend-ingress
+  namespace: tickety
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: tickety.situ.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend-service
+                port:
+                  number: 17000
