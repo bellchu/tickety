@@ -405,6 +405,29 @@ class ProtectedAIRouteTests(unittest.TestCase):
                     )
                     self.assertNotEqual(response.status_code, 403, response.text)
 
+    def test_standalone_oauth_status_is_available_but_not_configured(self):
+        from app.backend.integrations import registry
+
+        self.client.cookies.set(main.SESSION_COOKIE, "real-session")
+        headers = {"Sec-Fetch-Site": "same-origin"}
+        with (
+            patch.dict(os.environ, {"APP_MODE": "demo", "ITSM_PROVIDER": "standalone"}),
+            patch.dict(registry._ADAPTERS, {}, clear=True),
+        ):
+            status = self.client.get("/oauth/status", headers=headers)
+            authorize = self.client.get("/oauth/authorize", headers=headers)
+
+        self.assertEqual(
+            status.json(),
+            {"configured": False, "connected": False, "domain": ""},
+        )
+        self.assertEqual(status.status_code, 200, status.text)
+        self.assertEqual(authorize.status_code, 400, authorize.text)
+        self.assertEqual(
+            authorize.json(),
+            {"detail": "OAuth client ID and secret not configured"},
+        )
+
     def test_demo_non_admin_session_cannot_use_protected_routes(self):
         self.client.cookies.set(main.SESSION_COOKIE, "agent-session")
         with patch.object(main.settings_module, "is_production_mode", return_value=False):

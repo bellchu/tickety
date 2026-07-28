@@ -7,6 +7,13 @@ from ..schema import ExternalTicket, WebhookEvent
 
 class BaseITSMAdapter(ABC):
     provider_name: str = "base"
+    domain: str = ""
+    oauth_access_token: str = ""
+
+    @property
+    def oauth_configured(self) -> bool:
+        """OAuth is unsupported unless an adapter explicitly implements it."""
+        return False
 
     @abstractmethod
     async def fetch_new_tickets(self, since: Optional[datetime] = None) -> List[ExternalTicket]:
