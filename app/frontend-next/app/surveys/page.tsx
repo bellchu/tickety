@@ -1,291 +1,74 @@
 "use client";
 
 import { useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { BarChart3, MessageSquareHeart, Send, Star } from "lucide-react";
+import { Alert, Badge, Button, Dialog, EmptyState, ErrorState, Skeleton } from "@/components/ui";
 import { api } from "@/lib/api";
-import type { SurveyTemplate, SurveyOut, Ticket } from "@/lib/types";
-import {
-  MessageSquareHeart, Plus, RefreshCw, X, Send, Star, BarChart3,
-} from "lucide-react";
-import { cn } from "@/lib/utils";
+import type { SurveyTemplate, Ticket } from "@/lib/types";
 
-const RATING_LABELS: Record<string, string> = {
-  "5": "5 ★",
-  "4": "4 ★",
-  "3": "3 ★",
-  "2": "2 ★",
-  "1": "1 ★",
-};
+function formatDate(value: string | null) {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "—" : new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(date);
+}
 
 export default function SurveysPage() {
   const queryClient = useQueryClient();
-
-  const [showForm, setShowForm] = useState(false);
-
-  const { data: stats, isLoading: statsLoading } = useQuery({
-    queryKey: ["surveyStats"],
-    queryFn: api.getSurveyStats,
-  });
-
-  const { data: surveys, isLoading: surveysLoading } = useQuery({
-    queryKey: ["surveys"],
-    queryFn: api.getSurveys,
-  });
-
-  const { data: templates } = useQuery({
-    queryKey: ["surveyTemplates"],
-    queryFn: api.getSurveyTemplates,
-  });
-
-  const { data: tickets } = useQuery({
-    queryKey: ["tickets"],
-    queryFn: api.getTickets,
-  });
-
-  const sendMut = useMutation({
-    mutationFn: ({ ticketId, templateId }: { ticketId: string; templateId: number }) =>
-      api.sendSurvey(ticketId, templateId),
+  const [formOpen, setFormOpen] = useState(false);
+  const [notice, setNotice] = useState(false);
+  const statsQuery = useQuery({ queryKey: ["surveyStats"], queryFn: api.getSurveyStats });
+  const surveysQuery = useQuery({ queryKey: ["surveys"], queryFn: api.getSurveys });
+  const templatesQuery = useQuery({ queryKey: ["surveyTemplates"], queryFn: api.getSurveyTemplates });
+  const ticketsQuery = useQuery({ queryKey: ["tickets"], queryFn: api.getTickets });
+  const sendMutation = useMutation({
+    mutationFn: ({ ticketId, templateId }: { ticketId: string; templateId: number }) => api.sendSurvey(ticketId, templateId),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["surveys"] });
-      queryClient.invalidateQueries({ queryKey: ["surveyStats"] });
-      setShowForm(false);
+      void queryClient.invalidateQueries({ queryKey: ["surveys"] });
+      void queryClient.invalidateQueries({ queryKey: ["surveyStats"] });
+      setFormOpen(false);
+      setNotice(true);
     },
   });
-
-  const distribution = stats?.distribution || {};
-  const maxDist = Math.max(1, ...Object.values(distribution));
+  const stats = statsQuery.data;
+  const distribution = stats?.distribution ?? {};
+  const distributionTotal = Object.values(distribution).reduce((sum, count) => sum + count, 0);
+  const surveys = surveysQuery.data ?? [];
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-end justify-between gap-4">
-        <div className="space-y-1.5">
-          <h1 className="font-serif text-3xl text-ink-700">Surveys</h1>
-          <p className="text-[13px] text-ink-500">
-            CSAT &amp; feedback · measure satisfaction
-          </p>
-        </div>
-        <button onClick={() => setShowForm(true)} className="btn-primary text-xs">
-          <Send className="w-4 h-4" strokeWidth={1.5} />
-          Send Survey
-        </button>
-      </div>
+    <div className="mx-auto max-w-7xl space-y-6">
+      <header className="flex flex-col gap-4 border-b border-linen-400 pb-6 sm:flex-row sm:items-end sm:justify-between">
+        <div><p className="text-xs font-semibold uppercase tracking-[0.16em] text-ink-400">Experience signals</p><h1 className="mt-2 text-3xl font-semibold tracking-[-0.04em] text-ink-700">Surveys</h1><p className="mt-2 max-w-2xl text-sm leading-6 text-ink-500">Measure satisfaction after service delivery and monitor response quality over time.</p></div>
+        <Button leadingIcon={<Send className="h-4 w-4" />} onClick={() => { sendMutation.reset(); setFormOpen(true); }}>Send survey</Button>
+      </header>
+      {notice && <Alert variant="success" title="Survey sent" action={<Button size="sm" variant="ghost" onClick={() => setNotice(false)}>Dismiss</Button>}>The request is now included in delivery and response reporting.</Alert>}
 
-      {/* Stats bar */}
-      {statsLoading ? (
-        <div className="grid grid-cols-4 gap-3">
-          {[1, 2, 3, 4].map((i) => (
-            <div key={i} className="card-surface p-4 space-y-1.5">
-              <div className="skeleton h-3 w-16" />
-              <div className="skeleton h-6 w-10" />
-            </div>
-          ))}
-        </div>
-      ) : stats ? (
-        <div className="grid grid-cols-4 gap-3">
-          <div className="card-surface p-4 space-y-1.5">
-            <p className="kpi-label">Total Sent</p>
-            <p className="kpi-value">{stats.total_sent}</p>
-          </div>
-          <div className="card-surface p-4 space-y-1.5">
-            <p className="kpi-label">Response Rate</p>
-            <p className="kpi-value">{stats.response_rate}%</p>
-          </div>
-          <div className="card-surface p-4 space-y-1.5">
-            <p className="kpi-label">Avg Rating</p>
-            <p className="kpi-value">{stats.avg_rating.toFixed(1)}</p>
-          </div>
-          <div className="card-surface p-4 space-y-1.5">
-            <p className="kpi-label">Responded</p>
-            <p className="kpi-value">{stats.responded}</p>
-          </div>
-        </div>
-      ) : null}
+      <section aria-label="Survey performance" className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <Metric label="Total sent" value={stats ? stats.total_sent.toLocaleString() : "—"} detail="All delivery attempts" loading={statsQuery.isLoading} />
+        <Metric label="Response rate" value={stats ? `${stats.response_rate}%` : "—"} detail="Completed of sent" loading={statsQuery.isLoading} />
+        <Metric label="Average rating" value={stats ? stats.avg_rating.toFixed(1) : "—"} detail="Five-point scale" loading={statsQuery.isLoading} />
+        <Metric label="Responses" value={stats ? stats.responded.toLocaleString() : "—"} detail="Feedback received" loading={statsQuery.isLoading} />
+      </section>
+      {statsQuery.isError && <Alert variant="warning" title="Survey summary unavailable">The delivery ledger remains available below.</Alert>}
 
-      {/* Rating distribution + avg rating */}
-      {stats && Object.keys(distribution).length > 0 && (
-        <div className="card-surface p-6 flex gap-8">
-          <div className="shrink-0 flex flex-col items-center justify-center w-24">
-            <p className="text-4xl font-serif text-ink-700">{stats.avg_rating.toFixed(1)}</p>
-            <div className="flex items-center gap-0.5 mt-1">
-              {[1, 2, 3, 4, 5].map((s) => (
-                <Star
-                  key={s}
-                  className={cn(
-                    "w-3 h-3",
-                    s <= Math.round(stats.avg_rating) ? "text-amber-500 fill-amber-500" : "text-linen-400"
-                  )}
-                />
-              ))}
-            </div>
-            <p className="text-[11px] text-ink-400 mt-1">avg rating</p>
-          </div>
-          <div className="flex-1 space-y-2">
-            {[5, 4, 3, 2, 1].map((r) => {
-              const count = distribution[String(r)] || 0;
-              const pct = maxDist > 0 ? (count / maxDist) * 100 : 0;
-              return (
-                <div key={r} className="flex items-center gap-3">
-                  <span className="text-xs text-ink-500 w-8 text-right tabular-nums">{RATING_LABELS[String(r)]}</span>
-                  <div className="flex-1 h-5 bg-linen-200 rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-amber-400 rounded-full transition-all"
-                      style={{ width: `${pct}%` }}
-                    />
-                  </div>
-                  <span className="text-xs text-ink-400 w-6 tabular-nums">{count}</span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
+      {stats && distributionTotal > 0 && <section className="grid gap-6 rounded-2xl border border-linen-400 bg-linen-50 p-5 shadow-sm sm:grid-cols-[11rem_1fr] sm:p-6" aria-labelledby="rating-distribution-title"><div className="flex flex-col justify-center rounded-xl bg-ink-700 p-5 text-white"><p className="text-xs font-semibold uppercase tracking-[0.12em] text-white/60">CSAT score</p><p className="mt-3 text-5xl font-semibold tracking-[-0.06em] tabular-nums">{stats.avg_rating.toFixed(1)}</p><div className="mt-3 flex gap-1" aria-label={`${stats.avg_rating.toFixed(1)} out of 5 stars`}>{[1,2,3,4,5].map((value) => <Star key={value} className={`h-4 w-4 ${value <= Math.round(stats.avg_rating) ? "fill-amber-400 text-amber-400" : "text-white/30"}`} aria-hidden="true" />)}</div><p className="mt-3 text-xs text-white/60">{distributionTotal} rated responses</p></div><div><div className="flex items-center gap-2"><BarChart3 className="h-4 w-4 text-ink-400" aria-hidden="true" /><h2 id="rating-distribution-title" className="text-sm font-semibold text-ink-700">Rating distribution</h2></div><div className="mt-5 space-y-3">{[5,4,3,2,1].map((rating) => { const count = distribution[String(rating)] ?? 0; const percentage = distributionTotal ? Math.round((count / distributionTotal) * 100) : 0; return <div key={rating} className="grid grid-cols-[2.5rem_1fr_3.5rem] items-center gap-3 text-xs"><span className="font-medium text-ink-600">{rating} star</span><div className="h-2.5 overflow-hidden rounded-full bg-linen-300" role="progressbar" aria-label={`${rating} star responses`} aria-valuenow={percentage} aria-valuemin={0} aria-valuemax={100}><div className="h-full rounded-full bg-amber-400" style={{ width: `${percentage}%` }} /></div><span className="text-right tabular-nums text-ink-500">{count} · {percentage}%</span></div>; })}</div></div></section>}
 
-      {/* Surveys table */}
-      {surveysLoading ? (
-        <div className="card-surface p-6 space-y-3">
-          {[1, 2, 3, 4].map((i) => (
-            <div key={i} className="skeleton h-12 w-full" />
-          ))}
-        </div>
-      ) : !surveys || surveys.length === 0 ? (
-        <div className="card-surface p-12 text-center text-ink-400">
-          <MessageSquareHeart className="w-8 h-8 mx-auto mb-3 opacity-40" />
-          <p className="text-sm">No surveys sent yet</p>
-        </div>
-      ) : (
-        <div className="card-surface overflow-hidden">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-linen-300 bg-linen-100">
-                <th className="px-4 py-3 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">Ticket</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">Sent</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">Responded</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {surveys.map((s) => (
-                <tr key={s.id} className="border-b border-linen-200 last:border-0 hover:bg-linen-100">
-                  <td className="px-4 py-3 font-medium text-ink-700 max-w-xs truncate">
-                    {s.ticket_subject || s.ticket_id}
-                  </td>
-                  <td className="px-4 py-3 text-ink-500 text-xs">
-                    {s.sent_at ? new Date(s.sent_at).toLocaleDateString() : "—"}
-                  </td>
-                  <td className="px-4 py-3 text-ink-500 text-xs">
-                    {s.responded_at ? new Date(s.responded_at).toLocaleDateString() : "—"}
-                  </td>
-                  <td className="px-4 py-3">
-                    <span
-                      className={cn(
-                        "badge",
-                        s.responded_at
-                          ? "bg-moss-400/15 text-moss-600 border-moss-400/30"
-                          : "bg-amber-400/15 text-amber-600 border-amber-400/30"
-                      )}
-                    >
-                      {s.responded_at ? "Responded" : "Sent"}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {/* Send Survey modal */}
-      {showForm && (
-        <SendSurveyModal
-          tickets={tickets || []}
-          templates={templates || []}
-          onClose={() => setShowForm(false)}
-          onSubmit={(ticketId, templateId) => sendMut.mutate({ ticketId, templateId })}
-          loading={sendMut.isPending}
-          error={sendMut.error}
-        />
-      )}
+      <section className="overflow-hidden rounded-2xl border border-linen-400 bg-linen-50 shadow-sm">
+        <div className="border-b border-linen-400 p-4"><h2 className="text-sm font-semibold text-ink-700">Delivery ledger</h2><p className="mt-1 text-xs text-ink-500">{surveys.length} survey request{surveys.length === 1 ? "" : "s"}</p></div>
+        {surveysQuery.isLoading ? <div className="space-y-3 p-5" aria-label="Loading survey ledger">{Array.from({ length: 5 }, (_, index) => <Skeleton key={index} className="h-14 w-full" />)}</div> : surveysQuery.isError ? <ErrorState className="m-5" title="The survey ledger could not be loaded" description="No records were changed. Retry the request to restore the delivery view." onRetry={() => void surveysQuery.refetch()} retrying={surveysQuery.isFetching} /> : surveys.length === 0 ? <EmptyState className="m-5" icon={<MessageSquareHeart className="h-5 w-5" />} title="No surveys sent yet" description="Send a survey after resolving a ticket to begin measuring customer satisfaction." action={<Button onClick={() => setFormOpen(true)}>Send survey</Button>} /> : <>
+          <div className="divide-y divide-linen-300 md:hidden">{surveys.map((survey) => <article key={survey.id} className="p-4"><div className="flex items-start justify-between gap-3"><p className="min-w-0 truncate text-sm font-semibold text-ink-700">{survey.ticket_subject || survey.ticket_id}</p><Badge variant={survey.responded_at ? "success" : "warning"} dot>{survey.responded_at ? "Responded" : "Awaiting response"}</Badge></div><dl className="mt-3 grid grid-cols-2 gap-3 text-xs"><div><dt className="text-ink-400">Sent</dt><dd className="mt-1 text-ink-600">{formatDate(survey.sent_at)}</dd></div><div><dt className="text-ink-400">Responded</dt><dd className="mt-1 text-ink-600">{formatDate(survey.responded_at)}</dd></div></dl></article>)}</div>
+          <div className="hidden overflow-x-auto md:block"><table className="w-full text-sm"><thead className="bg-linen-100 text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-ink-400"><tr><th scope="col" className="px-5 py-3">Ticket</th><th scope="col" className="px-4 py-3">Sent</th><th scope="col" className="px-4 py-3">Responded</th><th scope="col" className="px-5 py-3">Status</th></tr></thead><tbody className="divide-y divide-linen-300">{surveys.map((survey) => <tr key={survey.id} className="hover:bg-linen-100"><td className="max-w-sm px-5 py-4 font-semibold text-ink-700"><span className="block truncate">{survey.ticket_subject || survey.ticket_id}</span></td><td className="px-4 py-4 text-xs text-ink-500">{formatDate(survey.sent_at)}</td><td className="px-4 py-4 text-xs text-ink-500">{formatDate(survey.responded_at)}</td><td className="px-5 py-4"><Badge variant={survey.responded_at ? "success" : "warning"} dot>{survey.responded_at ? "Responded" : "Awaiting response"}</Badge></td></tr>)}</tbody></table></div>
+        </>}
+      </section>
+      <SendSurveyDialog open={formOpen} tickets={ticketsQuery.data ?? []} templates={templatesQuery.data ?? []} dependenciesLoading={ticketsQuery.isLoading || templatesQuery.isLoading} dependenciesError={ticketsQuery.isError || templatesQuery.isError} onOpenChange={(open) => { if (!open) sendMutation.reset(); setFormOpen(open); }} onSubmit={(ticketId, templateId) => sendMutation.mutate({ ticketId, templateId })} pending={sendMutation.isPending} error={sendMutation.error} />
     </div>
   );
 }
 
-function SendSurveyModal({
-  tickets,
-  templates,
-  onClose,
-  onSubmit,
-  loading,
-  error,
-}: {
-  tickets: Ticket[];
-  templates: SurveyTemplate[];
-  onClose: () => void;
-  onSubmit: (ticketId: string, templateId: number) => void;
-  loading: boolean;
-  error: unknown;
-}) {
-  const [ticketId, setTicketId] = useState("");
-  const [templateId, setTemplateId] = useState("");
+function Metric({ label, value, detail, loading }: { label: string; value: string; detail: string; loading: boolean }) { return <div className="rounded-2xl border border-linen-400 bg-linen-50 p-4 shadow-sm sm:p-5"><p className="text-xs font-semibold uppercase tracking-[0.1em] text-ink-400">{label}</p>{loading ? <><Skeleton className="mt-4 h-8 w-20" /><Skeleton className="mt-3 h-3 w-28" /></> : <><p className="mt-3 text-3xl font-semibold tracking-[-0.04em] tabular-nums text-ink-700">{value}</p><p className="mt-1 text-xs leading-5 text-ink-500">{detail}</p></>}</div>; }
 
-  const errorMsg = error instanceof Error ? error.message : error ? String(error) : null;
-  const activeTemplates = templates.filter((t) => t.is_active);
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-ink-800/30 backdrop-blur-sm"
-      onClick={onClose}
-    >
-      <div
-        className="card-surface w-full max-w-md p-6 space-y-4"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between">
-          <h2 className="font-serif text-xl text-ink-700">Send Survey</h2>
-          <button onClick={onClose} className="p-1 rounded text-ink-400 hover:bg-linen-200">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-        <div className="space-y-3">
-          <label className="block space-y-1">
-            <span className="text-xs font-medium text-ink-500">Ticket</span>
-            <select value={ticketId} onChange={(e) => setTicketId(e.target.value)} className="input-base">
-              <option value="">Select a ticket…</option>
-              {tickets.map((t) => (
-                <option key={t.id} value={t.id}>{t.subject}</option>
-              ))}
-            </select>
-          </label>
-          <label className="block space-y-1">
-            <span className="text-xs font-medium text-ink-500">Template</span>
-            <select value={templateId} onChange={(e) => setTemplateId(e.target.value)} className="input-base">
-              <option value="">Select a template…</option>
-              {activeTemplates.map((t) => (
-                <option key={t.id} value={t.id}>{t.name}</option>
-              ))}
-            </select>
-          </label>
-          {templateId && (
-            <p className="text-xs text-ink-400 bg-linen-100 rounded-lg p-3">
-              {activeTemplates.find((t) => String(t.id) === templateId)?.question}
-            </p>
-          )}
-        </div>
-        {errorMsg && <p className="text-xs text-rust-500">Failed: {errorMsg}</p>}
-        <div className="flex items-center justify-end gap-2">
-          <button onClick={onClose} className="px-3 py-2 rounded text-xs text-ink-500 hover:bg-linen-200">
-            Cancel
-          </button>
-          <button
-            onClick={() => onSubmit(ticketId, Number(templateId))}
-            disabled={loading || !ticketId || !templateId}
-            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-clay-500 text-linen-50 text-xs font-semibold hover:bg-clay-600 disabled:opacity-50"
-          >
-            {loading && <RefreshCw className="w-3 h-3 animate-spin" />}
-            <Send className="w-3 h-3" />
-            Send
-          </button>
-        </div>
-      </div>
-    </div>
-  );
+function SendSurveyDialog({ open, tickets, templates, dependenciesLoading, dependenciesError, onOpenChange, onSubmit, pending, error }: { open: boolean; tickets: Ticket[]; templates: SurveyTemplate[]; dependenciesLoading: boolean; dependenciesError: boolean; onOpenChange: (open: boolean) => void; onSubmit: (ticketId: string, templateId: number) => void; pending: boolean; error: unknown }) {
+  const [ticketId, setTicketId] = useState(""); const [templateId, setTemplateId] = useState(""); const activeTemplates = templates.filter((template) => template.is_active); const selectedTemplate = activeTemplates.find((template) => String(template.id) === templateId);
+  const errorMessage = error instanceof Error ? error.message : error ? String(error) : null;
+  return <Dialog open={open} onOpenChange={onOpenChange} title="Send survey" description="Choose the completed service interaction and the feedback prompt recipients will receive." dismissible={!pending} closeOnBackdrop={!pending} footer={<><Button variant="secondary" onClick={() => onOpenChange(false)} disabled={pending}>Cancel</Button><Button leadingIcon={<Send className="h-4 w-4" />} onClick={() => onSubmit(ticketId, Number(templateId))} pending={pending} pendingLabel="Sending…" disabled={!ticketId || !templateId || dependenciesLoading || dependenciesError}>Send survey</Button></>}><div className="space-y-4">{errorMessage && <Alert variant="danger" title="Survey was not sent">{errorMessage}</Alert>}{dependenciesError && <Alert variant="danger" title="Survey options are unavailable">Close this dialog and retry after tickets and templates are available.</Alert>}<label className="block"><span className="text-sm font-medium text-ink-700">Ticket <span className="text-semantic-danger">*</span></span><select className="input-base mt-2 w-full" value={ticketId} onChange={(event) => setTicketId(event.target.value)} disabled={dependenciesLoading || dependenciesError}><option value="">{dependenciesLoading ? "Loading tickets…" : "Select a ticket"}</option>{tickets.map((ticket) => <option key={ticket.id} value={ticket.id}>{ticket.subject}</option>)}</select></label><label className="block"><span className="text-sm font-medium text-ink-700">Template <span className="text-semantic-danger">*</span></span><select className="input-base mt-2 w-full" value={templateId} onChange={(event) => setTemplateId(event.target.value)} disabled={dependenciesLoading || dependenciesError}><option value="">Select a template</option>{activeTemplates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}</select></label>{selectedTemplate && <div className="rounded-xl border border-linen-400 bg-linen-100 p-4"><p className="text-xs font-semibold uppercase tracking-[0.1em] text-ink-400">Recipient prompt</p><p className="mt-2 text-sm leading-6 text-ink-700">{selectedTemplate.question}</p></div>}</div></Dialog>;
 }

@@ -15,7 +15,21 @@ export const queryClient = new QueryClient({
 // needing the browser to reach the in-cluster backend directly (it can't).
 const API_PREFIX = "/api";
 
-async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
+export class APIError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "APIError";
+  }
+}
+
+function redirectExpiredSessionToLogin(path: string, status: number) {
+  if (status !== 401 || typeof window === "undefined" || path.startsWith("/auth/")) return;
+  const currentPath = `${window.location.pathname}${window.location.search}`;
+  if (currentPath.startsWith("/login") || currentPath.startsWith("/portal")) return;
+  window.location.replace(`/login?next=${encodeURIComponent(currentPath)}`);
+}
+
+async function fetchAPIResponse<T>(path: string, options?: RequestInit): Promise<{ data: T; response: Response }> {
   const res = await fetch(`${API_PREFIX}${path}`, {
     ...options,
     headers: { "Content-Type": "application/json", ...(options?.headers || {}) },
@@ -33,13 +47,37 @@ async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
         detail = text;
       }
     }
-    throw new Error(detail);
+    redirectExpiredSessionToLogin(path, res.status);
+    throw new APIError(detail, res.status);
   }
-  return text ? JSON.parse(text) : ({} as T);
+  return { data: text ? JSON.parse(text) : ({} as T), response: res };
+}
+
+async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
+  return (await fetchAPIResponse<T>(path, options)).data;
 }
 
 export const api = {
   getTickets: () => fetchAPI<import("./types").Ticket[]>("/tickets"),
+  getTicketsPage: async (options: import("./types").TicketListParams = {}) => {
+    const params = new URLSearchParams();
+    if (options.status) params.set("status", options.status);
+    if (options.priority) params.set("priority", options.priority);
+    if (options.assigneeId) params.set("assignee_id", options.assigneeId);
+    if (options.category) params.set("category", options.category);
+    if (options.search) params.set("search", options.search);
+    if (options.sort) params.set("sort", options.sort);
+    if (options.limit != null) params.set("limit", String(options.limit));
+    if (options.offset != null) params.set("offset", String(options.offset));
+    const path = `/tickets${params.size ? `?${params.toString()}` : ""}`;
+    const { data, response } = await fetchAPIResponse<import("./types").Ticket[]>(path);
+    return {
+      tickets: data,
+      limit: Number(response.headers.get("x-page-limit")) || options.limit || 100,
+      offset: Number(response.headers.get("x-page-offset")) || options.offset || 0,
+      hasMore: response.headers.get("x-has-more") === "true",
+    } satisfies import("./types").TicketPage;
+  },
   createTicket: (payload: import("./types").TicketCreateInput) =>
     fetchAPI<import("./types").Ticket>("/tickets", {
       method: "POST",
@@ -95,8 +133,11 @@ export const api = {
     fetchAPI<import("./types").AccountHealth>(`/intelligence/health/${encodeURIComponent(reporter)}`),
   getIntelRoute: (ticketId: string) =>
     fetchAPI<import("./types").RouteRecommendation>(`/intelligence/route/${ticketId}`),
-  generateTicketSummary: (ticketId: string) =>
-    fetchAPI<import("./types").TicketSummary>(`/tickets/${ticketId}/summary`, { method: "POST" }),
+  generateTicketSummary: (ticketId: string, force = false) =>
+    fetchAPI<import("./types").TicketSummary>(
+      `/tickets/${ticketId}/summary?force=${force ? 1 : 0}`,
+      { method: "POST" }
+    ),
   getRecommendedSolution: (ticketId: string, force = false) =>
     fetchAPI<import("./types").RecommendedSolution>(
       `/intelligence/resolve/${ticketId}?force=${force ? 1 : 0}`,
@@ -138,7 +179,7 @@ export const api = {
       body: JSON.stringify({ email, password }),
     }),
   logout: () => fetchAPI<{ status: string }>("/auth/logout", { method: "POST" }),
-  getAuthMe: () => fetchAPI<import("./types").UserOut>("/auth/me"),
+  getAuthMe: () => fetchAPI<import("./types").AuthContext>("/auth/me"),
   getSsoConfig: () => fetchAPI<{ enabled: boolean; provider: string }>("/auth/sso/config"),
   // Users / Agents CRUD
   getUsers: () => fetchAPI<import("./types").UserOut[]>("/users"),
@@ -154,12 +195,19 @@ export const api = {
     }),
   deleteUser: (id: string) => fetchAPI<{ status: string }>(`/users/${id}`, { method: "DELETE" }),
   // Knowledge Base
-  getKbArticles: (search?: string, category?: string) => {
+  getKbArticles: async (search?: string, category?: string) => {
     const params = new URLSearchParams();
     if (search) params.set("search", search);
     if (category) params.set("category", category);
-    const qs = params.toString();
-    return fetchAPI<import("./types").KbArticle[]>(`/kb${qs ? "?" + qs : ""}`);
+    params.set("limit", "500");
+    params.set("offset", "0");
+    const { data, response } = await fetchAPIResponse<import("./types").KbArticle[]>(
+      `/kb?${params.toString()}`,
+    );
+    return {
+      articles: data,
+      hasMore: response.headers.get("x-has-more") === "true",
+    };
   },
   getKbArticle: (id: string) => fetchAPI<import("./types").KbArticle>(`/kb/${id}`),
   createKbArticle: (payload: import("./types").KbArticleCreateInput) =>
@@ -191,12 +239,13 @@ export const api = {
   // Reports
   getReportSummary: () => fetchAPI<import("./types").ReportSummary>("/reports/summary"),
   getReportVolume: () => fetchAPI<{ days: string[]; counts: number[] }>("/reports/volume"),
-  getReportByCategory: () => fetchAPI<{ categories: string[]; counts: number[] }>("/reports/by-category"),
+  getReportByCategory: () =>
+    fetchAPI<import("./types").ReportByCategoryResponse>("/reports/by-category"),
   getReportByStatus: () => fetchAPI<{ statuses: string[]; counts: number[] }>("/reports/by-status"),
   getReportSlaCompliance: () =>
     fetchAPI<Record<string, { total: number; breached: number; compliance: number }>>("/reports/sla-compliance"),
   getReportResolutionTime: () =>
-    fetchAPI<{ categories: string[]; avg_hours: number[] }>("/reports/resolution-time"),
+    fetchAPI<import("./types").ReportResolutionTimeResponse>("/reports/resolution-time"),
   // Projects
   getProjects: () => fetchAPI<import("./types").Project[]>("/projects"),
   createProject: (payload: { name: string; key: string; description?: string; lead_id?: string }) =>
@@ -302,12 +351,13 @@ export const api = {
   getTimeSummary: () => fetchAPI<{ total_hours: number; today_hours: number }>("/time-entries/summary"),
   // Self-Service Portal
   portalCreateTicket: (subject: string, description: string, reporter: string, priority = "P3") =>
-    fetchAPI<import("./types").PortalTicket>("/portal/tickets", {
+    fetchAPI<import("./types").PortalTicketCreated>("/portal/tickets", {
       method: "POST",
       body: JSON.stringify({ subject, description, reporter, priority }),
     }),
-  portalListTickets: (reporter: string, ticketId: string) =>
-    fetchAPI<import("./types").PortalTicket[]>(
-      `/portal/tickets?reporter=${encodeURIComponent(reporter)}&ticket_id=${encodeURIComponent(ticketId)}`
-    ),
+  portalGetTicket: (accessToken: string) => {
+    return fetchAPI<import("./types").PortalTicket>("/portal/tickets", {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+  },
 };

@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api";
+import { api, APIError } from "@/lib/api";
+import { canAccessAdministration, isDemoAdministrationContext } from "@/lib/auth";
 import { Settings as SettingsType, LlmCatalog, LlmProvider, TicketCategory, BuildInfo, SyncAgentsOptions } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import {
@@ -12,6 +13,7 @@ import {
   Power, KeyRound, Link2, SlidersHorizontal,
 } from "lucide-react";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
+import { Alert, Button, ErrorState, Skeleton } from "@/components/ui";
 
 const PROVIDER_OPTIONS = [
   { value: "standalone", label: "Standalone", description: "Built-in ticketing" },
@@ -21,6 +23,107 @@ const PROVIDER_OPTIONS = [
 ];
 
 const PROVIDER_IDS = ["deepseek", "openai", "openrouter", "azure", "azure_ai", "custom"] as const;
+
+const API_READ_ONLY_KEYS = new Set([
+  "APP_MODE",
+  "SEED_DEMO_DATA",
+  "DATABASE_URL",
+  "NEXT_PUBLIC_API_URL",
+  "NEXT_PUBLIC_WS_URL",
+  "LLM_ALLOW_PRIVATE_ENDPOINTS",
+  "LLM_ALLOW_INSECURE_ENDPOINTS",
+  "LLM_ALLOWED_PROVIDER_HOSTS",
+]);
+
+// Keep this list aligned with app/backend/settings.py::_PRODUCTION_ENV_ONLY_KEYS.
+// Production renders these effective values for visibility, but changes must be
+// made through the reviewed deployment environment/Secret rather than the DB.
+const PRODUCTION_DEPLOYMENT_KEYS = new Set([
+  "DEEPSEEK_API_KEY",
+  "OPENAI_API_KEY",
+  "OPENAI_API_BASE",
+  "OPENROUTER_API_KEY",
+  "OPENROUTER_API_BASE",
+  "AZURE_API_KEY",
+  "AZURE_API_BASE",
+  "AZURE_API_VERSION",
+  "AZURE_AI_API_KEY",
+  "AZURE_AI_API_BASE",
+  "CUSTOM_API_KEY",
+  "CUSTOM_API_BASE",
+  "FRESHSERVICE_API_KEY",
+  "JIRA_API_TOKEN",
+  "FRESHSERVICE_OAUTH_CLIENT_SECRET",
+  "WEBHOOK_SECRET",
+  "WEBHOOK_MAX_AGE_SECONDS",
+  "SSO_CLIENT_SECRET",
+  "CORS_ALLOW_ORIGINS",
+  "COOKIE_SECURE",
+  "COOKIE_SAMESITE",
+  "LOGIN_REQUIRED",
+  "DEFAULT_MODEL",
+  "CUSTOM_PROVIDER_TYPE",
+  "CUSTOM_API_VERSION",
+  "CUSTOM_TEMPERATURE",
+  "CUSTOM_MAX_TOKENS",
+  "LLM_ALLOW_SYNTHETIC",
+  "LLM_REQUEST_TIMEOUT_SECONDS",
+  "LLM_OVERALL_TIMEOUT_SECONDS",
+  "LLM_MAX_PROMPT_CHARS",
+  "LLM_MAX_CONCURRENCY",
+  "LLM_PERSIST_METRICS",
+  "LLM_DAILY_TOKEN_BUDGET",
+  "LLM_PROVIDER_REQUESTS_PER_MINUTE",
+  "LLM_PROVIDER_TOKENS_PER_MINUTE",
+  "LLM_ENFORCE_PROVIDER_LIMITS",
+  "AI_USER_REQUESTS_PER_MINUTE",
+  "AI_USER_REQUESTS_PER_DAY",
+  "ANALYTICS_USER_REQUESTS_PER_MINUTE",
+  "ANALYTICS_USER_REQUESTS_PER_DAY",
+  "AI_INDEX_WRITES_PER_MINUTE",
+  "AI_INDEX_WRITES_PER_DAY",
+  "PORTAL_TICKETS_PER_MINUTE",
+  "PORTAL_TICKETS_PER_DAY",
+  "PORTAL_TICKETS_GLOBAL_PER_MINUTE",
+  "PORTAL_TICKETS_GLOBAL_PER_DAY",
+  "AI_ANALYSIS_LEASE_SECONDS",
+  "AI_ANALYSIS_MAX_ATTEMPTS",
+  "AI_PIPELINE_TIMEOUT_SECONDS",
+  "TICKET_EMBEDDING_ENABLED",
+  "TICKET_EMBEDDING_MODEL",
+  "TICKET_EMBEDDING_DIMENSIONS",
+  "TICKET_EMBEDDING_TIMEOUT_SECONDS",
+  "TICKET_EMBEDDING_MAX_CHARS",
+  "TICKET_EMBEDDING_MAX_COMMENTS_PER_REFRESH",
+  "TICKET_VECTOR_MIN_SCORE",
+  "TICKET_EMBEDDING_API_BASE",
+  "AUTO_TRIAGE_ENABLED",
+  "AUTO_SUMMARIZE_ENABLED",
+  "AUTO_ROUTE_ENABLED",
+  "AUTO_RESOLVE_ENABLED",
+  "AUTO_SYSTEMIC_ENABLED",
+  "ITSM_PROVIDER",
+  "FRESHSERVICE_DOMAIN",
+  "FRESHWORKS_ORG_DOMAIN",
+  "FRESHSERVICE_WORKSPACE_ID",
+  "FRESHSERVICE_TICKET_INCLUDES",
+  "FRESHSERVICE_AGENT_STATE",
+  "FRESHSERVICE_OAUTH_CLIENT_ID",
+  "FRESHSERVICE_OAUTH_REDIRECT_URI",
+  "FRESHSERVICE_OAUTH_SCOPES",
+  "JIRA_BASE_URL",
+  "JIRA_EMAIL",
+  "JIRA_PROJECT_KEY",
+  "JIRA_ISSUE_TYPE",
+  "SYNC_INTERVAL_SECONDS",
+  "SSO_ENABLED",
+  "SSO_PROVIDER",
+  "SSO_CLIENT_ID",
+  "SSO_DISCOVERY_URL",
+  "SSO_REDIRECT_URI",
+  "SSO_ALLOWED_DOMAINS",
+  "SSO_AUTO_PROVISION",
+]);
 
 type FreshserviceAuthMode = "api" | "oauth";
 type AgentSyncMode = "sync" | "merge";
@@ -45,7 +148,11 @@ function ensureHttpsUrl(value: string) {
 }
 
 function isAuthError(error: unknown) {
-  return error instanceof Error && error.message.toLowerCase().includes("not authenticated");
+  return error instanceof APIError && error.status === 401;
+}
+
+function isForbiddenError(error: unknown) {
+  return error instanceof APIError && error.status === 403;
 }
 
 const CATEGORY_COLORS = [
@@ -59,9 +166,17 @@ const CATEGORY_COLORS = [
 ];
 
 async function postMaintenanceAction(path: string) {
-  const res = await fetch(path, { method: "POST" });
+  const res = await fetch(path, { method: "POST", credentials: "include", cache: "no-store" });
   const text = await res.text();
-  const data = text ? JSON.parse(text) : {};
+  let data: Record<string, unknown> = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      if (!res.ok) throw new Error(`Maintenance request failed with HTTP ${res.status}`);
+      throw new Error("Maintenance request returned an invalid response");
+    }
+  }
   if (!res.ok) {
     const detail = typeof data.detail === "string" ? data.detail : `HTTP ${res.status}`;
     throw new Error(detail);
@@ -72,14 +187,34 @@ async function postMaintenanceAction(path: string) {
 export default function SettingsPage() {
   const router = useRouter();
   const queryClient = useQueryClient();
-  const { data, isLoading, error: settingsError } = useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
-  const { data: catalog, error: catalogError } = useQuery({ queryKey: ["llm-catalog"], queryFn: api.getLlmCatalog });
+  const authQuery = useQuery({ queryKey: ["auth-me"], queryFn: api.getAuthMe, retry: false });
+  const canAccessSettings = canAccessAdministration(authQuery.data);
+  const settingsQuery = useQuery({
+    queryKey: ["settings"],
+    queryFn: api.getSettings,
+    enabled: canAccessSettings,
+  });
+  const catalogQuery = useQuery({
+    queryKey: ["llm-catalog"],
+    queryFn: api.getLlmCatalog,
+    enabled: canAccessSettings,
+  });
+  const { data, isLoading, error: settingsError } = settingsQuery;
+  const { data: catalog, error: catalogError } = catalogQuery;
   const { data: version } = useQuery({ queryKey: ["version"], queryFn: api.getVersion, staleTime: Infinity });
-  const { data: syncStatus } = useQuery({ queryKey: ["sync-status"], queryFn: api.getSyncStatus, refetchInterval: 30000 });
+  const { data: syncStatus } = useQuery({
+    queryKey: ["sync-status"],
+    queryFn: api.getSyncStatus,
+    refetchInterval: 30000,
+    enabled: canAccessSettings,
+  });
 
   const [form, setForm] = useState<Partial<SettingsType>>({});
   const [saved, setSaved] = useState(false);
   const [freshserviceAuthMode, setFreshserviceAuthMode] = useState<FreshserviceAuthMode>("api");
+  const appMode = ((form.APP_MODE || data?.APP_MODE) as string) || "demo";
+  const productionSettingsReadOnly = appMode === "production";
+  const isDeploymentManaged = (key: string) => productionSettingsReadOnly && PRODUCTION_DEPLOYMENT_KEYS.has(key);
 
   useEffect(() => {
     if (data) {
@@ -105,7 +240,7 @@ export default function SettingsPage() {
     },
   });
 
-  const authError = isAuthError(settingsError) || isAuthError(catalogError) || isAuthError(mutation.error);
+  const authError = isAuthError(authQuery.error) || isAuthError(settingsError) || isAuthError(catalogError) || isAuthError(mutation.error);
 
   useEffect(() => {
     if (authError) {
@@ -133,6 +268,7 @@ export default function SettingsPage() {
   });
 
   const handleChange = (key: keyof SettingsType, value: string) => {
+    if (isDeploymentManaged(String(key))) return;
     if (mutation.isError) mutation.reset();
     setForm((prev) => ({ ...prev, [key]: value }));
   };
@@ -150,7 +286,6 @@ export default function SettingsPage() {
   }, [form.DEFAULT_MODEL, catalog]);
 
   const activeProvider: LlmProvider | undefined = catalog ? (catalog[activeProviderId] as LlmProvider) : undefined;
-  const appMode = (form.APP_MODE as string) || "demo";
   const itProvider = form.ITSM_PROVIDER || "standalone";
   const automationValue = (key: string) => {
     const value = form[key as keyof SettingsType] as string | undefined;
@@ -178,6 +313,11 @@ export default function SettingsPage() {
     keyReady("JIRA_API_TOKEN")
   );
   const isExternalProvider = itProvider === "freshservice" || itProvider === "jira";
+  const baselineForm = useMemo(() => data ? {
+    ...data,
+    ITSM_PROVIDER: data.ITSM_PROVIDER === "external" ? "freshservice" : data.ITSM_PROVIDER,
+  } : null, [data]);
+  const isDirty = baselineForm ? JSON.stringify(form) !== JSON.stringify(baselineForm) : false;
 
   const handleProviderChange = (pid: string) => {
     const prov = catalog ? (catalog[pid] as LlmProvider) : undefined;
@@ -228,15 +368,19 @@ export default function SettingsPage() {
       const v = form[key as keyof SettingsType];
       if (typeof v !== "string" || v === "") continue;
       if (v.includes("****")) continue;
+      if (API_READ_ONLY_KEYS.has(key)) continue;
+      if (isDeploymentManaged(key)) continue;
       payload[key] = v;
     }
     mutation.mutate(payload);
   };
 
-  if (isLoading) {
+  if (authQuery.isLoading || (canAccessSettings && isLoading)) {
     return (
-      <div className="flex items-center justify-center py-20 text-ink-400">
-        <RefreshCw className="w-5 h-5 animate-spin mr-2" /> Loading settings…
+      <div className="space-y-5" aria-busy="true" aria-label="Loading administration settings">
+        <Skeleton className="h-12 w-72" />
+        <Skeleton className="h-72 w-full" />
+        <Skeleton className="h-72 w-full" />
       </div>
     );
   }
@@ -249,22 +393,80 @@ export default function SettingsPage() {
     );
   }
 
+  if (authQuery.error) {
+    return (
+      <ErrorState
+        title="Session status could not be checked"
+        description="Tickety could not determine whether this session may access administration controls."
+        actionLabel="Retry session check"
+        onRetry={() => void authQuery.refetch()}
+        retrying={authQuery.isFetching}
+      />
+    );
+  }
+
+  if (isDemoAdministrationContext(authQuery.data)) {
+    return <DemoAdministrationState version={version} />;
+  }
+
+  if (!canAccessSettings) {
+    return (
+      <ErrorState
+        title="Administrator access required"
+        description="System settings are available only to a signed-in administrator. Your current session does not have permission to view or change them."
+      />
+    );
+  }
+
+  if (isForbiddenError(settingsError)) {
+    return (
+      <ErrorState
+        title="Administrator access required"
+        description="System settings are available only to a signed-in administrator. Your current session does not have permission to view or change them."
+      />
+    );
+  }
+
+  if (settingsError) {
+    return (
+      <ErrorState
+        title="Settings could not be loaded"
+        description="Administration controls are unavailable, so no configuration values are being shown or changed."
+        actionLabel="Retry settings"
+        onRetry={() => void settingsQuery.refetch()}
+        retrying={settingsQuery.isFetching}
+      />
+    );
+  }
+
   return (
-    <div className="space-y-8 max-w-3xl">
+    <div className="mx-auto max-w-5xl space-y-8">
       {/* Header */}
-      <div className="flex items-center gap-3">
-        <div className="w-10 h-10 rounded-lg bg-linen-300 flex items-center justify-center">
-          <SettingsIcon className="w-5 h-5 text-ink-600" />
+      <header className="flex items-start gap-4 border-b border-linen-300 pb-6">
+        <div className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-[var(--color-primary-soft)] text-semantic-primary">
+          <SettingsIcon className="h-5 w-5" aria-hidden="true" />
         </div>
         <div>
-          <h1 className="font-serif text-2xl text-ink-700">Settings</h1>
-          <p className="text-sm text-ink-500">Configure LLM, ticketing, SLA, categories, and system maintenance</p>
+          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-semantic-primary">Administration</p>
+          <h1 className="mt-1 text-3xl font-semibold tracking-[-0.03em] text-ink-700">System settings</h1>
+          <p className="mt-2 text-sm leading-6 text-ink-500">Configure intelligence, ticketing, security, workflow, and operational maintenance.</p>
         </div>
-      </div>
+      </header>
+
+      {catalogError && !isAuthError(catalogError) && (
+        <Alert variant="warning" title="Model catalog unavailable" action={<Button variant="secondary" size="sm" onClick={() => void catalogQuery.refetch()} pending={catalogQuery.isFetching} pendingLabel="Retrying…">Retry</Button>}>
+          Saved settings are available, but provider and model choices may be incomplete until the catalog reconnects.
+        </Alert>
+      )}
 
       <form onSubmit={handleSubmit} className="space-y-8">
         {/* ═══ LLM Configuration ═══ */}
         <SettingsSection title="LLM Configuration" subtitle="Choose the AI provider and model for ticket triage, summarization, and resolution">
+          {productionSettingsReadOnly && (
+            <DeploymentManagedNotice>
+              Provider selection, model routing, endpoints, and credentials are read-only here. Update the deployment environment/Secret and roll out the workloads to change them.
+            </DeploymentManagedNotice>
+          )}
           <Field label="Provider">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
               {PROVIDER_IDS.map((pid) => {
@@ -277,8 +479,10 @@ export default function SettingsPage() {
                     key={pid}
                     type="button"
                     onClick={() => handleProviderChange(pid)}
+                    disabled={productionSettingsReadOnly}
                     className={cn(
                       "min-h-[68px] rounded border px-3 py-2 text-left transition-colors",
+                      productionSettingsReadOnly && "cursor-not-allowed opacity-70",
                       selected
                         ? "border-clay-500 bg-clay-50 text-clay-700"
                         : "border-linen-400 bg-linen-50 text-ink-600 hover:bg-linen-200"
@@ -298,16 +502,19 @@ export default function SettingsPage() {
             </div>
           </Field>
 
-          <Field label="Default Model">
+          <Field label={<DeploymentManagedLabel label="Default Model" managed={productionSettingsReadOnly} />}>
             {activeProvider && activeProvider.models && activeProvider.models.length > 0 ? (
-              <SearchableSelect
-                value={form.DEFAULT_MODEL || ""}
-                options={activeProvider.models}
-                onChange={(v) => handleChange("DEFAULT_MODEL", v)}
-                placeholder={activeProvider.model_hint || "Select or search for a model…"}
-              />
+              <fieldset disabled={productionSettingsReadOnly} className="contents">
+                <SearchableSelect
+                  value={form.DEFAULT_MODEL || ""}
+                  options={activeProvider.models}
+                  onChange={(v) => handleChange("DEFAULT_MODEL", v)}
+                  placeholder={activeProvider.model_hint || "Select or search for a model…"}
+                  disabled={productionSettingsReadOnly}
+                />
+              </fieldset>
             ) : (
-              <input type="text" value={form.DEFAULT_MODEL || ""} onChange={(e) => handleChange("DEFAULT_MODEL", e.target.value)} placeholder={activeProvider?.model_hint || "model id"} className="input-base" />
+              <input type="text" value={form.DEFAULT_MODEL || ""} onChange={(e) => handleChange("DEFAULT_MODEL", e.target.value)} placeholder={activeProvider?.model_hint || "model id"} className="input-base" disabled={productionSettingsReadOnly} />
             )}
           </Field>
 
@@ -322,11 +529,11 @@ export default function SettingsPage() {
           </div>
 
           {activeProvider?.env_keys.map((ek) => (
-            <Field key={ek.key} label={ek.label} ready={keyReady(ek.key)}>
+            <Field key={ek.key} label={<DeploymentManagedLabel label={ek.label} managed={productionSettingsReadOnly} />} ready={keyReady(ek.key)}>
               {ek.secret ? (
-                <SecretInput value={(form[ek.key as keyof SettingsType] as string) || ""} onChange={(v) => handleChange(ek.key as keyof SettingsType, v)} placeholder={ek.placeholder} />
+                <SecretInput value={(form[ek.key as keyof SettingsType] as string) || ""} onChange={(v) => handleChange(ek.key as keyof SettingsType, v)} placeholder={ek.placeholder} disabled={productionSettingsReadOnly} />
               ) : (
-                <input type="text" value={(form[ek.key as keyof SettingsType] as string) || ""} onChange={(e) => handleChange(ek.key as keyof SettingsType, e.target.value)} placeholder={ek.placeholder} className="input-base" />
+                <input type="text" value={(form[ek.key as keyof SettingsType] as string) || ""} onChange={(e) => handleChange(ek.key as keyof SettingsType, e.target.value)} placeholder={ek.placeholder} className="input-base" disabled={productionSettingsReadOnly} />
               )}
             </Field>
           ))}
@@ -408,11 +615,11 @@ export default function SettingsPage() {
               </div>
 
               {freshserviceAuthMode === "api" ? (
-                <Field label="Freshservice API Key" ready={keyReady("FRESHSERVICE_API_KEY")}>
-                  <SecretInput value={form.FRESHSERVICE_API_KEY || ""} onChange={(v) => handleChange("FRESHSERVICE_API_KEY", v)} placeholder="Paste API key" />
+                <Field label={<DeploymentManagedLabel label="Freshservice API Key" managed={productionSettingsReadOnly} />} ready={keyReady("FRESHSERVICE_API_KEY")}>
+                  <SecretInput value={form.FRESHSERVICE_API_KEY || ""} onChange={(v) => handleChange("FRESHSERVICE_API_KEY", v)} placeholder="Paste API key" disabled={productionSettingsReadOnly} />
                 </Field>
               ) : (
-                <FreshserviceOAuthSetup form={form} onChange={handleChange} keyReady={keyReady} />
+                <FreshserviceOAuthSetup form={form} onChange={handleChange} keyReady={keyReady} productionSettingsReadOnly={productionSettingsReadOnly} />
               )}
 
               <AdvancedPanel title="Advanced Freshservice Sync">
@@ -433,8 +640,8 @@ export default function SettingsPage() {
                       <option value="occasional">Occasional</option>
                     </select>
                   </Field>
-                  <Field label="Webhook Secret" ready={keyReady("WEBHOOK_SECRET")}>
-                    <SecretInput value={form.WEBHOOK_SECRET || ""} onChange={(v) => handleChange("WEBHOOK_SECRET", v)} placeholder="Shared secret" />
+                  <Field label={<DeploymentManagedLabel label="Webhook Secret" managed={productionSettingsReadOnly} />} ready={keyReady("WEBHOOK_SECRET")}>
+                    <SecretInput value={form.WEBHOOK_SECRET || ""} onChange={(v) => handleChange("WEBHOOK_SECRET", v)} placeholder="Shared secret" disabled={productionSettingsReadOnly} />
                   </Field>
                   <Field label="Sync Interval" ready={Boolean(form.SYNC_INTERVAL_SECONDS?.trim())}>
                     <input type="number" min={10} value={form.SYNC_INTERVAL_SECONDS || ""} onChange={(e) => handleChange("SYNC_INTERVAL_SECONDS", e.target.value)} placeholder="60" className="input-base" />
@@ -466,8 +673,8 @@ export default function SettingsPage() {
                 <Field label="Atlassian Email" ready={Boolean(form.JIRA_EMAIL?.trim())}>
                   <input type="email" value={form.JIRA_EMAIL || ""} onChange={(e) => handleChange("JIRA_EMAIL", e.target.value)} placeholder="you@example.com" className="input-base" />
                 </Field>
-                <Field label="Atlassian API Token" ready={keyReady("JIRA_API_TOKEN")}>
-                  <SecretInput value={form.JIRA_API_TOKEN || ""} onChange={(v) => handleChange("JIRA_API_TOKEN", v)} placeholder="Paste API token" />
+                <Field label={<DeploymentManagedLabel label="Atlassian API Token" managed={productionSettingsReadOnly} />} ready={keyReady("JIRA_API_TOKEN")}>
+                  <SecretInput value={form.JIRA_API_TOKEN || ""} onChange={(v) => handleChange("JIRA_API_TOKEN", v)} placeholder="Paste API token" disabled={productionSettingsReadOnly} />
                 </Field>
               </div>
 
@@ -561,15 +768,22 @@ export default function SettingsPage() {
 
         {/* ═══ Security & Auth ═══ */}
         <SettingsSection title="Security & Authentication" subtitle="Require login and configure Single Sign-On (OIDC) for production deployments">
+          {productionSettingsReadOnly && (
+            <DeploymentManagedNotice>
+              Authentication, SSO, CORS, and cookie controls are read-only here. Their effective values come from the deployment environment/Secret.
+            </DeploymentManagedNotice>
+          )}
           <Field label="Runtime Mode">
             <select
               value={appMode}
-              onChange={(e) => handleChange("APP_MODE", e.target.value)}
+              disabled
+              aria-describedby="runtime-mode-help"
               className="input-base"
             >
               <option value="demo">Demo</option>
               <option value="production">Production</option>
             </select>
+            <span id="runtime-mode-help" className="block text-xs leading-5 text-ink-400">Runtime mode is deployment-owned and cannot be changed from the application.</span>
           </Field>
           <Field label="Frontend URL">
             <input
@@ -581,20 +795,22 @@ export default function SettingsPage() {
             />
           </Field>
           <div className="grid grid-cols-2 gap-4">
-            <Field label="CORS Allow Origins">
+            <Field label={<DeploymentManagedLabel label="CORS Allow Origins" managed={productionSettingsReadOnly} />}>
               <input
                 type="text"
                 value={form.CORS_ALLOW_ORIGINS || ""}
                 onChange={(e) => handleChange("CORS_ALLOW_ORIGINS", e.target.value)}
                 placeholder="https://support.example.com"
                 className="input-base"
+                disabled={productionSettingsReadOnly}
               />
             </Field>
-            <Field label="Cookie SameSite">
+            <Field label={<DeploymentManagedLabel label="Cookie SameSite" managed={productionSettingsReadOnly} />}>
               <select
                 value={(form.COOKIE_SAMESITE as string) || "lax"}
                 onChange={(e) => handleChange("COOKIE_SAMESITE", e.target.value)}
                 className="input-base"
+                disabled={productionSettingsReadOnly}
               >
                 <option value="lax">Lax</option>
                 <option value="strict">Strict</option>
@@ -607,21 +823,24 @@ export default function SettingsPage() {
             desc="Require HTTPS for session cookies. Production mode enables this by default."
             value={(form.COOKIE_SECURE as string) === "true" || (((form.COOKIE_SECURE as string) || "") === "" && appMode === "production")}
             onChange={(v) => handleChange("COOKIE_SECURE", v ? "true" : "false")}
+            disabled={productionSettingsReadOnly}
           />
           <ToggleRow
             label="Seed Demo Data"
-            desc="Create demo users and sample tickets on startup outside demo mode."
-            value={(form.SEED_DEMO_DATA as string) === "true"}
-            onChange={(v) => handleChange("SEED_DEMO_DATA", v ? "true" : "false")}
+            desc={appMode === "production" ? "Demo accounts and sample records are permanently disabled in production." : "Demo mode creates local sample users and records on startup."}
+            value={appMode === "demo"}
+            disabled
+            onChange={() => {}}
           />
           <ToggleRow
             label="Require Login"
             desc="When enabled, users must sign in. When disabled (default), the app runs in demo mode — no login needed."
             value={(form.LOGIN_REQUIRED as string) === "true" || (((form.LOGIN_REQUIRED as string) || "") === "" && appMode === "production")}
             onChange={(v) => handleChange("LOGIN_REQUIRED", v ? "true" : "false")}
+            disabled={productionSettingsReadOnly}
           />
 
-          {(form.LOGIN_REQUIRED as string) === "true" && (
+          {appMode === "demo" && (form.LOGIN_REQUIRED as string) === "true" && (
             <div className="rounded border border-amber-400/40 bg-amber-400/5 p-3 text-xs text-ink-600">
               <p className="font-medium mb-1">Default demo accounts (seeded on first start):</p>
               <p>alice@company.com · bob@company.com · carol@company.com</p>
@@ -636,33 +855,35 @@ export default function SettingsPage() {
             desc="Allow users to sign in via an OpenID Connect provider (Google, Azure AD, Okta, etc.)"
             value={(form.SSO_ENABLED as string) === "true"}
             onChange={(v) => handleChange("SSO_ENABLED", v ? "true" : "false")}
+            disabled={productionSettingsReadOnly}
           />
 
           {(form.SSO_ENABLED as string) === "true" && (
             <div className="space-y-4 pt-2">
-              <Field label="SSO Provider Name">
-                <input type="text" value={form.SSO_PROVIDER || ""} onChange={(e) => handleChange("SSO_PROVIDER", e.target.value)} placeholder="e.g. Google, Azure AD, Okta" className="input-base" />
+              <Field label={<DeploymentManagedLabel label="SSO Provider Name" managed={productionSettingsReadOnly} />}>
+                <input type="text" value={form.SSO_PROVIDER || ""} onChange={(e) => handleChange("SSO_PROVIDER", e.target.value)} placeholder="e.g. Google, Azure AD, Okta" className="input-base" disabled={productionSettingsReadOnly} />
               </Field>
-              <Field label="Client ID">
-                <input type="text" value={form.SSO_CLIENT_ID || ""} onChange={(e) => handleChange("SSO_CLIENT_ID", e.target.value)} placeholder="OIDC client ID" className="input-base" />
+              <Field label={<DeploymentManagedLabel label="Client ID" managed={productionSettingsReadOnly} />}>
+                <input type="text" value={form.SSO_CLIENT_ID || ""} onChange={(e) => handleChange("SSO_CLIENT_ID", e.target.value)} placeholder="OIDC client ID" className="input-base" disabled={productionSettingsReadOnly} />
               </Field>
-              <Field label="Client Secret">
-                <SecretInput value={form.SSO_CLIENT_SECRET || ""} onChange={(v) => handleChange("SSO_CLIENT_SECRET", v)} placeholder="OIDC client secret" />
+              <Field label={<DeploymentManagedLabel label="Client Secret" managed={productionSettingsReadOnly} />}>
+                <SecretInput value={form.SSO_CLIENT_SECRET || ""} onChange={(v) => handleChange("SSO_CLIENT_SECRET", v)} placeholder="OIDC client secret" disabled={productionSettingsReadOnly} />
               </Field>
-              <Field label="Discovery URL">
-                <input type="text" value={form.SSO_DISCOVERY_URL || ""} onChange={(e) => handleChange("SSO_DISCOVERY_URL", e.target.value)} placeholder="https://accounts.google.com/.well-known/openid-configuration" className="input-base" />
+              <Field label={<DeploymentManagedLabel label="Discovery URL" managed={productionSettingsReadOnly} />}>
+                <input type="text" value={form.SSO_DISCOVERY_URL || ""} onChange={(e) => handleChange("SSO_DISCOVERY_URL", e.target.value)} placeholder="https://accounts.google.com/.well-known/openid-configuration" className="input-base" disabled={productionSettingsReadOnly} />
               </Field>
-              <Field label="Redirect URI">
-                <input type="text" value={form.SSO_REDIRECT_URI || ""} onChange={(e) => handleChange("SSO_REDIRECT_URI", e.target.value)} placeholder="http://localhost:3000/api/auth/sso/callback" className="input-base" />
+              <Field label={<DeploymentManagedLabel label="Redirect URI" managed={productionSettingsReadOnly} />}>
+                <input type="text" value={form.SSO_REDIRECT_URI || ""} onChange={(e) => handleChange("SSO_REDIRECT_URI", e.target.value)} placeholder="http://localhost:3000/api/auth/sso/callback" className="input-base" disabled={productionSettingsReadOnly} />
               </Field>
-              <Field label="Allowed Email Domains">
-                <input type="text" value={form.SSO_ALLOWED_DOMAINS || ""} onChange={(e) => handleChange("SSO_ALLOWED_DOMAINS", e.target.value)} placeholder="company.com,subsidiary.com" className="input-base" />
+              <Field label={<DeploymentManagedLabel label="Allowed Email Domains" managed={productionSettingsReadOnly} />}>
+                <input type="text" value={form.SSO_ALLOWED_DOMAINS || ""} onChange={(e) => handleChange("SSO_ALLOWED_DOMAINS", e.target.value)} placeholder="company.com,subsidiary.com" className="input-base" disabled={productionSettingsReadOnly} />
               </Field>
               <ToggleRow
                 label="Auto-Provision SSO Users"
                 desc="Create new active agent accounts for trusted SSO domains. Keep disabled when accounts should be pre-approved."
                 value={(form.SSO_AUTO_PROVISION as string) === "true"}
                 onChange={(v) => handleChange("SSO_AUTO_PROVISION", v ? "true" : "false")}
+                disabled={productionSettingsReadOnly}
               />
               <p className="text-xs text-ink-400">
                 Use the well-known URL for your provider. Common ones:<br />
@@ -709,9 +930,11 @@ export default function SettingsPage() {
         <SystemInfoSection version={version} syncStatus={syncStatus} />
 
         {/* ═══ Save Bar ═══ */}
-        <div className="sticky bottom-4 flex items-center justify-end gap-3 bg-linen-50/90 backdrop-blur rounded-lg border border-linen-400 px-4 py-3 shadow-sm">
+        <div className="sticky bottom-4 z-30 flex flex-col gap-3 rounded-xl border border-linen-400 bg-linen-50/95 px-4 py-3 shadow-[var(--shadow-raised)] backdrop-blur sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-xs text-ink-500">{isDirty ? "You have unsaved configuration changes." : "Configuration is up to date."}</p>
+          <div className="flex items-center justify-end gap-3">
           {saved && (
-            <span className="flex items-center gap-1.5 text-sm text-ink-600">
+            <span role="status" className="flex items-center gap-1.5 text-sm text-moss-600">
               <CheckCircle2 className="w-4 h-4" /> Saved
             </span>
           )}
@@ -720,12 +943,52 @@ export default function SettingsPage() {
               <AlertCircle className="w-4 h-4" /> {mutation.error instanceof Error ? mutation.error.message : "Failed to save"}
             </span>
           )}
-          <button type="submit" disabled={mutation.isPending} className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-clay-500 text-linen-50 text-sm font-semibold hover:bg-clay-600 disabled:opacity-50 transition-colors">
-            {mutation.isPending ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+          <Button type="submit" disabled={!isDirty} pending={mutation.isPending} pendingLabel="Saving…" leadingIcon={<Save className="h-4 w-4" />}>
             Save Changes
-          </button>
+          </Button>
+          </div>
         </div>
       </form>
+    </div>
+  );
+}
+
+function DemoAdministrationState({ version }: { version?: BuildInfo }) {
+  return (
+    <div className="mx-auto max-w-5xl space-y-8">
+      <header className="flex items-start gap-4 border-b border-linen-300 pb-6">
+        <div className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-[var(--color-primary-soft)] text-semantic-primary">
+          <SettingsIcon className="h-5 w-5" aria-hidden="true" />
+        </div>
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-semantic-primary">Administration</p>
+          <h1 className="mt-1 text-3xl font-semibold tracking-[-0.03em] text-ink-700">System settings</h1>
+          <p className="mt-2 text-sm leading-6 text-ink-500">Administration controls are intentionally isolated from the public demo workspace.</p>
+        </div>
+      </header>
+
+      <div className="rounded-xl border border-blue-400/30 bg-blue-400/5 p-6 sm:p-8" role="status">
+        <div className="flex items-start gap-4">
+          <div className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-white text-blue-500 shadow-sm">
+            <ShieldCheck className="h-5 w-5" aria-hidden="true" />
+          </div>
+          <div className="max-w-2xl">
+            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-blue-600">Public demo protection</p>
+            <h2 className="mt-1 text-xl font-semibold text-ink-700">Administration is locked in demo mode</h2>
+            <p className="mt-2 text-sm leading-6 text-ink-500">
+              The demo identity can explore Tickety workflows, but configuration, credentials, integrations, and AI provider controls remain unavailable. A production deployment with a private administrator account is required to manage these settings.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <SettingsSection title="Runtime information" subtitle="This public information confirms which application build is running.">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <InfoTile label="Mode" value="Demo" />
+          <InfoTile label="Version" value={version?.version || "—"} />
+          <InfoTile label="Build SHA" value={version?.build_sha || "—"} mono />
+        </div>
+      </SettingsSection>
     </div>
   );
 }
@@ -826,10 +1089,12 @@ function FreshserviceOAuthSetup({
   form,
   onChange,
   keyReady,
+  productionSettingsReadOnly,
 }: {
   form: Partial<SettingsType>;
   onChange: (key: keyof SettingsType, value: string) => void;
   keyReady: (key: string) => boolean;
+  productionSettingsReadOnly: boolean;
 }) {
   const { data: status } = useQuery({ queryKey: ["oauth-status"], queryFn: api.getOAuthStatus, refetchInterval: 30000 });
   const authMut = useMutation({ mutationFn: api.getOAuthAuthorizeUrl, onSuccess: (res) => window.open(res.url, "_blank", "width=700,height=600") });
@@ -847,8 +1112,8 @@ function FreshserviceOAuthSetup({
         <Field label="OAuth Client ID" ready={keyReady("FRESHSERVICE_OAUTH_CLIENT_ID")}>
           <SecretInput value={form.FRESHSERVICE_OAUTH_CLIENT_ID || ""} onChange={(v) => onChange("FRESHSERVICE_OAUTH_CLIENT_ID", v)} placeholder="Client ID" />
         </Field>
-        <Field label="OAuth Client Secret" ready={keyReady("FRESHSERVICE_OAUTH_CLIENT_SECRET")}>
-          <SecretInput value={form.FRESHSERVICE_OAUTH_CLIENT_SECRET || ""} onChange={(v) => onChange("FRESHSERVICE_OAUTH_CLIENT_SECRET", v)} placeholder="Client secret" />
+        <Field label={<DeploymentManagedLabel label="OAuth Client Secret" managed={productionSettingsReadOnly} />} ready={keyReady("FRESHSERVICE_OAUTH_CLIENT_SECRET")}>
+          <SecretInput value={form.FRESHSERVICE_OAUTH_CLIENT_SECRET || ""} onChange={(v) => onChange("FRESHSERVICE_OAUTH_CLIENT_SECRET", v)} placeholder="Client secret" disabled={productionSettingsReadOnly} />
         </Field>
       </div>
 
@@ -887,10 +1152,10 @@ function FreshserviceOAuthSetup({
 
 function SettingsSection({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
   return (
-    <section className="card-surface p-6 space-y-4">
-      <div>
-        <h2 className="text-base font-semibold text-ink-700">{title}</h2>
-        {subtitle && <p className="text-xs text-ink-500 mt-0.5">{subtitle}</p>}
+    <section className="space-y-5 rounded-2xl border border-linen-400 bg-linen-50 p-5 shadow-sm sm:p-6">
+      <div className="border-b border-linen-300 pb-4">
+        <h2 className="text-lg font-semibold tracking-[-0.01em] text-ink-700">{title}</h2>
+        {subtitle && <p className="mt-1 max-w-3xl text-xs leading-5 text-ink-500">{subtitle}</p>}
       </div>
       {children}
     </section>
@@ -908,6 +1173,28 @@ function Field({ label, children, ready }: { label: React.ReactNode; children: R
       </span>
       {children}
     </label>
+  );
+}
+
+function DeploymentManagedLabel({ label, managed }: { label: string; managed: boolean }) {
+  return (
+    <span className="inline-flex flex-wrap items-center gap-2">
+      <span>{label}</span>
+      {managed && (
+        <span className="inline-flex items-center gap-1 rounded-full border border-linen-400 bg-linen-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink-400">
+          <ShieldCheck className="h-3 w-3" aria-hidden="true" /> Deployment managed
+        </span>
+      )}
+    </span>
+  );
+}
+
+function DeploymentManagedNotice({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="flex items-start gap-2 rounded border border-blue-400/30 bg-blue-400/5 p-3 text-xs leading-5 text-ink-600" role="note">
+      <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-blue-500" aria-hidden="true" />
+      <p>{children}</p>
+    </div>
   );
 }
 
@@ -937,7 +1224,7 @@ function OffPill() {
 
 // ═══ Secret Input ═════════════════════════════════════════════
 
-function SecretInput({ value, onChange, placeholder }: { value: string; onChange: (v: string) => void; placeholder?: string }) {
+function SecretInput({ value, onChange, placeholder, disabled = false }: { value: string; onChange: (v: string) => void; placeholder?: string; disabled?: boolean }) {
   const [reveal, setReveal] = useState(false);
   const isMasked = value.includes("****");
   return (
@@ -949,9 +1236,11 @@ function SecretInput({ value, onChange, placeholder }: { value: string; onChange
         placeholder={isMasked ? "•••• stored, type to replace" : placeholder}
         onFocus={() => { if (isMasked) onChange(""); }}
         className="input-base flex-1"
+        disabled={disabled}
       />
-      <button type="button" onClick={() => setReveal((r) => !r)} className="px-3 rounded-lg border border-linen-400 text-xs text-ink-500 hover:bg-linen-200">
-        {reveal ? "Hide" : "Show"}
+      <button type="button" aria-pressed={reveal} onClick={() => setReveal((r) => !r)} disabled={disabled} className="px-3 rounded-lg border border-linen-400 text-xs text-ink-500 hover:bg-linen-200 disabled:cursor-not-allowed disabled:opacity-60">
+        <span className="sr-only">{reveal ? "Hide secret value" : "Show secret value"}</span>
+        <span aria-hidden="true">{reveal ? "Hide" : "Show"}</span>
       </button>
     </div>
   );
@@ -1272,15 +1561,19 @@ function AgentSection() {
 
 // ═══ Toggle Row (AI automation) ═══════════════════════════════
 
-function ToggleRow({ label, desc, value, onChange }: { label: string; desc: string; value: boolean; onChange: (v: boolean) => void }) {
+function ToggleRow({ label, desc, value, onChange, disabled = false }: { label: string; desc: string; value: boolean; onChange: (v: boolean) => void; disabled?: boolean }) {
   return (
-    <div className="flex items-center justify-between rounded border border-linen-400 p-3">
+    <div className={cn("flex items-center justify-between rounded border border-linen-400 p-3", disabled && "opacity-65")}>
       <div className="min-w-0 flex-1">
         <p className="text-sm font-medium text-ink-600">{label}</p>
         <p className="text-xs text-ink-400 mt-0.5">{desc}</p>
       </div>
       <button
         type="button"
+        role="switch"
+        aria-checked={value}
+        aria-label={label}
+        disabled={disabled}
         onClick={() => onChange(!value)}
         className={cn(
           "relative shrink-0 w-10 h-5 rounded-full transition-colors ml-3 flex items-center",

@@ -10,7 +10,11 @@ from ..database import (
     UserRecord,
 )
 from ..schema import ExternalTicket, WebhookEvent
+# Kept as a module attribute for compatibility with integrations/tests that
+# patch it. External persistence deliberately never calls it: provider ticket
+# text must be reviewed or explicitly promoted before entering shared RAG.
 from ..ticket_vectors import refresh_ticket_documents_background
+from ..ai_state import invalidate_ticket_ai, invalidate_ticket_resolution
 from .registry import get_adapter
 
 
@@ -31,6 +35,10 @@ def _upsert_ticket(db: Session, ext: ExternalTicket, provider: str, overwrite: b
     workflow_status = "Closed" if ext.status.lower() in ("closed", "resolved") else ext.status
 
     if existing:
+        analysis_input_changed = (
+            existing.subject != ext.subject or existing.description != ext.description
+        )
+        resolution_input_changed = existing.priority != ext.priority
         changed = (
             existing.subject != ext.subject
             or existing.description != ext.description
@@ -53,6 +61,10 @@ def _upsert_ticket(db: Session, ext: ExternalTicket, provider: str, overwrite: b
             return "skipped", existing
         existing.subject = ext.subject
         existing.description = ext.description
+        if analysis_input_changed:
+            invalidate_ticket_ai(existing)
+        elif resolution_input_changed:
+            invalidate_ticket_resolution(existing)
         existing.reporter = ext.reporter
         existing.priority = ext.priority
         existing.external_status = ext.status
@@ -78,7 +90,6 @@ def _upsert_ticket(db: Session, ext: ExternalTicket, provider: str, overwrite: b
             existing.status = existing.workflow_status or ext.status
         db.commit()
         db.refresh(existing)
-        refresh_ticket_documents_background(db, existing)
         return "updated", existing
 
     new_ticket = TicketRecord(
@@ -111,7 +122,6 @@ def _upsert_ticket(db: Session, ext: ExternalTicket, provider: str, overwrite: b
     db.add(new_ticket)
     db.commit()
     db.refresh(new_ticket)
-    refresh_ticket_documents_background(db, new_ticket)
     return "new", new_ticket
 
 
@@ -174,7 +184,12 @@ def sync_tickets_from_external(adapter=None) -> dict:
                 if ticket and ext.updated_at:
                     max_persisted_updated_at = max(max_persisted_updated_at or ext.updated_at, ext.updated_at)
             except Exception as e:
-                print(f"[sync] error upserting ticket {ext.external_id}: {e}")
+                print(f"[sync] ticket upsert failed kind={type(e).__name__}")
+                # A flush/commit failure leaves the SQLAlchemy session in a
+                # failed transaction. Reset it before processing the next
+                # ticket so one bad record cannot poison the rest of the
+                # batch or prevent the final sync-state update.
+                db.rollback()
                 result["errors"] += 1
 
         if result["errors"]:
@@ -196,10 +211,10 @@ def sync_tickets_from_external(adapter=None) -> dict:
         ).first()
         if sync_state:
             sync_state.last_status = "error"
-            sync_state.last_error = str(e)
+            sync_state.last_error = f"sync_failed:{type(e).__name__}"
             db.commit()
         result["errors"] += 1
-        print(f"[sync] fatal error: {e}")
+        print(f"[sync] fatal error kind={type(e).__name__}")
     finally:
         db.close()
 
@@ -234,8 +249,6 @@ def fetch_tickets_by_days(adapter=None, days: int = 7, overwrite: bool = False) 
 
         from .. import settings as settings_module
         auto_triage = settings_module.automation_enabled("AUTO_TRIAGE_ENABLED", "AUTO_TRIAGE")
-        auto_summary = settings_module.automation_enabled("AUTO_SUMMARIZE_ENABLED")
-        auto_resolution = settings_module.automation_enabled("AUTO_RESOLVE_ENABLED")
         new_tickets: list = []  # collect for auto-triage
 
         max_persisted_updated_at = None
@@ -257,7 +270,7 @@ def fetch_tickets_by_days(adapter=None, days: int = 7, overwrite: bool = False) 
                 if ticket and ext.updated_at:
                     max_persisted_updated_at = max(max_persisted_updated_at or ext.updated_at, ext.updated_at)
             except Exception as e:
-                print(f"[fetch] error upserting ticket {ext.external_id}: {e}")
+                print(f"[fetch] ticket upsert failed kind={type(e).__name__}")
                 result["errors"] += 1
 
         # Record a successful manual fetch on the sync state so the worker's
@@ -288,63 +301,16 @@ def fetch_tickets_by_days(adapter=None, days: int = 7, overwrite: bool = False) 
         # Auto-triage newly imported tickets
         if auto_triage and new_tickets:
             import asyncio
-            from ..llm_manager import LLMManager
-            from ..brain import IntelligenceEngine
-            from .. import intelligence as intel
-            engine = IntelligenceEngine(LLMManager())
+            from ..main import _auto_process
             db2 = SessionLocal()
             for t in new_tickets:
                 try:
                     t2 = db2.query(TicketRecord).filter(TicketRecord.id == t.id).first()
                     if t2 and not t2.ai_reasoning:
-                        analysis = asyncio.run(engine.process_ticket({
-                            "subject": t2.subject,
-                            "description": t2.description,
-                        }))
-                        t2.sentiment = analysis.get("sentiment")
-                        t2.category = analysis.get("category")
-                        t2.priority = analysis.get("priority")
-                        t2.mood = analysis.get("mood")
-                        t2.complexity = analysis.get("complexity", 1)
-                        t2.ai_reasoning = analysis.get("reasoning")
-                        t2.escalation_risk = intel.escalation_risk(t2)
-                        if analysis.get("suggested_response"):
-                            t2.suggested_response = analysis.get("suggested_response")
-                            t2.ai_review_state = "Awaiting Review"
-                            if (t2.workflow_status or t2.status or "New").lower() in {"new", "open", "processed"}:
-                                t2.workflow_status = "Awaiting Review"
-                        elif analysis.get("action") == "escalate":
-                            t2.ai_review_state = "Escalated"
-                            t2.workflow_status = "Escalated"
-                        else:
-                            t2.ai_review_state = "Processed"
-                            t2.workflow_status = t2.workflow_status or t2.status or "Open"
-                        t2.status = t2.workflow_status or t2.status
-                        db2.commit()
+                        asyncio.run(_auto_process(t2, db2))
                         print(f"[fetch] auto-triaged {t2.id[:8]}")
-
-                        if auto_summary:
-                            try:
-                                summary = asyncio.run(intel.summarize_ticket(
-                                    engine.llm, t2
-                                ))
-                                if summary:
-                                    t2.summary = summary
-                                    db2.commit()
-                            except Exception as se:
-                                print(f"[fetch] summary error on {t2.id[:8]}: {se}")
-
-                        if auto_resolution:
-                            try:
-                                plan = asyncio.run(intel.recommend_resolution(
-                                    engine.llm, t2
-                                ))
-                                t2.recommended_solution = __import__("json").dumps(plan)
-                                db2.commit()
-                            except Exception as re:
-                                print(f"[fetch] resolution error on {t2.id[:8]}: {re}")
                 except Exception as e:
-                    print(f"[fetch] auto-triage error on {t.id}: {e}")
+                    print(f"[fetch] auto-triage error on {t.id} kind={type(e).__name__}")
                     db2.rollback()
             db2.close()
 
@@ -354,10 +320,10 @@ def fetch_tickets_by_days(adapter=None, days: int = 7, overwrite: bool = False) 
         ).first()
         if sync_state:
             sync_state.last_status = "error"
-            sync_state.last_error = str(e)
+            sync_state.last_error = f"fetch_failed:{type(e).__name__}"
             db.commit()
         result["errors"] += 1
-        print(f"[fetch] fatal error: {e}")
+        print(f"[fetch] fatal error kind={type(e).__name__}")
     finally:
         db.close()
 
@@ -392,7 +358,7 @@ def handle_webhook_event(event: WebhookEvent, adapter=None) -> Optional[TicketRe
         db.commit()
         return ticket
     except Exception as e:
-        print(f"[webhook] error: {e}")
+        print(f"[webhook] apply failed kind={type(e).__name__}")
         db.rollback()
         return None
     finally:
@@ -649,6 +615,13 @@ def _import_external_agents(adapter, raw_agents: list[dict[str, Any]], options: 
                         if matched_user and sync_options["merge_existing"]:
                             user = matched_user
                             merged_user = True
+                        elif matched_user:
+                            result["conflicts"] += 1
+                            _limited_append(
+                                result["conflict_details"],
+                                f"{agent['name']} matches an existing Tickety user by {match_reason}; enable merge to link the accounts",
+                            )
+                            continue
                         elif sync_options["create_missing"]:
                             user = _create_external_agent_user(db, agent)
                             created_user = True
@@ -663,6 +636,13 @@ def _import_external_agents(adapter, raw_agents: list[dict[str, Any]], options: 
                     if matched_user and sync_options["merge_existing"]:
                         user = matched_user
                         merged_user = True
+                    elif matched_user:
+                        result["conflicts"] += 1
+                        _limited_append(
+                            result["conflict_details"],
+                            f"{agent['name']} matches an existing Tickety user by {match_reason}; enable merge to link the accounts",
+                        )
+                        continue
                     elif sync_options["create_missing"]:
                         user = _create_external_agent_user(db, agent)
                         created_user = True
@@ -694,8 +674,8 @@ def _import_external_agents(adapter, raw_agents: list[dict[str, Any]], options: 
                     if isinstance(raw_agent, dict)
                     else "unknown"
                 )
-                detail = f"Agent {agent_id}: {e}"
-                print(f"[agents] error processing agent {agent_id}: {e}")
+                detail = f"agent_processing_failed:{type(e).__name__}"
+                print(f"[agents] processing failed kind={type(e).__name__}")
                 db.rollback()
                 result["errors"] += 1
                 result["error_details"].append(detail)
@@ -704,9 +684,9 @@ def _import_external_agents(adapter, raw_agents: list[dict[str, Any]], options: 
             result["tickets_reassigned"] = _reconcile_ticket_assignees(db, adapter.provider_name)
 
     except Exception as e:
-        print(f"[agents] fatal error: {e}")
+        print(f"[agents] fatal error kind={type(e).__name__}")
         result["errors"] += 1
-        result["error_details"].append(str(e))
+        result["error_details"].append(f"agent_sync_failed:{type(e).__name__}")
     finally:
         db.close()
     return result
@@ -732,10 +712,10 @@ async def async_sync_agents_from_external(adapter=None, options: Optional[dict[s
     try:
         raw_agents = await adapter.fetch_agents()
     except Exception as e:
-        print(f"[agents] fatal error: {e}")
+        print(f"[agents] fatal error kind={type(e).__name__}")
         result = _empty_agent_sync_result()
         result["errors"] += 1
-        result["error_details"].append(str(e))
+        result["error_details"].append(f"agent_fetch_failed:{type(e).__name__}")
         return result
     return _import_external_agents(adapter, raw_agents, options=options)
 

@@ -1,14 +1,17 @@
 "use client";
 
 import { useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { BookOpen, Edit3, Eye, FileText, Plus, Search, Tag, ThumbsDown, ThumbsUp, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
 import type { KbArticle, KbArticleCreateInput } from "@/lib/types";
-import {
-  BookOpen, Plus, RefreshCw, Search, Eye, ThumbsUp, ThumbsDown,
-  X, FileText, Tag, Trash2, Edit3, ChevronRight,
-} from "lucide-react";
-import { cn, formatTimeAgo } from "@/lib/utils";
+import { formatTimeAgo } from "@/lib/utils";
+import { Badge, type BadgeVariant } from "@/components/ui/Badge";
+import { Button, IconButton } from "@/components/ui/Button";
+import { ConfirmDialog, Dialog } from "@/components/ui/Dialog";
+import { Alert, EmptyState, ErrorState, Skeleton } from "@/components/ui/Feedback";
+
+const articleVariant = (status: string): BadgeVariant => status === "published" ? "success" : status === "archived" ? "neutral" : "warning";
 
 export default function KnowledgeBasePage() {
   const queryClient = useQueryClient();
@@ -17,268 +20,81 @@ export default function KnowledgeBasePage() {
   const [selected, setSelected] = useState<KbArticle | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<KbArticle | null>(null);
+  const [deleting, setDeleting] = useState<KbArticle | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
-  const { data: articles, isLoading } = useQuery({
-    queryKey: ["kb-articles", search, categoryFilter],
-    queryFn: () => api.getKbArticles(search || undefined, categoryFilter || undefined),
-  });
-
-  const { data: catData } = useQuery({ queryKey: ["kb-categories"], queryFn: api.getKbCategories });
-  const categories = catData?.categories || [];
+  const articlesQuery = useQuery({ queryKey: ["kb-articles", search, categoryFilter], queryFn: () => api.getKbArticles(search || undefined, categoryFilter || undefined) });
+  const categoriesQuery = useQuery({ queryKey: ["kb-categories"], queryFn: api.getKbCategories });
+  const refreshKnowledge = async () => { await Promise.all([queryClient.invalidateQueries({ queryKey: ["kb-articles"] }), queryClient.invalidateQueries({ queryKey: ["kb-categories"] })]); };
 
   const createMut = useMutation({
     mutationFn: (payload: KbArticleCreateInput) => api.createKbArticle(payload),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["kb-articles"] });
-      queryClient.invalidateQueries({ queryKey: ["kb-categories"] });
-      setShowForm(false);
-    },
+    onSuccess: async (article) => { await refreshKnowledge(); setShowForm(false); setNotice(article.status === "published" ? "Article published to the knowledge base." : "Draft article created."); },
   });
-
   const updateMut = useMutation({
     mutationFn: ({ id, payload }: { id: string; payload: Partial<KbArticleCreateInput> }) => api.updateKbArticle(id, payload),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["kb-articles"] });
-      setEditing(null);
-    },
+    onSuccess: async (article) => { await refreshKnowledge(); setEditing(null); setSelected((current) => current?.id === article.id ? article : current); setNotice("Article changes saved."); },
   });
-
   const deleteMut = useMutation({
     mutationFn: (id: string) => api.deleteKbArticle(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["kb-articles"] }),
+    onSuccess: async () => { await refreshKnowledge(); setDeleting(null); setSelected(null); setNotice("Article removed from the knowledge base."); },
   });
-
   const feedbackMut = useMutation({
     mutationFn: ({ id, helpful }: { id: string; helpful: boolean }) => api.kbFeedback(id, helpful),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["kb-articles"] }),
+    onSuccess: async (_, variables) => { await queryClient.invalidateQueries({ queryKey: ["kb-articles"] }); setNotice(variables.helpful ? "Thanks — your feedback was recorded." : "Thanks — this article has been flagged for improvement."); setSelected(null); },
   });
 
-  const list = articles || [];
-  const published = list.filter((a) => a.status === "published");
+  const articles = articlesQuery.data?.articles ?? [];
+  const articlesTruncated = articlesQuery.data?.hasMore ?? false;
+  const categories = categoriesQuery.data?.categories ?? [];
+  const published = articles.filter((article) => article.status === "published");
+  const totalViews = articles.reduce((sum, article) => sum + article.views, 0);
+  const helpfulTotal = articles.reduce((sum, article) => sum + article.helpful, 0);
+  const feedbackTotal = articles.reduce((sum, article) => sum + article.helpful + article.not_helpful, 0);
+  const helpfulRate = feedbackTotal ? Math.round((helpfulTotal / feedbackTotal) * 100) : 0;
+  const hasFilters = Boolean(search || categoryFilter);
+  const actionError = deleteMut.error || feedbackMut.error;
+  const actionErrorMessage = actionError instanceof Error
+    ? actionError.message
+    : "Could not load categories or complete the requested action.";
 
-  return (
-    <div className="space-y-6">
-      <div className="flex items-end justify-between gap-4">
-        <div className="space-y-1.5">
-          <h1 className="font-serif text-3xl text-ink-700">Knowledge Base</h1>
-          <p className="text-[13px] text-ink-500">
-            {published.length} published articles · self-service guides and solutions
-          </p>
-        </div>
-        <button onClick={() => setShowForm(true)} className="btn-primary text-xs">
-          <Plus className="w-4 h-4" strokeWidth={1.5} />
-          New Article
-        </button>
-      </div>
+  return <div className="space-y-8">
+    <header className="flex flex-col gap-4 border-b border-linen-300 pb-6 sm:flex-row sm:items-end sm:justify-between"><div><div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-ink-400"><BookOpen className="h-4 w-4" aria-hidden="true" /> Self-service operations</div><h1 className="font-serif text-3xl tracking-tight text-ink-700 sm:text-4xl">Knowledge base</h1><p className="mt-2 max-w-2xl text-sm text-ink-500">Turn proven resolutions into clear, trusted guidance for requesters and support teams.</p></div><Button leadingIcon={<Plus className="h-4 w-4" />} onClick={() => { setNotice(null); setShowForm(true); }}>New article</Button></header>
 
-      {/* Search + filters */}
-      <div className="flex items-center gap-3">
-        <div className="relative flex-1">
-          <Search className="w-4 h-4 text-ink-400 absolute left-3 top-1/2 -translate-y-1/2" />
-          <input
-            type="text"
-            placeholder="Search articles…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="input-base input-search"
-          />
-        </div>
-        <select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)} className="input-base w-48">
-          <option value="">All categories</option>
-          {categories.map((c) => <option key={c} value={c}>{c}</option>)}
-        </select>
-      </div>
+    {notice && <Alert variant="success" title="Knowledge base updated">{notice}</Alert>}
+    {(deleteMut.isError || feedbackMut.isError || categoriesQuery.isError) && <Alert variant="danger" title="Some knowledge actions are unavailable">{actionErrorMessage}</Alert>}
 
-      {/* Article list */}
-      {isLoading ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">{[1, 2, 3, 4].map((i) => <div key={i} className="card-surface p-5"><div className="skeleton h-6 w-3/4 mb-3" /><div className="skeleton h-4 w-full mb-2" /><div className="skeleton h-4 w-1/2" /></div>)}</div>
-      ) : list.length === 0 ? (
-        <div className="card-surface p-12 text-center">
-          <BookOpen className="w-10 h-10 text-ink-300 mx-auto mb-3" />
-          <p className="text-ink-500">No articles found. Create your first KB article.</p>
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {list.map((a) => (
-            <div
-              key={a.id}
-              className="card-surface p-5 cursor-pointer hover:border-linen-400 transition-colors group"
-              onClick={() => setSelected(a)}
-            >
-              <div className="flex items-start justify-between gap-3 mb-2">
-                <div className="flex items-center gap-2">
-                  <FileText className="w-4 h-4 text-ink-400 shrink-0" />
-                  <h3 className="text-sm font-semibold text-ink-700 group-hover:text-ink-800">{a.title}</h3>
-                </div>
-                {a.status !== "published" && (
-                  <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold border border-amber-400/30 bg-amber-400/10 text-amber-600 shrink-0">
-                    {a.status}
-                  </span>
-                )}
-              </div>
-              <p className="text-xs text-ink-400 line-clamp-2 mb-3">
-                {a.content.replace(/[#*]/g, "").slice(0, 150)}…
-              </p>
-              <div className="flex items-center gap-3 text-[11px] text-ink-400">
-                {a.category && (
-                  <span className="inline-flex items-center gap-1">
-                    <Tag className="w-3 h-3" /> {a.category}
-                  </span>
-                )}
-                <span className="inline-flex items-center gap-1">
-                  <Eye className="w-3 h-3" /> {a.views}
-                </span>
-                <span className="inline-flex items-center gap-1">
-                  <ThumbsUp className="w-3 h-3" /> {a.helpful}
-                </span>
-                <span className="ml-auto">{formatTimeAgo(a.updated_at)}</span>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+    <section aria-label="Knowledge base summary" className="grid grid-cols-2 gap-3 lg:grid-cols-4"><Metric label="Published" value={published.length} featured /><Metric label="Drafts" value={articles.filter((article) => article.status === "draft").length} /><Metric label="Article views" value={totalViews} /><Metric label="Helpful rating" value={`${helpfulRate}%`} /></section>
 
-      {/* Article reader modal */}
-      {selected && (
-        <ArticleReaderModal
-          article={selected}
-          onClose={() => setSelected(null)}
-          onFeedback={(helpful) => feedbackMut.mutate({ id: selected.id, helpful })}
-        />
-      )}
+    <section aria-labelledby="library-heading" className="space-y-4"><div className="flex flex-col gap-3 lg:flex-row lg:items-end"><div className="min-w-0 flex-1"><h2 id="library-heading" className="text-lg font-semibold text-ink-700">Article library</h2><p className="mt-1 text-xs text-ink-400" aria-live="polite">{articlesQuery.isLoading ? "Loading articles…" : `${articles.length} matching article${articles.length === 1 ? "" : "s"}${articlesTruncated ? " shown" : ""}`}</p></div><label className="relative block min-w-0 flex-1 lg:max-w-md"><span className="sr-only">Search knowledge articles</span><Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-400" aria-hidden="true" /><input type="search" className="input-base input-search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search titles and content…" /></label><label className="lg:w-56"><span className="sr-only">Filter articles by category</span><select className="input-base" value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)}><option value="">All categories</option>{categories.map((category) => <option key={category}>{category}</option>)}</select></label></div>
+      {articlesTruncated && <Alert variant="warning" title="Showing the first 500 articles">Use search or category filters to narrow the library before calculating summary totals.</Alert>}
+      {articlesQuery.isLoading ? <ArticleSkeleton /> : articlesQuery.isError ? <ErrorState title="Could not load knowledge articles" description="Search and article management are temporarily unavailable." onRetry={() => articlesQuery.refetch()} retrying={articlesQuery.isFetching} /> : articles.length === 0 ? <EmptyState icon={<BookOpen className="h-5 w-5" />} title={hasFilters ? "No articles match this search" : "No knowledge articles yet"} description={hasFilters ? "Try a broader search or clear the category filter." : "Capture the first proven resolution so the next requester can self-serve."} action={hasFilters ? <Button variant="secondary" onClick={() => { setSearch(""); setCategoryFilter(""); }}>Clear filters</Button> : <Button leadingIcon={<Plus className="h-4 w-4" />} onClick={() => setShowForm(true)}>New article</Button>} /> : <div className="grid gap-4 lg:grid-cols-2">{articles.map((article) => <ArticleCard key={article.id} article={article} onRead={setSelected} onEdit={setEditing} onDelete={setDeleting} />)}</div>}
+    </section>
 
-      {/* Create / Edit modal */}
-      {(showForm || editing) && (
-        <ArticleFormModal
-          article={editing}
-          categories={categories}
-          onClose={() => { setShowForm(false); setEditing(null); }}
-          onSubmit={(payload) => {
-            if (editing) {
-              updateMut.mutate({ id: editing.id, payload });
-            } else {
-              createMut.mutate(payload);
-            }
-          }}
-          loading={createMut.isPending || updateMut.isPending}
-        />
-      )}
-    </div>
-  );
+    <ArticleReaderDialog open={Boolean(selected)} article={selected} onClose={() => { if (!feedbackMut.isPending) { setSelected(null); feedbackMut.reset(); } }} onEdit={(article) => { setSelected(null); setEditing(article); }} onDelete={(article) => { setSelected(null); setDeleting(article); }} onFeedback={(helpful) => selected && feedbackMut.mutate({ id: selected.id, helpful })} pending={feedbackMut.isPending} error={feedbackMut.error} />
+    <ArticleFormDialog open={showForm || Boolean(editing)} article={editing} categories={categories} onClose={() => { if (!createMut.isPending && !updateMut.isPending) { setShowForm(false); setEditing(null); createMut.reset(); updateMut.reset(); } }} onSubmit={(payload) => editing ? updateMut.mutate({ id: editing.id, payload }) : createMut.mutate(payload)} pending={createMut.isPending || updateMut.isPending} error={createMut.error || updateMut.error} />
+    <ConfirmDialog open={Boolean(deleting)} onOpenChange={(open) => { if (!open) { setDeleting(null); deleteMut.reset(); } }} title="Delete article?" description={<>This permanently removes <strong>{deleting?.title}</strong> and its feedback history. This action cannot be undone.</>} confirmLabel="Delete article" destructive pending={deleteMut.isPending} onConfirm={() => { if (deleting) deleteMut.mutate(deleting.id); }} />
+  </div>;
 }
 
-function ArticleReaderModal({ article, onClose, onFeedback }: {
-  article: KbArticle;
-  onClose: () => void;
-  onFeedback: (helpful: boolean) => void;
-}) {
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink-800/30 backdrop-blur-sm p-4" onClick={onClose}>
-      <div className="card-surface w-full max-w-2xl p-6 space-y-4 max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            {article.category && (
-              <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold border border-linen-400 text-ink-500">
-                {article.category}
-              </span>
-            )}
-            {article.status !== "published" && (
-              <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold border border-amber-400/30 bg-amber-400/10 text-amber-600">
-                {article.status}
-              </span>
-            )}
-          </div>
-          <button onClick={onClose} className="p-1 rounded text-ink-400 hover:bg-linen-200"><X className="w-4 h-4" /></button>
-        </div>
-        <h2 className="font-serif text-2xl text-ink-700">{article.title}</h2>
-        {article.tags && (
-          <div className="flex items-center gap-1.5 flex-wrap">
-            {article.tags.split(",").map((t) => (
-              <span key={t} className="text-[11px] text-ink-400 bg-linen-200 px-2 py-0.5 rounded">#{t.trim()}</span>
-            ))}
-          </div>
-        )}
-        <div className="prose prose-sm max-w-none">
-          <pre className="whitespace-pre-wrap font-sans text-sm text-ink-600 leading-relaxed bg-transparent p-0 border-0">
-            {article.content}
-          </pre>
-        </div>
-        <div className="border-t border-linen-300 pt-4 flex items-center justify-between">
-          <span className="text-xs text-ink-400">{article.views} views · Updated {formatTimeAgo(article.updated_at)}</span>
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-ink-500 mr-1">Was this helpful?</span>
-            <button onClick={() => onFeedback(true)} className="inline-flex items-center gap-1 px-3 py-1.5 rounded border border-linen-400 text-xs text-ink-600 hover:bg-moss-400/10 hover:border-moss-400">
-              <ThumbsUp className="w-3.5 h-3.5" /> Yes ({article.helpful})
-            </button>
-            <button onClick={() => onFeedback(false)} className="inline-flex items-center gap-1 px-3 py-1.5 rounded border border-linen-400 text-xs text-ink-600 hover:bg-rust-400/10 hover:border-rust-400">
-              <ThumbsDown className="w-3.5 h-3.5" /> No ({article.not_helpful})
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
+function Metric({ label, value, featured }: { label: string; value: number | string; featured?: boolean }) { return <div className={`rounded-2xl border p-4 ${featured ? "border-clay-200 bg-[var(--color-primary-soft)]" : "border-linen-300 bg-linen-50"}`}><p className="text-xs font-medium text-ink-500">{label}</p><p className="mt-2 font-serif text-3xl tabular-nums text-ink-700">{value}</p></div>; }
+function ArticleSkeleton() { return <div className="grid gap-4 lg:grid-cols-2" aria-label="Loading knowledge articles">{Array.from({ length: 4 }, (_, i) => <div key={i} className="card-surface p-5"><Skeleton className="h-5 w-3/4" /><Skeleton className="mt-4 h-4 w-full" /><Skeleton className="mt-2 h-4 w-2/3" /><Skeleton className="mt-5 h-6 w-1/3" /></div>)}</div>; }
+
+function ArticleCard({ article, onRead, onEdit, onDelete }: { article: KbArticle; onRead: (article: KbArticle) => void; onEdit: (article: KbArticle) => void; onDelete: (article: KbArticle) => void }) {
+  return <article className="card-surface group flex min-h-56 flex-col p-5 transition-[border-color,box-shadow] hover:border-linen-500 hover:shadow-sm"><div className="flex items-start gap-3"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[var(--color-primary-soft)] text-semantic-primary"><FileText className="h-5 w-5" aria-hidden="true" /></div><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><Badge variant={articleVariant(article.status)} dot>{article.status}</Badge>{article.category && <Badge icon={<Tag className="h-3 w-3" />}>{article.category}</Badge>}</div><h3 className="mt-3 text-base font-semibold leading-6 text-ink-700">{article.title}</h3></div></div><p className="mt-4 line-clamp-3 text-sm leading-6 text-ink-500">{article.content.replace(/[#*_`]/g, " ").replace(/\s+/g, " ").trim() || "No article content yet."}</p><div className="mt-auto flex flex-wrap items-center gap-3 border-t border-linen-200 pt-4 text-xs text-ink-400"><span className="inline-flex items-center gap-1"><Eye className="h-3.5 w-3.5" aria-hidden="true" /> {article.views}</span><span className="inline-flex items-center gap-1"><ThumbsUp className="h-3.5 w-3.5" aria-hidden="true" /> {article.helpful}</span><span>{article.updated_at ? `Updated ${formatTimeAgo(article.updated_at)}` : "Not yet updated"}</span><div className="ml-auto flex gap-1"><IconButton size="sm" aria-label={`Edit ${article.title}`} icon={<Edit3 className="h-4 w-4" />} onClick={() => onEdit(article)} /><IconButton size="sm" aria-label={`Delete ${article.title}`} icon={<Trash2 className="h-4 w-4" />} onClick={() => onDelete(article)} /><Button size="sm" variant="secondary" onClick={() => onRead(article)}>Read</Button></div></div></article>;
 }
 
-function ArticleFormModal({ article, categories, onClose, onSubmit, loading }: {
-  article: KbArticle | null;
-  categories: string[];
-  onClose: () => void;
-  onSubmit: (payload: KbArticleCreateInput) => void;
-  loading: boolean;
-}) {
-  const [title, setTitle] = useState(article?.title || "");
-  const [content, setContent] = useState(article?.content || "");
-  const [category, setCategory] = useState(article?.category || "");
-  const [tags, setTags] = useState(article?.tags || "");
-  const [status, setStatus] = useState(article?.status || "draft");
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink-800/30 backdrop-blur-sm p-4" onClick={onClose}>
-      <div className="card-surface w-full max-w-2xl p-6 space-y-4 max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between">
-          <h2 className="font-serif text-xl text-ink-700">{article ? "Edit Article" : "New Article"}</h2>
-          <button onClick={onClose} className="p-1 rounded text-ink-400 hover:bg-linen-200"><X className="w-4 h-4" /></button>
-        </div>
-        <label className="block space-y-1">
-          <span className="text-xs font-medium text-ink-500">Title</span>
-          <input value={title} onChange={(e) => setTitle(e.target.value)} className="input-base" placeholder="How to…" />
-        </label>
-        <div className="grid grid-cols-2 gap-3">
-          <label className="block space-y-1">
-            <span className="text-xs font-medium text-ink-500">Category</span>
-            <input list="kb-cat-list" value={category} onChange={(e) => setCategory(e.target.value)} className="input-base" placeholder="Network, Software…" />
-            <datalist id="kb-cat-list">{categories.map((c) => <option key={c} value={c} />)}</datalist>
-          </label>
-          <label className="block space-y-1">
-            <span className="text-xs font-medium text-ink-500">Tags (comma-separated)</span>
-            <input value={tags} onChange={(e) => setTags(e.target.value)} className="input-base" placeholder="vpn, network" />
-          </label>
-        </div>
-        <label className="block space-y-1">
-          <span className="text-xs font-medium text-ink-500">Content (Markdown supported)</span>
-          <textarea value={content} onChange={(e) => setContent(e.target.value)} rows={12} className="input-base font-mono text-xs resize-y" placeholder="Write your article…" />
-        </label>
-        <label className="block space-y-1">
-          <span className="text-xs font-medium text-ink-500">Status</span>
-          <select value={status} onChange={(e) => setStatus(e.target.value)} className="input-base">
-            <option value="draft">Draft</option>
-            <option value="published">Published</option>
-            <option value="archived">Archived</option>
-          </select>
-        </label>
-        <div className="flex items-center justify-end gap-2">
-          <button onClick={onClose} className="px-3 py-2 rounded text-xs text-ink-500 hover:bg-linen-200">Cancel</button>
-          <button
-            onClick={() => onSubmit({ title, content, category: category || undefined, tags: tags || undefined, status })}
-            disabled={loading || !title.trim()}
-            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-clay-500 text-linen-50 text-xs font-semibold hover:bg-clay-600 disabled:opacity-50"
-          >
-            {loading && <RefreshCw className="w-3 h-3 animate-spin" />}
-            {article ? "Save" : "Publish"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
+function ArticleReaderDialog({ open, article, onClose, onEdit, onDelete, onFeedback, pending, error }: { open: boolean; article: KbArticle | null; onClose: () => void; onEdit: (article: KbArticle) => void; onDelete: (article: KbArticle) => void; onFeedback: (helpful: boolean) => void; pending: boolean; error: unknown }) {
+  if (!article) return null;
+  return <Dialog open={open} onOpenChange={(next) => { if (!next) onClose(); }} title={article.title} description={<span className="flex flex-wrap items-center gap-2"><Badge variant={articleVariant(article.status)}>{article.status}</Badge>{article.category && <Badge>{article.category}</Badge>}<span>{article.views} views · v{article.version}</span></span>} className="max-w-3xl" dismissible={!pending} footer={<><Button variant="ghost" leadingIcon={<Trash2 className="h-4 w-4" />} onClick={() => onDelete(article)} disabled={pending}>Delete</Button><Button variant="secondary" leadingIcon={<Edit3 className="h-4 w-4" />} onClick={() => onEdit(article)} disabled={pending}>Edit article</Button><Button variant="secondary" leadingIcon={<ThumbsDown className="h-4 w-4" />} onClick={() => onFeedback(false)} disabled={pending}>Needs work</Button><Button leadingIcon={<ThumbsUp className="h-4 w-4" />} onClick={() => onFeedback(true)} pending={pending} pendingLabel="Recording…">Helpful</Button></>}><div className="space-y-5">{error ? <Alert variant="danger" title="Feedback was not recorded">{error instanceof Error ? error.message : "Please try again."}</Alert> : null}{article.tags && <div className="flex flex-wrap gap-2" aria-label="Article tags">{article.tags.split(",").map((tag) => tag.trim()).filter(Boolean).map((tag) => <Badge key={tag}>#{tag}</Badge>)}</div>}<div className="whitespace-pre-wrap text-sm leading-7 text-ink-600">{article.content}</div><div className="border-t border-linen-300 pt-4 text-xs text-ink-400">{article.author_name ? `Written by ${article.author_name}` : "Author not recorded"}{article.updated_at ? ` · Updated ${formatTimeAgo(article.updated_at)}` : ""}</div></div></Dialog>;
 }
+
+function ArticleFormDialog({ open, article, categories, onClose, onSubmit, pending, error }: { open: boolean; article: KbArticle | null; categories: string[]; onClose: () => void; onSubmit: (payload: KbArticleCreateInput) => void; pending: boolean; error: unknown }) { const key = article?.id ?? (open ? "new" : "closed"); return <ArticleFormDialogBody key={key} {...{ open, article, categories, onClose, onSubmit, pending, error }} />; }
+function ArticleFormDialogBody({ open, article, categories, onClose, onSubmit, pending, error }: { open: boolean; article: KbArticle | null; categories: string[]; onClose: () => void; onSubmit: (payload: KbArticleCreateInput) => void; pending: boolean; error: unknown }) {
+  const [form, setForm] = useState({ title: article?.title || "", content: article?.content || "", category: article?.category || "", tags: article?.tags || "", status: article?.status || "draft" });
+  const set = (key: keyof typeof form, value: string) => setForm((current) => ({ ...current, [key]: value }));
+  const errorMessage = error instanceof Error ? error.message : error ? "The article could not be saved." : null;
+  const valid = Boolean(form.title.trim() && form.content.trim());
+  return <Dialog open={open} onOpenChange={(next) => { if (!next) onClose(); }} title={article ? "Edit article" : "New knowledge article"} description="Write clear guidance as a draft. Publication requires review by a different admin or supervisor." className="max-w-3xl" dismissible={!pending} footer={<><Button variant="secondary" onClick={onClose} disabled={pending}>Cancel</Button><Button pending={pending} pendingLabel="Saving…" disabled={!valid} onClick={() => onSubmit({ title: form.title.trim(), content: form.content.trim(), category: form.category || undefined, tags: form.tags || undefined, status: form.status })}>{form.status === "published" ? "Publish reviewed article" : article ? "Save draft" : "Create draft"}</Button></>}><div className="space-y-4">{errorMessage && <Alert variant="danger" title="Could not save article">{errorMessage}</Alert>}<Field label="Title"><input className="input-base" value={form.title} onChange={(e) => set("title", e.target.value)} placeholder="How to restore VPN access" /></Field><div className="grid gap-4 sm:grid-cols-2"><Field label="Category"><input className="input-base" list="kb-categories" value={form.category} onChange={(e) => set("category", e.target.value)} placeholder="Network" /><datalist id="kb-categories">{categories.map((category) => <option key={category} value={category} />)}</datalist></Field><Field label="Tags"><input className="input-base" value={form.tags} onChange={(e) => set("tags", e.target.value)} placeholder="vpn, access, remote" /></Field></div><Field label="Content"><textarea className="input-base min-h-72 resize-y font-mono text-xs leading-6" value={form.content} onChange={(e) => set("content", e.target.value)} placeholder="Describe symptoms, prerequisites, safe steps, verification, and escalation guidance…" /></Field><Field label="Publication status"><select className="input-base" value={form.status} onChange={(e) => set("status", e.target.value)}><option value="draft">Draft</option>{article && <option value="published">Published (independent review)</option>}<option value="archived">Archived</option></select></Field></div></Dialog>;
+}
+function Field({ label, children }: { label: string; children: React.ReactNode }) { return <label className="block"><span className="mb-1.5 block text-xs font-semibold text-ink-500">{label}</span>{children}</label>; }

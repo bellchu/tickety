@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Literal
 from datetime import datetime
 
@@ -57,6 +57,21 @@ class Ticket(BaseModel):
     escalation_risk: int = 0
     summary: Optional[str] = None
     recommended_solution: Optional[str] = None
+    ai_source_hash: Optional[str] = None
+    ai_pipeline_version: Optional[str] = None
+    ai_model: Optional[str] = None
+    ai_status: Optional[str] = None
+    ai_claim_id: Optional[str] = None
+    ai_lease_expires_at: Optional[datetime] = None
+    ai_attempts: int = 0
+    ai_next_attempt_at: Optional[datetime] = None
+    ai_requested_artifacts: Optional[str] = None
+    ai_started_at: Optional[datetime] = None
+    ai_generated_at: Optional[datetime] = None
+    ai_error: Optional[str] = None
+    ai_synthetic: bool = False
+    ai_suggested_priority: Optional[str] = None
+    ai_suggested_category: Optional[str] = None
 
 
 class AIAnalysis(BaseModel):
@@ -143,33 +158,33 @@ class SyncStatus(BaseModel):
 
 class TicketCreate(BaseModel):
     subject: str = Field(..., min_length=1, max_length=200)
-    description: str = ""
-    reporter: str = ""
-    priority: str = "P3"
+    description: str = Field("", max_length=20_000)
+    reporter: str = Field("", max_length=320)
+    priority: str = Field("P3", min_length=1, max_length=32)
     ticket_type: Literal["incident", "request"] = "incident"
-    impact: Optional[str] = None
-    urgency: Optional[str] = None
-    service_id: Optional[str] = None
-    asset_id: Optional[str] = None
+    impact: Optional[str] = Field(None, max_length=120)
+    urgency: Optional[str] = Field(None, max_length=120)
+    service_id: Optional[str] = Field(None, max_length=255)
+    asset_id: Optional[str] = Field(None, max_length=255)
 
 
 class ExternalTicket(BaseModel):
-    external_id: str
-    subject: str
-    description: str
-    reporter: str
-    priority: str
-    status: str
-    assignee_id: Optional[str] = None
+    external_id: str = Field(..., min_length=1, max_length=255)
+    subject: str = Field(..., min_length=1, max_length=500)
+    description: str = Field(..., max_length=100_000)
+    reporter: str = Field(..., max_length=320)
+    priority: str = Field(..., min_length=1, max_length=32)
+    status: str = Field(..., min_length=1, max_length=120)
+    assignee_id: Optional[str] = Field(None, max_length=255)
     updated_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
     resolved_at: Optional[datetime] = None
     due_by: Optional[datetime] = None
     fr_due_by: Optional[datetime] = None
-    ticket_type: Optional[str] = None
-    requester_email: Optional[str] = None
-    external_workspace_id: Optional[str] = None
-    url: Optional[str] = None
+    ticket_type: Optional[str] = Field(None, max_length=120)
+    requester_email: Optional[str] = Field(None, max_length=320)
+    external_workspace_id: Optional[str] = Field(None, max_length=255)
+    url: Optional[str] = Field(None, max_length=2_048)
 
 
 class WebhookEvent(BaseModel):
@@ -201,9 +216,23 @@ class Settings(BaseModel):
     CUSTOM_TEMPERATURE: Optional[str] = None
     CUSTOM_MAX_TOKENS: Optional[str] = None
     DEFAULT_MODEL: Optional[str] = None
+    LLM_ALLOW_SYNTHETIC: Optional[str] = None
+    LLM_REQUEST_TIMEOUT_SECONDS: Optional[str] = None
+    LLM_OVERALL_TIMEOUT_SECONDS: Optional[str] = None
+    LLM_MAX_PROMPT_CHARS: Optional[str] = None
+    LLM_MAX_CONCURRENCY: Optional[str] = None
+    LLM_PERSIST_METRICS: Optional[str] = None
+    LLM_DAILY_TOKEN_BUDGET: Optional[str] = None
+    AI_USER_REQUESTS_PER_MINUTE: Optional[str] = None
+    AI_USER_REQUESTS_PER_DAY: Optional[str] = None
+    AI_ANALYSIS_LEASE_SECONDS: Optional[str] = None
+    AI_ANALYSIS_MAX_ATTEMPTS: Optional[str] = None
     TICKET_EMBEDDING_ENABLED: Optional[str] = None
     TICKET_EMBEDDING_MODEL: Optional[str] = None
     TICKET_EMBEDDING_DIMENSIONS: Optional[str] = None
+    TICKET_EMBEDDING_TIMEOUT_SECONDS: Optional[str] = None
+    TICKET_EMBEDDING_MAX_CHARS: Optional[str] = None
+    TICKET_VECTOR_MIN_SCORE: Optional[str] = None
     TICKET_EMBEDDING_API_BASE: Optional[str] = None
     DATABASE_URL: Optional[str] = None
     ITSM_PROVIDER: Optional[str] = None
@@ -263,9 +292,9 @@ class Settings(BaseModel):
 
 class ResolutionPlan(BaseModel):
     root_cause_hypothesis: str = ""
-    resolution_steps: List[str] = []
-    confidence: str = "medium"
-    estimated_effort: str = "medium"
+    resolution_steps: List[str] = Field(default_factory=list)
+    confidence: Literal["high", "medium", "low"] = "medium"
+    estimated_effort: Literal["high", "medium", "low"] = "medium"
     escalation_advice: str = ""
     preventive_note: str = ""
 
@@ -278,20 +307,20 @@ class RecommendedSolution(BaseModel):
 # ── Standalone ticketing schemas ──────────────────────────────
 
 class TicketUpdate(BaseModel):
-    subject: Optional[str] = None
-    description: Optional[str] = None
-    status: Optional[str] = None
-    workflow_status: Optional[str] = None
-    ai_review_state: Optional[str] = None
-    priority: Optional[str] = None
+    subject: Optional[str] = Field(None, min_length=1, max_length=200)
+    description: Optional[str] = Field(None, max_length=20_000)
+    status: Optional[str] = Field(None, max_length=120)
+    workflow_status: Optional[str] = Field(None, max_length=120)
+    ai_review_state: Optional[str] = Field(None, max_length=120)
+    priority: Optional[str] = Field(None, max_length=32)
     ticket_type: Optional[Literal["incident", "request"]] = None
-    impact: Optional[str] = None
-    urgency: Optional[str] = None
-    assignee_id: Optional[str] = None
-    service_id: Optional[str] = None
-    asset_id: Optional[str] = None
-    category: Optional[str] = None
-    tags: Optional[str] = None
+    impact: Optional[str] = Field(None, max_length=120)
+    urgency: Optional[str] = Field(None, max_length=120)
+    assignee_id: Optional[str] = Field(None, max_length=255)
+    service_id: Optional[str] = Field(None, max_length=255)
+    asset_id: Optional[str] = Field(None, max_length=255)
+    category: Optional[str] = Field(None, max_length=120)
+    tags: Optional[str] = Field(None, max_length=1_000)
     response_due_at: Optional[datetime] = None
     resolution_due_at: Optional[datetime] = None
     due_by: Optional[datetime] = None
@@ -311,7 +340,7 @@ class TicketComment(BaseModel):
 
 
 class TicketCommentCreate(BaseModel):
-    body: str = Field(..., min_length=1)
+    body: str = Field(..., min_length=1, max_length=20_000)
     is_private: bool = False
 
 
@@ -346,13 +375,13 @@ class TicketAuditEntry(BaseModel):
 
 
 class BulkAction(BaseModel):
-    ticket_ids: List[str] = Field(..., min_length=1)
-    action: str = Field(..., description="assign | close | set_priority | set_category")
-    value: Optional[str] = None
+    ticket_ids: List[str] = Field(..., min_length=1, max_length=100)
+    action: Literal["assign", "close", "set_priority", "set_category"]
+    value: Optional[str] = Field(None, max_length=255)
 
 
 class TicketIntelligenceBackfillRequest(BaseModel):
-    limit: int = Field(200, ge=1, le=5000)
+    limit: int = Field(200, ge=1, le=500)
     include_comments: bool = True
     include_kb: bool = True
     force: bool = False
@@ -366,6 +395,13 @@ class TicketIntelligenceSearchResult(BaseModel):
     snippet: str = ""
     score: float = 0.0
     match_method: str = "keyword"
+    citation_id: Optional[str] = None
+    authority: Literal[
+        "published_kb",
+        "internal_comment",
+        "external_report",
+        "authenticated_report",
+    ] = "authenticated_report"
     metadata: dict = Field(default_factory=dict)
 
 
@@ -379,8 +415,22 @@ class TicketIntelligenceAnalysisRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=1000)
     limit: int = Field(8, ge=1, le=30)
     source_types: List[Literal["ticket", "comment", "kb_article"]] = Field(
-        default_factory=lambda: ["ticket", "comment", "kb_article"]
+        default_factory=lambda: ["ticket", "comment", "kb_article"],
+        min_length=1,
+        max_length=3,
     )
+
+    @field_validator("source_types")
+    @classmethod
+    def source_types_must_be_unique(cls, value):
+        if len(value) != len(set(value)):
+            raise ValueError("source_types must not contain duplicates")
+        return value
+
+
+class GroundedAnalysisResult(BaseModel):
+    text: str = Field(..., min_length=1, max_length=1_000)
+    citations: List[str] = Field(..., min_length=1, max_length=10)
 
 
 class TicketIntelligenceAnalysisResponse(BaseModel):
@@ -389,7 +439,11 @@ class TicketIntelligenceAnalysisResponse(BaseModel):
     answer: str = ""
     findings: List[str] = Field(default_factory=list)
     recommended_actions: List[str] = Field(default_factory=list)
+    citations: List[str] = Field(default_factory=list)
+    confidence: Literal["high", "medium", "low"] = "low"
     context: List[TicketIntelligenceSearchResult] = Field(default_factory=list)
+    grounded_findings: List[GroundedAnalysisResult] = Field(default_factory=list)
+    grounded_recommended_actions: List[GroundedAnalysisResult] = Field(default_factory=list)
 
 
 # ── Authentication ──────────────────────────────────────────────
@@ -414,6 +468,11 @@ class UserOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class AuthContext(UserOut):
+    auth_kind: Literal["session", "demo_fallback"]
+    app_mode: Literal["demo", "production"]
 
 
 class UserCreate(BaseModel):
@@ -466,22 +525,24 @@ class KbArticle(BaseModel):
 
 class KbArticleCreate(BaseModel):
     title: str = Field(..., min_length=1, max_length=200)
-    content: str = ""
-    category: Optional[str] = None
-    tags: Optional[str] = None
-    status: str = "draft"
-    reviewer_id: Optional[str] = None
+    content: str = Field("", max_length=100_000)
+    category: Optional[str] = Field(None, max_length=120)
+    tags: Optional[str] = Field(None, max_length=1_000)
+    status: Literal["draft", "published", "archived"] = "draft"
     review_due_at: Optional[datetime] = None
 
 
 class KbArticleUpdate(BaseModel):
-    title: Optional[str] = None
-    content: Optional[str] = None
-    category: Optional[str] = None
-    tags: Optional[str] = None
-    status: Optional[str] = None
-    reviewer_id: Optional[str] = None
+    title: Optional[str] = Field(None, min_length=1, max_length=200)
+    content: Optional[str] = Field(None, max_length=100_000)
+    category: Optional[str] = Field(None, max_length=120)
+    tags: Optional[str] = Field(None, max_length=1_000)
+    status: Optional[Literal["draft", "published", "archived"]] = None
     review_due_at: Optional[datetime] = None
+
+
+class KbFeedbackCreate(BaseModel):
+    helpful: bool = Field(..., strict=True)
 
 
 # ── Custom status / priority config ─────────────────────────────
@@ -896,15 +957,25 @@ class TimeEntryCreate(BaseModel):
 
 class PortalTicketCreate(BaseModel):
     subject: str = Field(..., min_length=1, max_length=200)
-    description: str = ""
-    reporter: str = Field(..., min_length=1)
-    priority: str = "P3"
+    description: str = Field("", max_length=20_000)
+    reporter: str = Field(..., min_length=1, max_length=320)
+    priority: str = Field("P3", min_length=1, max_length=32)
 
 class PortalTicketOut(BaseModel):
     id: str
     subject: str
     status: str
     priority: str
-    reporter: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class PortalTicketCreated(PortalTicketOut):
+    # Capability material is deliberately present only in the creation
+    # response; the database stores its digest, not this bearer token.
+    access_token: str
+    tracking_url: str
+    access_expires_at: datetime

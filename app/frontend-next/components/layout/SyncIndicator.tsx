@@ -5,12 +5,16 @@ import { api } from "@/lib/api";
 import { RefreshCw, CheckCircle2, AlertTriangle, WifiOff } from "lucide-react";
 import { formatTimeAgo } from "@/lib/utils";
 
-export function SyncIndicator() {
+export function SyncIndicator({ enabled }: { enabled: boolean }) {
   const { data: status, isLoading } = useQuery({
     queryKey: ["sync-status"],
     queryFn: api.getSyncStatus,
     refetchInterval: 30_000,
+    enabled,
+    retry: false,
   });
+
+  if (!enabled) return null;
 
   const icon = () => {
     if (isLoading)

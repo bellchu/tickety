@@ -174,11 +174,16 @@ class FreshserviceAdapter(BaseITSMAdapter):
                     row.value = value
                 else:
                     db.add(SettingsRecord(key=key, value=value))
-                os.environ[key] = value
             db.commit()
+            for key, value in updates.items():
+                os.environ[key] = value
         except Exception as exc:
             db.rollback()
-            print(f"[External] failed to persist refreshed OAuth token: {exc}")
+            print(
+                "[External] failed to persist refreshed OAuth token "
+                f"kind={type(exc).__name__}"
+            )
+            raise RuntimeError("OAuth token persistence failed") from exc
         finally:
             db.close()
 
@@ -188,7 +193,7 @@ class FreshserviceAdapter(BaseITSMAdapter):
         try:
             token_data = await self.oauth_refresh()
         except Exception as exc:
-            print(f"[External] OAuth refresh failed: {exc}")
+            print(f"[External] OAuth refresh failed kind={type(exc).__name__}")
             return False
         access_token = token_data.get("access_token")
         if not access_token:
@@ -292,6 +297,20 @@ class FreshserviceAdapter(BaseITSMAdapter):
             external_workspace_id=str(raw.get("workspace_id")) if raw.get("workspace_id") is not None else None,
             url=self.build_ticket_url(str(raw.get("id", ""))),
         )
+
+    def _parse_ticket_batch(self, raw_tickets: list) -> List[ExternalTicket]:
+        """Validate provider records independently so one poison record cannot
+        discard otherwise valid tickets from the same page."""
+        parsed: List[ExternalTicket] = []
+        for raw in raw_tickets:
+            try:
+                parsed.append(self._parse_ticket(raw))
+            except Exception as exc:
+                print(
+                    "[External] Freshservice ticket parse skipped "
+                    f"kind={type(exc).__name__}"
+                )
+        return parsed
 
     # ── Rate-limit aware request helper ─────────────────────────────
     #
@@ -405,8 +424,12 @@ class FreshserviceAdapter(BaseITSMAdapter):
                     raise RuntimeError(f"Freshservice still rate-limited on page {page}")
                 resp.raise_for_status()
                 data = resp.json()
+                if not isinstance(data, dict):
+                    raise RuntimeError("Freshservice ticket response must be an object")
                 tickets = data.get("tickets", [])
-                out.extend(self._parse_ticket(t) for t in tickets)
+                if not isinstance(tickets, list):
+                    raise RuntimeError("Freshservice tickets must be a list")
+                out.extend(self._parse_ticket_batch(tickets))
                 # No next-page link header => last page reached.
                 if not self._parse_link_next(resp.headers.get("link"), self.base_url):
                     break
@@ -462,23 +485,55 @@ class FreshserviceAdapter(BaseITSMAdapter):
         headers: dict,
         raw_body: bytes | None = None,
     ) -> Optional[WebhookEvent]:
-        signature = headers.get("x-freshservice-webhook-signature", "")
-        if not self.webhook_secret and os.getenv("APP_MODE", "demo").lower() == "production":
-            print("[External] webhook secret missing in production")
+        body = raw_body if raw_body is not None else str(payload).encode()
+        if not self.verify_webhook_signature(headers, body):
             return None
-        if self.webhook_secret and not signature:
-            print("[External] webhook signature missing")
-            return None
-        if self.webhook_secret and signature:
-            body = raw_body if raw_body is not None else str(payload).encode()
-            expected = base64.b64encode(
-                hmac.new(self.webhook_secret.encode(), body, hashlib.sha256).digest()
-            ).decode()
-            if not hmac.compare_digest(signature, expected):
-                print("[External] webhook signature mismatch")
-                return None
+        return self.parse_verified_webhook(payload)
 
+    def verify_webhook_signature(self, headers: dict, raw_body: bytes) -> bool:
+        """Authenticate the raw delivery before any JSON parser sees it."""
+        signature = headers.get("x-freshservice-webhook-signature", "")
+        timestamp = headers.get("x-freshservice-webhook-timestamp", "")
+        if not self.webhook_secret or self.webhook_secret in {
+            "your-webhook-secret",
+            "change-me",
+        }:
+            print("[External] webhook secret is not configured")
+            return False
+        if not signature:
+            print("[External] webhook signature missing")
+            return False
+        if not timestamp.isascii() or not timestamp.isdigit():
+            print("[External] webhook timestamp invalid")
+            return False
+        try:
+            timestamp_seconds = int(timestamp)
+            max_age = max(
+                30,
+                min(int(os.getenv("WEBHOOK_MAX_AGE_SECONDS", "300")), 3600),
+            )
+        except (TypeError, ValueError):
+            print("[External] webhook timestamp invalid")
+            return False
+        if timestamp_seconds <= 0 or abs(int(time.time()) - timestamp_seconds) > max_age:
+            print("[External] webhook timestamp expired")
+            return False
+        signed_body = timestamp.encode("ascii") + b"." + raw_body
+        expected = base64.b64encode(
+            hmac.new(self.webhook_secret.encode(), signed_body, hashlib.sha256).digest()
+        ).decode()
+        if not hmac.compare_digest(signature, expected):
+            print("[External] webhook signature mismatch")
+            return False
+        return True
+
+    @staticmethod
+    def parse_verified_webhook(payload: dict) -> Optional[WebhookEvent]:
+        if not isinstance(payload, dict):
+            return None
         ticket_data = payload.get("ticket", payload.get("data", {}))
+        if not isinstance(ticket_data, dict):
+            return None
         ext_id = str(ticket_data.get("id", ""))
         if not ext_id:
             return None

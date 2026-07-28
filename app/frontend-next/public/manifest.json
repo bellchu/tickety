@@ -22,7 +22,7 @@
       "location": {
         "ticket_sidebar": {
           "url": "index.html",
-          "icon": "icon.svg"
+          "icon": "brand/tickety-mark.svg"
         }
       }
     }

@@ -11,6 +11,21 @@ export interface Ticket {
   complexity: number;
   ai_reasoning: string | null;
   suggested_response: string | null;
+  ai_source_hash: string | null;
+  ai_pipeline_version: string | null;
+  ai_model: string | null;
+  ai_status: string | null;
+  ai_claim_id: string | null;
+  ai_lease_expires_at: string | null;
+  ai_attempts: number;
+  ai_next_attempt_at: string | null;
+  ai_requested_artifacts: string | null;
+  ai_started_at: string | null;
+  ai_generated_at: string | null;
+  ai_error: string | null;
+  ai_synthetic: boolean;
+  ai_suggested_priority: string | null;
+  ai_suggested_category: string | null;
   ticket_type: string;
   impact: string | null;
   urgency: string | null;
@@ -57,6 +72,26 @@ export interface TicketCreateInput {
   urgency?: string | null;
   service_id?: string | null;
   asset_id?: string | null;
+}
+
+export type TicketListSort = "newest" | "oldest" | "priority" | "updated" | "complexity";
+
+export interface TicketListParams {
+  status?: string;
+  priority?: string;
+  assigneeId?: string;
+  category?: string;
+  search?: string;
+  sort?: TicketListSort;
+  limit?: number;
+  offset?: number;
+}
+
+export interface TicketPage {
+  tickets: Ticket[];
+  limit: number;
+  offset: number;
+  hasMore: boolean;
 }
 
 export interface User {
@@ -245,6 +280,8 @@ export interface SlaStatusItem {
 export interface IntelSlaResponse {
   generated_at: string;
   count: number;
+  analyzed_tickets: number;
+  truncated: boolean;
   items: SlaStatusItem[];
 }
 
@@ -263,11 +300,16 @@ export interface PrioritizedTicket {
 export interface IntelPrioritizeResponse {
   generated_at: string;
   backlog_size: number;
+  analyzed_tickets: number;
+  truncated: boolean;
   ranked: PrioritizedTicket[];
 }
 
 export interface IntelAlertsResponse {
   generated_at: string;
+  total_open_tickets: number;
+  analyzed_tickets: number;
+  truncated: boolean;
   summary: {
     escalation_prone: number;
     sla_at_risk: number;
@@ -280,6 +322,8 @@ export interface IntelAlertsResponse {
 
 export interface IntelTrendsResponse {
   total_tickets: number;
+  analyzed_tickets: number;
+  truncated: boolean;
   by_category: Record<string, number>;
   by_sentiment: Record<string, number>;
   by_status: Record<string, number>;
@@ -295,6 +339,8 @@ export interface AccountHealth {
   total: number;
   avg_escalation_risk: number;
   negative_sentiment_ratio: number;
+  analyzed_tickets: number;
+  truncated: boolean;
 }
 
 export interface RouteCandidate {
@@ -309,10 +355,32 @@ export interface RouteCandidate {
 
 export interface RouteRecommendation {
   recommended_user_id: string | null;
-  recommended_name: string | null;
-  reasoning: string;
-  tier_needed: number;
+  recommended_name?: string | null;
+  reasoning?: string;
+  tier_needed?: number;
   candidates: RouteCandidate[];
+  total_users: number;
+  analyzed_users: number;
+  candidate_pool_truncated: boolean;
+}
+
+export interface WorkloadAgent {
+  user_id: string;
+  name: string;
+  tier: number;
+  open_tickets: number;
+  total_resolved: number;
+  avg_resolution_hours: number;
+  impact_points: number;
+}
+
+export interface IntelWorkloadResponse {
+  agents: WorkloadAgent[];
+  total_users: number;
+  analyzed_users: number;
+  users_truncated: boolean;
+  duration_rows_analyzed: number;
+  duration_rows_truncated: boolean;
 }
 
 export interface TicketSummary {
@@ -328,6 +396,7 @@ export interface TicketAnalysisResult {
   recommended_solution: RecommendedSolution | null;
   documents_changed: number;
   errors: { step: string; error: string }[];
+  cached: boolean;
 }
 
 // ── Resolution Agent (Recommended Solution) ─────────────────
@@ -335,8 +404,8 @@ export interface TicketAnalysisResult {
 export interface ResolutionPlan {
   root_cause_hypothesis: string;
   resolution_steps: string[];
-  confidence: "high" | "medium" | "low" | string;
-  estimated_effort: "high" | "medium" | "low" | string;
+  confidence: "high" | "medium" | "low";
+  estimated_effort: "high" | "medium" | "low";
   escalation_advice: string;
   preventive_note: string;
 }
@@ -428,11 +497,28 @@ export interface SystemicCluster {
 export interface SystemicIssuesResponse {
   clusters: SystemicCluster[];
   total_tickets: number;
+  analyzed_tickets: number;
+  truncated: boolean;
   clustered_tickets: number;
   parameters: {
     similarity_cutoff: number;
     min_cluster_size: number;
   };
+}
+
+export interface ReportByCategoryResponse {
+  categories: string[];
+  counts: number[];
+  total_categories: number;
+  truncated: boolean;
+}
+
+export interface ReportResolutionTimeResponse {
+  categories: string[];
+  avg_hours: number[];
+  total_matching_tickets: number;
+  analyzed_tickets: number;
+  truncated: boolean;
 }
 
 // ── Standalone ticketing types ────────────────────────────────
@@ -479,6 +565,11 @@ export interface UserOut {
   tier: number;
   momentum: number;
   last_login_at: string | null;
+}
+
+export interface AuthContext extends UserOut {
+  auth_kind: "session" | "demo_fallback";
+  app_mode: "demo" | "production";
 }
 
 export interface AuthResponse {
@@ -532,7 +623,6 @@ export interface KbArticleCreateInput {
   category?: string;
   tags?: string;
   status: string;
-  reviewer_id?: string | null;
   review_due_at?: string | null;
 }
 
@@ -740,7 +830,16 @@ export interface PortalTicket {
   subject: string;
   status: string;
   priority: string;
-  reporter: string | null;
   created_at: string | null;
   updated_at: string | null;
+}
+
+/**
+ * Returned only by the public ticket creation endpoint. Capability material is
+ * intentionally absent from every subsequent ticket response.
+ */
+export interface PortalTicketCreated extends PortalTicket {
+  access_token: string;
+  tracking_url: string;
+  access_expires_at: string;
 }

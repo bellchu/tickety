@@ -1,6 +1,7 @@
 import os
 import secrets
 from datetime import datetime
+from pathlib import Path
 from sqlalchemy import (
     create_engine, Column, String, Text, Integer, DateTime, Boolean, Float,
     ForeignKey, UniqueConstraint, Index,
@@ -35,6 +36,21 @@ class TicketRecord(Base):
     complexity = Column(Integer, default=1)
     ai_reasoning = Column(Text, nullable=True)
     suggested_response = Column(Text, nullable=True)
+    ai_source_hash = Column(String(64), nullable=True, index=True)
+    ai_pipeline_version = Column(String, nullable=True)
+    ai_model = Column(String, nullable=True)
+    ai_status = Column(String, nullable=True, index=True)
+    ai_claim_id = Column(String(36), nullable=True, index=True)
+    ai_lease_expires_at = Column(DateTime, nullable=True, index=True)
+    ai_attempts = Column(Integer, nullable=False, default=0)
+    ai_next_attempt_at = Column(DateTime, nullable=True, index=True)
+    ai_requested_artifacts = Column(String, nullable=True)
+    ai_started_at = Column(DateTime, nullable=True)
+    ai_generated_at = Column(DateTime, nullable=True)
+    ai_error = Column(String, nullable=True)
+    ai_synthetic = Column(Boolean, nullable=False, default=False)
+    ai_suggested_priority = Column(String, nullable=True)
+    ai_suggested_category = Column(String, nullable=True)
 
     # Standalone ticketing fields
     ticket_type = Column(String, default="incident")  # incident | request
@@ -51,6 +67,11 @@ class TicketRecord(Base):
     sla_paused_at = Column(DateTime, nullable=True)
     sla_paused_seconds = Column(Integer, default=0)
     tags = Column(Text, nullable=True)  # comma-separated tags
+
+    # Public requester tracking capability. Only the SHA-256 digest is stored;
+    # the bearer token itself is returned once when a portal ticket is created.
+    portal_access_token_hash = Column(String(64), nullable=True, unique=True, index=True)
+    portal_access_expires_at = Column(DateTime, nullable=True)
 
     # ITSM external linkage
     external_source = Column(String, nullable=True)
@@ -80,6 +101,67 @@ class TicketRecord(Base):
     recommended_solution = Column(Text, nullable=True)
 
     __table_args__ = (UniqueConstraint("external_source", "external_id", name="uix_external_ticket"),)
+
+
+class AIUsageEventRecord(Base):
+    __tablename__ = "ai_usage_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    actor_id = Column(String, nullable=False, index=True)
+    task = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
+class AIRequestBucketRecord(Base):
+    __tablename__ = "ai_request_buckets"
+
+    actor_id = Column(String, primary_key=True)
+    window_kind = Column(String, primary_key=True)
+    window_start = Column(DateTime, primary_key=True)
+    request_count = Column(Integer, nullable=False, default=0)
+
+
+class LLMCallRecord(Base):
+    __tablename__ = "llm_call_records"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    provider = Column(String, nullable=False, index=True)
+    model = Column(String, nullable=False)
+    task = Column(String, nullable=False)
+    status = Column(String, nullable=False, index=True)
+    attempts = Column(Integer, nullable=False, default=1)
+    latency_ms = Column(Integer, nullable=False, default=0)
+    prompt_tokens = Column(Integer, nullable=False, default=0)
+    completion_tokens = Column(Integer, nullable=False, default=0)
+    total_tokens = Column(Integer, nullable=False, default=0)
+    synthetic = Column(Boolean, nullable=False, default=False)
+    error_code = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
+class LLMProviderLeaseRecord(Base):
+    __tablename__ = "llm_provider_leases"
+
+    provider = Column(String, primary_key=True)
+    slot = Column(Integer, primary_key=True)
+    owner_id = Column(String(64), nullable=False, index=True)
+    expires_at = Column(DateTime, nullable=False, index=True)
+
+
+class AIArtifactRecord(Base):
+    __tablename__ = "ai_artifact_records"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticket_id = Column(String, ForeignKey("tickets.id"), nullable=False, index=True)
+    artifact = Column(String, nullable=False, index=True)
+    input_hash = Column(String(64), nullable=False, index=True)
+    pipeline_version = Column(String, nullable=False)
+    provider = Column(String, nullable=False)
+    model = Column(String, nullable=False)
+    synthetic = Column(Boolean, nullable=False, default=False)
+    content_hash = Column(String(64), nullable=False)
+    active = Column(Boolean, nullable=False, default=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class UserRecord(Base):
@@ -530,19 +612,26 @@ def _ensure_ticket_search_documents():
                 "ON ticket_search_documents (source_type, source_id)"
             )
             conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_ticket_search_documents_fts "
+                "ON ticket_search_documents USING GIN ("
+                "to_tsvector('simple'::regconfig, "
+                "COALESCE(title, '') || ' ' || LEFT(COALESCE(body, ''), 20000))"
+                ")"
+            )
+            conn.exec_driver_sql(
                 "CREATE INDEX IF NOT EXISTS ix_ticket_search_documents_embedding "
                 "ON ticket_search_documents USING hnsw (embedding vector_cosine_ops)"
             )
     except Exception as e:
-        print(f"[vectors] pgvector table unavailable: {e}")
+        print(f"[vectors] pgvector table unavailable kind={type(e).__name__}")
 
 
 def _ensure_columns():
-    """Idempotently add columns introduced after the initial schema.
+    """Legacy bootstrap support for non-production demo/development databases.
 
     Base.metadata.create_all() only creates *missing tables*, not missing
-    columns on existing tables, so for already-deployed Postgres instances we
-    ALTER TABLE ... ADD COLUMN IF NOT EXISTS for any new field.
+    columns on existing tables. Production schema changes are exclusively
+    managed by Alembic and must never call this helper.
     """
     insp = _sa_inspect(engine)
     if not insp.has_table("tickets"):
@@ -554,6 +643,21 @@ def _ensure_columns():
         "escalation_risk": "INTEGER DEFAULT 0",
         "summary": "TEXT",
         "recommended_solution": "TEXT",
+        "ai_source_hash": "VARCHAR(64)",
+        "ai_pipeline_version": "VARCHAR",
+        "ai_model": "VARCHAR",
+        "ai_status": "VARCHAR",
+        "ai_claim_id": "VARCHAR(36)",
+        "ai_lease_expires_at": "TIMESTAMP",
+        "ai_attempts": "INTEGER DEFAULT 0",
+        "ai_next_attempt_at": "TIMESTAMP",
+        "ai_requested_artifacts": "VARCHAR",
+        "ai_started_at": "TIMESTAMP",
+        "ai_generated_at": "TIMESTAMP",
+        "ai_error": "VARCHAR",
+        "ai_synthetic": "BOOLEAN DEFAULT 0",
+        "ai_suggested_priority": "VARCHAR",
+        "ai_suggested_category": "VARCHAR",
         "ticket_type": "VARCHAR DEFAULT 'incident'",
         "impact": "VARCHAR",
         "urgency": "VARCHAR",
@@ -568,6 +672,10 @@ def _ensure_columns():
         "sla_paused_at": "TIMESTAMP",
         "sla_paused_seconds": "INTEGER DEFAULT 0",
         "tags": "TEXT",
+        # Legacy demo/development compatibility; revision 0002 owns these in
+        # production databases.
+        "portal_access_token_hash": "VARCHAR(64)",
+        "portal_access_expires_at": "TIMESTAMP",
         "external_workspace_id": "VARCHAR",
         "external_created_at": "TIMESTAMP",
         "external_resolved_at": "TIMESTAMP",
@@ -580,6 +688,10 @@ def _ensure_columns():
                 conn.exec_driver_sql(
                     f'ALTER TABLE tickets ADD COLUMN IF NOT EXISTS {col} {ddl}'
                 )
+        conn.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_tickets_portal_access_token_hash "
+            "ON tickets (portal_access_token_hash)"
+        )
 
     # ── users table additions (auth/roles) ──
     if insp.has_table("users"):
@@ -633,7 +745,32 @@ def _ensure_columns():
                     )
 
 
+def verify_database_schema() -> None:
+    """Fail closed unless the production database is at the Alembic head."""
+    try:
+        from alembic.config import Config
+        from alembic.runtime.migration import MigrationContext
+        from alembic.script import ScriptDirectory
+
+        config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
+        script = ScriptDirectory.from_config(config)
+        expected_heads = set(script.get_heads())
+        with engine.connect() as connection:
+            current_heads = set(MigrationContext.configure(connection).get_current_heads())
+        if not expected_heads or current_heads != expected_heads:
+            raise RuntimeError
+    except Exception:
+        raise RuntimeError(
+            "Database schema is not at the required migration revision; run `alembic upgrade head`."
+        ) from None
+
+
 def init_db():
+    if os.getenv("APP_MODE", "demo").strip().lower() == "production":
+        # Production startup is verification-only. DDL belongs to the explicit
+        # migration job so replicas never race schema changes.
+        verify_database_schema()
+        return
     Base.metadata.create_all(bind=engine)
     _ensure_columns()
     _ensure_ticket_search_documents()

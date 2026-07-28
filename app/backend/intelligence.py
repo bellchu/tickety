@@ -25,10 +25,20 @@ from collections import Counter
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
+from sqlalchemy import case, func, or_
 from sqlalchemy.orm import Session
 
 from .database import TicketRecord, UserRecord
-from .llm_manager import LLMManager
+from .llm_manager import LLMInvalidOutputError, LLMManager
+from .ai_contracts import ResolutionAnalysis, TicketSummary
+from .ai_input import (
+    UnsafeAIAdviceError,
+    canonical_bounded_json,
+    prompt_char_limit,
+    validate_semantic_advice,
+)
+from .privacy import redact_text
+from .prompts import RESOLUTION_SYSTEM_PROMPT, SUMMARY_SYSTEM_PROMPT
 
 # ── Tunables ──────────────────────────────────────────────────────────────
 
@@ -77,12 +87,16 @@ _STOPWORDS = {
     "do", "does", "did", "will", "if", "then", "so", "than", "too", "very",
 }
 
+_MAX_ANALYTICS_ROWS = 500
+
 
 # ── helpers ───────────────────────────────────────────────────────────────
 
 def _age_hours(t: TicketRecord, now: Optional[datetime] = None) -> float:
     now = now or datetime.utcnow()
-    delta = now - (t.resolved_at or t.updated_at or t.created_at or now)
+    started = t.external_created_at or t.created_at or now
+    ended = (t.resolved_at or now) if not _open(t) else now
+    delta = ended - started
     return max(0.0, delta.total_seconds() / 3600.0)
 
 
@@ -202,9 +216,21 @@ def recommend_assignee(
     NOT from `complexity`/sentiment. Escalation risk only nudges a preference
     toward a higher tier; it never forces one.
     """
-    users = db.query(UserRecord).all()
+    total_users = db.query(UserRecord).count()
+    users = db.query(UserRecord).order_by(
+        UserRecord.tier.desc(),
+        UserRecord.impact_points.desc(),
+        UserRecord.momentum.desc(),
+        UserRecord.id.asc(),
+    ).limit(_MAX_ANALYTICS_ROWS).all()
     if not users:
-        return {"recommended_user_id": None, "candidates": []}
+        return {
+            "recommended_user_id": None,
+            "candidates": [],
+            "total_users": total_users,
+            "analyzed_users": 0,
+            "candidate_pool_truncated": False,
+        }
 
     risk = escalation_risk(ticket)
     complexity = ticket.complexity or 1
@@ -243,35 +269,49 @@ def recommend_assignee(
             f"does not raise the tier floor)."
         ),
         "candidates": candidates[:5],
+        "total_users": total_users,
+        "analyzed_users": len(users),
+        "candidate_pool_truncated": total_users > len(users),
     }
 
 
 # ── 5. Summarization Agent (LLM-backed) ───────────────────────────────────
 
-_SUMMARY_PROMPT = (
-    "Summarize the following IT support ticket in 2-3 concise sentences for a "
-    "support manager. Capture the issue, urgency, and any action already taken. "
-    "Return JSON: {{\"summary\": \"...\"}}.\n\n"
-    "Subject: {subject}\nDescription: {description}\n"
-    "AI triage reasoning so far: {reasoning}"
-)
-
 
 async def summarize_ticket(
-    llm: LLMManager, ticket: TicketRecord
+    llm: LLMManager, ticket: TicketRecord, *, force: bool = False
 ) -> str | None:
     """LLM-generated case summary (cached on the ticket).
     Returns None when the LLM fails — the caller should not persist None."""
     # Ignore stale fallback placeholders so existing tickets get regenerated.
-    if ticket.summary and "auto summary unavailable" not in ticket.summary:
+    if not force and ticket.summary and "auto summary unavailable" not in ticket.summary:
         return ticket.summary
-    prompt = _SUMMARY_PROMPT.format(
-        subject=ticket.subject,
-        description=ticket.description or "",
-        reasoning=ticket.ai_reasoning or "",
+    prompt = canonical_bounded_json(
+        {
+            "subject": redact_text(ticket.subject),
+            "description": redact_text(ticket.description or ""),
+            "triage_reasoning": redact_text(ticket.ai_reasoning or ""),
+        },
+        max_chars=prompt_char_limit(llm),
+        field_limits={
+            "subject": 1_000,
+            "description": 20_000,
+            "triage_reasoning": 4_000,
+        },
     )
-    result = await llm.analyze(prompt, json_schema={})
+    result = await llm.analyze(
+        prompt,
+        response_model=TicketSummary,
+        system_prompt=SUMMARY_SYSTEM_PROMPT,
+        max_tokens=500,
+    )
     summary = (result.get("summary") or "").strip()
+    try:
+        validate_semantic_advice(summary)
+    except UnsafeAIAdviceError as exc:
+        raise LLMInvalidOutputError(
+            "AI provider returned unsafe summary output"
+        ) from exc
     # Don't persist the fallback placeholder — it's not a real summary.
     # The frontend will show a clean "unavailable" state instead.
     return summary or None
@@ -282,25 +322,6 @@ async def summarize_ticket(
 # Produces a concrete, actionable resolution plan the assigned engineer can
 # follow: root-cause hypothesis, ordered steps, confidence, and when to
 # escalate. Cached on the ticket as `recommended_solution` (JSON string).
-_RESOLUTION_PROMPT = (
-    "You are a senior IT support engineer. Given the ticket below, produce a "
-    "concrete resolution plan that the assigned engineer can follow directly "
-    "to resolve the issue. Be specific and actionable; prefer standard, safe "
-    "troubleshooting steps. Do not invent credentials, IPs, or private data.\n\n"
-    "Subject: {subject}\n"
-    "Description: {description}\n"
-    "Category: {category}\nPriority: {priority}\nSentiment: {sentiment}\n"
-    "AI triage reasoning so far: {reasoning}\n\n"
-    "Return exactly this JSON:\n"
-    "{{\n"
-    "  \"root_cause_hypothesis\": \"most likely root cause in one sentence\",\n"
-    "  \"resolution_steps\": [\"ordered, concrete step 1\", \"step 2\", ...],\n"
-    "  \"confidence\": \"high | medium | low\",\n"
-    "  \"estimated_effort\": \"low | medium | high\",\n"
-    "  \"escalation_advice\": \"when/how to escalate if the steps don't fix it\",\n"
-    "  \"preventive_note\": \"one-line fix to prevent recurrence, or empty\"\n"
-    "}}"
-)
 
 
 async def recommend_resolution(
@@ -311,27 +332,36 @@ async def recommend_resolution(
     Cached on the ticket as `recommended_solution` (JSON). Returns the parsed
     plan dict so the endpoint can shape the response.
     """
-    prompt = _RESOLUTION_PROMPT.format(
-        subject=ticket.subject,
-        description=ticket.description or "",
-        category=ticket.category or "Other",
-        priority=ticket.priority or "P3",
-        sentiment=ticket.sentiment or "Neutral",
-        reasoning=ticket.ai_reasoning or "",
+    prompt = canonical_bounded_json(
+        {
+            "subject": redact_text(ticket.subject),
+            "description": redact_text(ticket.description or ""),
+            "triage_reasoning": redact_text(ticket.ai_reasoning or ""),
+        },
+        fixed_fields={
+            "category": ticket.category or "Other",
+            "priority": ticket.priority or "P3",
+            "sentiment": ticket.sentiment or "Neutral",
+        },
+        max_chars=prompt_char_limit(llm),
+        field_limits={
+            "subject": 1_000,
+            "description": 20_000,
+            "triage_reasoning": 4_000,
+        },
     )
-    result = await llm.analyze(prompt, json_schema={})
-    # Normalize / fill defaults so the UI always has the expected shape.
-    steps = result.get("resolution_steps") or []
-    if isinstance(steps, str):
-        steps = [steps]
-    plan = {
-        "root_cause_hypothesis": result.get("root_cause_hypothesis") or "",
-        "resolution_steps": [str(s).strip() for s in steps if str(s).strip()],
-        "confidence": (result.get("confidence") or "medium").lower(),
-        "estimated_effort": (result.get("estimated_effort") or "medium").lower(),
-        "escalation_advice": result.get("escalation_advice") or "",
-        "preventive_note": result.get("preventive_note") or "",
-    }
+    plan = await llm.analyze(
+        prompt,
+        response_model=ResolutionAnalysis,
+        system_prompt=RESOLUTION_SYSTEM_PROMPT,
+        max_tokens=1_200,
+    )
+    try:
+        validate_semantic_advice(plan)
+    except UnsafeAIAdviceError as exc:
+        raise LLMInvalidOutputError(
+            "AI provider returned unsafe resolution advice"
+        ) from exc
     return plan
 
 
@@ -339,24 +369,29 @@ async def recommend_resolution(
 
 def account_health(db: Session, reporter: str) -> Dict[str, Any]:
     """Per-reporter health score (churn-risk proxy) from their ticket history."""
-    tickets = db.query(TicketRecord).filter(TicketRecord.reporter == reporter).all()
-    if not tickets:
+    query = db.query(TicketRecord).filter(TicketRecord.reporter == reporter)
+    total = query.count()
+    if not total:
         return {"reporter": reporter, "health_score": None, "churn_risk": "unknown",
                 "open": 0, "total": 0}
+    open_n = query.filter(or_(
+        TicketRecord.status.is_(None),
+        func.lower(TicketRecord.status).notin_(["closed", "resolved", "cancelled"]),
+    )).count()
+    resolved_n = query.filter(TicketRecord.resolved_at.isnot(None)).count()
+    tickets = query.order_by(
+        TicketRecord.updated_at.desc().nullslast(), TicketRecord.id.asc()
+    ).limit(_MAX_ANALYTICS_ROWS).all()
 
-    total = len(tickets)
-    open_tickets = [t for t in tickets if _open(t)]
-    open_n = len(open_tickets)
-    resolved = [t for t in tickets if t.resolved_at]
-    resolved_n = len(resolved)
-    avg_risk = sum(escalation_risk(t) for t in tickets) / total
+    analyzed = len(tickets)
+    avg_risk = sum(escalation_risk(t) for t in tickets) / analyzed
 
     # Sentiment pain: count negative sentiments.
     pain = sum(
         1 for t in tickets
         if (t.sentiment or "") in {"Business-Critical", "High-Impact"}
     )
-    pain_ratio = pain / total
+    pain_ratio = pain / analyzed
 
     # Health = 100 - risk-driven penalties.
     health = 100 - (avg_risk * 0.5) - (pain_ratio * 30) - (min(open_n, 5) * 4)
@@ -378,15 +413,39 @@ def account_health(db: Session, reporter: str) -> Dict[str, Any]:
         "total": total,
         "avg_escalation_risk": round(avg_risk, 1),
         "negative_sentiment_ratio": round(pain_ratio, 2),
+        "analyzed_tickets": analyzed,
+        "truncated": total > analyzed,
     }
 
 
 # ── 7. Text Analytics Agent ───────────────────────────────────────────────
 
+
+def _non_portal_ticket_query(db: Session):
+    return db.query(TicketRecord).filter(
+        func.lower(func.coalesce(TicketRecord.external_source, "")) != "portal"
+    )
+
+
+def _trusted_text_evidence_query(db: Session):
+    """Use only Tickety-owned prose for cross-ticket text aggregation."""
+    return db.query(TicketRecord).filter(or_(
+        TicketRecord.external_source.is_(None),
+        func.lower(TicketRecord.external_source).in_(["manual", "standalone"]),
+    ))
+
+
 def trends(db: Session, limit_terms: int = 15) -> Dict[str, Any]:
     """Aggregate trends across all tickets: category & sentiment distribution,
     status counts, and top keywords (lightweight VOC)."""
-    tickets = db.query(TicketRecord).all()
+    aggregate_query = _non_portal_ticket_query(db)
+    total_tickets = aggregate_query.count()
+    tickets = aggregate_query.order_by(
+        TicketRecord.updated_at.desc().nullslast(), TicketRecord.id.asc()
+    ).limit(_MAX_ANALYTICS_ROWS).all()
+    text_tickets = _trusted_text_evidence_query(db).order_by(
+        TicketRecord.updated_at.desc().nullslast(), TicketRecord.id.asc()
+    ).limit(_MAX_ANALYTICS_ROWS).all()
 
     categories = Counter()
     sentiments = Counter()
@@ -401,6 +460,7 @@ def trends(db: Session, limit_terms: int = 15) -> Dict[str, Any]:
             sentiments[t.sentiment] += 1
         if t.status:
             statuses[t.status] += 1
+    for t in text_tickets:
         text = (f"{t.subject or ''} {t.description or ''}").lower()
         for tok in token_re.findall(text):
             if tok in _STOPWORDS:
@@ -410,7 +470,10 @@ def trends(db: Session, limit_terms: int = 15) -> Dict[str, Any]:
             word_counter[tok] += 1
 
     return {
-        "total_tickets": len(tickets),
+        "total_tickets": total_tickets,
+        "analyzed_tickets": len(tickets),
+        "text_evidence_tickets": len(text_tickets),
+        "truncated": total_tickets > len(tickets),
         "by_category": dict(categories.most_common()),
         "by_sentiment": dict(sentiments.most_common()),
         "by_status": dict(statuses.most_common()),
@@ -433,9 +496,25 @@ def _jaccard(a: set, b: set) -> float:
 
 from collections import Counter
 def systemic_issues(db, cluster_threshold: int = 3, similarity_cutoff: float = 0.25) -> dict:
-    tickets = db.query(TicketRecord).all()
+    # Pairwise similarity is O(n^2); bound the working set so one request
+    # cannot monopolize an API worker on an arbitrarily large installation.
+    trusted_query = _trusted_text_evidence_query(db)
+    total_tickets = trusted_query.count()
+    tickets = trusted_query.order_by(
+        TicketRecord.updated_at.desc().nullslast(), TicketRecord.id.asc()
+    ).limit(500).all()
     if len(tickets) < 2:
-        return {"clusters": [], "total_tickets": len(tickets)}
+        return {
+            "clusters": [],
+            "total_tickets": total_tickets,
+            "analyzed_tickets": len(tickets),
+            "truncated": total_tickets > len(tickets),
+            "clustered_tickets": 0,
+            "parameters": {
+                "similarity_cutoff": similarity_cutoff,
+                "min_cluster_size": cluster_threshold,
+            },
+        }
 
     keywords = {t.id: _ticket_keywords(t) for t in tickets}
     ids = list(keywords.keys())
@@ -486,7 +565,9 @@ def systemic_issues(db, cluster_threshold: int = 3, similarity_cutoff: float = 0
     results.sort(key=lambda c: c["business_impact_score"], reverse=True)
     return {
         "clusters": results,
-        "total_tickets": len(tickets),
+        "total_tickets": total_tickets,
+        "analyzed_tickets": len(tickets),
+        "truncated": total_tickets > len(tickets),
         "clustered_tickets": sum(c["ticket_count"] for c in results),
         "parameters": {"similarity_cutoff": similarity_cutoff, "min_cluster_size": cluster_threshold},
     }
@@ -495,7 +576,20 @@ def proactive_alerts(db: Session, now: Optional[datetime] = None) -> Dict[str, A
     """Unified feed of cases needing human attention right now:
     escalation-prone, SLA at-risk, and SLA-breached tickets."""
     now = now or datetime.utcnow()
-    open_tickets = [t for t in db.query(TicketRecord).all() if _open(t)]
+    open_query = db.query(TicketRecord).filter(or_(
+        TicketRecord.status.is_(None),
+        func.lower(TicketRecord.status).notin_(["closed", "resolved", "cancelled"]),
+    ))
+    total_open = open_query.count()
+    open_tickets = open_query.order_by(
+        case(
+            {"P1": 1, "Urgent": 1, "P2": 2, "High": 2, "P3": 3, "Medium": 3},
+            value=TicketRecord.priority,
+            else_=4,
+        ).asc(),
+        TicketRecord.created_at.asc().nullsfirst(),
+        TicketRecord.id.asc(),
+    ).limit(_MAX_ANALYTICS_ROWS).all()
 
     escalate_prone = []
     sla_at_risk = []
@@ -518,6 +612,9 @@ def proactive_alerts(db: Session, now: Optional[datetime] = None) -> Dict[str, A
 
     return {
         "generated_at": now.isoformat(),
+        "total_open_tickets": total_open,
+        "analyzed_tickets": len(open_tickets),
+        "truncated": total_open > len(open_tickets),
         "summary": {
             "escalation_prone": len(escalate_prone),
             "sla_at_risk": len(sla_at_risk),

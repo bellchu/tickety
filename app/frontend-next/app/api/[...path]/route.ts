@@ -1,4 +1,13 @@
 import { NextRequest } from "next/server";
+import {
+  boundedBody,
+  jsonError,
+  maxRequestBodyBytes,
+  publicForwardingIdentity,
+  sanitizedProxyRequestHeaders,
+  sanitizedProxyResponseHeaders,
+  validateRequestBodyHeaders,
+} from "@/lib/proxy-security";
 
 /**
  * Runtime API proxy.
@@ -34,20 +43,39 @@ async function proxy(req: NextRequest, ctx: Ctx) {
   const search = req.nextUrl.search; // includes leading "?" or ""
   const url = `${BACKEND}/${path}${search}`;
 
-  // Hop-by-hop / host headers must not be forwarded verbatim.
-  const headers = new Headers(req.headers);
-  headers.delete("host");
-  headers.delete("content-length"); // fetch recomputes from the body
-  const forwardedOrigin = `${req.nextUrl.protocol}//${req.nextUrl.host}`;
-  headers.set("x-forwarded-host", req.nextUrl.host);
-  headers.set("x-forwarded-proto", req.nextUrl.protocol.replace(":", ""));
-  headers.set("origin", forwardedOrigin);
+  const maxBodyBytes = maxRequestBodyBytes();
+  const framingError = validateRequestBodyHeaders(req.headers, maxBodyBytes);
+  if (framingError) {
+    return jsonError(framingError.status, framingError.detail);
+  }
+
+  let body: ArrayBuffer | undefined;
+  try {
+    body = await boundedBody(req, maxBodyBytes);
+  } catch (err) {
+    if (err instanceof RangeError && err.message === "request_body_too_large") {
+      return jsonError(413, "request_body_too_large");
+    }
+    return jsonError(400, "invalid_request_body");
+  }
+
+  // Hop-by-hop / host headers must not be forwarded verbatim. Preserve the
+  // browser's Origin and Sec-Fetch-* headers so backend CSRF checks see the
+  // real caller instead of a synthetic same-origin value from this proxy.
+  const forwardingIdentity = publicForwardingIdentity(
+    req.nextUrl,
+    process.env.SITE_URL,
+  );
+  const headers = sanitizedProxyRequestHeaders(
+    req.headers,
+    forwardingIdentity.host,
+    forwardingIdentity.proto,
+  );
 
   const init: RequestInit & { duplex?: "half" } = {
     method: req.method,
     headers,
-    // GET/HEAD must not carry a body.
-    body: ["GET", "HEAD"].includes(req.method) ? undefined : req.body,
+    body,
     duplex: "half",
     cache: "no-store",
     redirect: "manual",
@@ -55,21 +83,19 @@ async function proxy(req: NextRequest, ctx: Ctx) {
 
   try {
     const upstream = await fetch(url, init);
-    const respHeaders = new Headers(upstream.headers);
     // We pass through the already-decoded body; drop transport encoding.
-    respHeaders.delete("content-encoding");
-    respHeaders.delete("content-length");
+    const respHeaders = sanitizedProxyResponseHeaders(upstream.headers);
     return new Response(upstream.body, {
       status: upstream.status,
       statusText: upstream.statusText,
       headers: respHeaders,
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return new Response(
-      JSON.stringify({ error: "proxy_failed", detail: message, upstream: url }),
-      { status: 502, headers: { "content-type": "application/json" } }
+    console.error(
+      "[api-proxy] upstream request failed kind=",
+      err instanceof Error ? err.name : "unknown",
     );
+    return jsonError(502, "upstream_unavailable");
   }
 }
 

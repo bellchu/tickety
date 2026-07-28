@@ -1,0 +1,91 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tickety-migrate
+  namespace: tickety
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: tickety-migrate
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+      - name: wait-for-postgres
+        image: tickety-backend:latest
+        imagePullPolicy: Never
+        envFrom:
+        - secretRef:
+            name: tickety-secrets
+        command:
+          - python
+          - -c
+          - |
+            import time, psycopg2, os
+            url = os.getenv("DATABASE_URL", "").replace("postgresql+psycopg2://", "postgresql://")
+            for _ in range(60):
+                try:
+                    connection = psycopg2.connect(url)
+                    connection.close()
+                    break
+                except Exception:
+                    print("Waiting for Postgres")
+                    time.sleep(2)
+            else:
+                raise SystemExit("Postgres did not become ready")
+        resources:
+          requests:
+            cpu: 25m
+            memory: 64Mi
+          limits:
+            cpu: 250m
+            memory: 256Mi
+        securityContext:
+          runAsUser: 10001
+          runAsGroup: 10001
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      containers:
+      - name: migrate
+        image: tickety-backend:latest
+        imagePullPolicy: Never
+        command: ["alembic", "upgrade", "head"]
+        envFrom:
+        - secretRef:
+            name: tickety-secrets
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        securityContext:
+          runAsUser: 10001
+          runAsGroup: 10001
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 64Mi

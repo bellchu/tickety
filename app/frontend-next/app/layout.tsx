@@ -1,14 +1,61 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { Providers } from "./providers";
-import { Sidebar } from "@/components/layout/Sidebar";
-import { Footer } from "@/components/layout/Footer";
+import { AppShell } from "@/components/layout/AppShell";
 
 export const dynamic = "force-dynamic";
 
+const metadataBase = new URL(
+  process.env.SITE_URL ??
+    process.env.NEXT_PUBLIC_SITE_URL ??
+    "http://localhost:3000"
+);
+
 export const metadata: Metadata = {
-  title: "Tickety — Intelligent Support Operations",
-  description: "AI-powered ticket triage with performance engagement",
+  metadataBase,
+  applicationName: "Tickety",
+  title: {
+    default: "Tickety — Intelligent Service Operations",
+    template: "%s · Tickety",
+  },
+  description:
+    "AI-assisted service operations for decisive triage, accountable ownership, and faster resolution.",
+  manifest: "/manifest.webmanifest",
+  icons: {
+    icon: [
+      { url: "/icon.svg", type: "image/svg+xml" },
+      { url: "/icons/icon-192.png", sizes: "192x192", type: "image/png" },
+    ],
+    shortcut: "/favicon.ico",
+    apple: [{ url: "/apple-icon.png", sizes: "180x180", type: "image/png" }],
+  },
+  openGraph: {
+    type: "website",
+    siteName: "Tickety",
+    title: "Tickety — Intelligent Service Operations",
+    description:
+      "Resolve what matters with clear triage, accountable ownership, and auditable service operations.",
+    images: [
+      {
+        url: "/opengraph-image.png",
+        width: 1200,
+        height: 630,
+        alt: "Tickety — Resolve what matters.",
+      },
+    ],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "Tickety — Intelligent Service Operations",
+    description:
+      "Resolve what matters with clear triage, accountable ownership, and auditable service operations.",
+    images: ["/twitter-image.png"],
+  },
+};
+
+export const viewport: Viewport = {
+  colorScheme: "light",
+  themeColor: "#0A0B0D",
 };
 
 export default function RootLayout({
@@ -20,17 +67,7 @@ export default function RootLayout({
     <html lang="en">
       <body>
         <Providers>
-          <div className="flex min-h-screen">
-            <Sidebar />
-            <div className="flex flex-1 flex-col pl-64">
-              <main className="flex-1">
-                <div className="mx-auto max-w-7xl px-8 py-8">
-                  {children}
-                </div>
-              </main>
-              <Footer />
-            </div>
-          </div>
+          <AppShell>{children}</AppShell>
         </Providers>
       </body>
     </html>

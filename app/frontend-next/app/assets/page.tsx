@@ -1,466 +1,180 @@
 "use client";
 
 import { useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Edit3, Laptop, Plus, Search, ShieldCheck, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
 import type { Asset, UserOut } from "@/lib/types";
-import {
-  Laptop, Plus, RefreshCw, Trash2, X, Search,
-} from "lucide-react";
-import { cn } from "@/lib/utils";
+import { Badge, type BadgeVariant } from "@/components/ui/Badge";
+import { Button, IconButton } from "@/components/ui/Button";
+import { ConfirmDialog, Dialog } from "@/components/ui/Dialog";
+import { Alert, EmptyState, ErrorState, Skeleton } from "@/components/ui/Feedback";
 
-const ASSET_TYPES = [
-  { value: "", label: "All Types" },
-  { value: "Hardware", label: "Hardware" },
-  { value: "Software", label: "Software" },
-  { value: "License", label: "License" },
-  { value: "Network", label: "Network" },
-  { value: "Facility", label: "Facility" },
-];
+const ASSET_TYPES = ["Hardware", "Software", "License", "Network", "Facility"];
+const ASSET_STATUSES = ["Active", "Inactive", "Retired", "In Repair", "Lost/Stolen"];
 
-const ASSET_STATUSES = [
-  { value: "", label: "All Statuses" },
-  { value: "Active", label: "Active" },
-  { value: "Inactive", label: "Inactive" },
-  { value: "Retired", label: "Retired" },
-  { value: "In Repair", label: "In Repair" },
-  { value: "Lost/Stolen", label: "Lost/Stolen" },
-];
-
-const STATUS_COLORS: Record<string, string> = {
-  Active: "bg-emerald-400/15 text-emerald-600 border-emerald-400/30",
-  Inactive: "bg-ink-400/15 text-ink-500 border-ink-400/30",
-  Retired: "bg-clay-400/15 text-clay-500 border-clay-400/30",
-  "In Repair": "bg-amber-400/15 text-amber-600 border-amber-400/30",
-  "Lost/Stolen": "bg-rust-400/15 text-rust-500 border-rust-400/30",
-};
-
-const TYPE_COLORS: Record<string, string> = {
-  Hardware: "bg-blue-400/15 text-blue-600 border-blue-400/30",
-  Software: "bg-violet-400/15 text-violet-600 border-violet-400/30",
-  License: "bg-cyan-400/15 text-cyan-600 border-cyan-400/30",
-  Network: "bg-moss-400/15 text-moss-600 border-moss-400/30",
-  Facility: "bg-amber-400/15 text-amber-600 border-amber-400/30",
-};
-
-const TYPE_ICONS: Record<string, typeof Laptop> = {
-  Hardware: Laptop,
-  Software: Laptop,
-  License: Laptop,
-  Network: Laptop,
-  Facility: Laptop,
+const statusVariant = (status: string): BadgeVariant => {
+  if (status === "Active") return "success";
+  if (status === "In Repair") return "warning";
+  if (status === "Lost/Stolen") return "danger";
+  return "neutral";
 };
 
 export default function AssetsPage() {
   const queryClient = useQueryClient();
-
   const [assetType, setAssetType] = useState("");
   const [status, setStatus] = useState("");
   const [search, setSearch] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Asset | null>(null);
+  const [deleting, setDeleting] = useState<Asset | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
-  const { data: stats, isLoading: statsLoading } = useQuery({
-    queryKey: ["assetStats"],
-    queryFn: api.getAssetStats,
-  });
-
-  const { data: assets, isLoading: assetsLoading } = useQuery({
+  const statsQuery = useQuery({ queryKey: ["assetStats"], queryFn: api.getAssetStats });
+  const assetsQuery = useQuery({
     queryKey: ["assets", assetType, status, search],
     queryFn: () => api.getAssets(assetType || undefined, status || undefined, search || undefined),
   });
+  const usersQuery = useQuery({ queryKey: ["users"], queryFn: api.getUsers });
 
-  const { data: users } = useQuery({
-    queryKey: ["users"],
-    queryFn: api.getUsers,
-  });
+  const refreshAssets = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["assets"] }),
+      queryClient.invalidateQueries({ queryKey: ["assetStats"] }),
+    ]);
+  };
 
   const createMut = useMutation({
     mutationFn: (payload: Partial<Asset>) => api.createAsset(payload),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["assets"] });
-      queryClient.invalidateQueries({ queryKey: ["assetStats"] });
+    onSuccess: async () => {
+      await refreshAssets();
       setShowForm(false);
+      setNotice("Asset added to the configuration inventory.");
     },
   });
-
   const updateMut = useMutation({
-    mutationFn: ({ id, payload }: { id: string; payload: Partial<Asset> }) =>
-      api.updateAsset(id, payload),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["assets"] });
-      queryClient.invalidateQueries({ queryKey: ["assetStats"] });
+    mutationFn: ({ id, payload }: { id: string; payload: Partial<Asset> }) => api.updateAsset(id, payload),
+    onSuccess: async () => {
+      await refreshAssets();
       setEditing(null);
+      setNotice("Asset details updated.");
     },
   });
-
   const deleteMut = useMutation({
     mutationFn: (id: string) => api.deleteAsset(id),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["assets"] });
-      queryClient.invalidateQueries({ queryKey: ["assetStats"] });
+    onSuccess: async () => {
+      await refreshAssets();
+      setDeleting(null);
+      setNotice("Asset removed from the inventory.");
     },
   });
+
+  const assets = assetsQuery.data ?? [];
+  const hasFilters = Boolean(assetType || status || search);
 
   return (
     <div className="space-y-6">
-      <div className="flex items-end justify-between gap-4">
-        <div className="space-y-1.5">
-          <h1 className="font-serif text-3xl text-ink-700">Assets</h1>
-          <p className="text-[13px] text-ink-500">
-            {stats?.total ?? "—"} total assets · configuration management
-          </p>
-        </div>
-        <button onClick={() => setShowForm(true)} className="btn-primary text-xs">
-          <Plus className="w-4 h-4" strokeWidth={1.5} />
-          Add Asset
-        </button>
-      </div>
-
-      {/* Summary bar */}
-      {statsLoading ? (
-        <div className="grid grid-cols-5 gap-3">
-          {[1, 2, 3, 4, 5].map((i) => (
-            <div key={i} className="card-surface p-4 space-y-1.5">
-              <div className="skeleton h-3 w-16" />
-              <div className="skeleton h-6 w-10" />
-            </div>
-          ))}
-        </div>
-      ) : stats ? (
-        <div className="grid grid-cols-5 gap-3">
-          <div className="card-surface p-4 space-y-1.5">
-            <p className="kpi-label">Total Assets</p>
-            <p className="kpi-value">{stats.total}</p>
+      <header className="flex flex-col gap-4 border-b border-linen-300 pb-6 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-ink-400">
+            <ShieldCheck className="h-4 w-4" aria-hidden="true" /> Configuration management
           </div>
-          {Object.entries(stats.by_type || {}).map(([type, count]) => (
-            <div key={type} className="card-surface p-4 space-y-1.5">
-              <p className="kpi-label">{type}</p>
-              <p className="kpi-value">{count}</p>
-            </div>
-          ))}
+          <h1 className="font-serif text-3xl tracking-tight text-ink-700 sm:text-4xl">Assets</h1>
+          <p className="mt-2 max-w-2xl text-sm text-ink-500">Track ownership, lifecycle, location, and warranty exposure across the estate.</p>
         </div>
-      ) : null}
+        <Button leadingIcon={<Plus className="h-4 w-4" />} onClick={() => { setNotice(null); setShowForm(true); }}>
+          Add asset
+        </Button>
+      </header>
 
-      {/* Filter bar */}
-      <div className="flex items-center gap-3">
-        <select
-          value={assetType}
-          onChange={(e) => setAssetType(e.target.value)}
-          className="input-base text-xs w-36"
-        >
-          {ASSET_TYPES.map((t) => (
-            <option key={t.value} value={t.value}>{t.label}</option>
-          ))}
-        </select>
-        <select
-          value={status}
-          onChange={(e) => setStatus(e.target.value)}
-          className="input-base text-xs w-36"
-        >
-          {ASSET_STATUSES.map((s) => (
-            <option key={s.value} value={s.value}>{s.label}</option>
-          ))}
-        </select>
-        <div className="relative flex-1">
-          <Search className="w-3.5 h-3.5 text-ink-400 absolute left-3 top-1/2 -translate-y-1/2" />
-          <input
-            type="text"
-            placeholder="Search assets…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="input-base input-search text-xs"
-          />
-        </div>
-      </div>
+      {notice && <Alert variant="success" title="Inventory updated">{notice}</Alert>}
+      {(deleteMut.isError || usersQuery.isError) && (
+        <Alert variant="danger" title="Some asset actions are unavailable">
+          {deleteMut.error instanceof Error ? deleteMut.error.message : "Could not load owners or complete the requested change. Try again."}
+        </Alert>
+      )}
 
-      {/* Assets table */}
-      {assetsLoading ? (
-        <div className="card-surface p-6 space-y-3">
-          {[1, 2, 3, 4].map((i) => (
-            <div key={i} className="skeleton h-12 w-full" />
-          ))}
-        </div>
-      ) : !assets || assets.length === 0 ? (
-        <div className="card-surface p-12 text-center text-ink-400">
-          <Laptop className="w-8 h-8 mx-auto mb-3 opacity-40" />
-          <p className="text-sm">No assets found</p>
-        </div>
+      {statsQuery.isError ? (
+        <ErrorState title="Asset summary unavailable" description="The inventory can still be searched below." onRetry={() => statsQuery.refetch()} retrying={statsQuery.isFetching} />
       ) : (
-        <div className="card-surface overflow-hidden">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-linen-300 bg-linen-100">
-                <th className="px-4 py-3 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">Name</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">Type</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">Asset Tag</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">Status</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">Owner</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">Location</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">Vendor</th>
-                <th className="px-4 py-3 text-right text-xs font-semibold text-ink-500 uppercase tracking-wider">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {assets.map((a) => (
-                <tr key={a.id} className="border-b border-linen-200 last:border-0 hover:bg-linen-100">
-                  <td className="px-4 py-3 font-medium text-ink-700">{a.name}</td>
-                  <td className="px-4 py-3">
-                    <span className={cn("badge", TYPE_COLORS[a.asset_type] || "bg-ink-400/15 text-ink-500 border-ink-400/30")}>
-                      {a.asset_type}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-ink-500 tabular-nums">{a.asset_tag || "—"}</td>
-                  <td className="px-4 py-3">
-                    <span className={cn("badge", STATUS_COLORS[a.status] || "bg-ink-400/15 text-ink-500 border-ink-400/30")}>
-                      {a.status}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-ink-500">{a.owner_name || "—"}</td>
-                  <td className="px-4 py-3 text-ink-500">{a.location || "—"}</td>
-                  <td className="px-4 py-3 text-ink-500">{a.vendor || "—"}</td>
-                  <td className="px-4 py-3 text-right">
-                    <div className="inline-flex items-center gap-1">
-                      <button
-                        onClick={() => setEditing(a)}
-                        className="p-1.5 rounded text-ink-400 hover:text-ink-700 hover:bg-linen-200"
-                        title="Edit"
-                      >
-                        <Laptop className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        onClick={() => deleteMut.mutate(a.id)}
-                        className="p-1.5 rounded text-ink-400 hover:text-rust-500 hover:bg-rust-400/10"
-                        title="Delete"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <section aria-label="Asset inventory summary" className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+          {statsQuery.isLoading ? Array.from({ length: 5 }, (_, i) => <Skeleton key={i} className="h-24" />) : (
+            <>
+              <Metric label="Total assets" value={statsQuery.data?.total ?? 0} featured />
+              {ASSET_TYPES.slice(0, 4).map((type) => <Metric key={type} label={type} value={statsQuery.data?.by_type?.[type] ?? 0} />)}
+            </>
+          )}
+        </section>
       )}
 
-      {/* Create / Edit modal */}
-      {(showForm || editing) && (
-        <AssetFormModal
-          asset={editing}
-          users={users || []}
-          onClose={() => { setShowForm(false); setEditing(null); }}
-          onSubmit={(payload) => {
-            if (editing) {
-              updateMut.mutate({ id: editing.id, payload });
-            } else {
-              createMut.mutate(payload);
-            }
-          }}
-          loading={createMut.isPending || updateMut.isPending}
-          error={createMut.error || updateMut.error}
-        />
-      )}
+      <section aria-labelledby="asset-inventory-heading" className="space-y-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-end">
+          <div className="min-w-0 flex-1">
+            <h2 id="asset-inventory-heading" className="text-lg font-semibold text-ink-700">Inventory</h2>
+            <p className="mt-1 text-xs text-ink-400" aria-live="polite">{assetsQuery.isLoading ? "Loading assets…" : `${assets.length} matching asset${assets.length === 1 ? "" : "s"}`}</p>
+          </div>
+          <label className="relative block min-w-0 flex-1 lg:max-w-sm">
+            <span className="sr-only">Search assets</span>
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-400" aria-hidden="true" />
+            <input className="input-base input-search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search name, tag, vendor…" type="search" />
+          </label>
+          <div className="grid grid-cols-2 gap-3 lg:w-[22rem]">
+            <label><span className="sr-only">Filter by asset type</span><select className="input-base" value={assetType} onChange={(e) => setAssetType(e.target.value)}><option value="">All types</option>{ASSET_TYPES.map((value) => <option key={value}>{value}</option>)}</select></label>
+            <label><span className="sr-only">Filter by status</span><select className="input-base" value={status} onChange={(e) => setStatus(e.target.value)}><option value="">All statuses</option>{ASSET_STATUSES.map((value) => <option key={value}>{value}</option>)}</select></label>
+          </div>
+        </div>
+
+        {assetsQuery.isLoading ? <AssetSkeleton /> : assetsQuery.isError ? (
+          <ErrorState title="Could not load assets" description="The inventory service did not return a usable response." onRetry={() => assetsQuery.refetch()} retrying={assetsQuery.isFetching} />
+        ) : assets.length === 0 ? (
+          <EmptyState
+            icon={<Laptop className="h-5 w-5" />}
+            title={hasFilters ? "No assets match these filters" : "No assets in the inventory"}
+            description={hasFilters ? "Adjust or clear the filters to widen the result set." : "Add the first asset to establish ownership and lifecycle visibility."}
+            action={hasFilters ? <Button variant="secondary" onClick={() => { setAssetType(""); setStatus(""); setSearch(""); }}>Clear filters</Button> : <Button leadingIcon={<Plus className="h-4 w-4" />} onClick={() => setShowForm(true)}>Add asset</Button>}
+          />
+        ) : <AssetResults assets={assets} onEdit={setEditing} onDelete={setDeleting} />}
+      </section>
+
+      <AssetFormDialog
+        open={showForm || Boolean(editing)} asset={editing} users={usersQuery.data ?? []}
+        onClose={() => { if (!createMut.isPending && !updateMut.isPending) { setShowForm(false); setEditing(null); createMut.reset(); updateMut.reset(); } }}
+        onSubmit={(payload) => editing ? updateMut.mutate({ id: editing.id, payload }) : createMut.mutate(payload)}
+        pending={createMut.isPending || updateMut.isPending} error={createMut.error || updateMut.error}
+      />
+      <ConfirmDialog
+        open={Boolean(deleting)} onOpenChange={(open) => { if (!open) { setDeleting(null); deleteMut.reset(); } }}
+        title="Remove asset?" description={<>This permanently removes <strong>{deleting?.name}</strong> from the configuration inventory. This action cannot be undone.</>}
+        confirmLabel="Remove asset" destructive pending={deleteMut.isPending} onConfirm={() => { if (deleting) deleteMut.mutate(deleting.id); }}
+      />
     </div>
   );
 }
 
-function AssetFormModal({
-  asset,
-  users,
-  onClose,
-  onSubmit,
-  loading,
-  error,
-}: {
-  asset: Asset | null;
-  users: UserOut[];
-  onClose: () => void;
-  onSubmit: (payload: Partial<Asset>) => void;
-  loading: boolean;
-  error: unknown;
-}) {
-  const [name, setName] = useState(asset?.name || "");
-  const [assetType, setAssetType] = useState(asset?.asset_type || "Hardware");
-  const [assetTag, setAssetTag] = useState(asset?.asset_tag || "");
-  const [status, setStatus] = useState(asset?.status || "Active");
-  const [ownerId, setOwnerId] = useState(asset?.owner_id || "");
-  const [location, setLocation] = useState(asset?.location || "");
-  const [vendor, setVendor] = useState(asset?.vendor || "");
-  const [model, setModel] = useState(asset?.model || "");
-  const [purchaseDate, setPurchaseDate] = useState(asset?.purchase_date || "");
-  const [warrantyExpiry, setWarrantyExpiry] = useState(asset?.warranty_expiry || "");
-  const [cost, setCost] = useState(asset?.cost != null ? String(asset.cost) : "");
-  const [notes, setNotes] = useState(asset?.notes || "");
+function Metric({ label, value, featured = false }: { label: string; value: number; featured?: boolean }) {
+  return <div className={`rounded-2xl border p-4 ${featured ? "border-clay-200 bg-[var(--color-primary-soft)]" : "border-linen-300 bg-linen-50"}`}><p className="text-xs font-medium text-ink-500">{label}</p><p className="mt-2 font-serif text-3xl tabular-nums text-ink-700">{value}</p></div>;
+}
 
-  const errorMsg = error instanceof Error ? error.message : error ? String(error) : null;
+function AssetSkeleton() { return <div className="card-surface space-y-3 p-4" aria-label="Loading asset inventory">{Array.from({ length: 5 }, (_, i) => <Skeleton key={i} className="h-14" />)}</div>; }
 
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-ink-800/30 backdrop-blur-sm"
-      onClick={onClose}
-    >
-      <div
-        className="card-surface w-full max-w-lg p-6 space-y-4 max-h-[85vh] overflow-y-auto"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between">
-          <h2 className="font-serif text-xl text-ink-700">
-            {asset ? "Edit Asset" : "Add Asset"}
-          </h2>
-          <button onClick={onClose} className="p-1 rounded text-ink-400 hover:bg-linen-200">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-        <div className="space-y-3">
-          <label className="block space-y-1">
-            <span className="text-xs font-medium text-ink-500">Name</span>
-            <input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              className="input-base"
-              placeholder="Dell Latitude 5540"
-            />
-          </label>
-          <div className="grid grid-cols-2 gap-3">
-            <label className="block space-y-1">
-              <span className="text-xs font-medium text-ink-500">Asset Type</span>
-              <select value={assetType} onChange={(e) => setAssetType(e.target.value)} className="input-base">
-                {ASSET_TYPES.filter((t) => t.value).map((t) => (
-                  <option key={t.value} value={t.value}>{t.label}</option>
-                ))}
-              </select>
-            </label>
-            <label className="block space-y-1">
-              <span className="text-xs font-medium text-ink-500">Status</span>
-              <select value={status} onChange={(e) => setStatus(e.target.value)} className="input-base">
-                {ASSET_STATUSES.filter((s) => s.value).map((s) => (
-                  <option key={s.value} value={s.value}>{s.label}</option>
-                ))}
-              </select>
-            </label>
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <label className="block space-y-1">
-              <span className="text-xs font-medium text-ink-500">Asset Tag</span>
-              <input
-                value={assetTag}
-                onChange={(e) => setAssetTag(e.target.value)}
-                className="input-base"
-                placeholder="IT-0042"
-              />
-            </label>
-            <label className="block space-y-1">
-              <span className="text-xs font-medium text-ink-500">Owner</span>
-              <select value={ownerId} onChange={(e) => setOwnerId(e.target.value)} className="input-base">
-                <option value="">Unassigned</option>
-                {users.map((u) => (
-                  <option key={u.id} value={u.id}>{u.name}</option>
-                ))}
-              </select>
-            </label>
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <label className="block space-y-1">
-              <span className="text-xs font-medium text-ink-500">Location</span>
-              <input
-                value={location}
-                onChange={(e) => setLocation(e.target.value)}
-                className="input-base"
-                placeholder="HQ - Floor 3"
-              />
-            </label>
-            <label className="block space-y-1">
-              <span className="text-xs font-medium text-ink-500">Vendor</span>
-              <input
-                value={vendor}
-                onChange={(e) => setVendor(e.target.value)}
-                className="input-base"
-                placeholder="Dell Technologies"
-              />
-            </label>
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <label className="block space-y-1">
-              <span className="text-xs font-medium text-ink-500">Model</span>
-              <input
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                className="input-base"
-                placeholder="Latitude 5540"
-              />
-            </label>
-            <label className="block space-y-1">
-              <span className="text-xs font-medium text-ink-500">Cost</span>
-              <input
-                type="number"
-                value={cost}
-                onChange={(e) => setCost(e.target.value)}
-                className="input-base"
-                placeholder="1299.00"
-              />
-            </label>
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <label className="block space-y-1">
-              <span className="text-xs font-medium text-ink-500">Purchase Date</span>
-              <input
-                type="date"
-                value={purchaseDate}
-                onChange={(e) => setPurchaseDate(e.target.value)}
-                className="input-base"
-              />
-            </label>
-            <label className="block space-y-1">
-              <span className="text-xs font-medium text-ink-500">Warranty Expiry</span>
-              <input
-                type="date"
-                value={warrantyExpiry}
-                onChange={(e) => setWarrantyExpiry(e.target.value)}
-                className="input-base"
-              />
-            </label>
-          </div>
-          <label className="block space-y-1">
-            <span className="text-xs font-medium text-ink-500">Notes</span>
-            <textarea
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              className="input-base min-h-[80px] resize-y"
-              placeholder="Any additional notes…"
-            />
-          </label>
-        </div>
-        {errorMsg && <p className="text-xs text-rust-500">Failed: {errorMsg}</p>}
-        <div className="flex items-center justify-end gap-2">
-          <button onClick={onClose} className="px-3 py-2 rounded text-xs text-ink-500 hover:bg-linen-200">
-            Cancel
-          </button>
-          <button
-            onClick={() =>
-              onSubmit({
-                name,
-                asset_type: assetType,
-                asset_tag: assetTag || undefined,
-                status,
-                owner_id: ownerId || undefined,
-                location: location || undefined,
-                vendor: vendor || undefined,
-                model: model || undefined,
-                purchase_date: purchaseDate || undefined,
-                warranty_expiry: warrantyExpiry || undefined,
-                cost: cost ? parseFloat(cost) : undefined,
-                notes: notes || undefined,
-              })
-            }
-            disabled={loading || !name.trim()}
-            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-clay-500 text-linen-50 text-xs font-semibold hover:bg-clay-600 disabled:opacity-50"
-          >
-            {loading && <RefreshCw className="w-3 h-3 animate-spin" />}
-            {asset ? "Save" : "Create"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
+function AssetResults({ assets, onEdit, onDelete }: { assets: Asset[]; onEdit: (asset: Asset) => void; onDelete: (asset: Asset) => void }) {
+  return <>
+    <div className="grid gap-3 md:hidden">{assets.map((asset) => <article key={asset.id} className="card-surface p-4"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="font-semibold text-ink-700">{asset.name}</p><p className="mt-1 text-xs text-ink-400">{asset.asset_tag || "No asset tag"} · {asset.asset_type}</p></div><Badge variant={statusVariant(asset.status)} dot>{asset.status}</Badge></div><dl className="mt-4 grid grid-cols-2 gap-3 text-xs"><div><dt className="text-ink-400">Owner</dt><dd className="mt-1 text-ink-600">{asset.owner_name || "Unassigned"}</dd></div><div><dt className="text-ink-400">Location</dt><dd className="mt-1 text-ink-600">{asset.location || "Not recorded"}</dd></div><div><dt className="text-ink-400">Vendor / model</dt><dd className="mt-1 text-ink-600">{[asset.vendor, asset.model].filter(Boolean).join(" · ") || "Not recorded"}</dd></div><div className="flex items-end justify-end gap-1"><IconButton size="sm" icon={<Edit3 className="h-4 w-4" />} aria-label={`Edit ${asset.name}`} onClick={() => onEdit(asset)} /><IconButton size="sm" icon={<Trash2 className="h-4 w-4" />} aria-label={`Remove ${asset.name}`} onClick={() => onDelete(asset)} /></div></dl></article>)}</div>
+    <div className="card-surface hidden overflow-x-auto md:block"><table className="w-full min-w-[860px] text-sm"><thead><tr className="border-b border-linen-300 bg-linen-100 text-left text-[11px] uppercase tracking-[0.12em] text-ink-400"><th className="px-4 py-3 font-semibold">Asset</th><th className="px-4 py-3 font-semibold">Type</th><th className="px-4 py-3 font-semibold">Status</th><th className="px-4 py-3 font-semibold">Owner</th><th className="px-4 py-3 font-semibold">Location</th><th className="px-4 py-3 font-semibold">Vendor / model</th><th className="px-4 py-3 text-right font-semibold">Actions</th></tr></thead><tbody>{assets.map((asset) => <tr key={asset.id} className="border-b border-linen-200 last:border-0 hover:bg-linen-100"><td className="px-4 py-3"><p className="font-semibold text-ink-700">{asset.name}</p><p className="mt-0.5 text-xs text-ink-400">{asset.asset_tag || "No tag"}</p></td><td className="px-4 py-3"><Badge>{asset.asset_type}</Badge></td><td className="px-4 py-3"><Badge variant={statusVariant(asset.status)} dot>{asset.status}</Badge></td><td className="px-4 py-3 text-ink-600">{asset.owner_name || "Unassigned"}</td><td className="px-4 py-3 text-ink-600">{asset.location || "—"}</td><td className="px-4 py-3 text-ink-600">{[asset.vendor, asset.model].filter(Boolean).join(" · ") || "—"}</td><td className="px-4 py-3"><div className="flex justify-end gap-1"><IconButton size="sm" icon={<Edit3 className="h-4 w-4" />} aria-label={`Edit ${asset.name}`} onClick={() => onEdit(asset)} /><IconButton size="sm" icon={<Trash2 className="h-4 w-4" />} aria-label={`Remove ${asset.name}`} onClick={() => onDelete(asset)} /></div></td></tr>)}</tbody></table></div>
+  </>;
+}
+
+function AssetFormDialog({ open, asset, users, onClose, onSubmit, pending, error }: { open: boolean; asset: Asset | null; users: UserOut[]; onClose: () => void; onSubmit: (payload: Partial<Asset>) => void; pending: boolean; error: unknown }) {
+  const key = asset?.id ?? (open ? "new" : "closed");
+  return <AssetFormDialogBody key={key} {...{ open, asset, users, onClose, onSubmit, pending, error }} />;
+}
+
+function AssetFormDialogBody({ open, asset, users, onClose, onSubmit, pending, error }: { open: boolean; asset: Asset | null; users: UserOut[]; onClose: () => void; onSubmit: (payload: Partial<Asset>) => void; pending: boolean; error: unknown }) {
+  const [form, setForm] = useState({ name: asset?.name || "", asset_type: asset?.asset_type || "Hardware", asset_tag: asset?.asset_tag || "", status: asset?.status || "Active", owner_id: asset?.owner_id || "", location: asset?.location || "", vendor: asset?.vendor || "", model: asset?.model || "", purchase_date: asset?.purchase_date || "", warranty_expiry: asset?.warranty_expiry || "", cost: asset?.cost == null ? "" : String(asset.cost), notes: asset?.notes || "" });
+  const set = (field: keyof typeof form, value: string) => setForm((current) => ({ ...current, [field]: value }));
+  const field = (label: string, name: keyof typeof form, placeholder?: string, type = "text") => <label className="block"><span className="mb-1.5 block text-xs font-semibold text-ink-500">{label}</span><input className="input-base" type={type} value={form[name]} onChange={(e) => set(name, e.target.value)} placeholder={placeholder} /></label>;
+  const errorMessage = error instanceof Error ? error.message : error ? "The asset could not be saved." : null;
+  return <Dialog open={open} onOpenChange={(next) => { if (!next) onClose(); }} title={asset ? "Edit asset" : "Add asset"} description="Keep lifecycle and ownership information accurate for support and audit workflows." className="max-w-2xl" dismissible={!pending} footer={<><Button variant="secondary" onClick={onClose} disabled={pending}>Cancel</Button><Button pending={pending} pendingLabel="Saving…" disabled={!form.name.trim()} onClick={() => onSubmit({ name: form.name.trim(), asset_type: form.asset_type, asset_tag: form.asset_tag || undefined, status: form.status, owner_id: form.owner_id || undefined, location: form.location || undefined, vendor: form.vendor || undefined, model: form.model || undefined, purchase_date: form.purchase_date || undefined, warranty_expiry: form.warranty_expiry || undefined, cost: form.cost ? Number(form.cost) : undefined, notes: form.notes || undefined })}>{asset ? "Save changes" : "Add asset"}</Button></>}>
+    <div className="space-y-4">{errorMessage && <Alert variant="danger" title="Could not save asset">{errorMessage}</Alert>}{field("Asset name", "name", "Dell Latitude 5540")}<div className="grid gap-4 sm:grid-cols-2"><label><span className="mb-1.5 block text-xs font-semibold text-ink-500">Asset type</span><select className="input-base" value={form.asset_type} onChange={(e) => set("asset_type", e.target.value)}>{ASSET_TYPES.map((value) => <option key={value}>{value}</option>)}</select></label><label><span className="mb-1.5 block text-xs font-semibold text-ink-500">Status</span><select className="input-base" value={form.status} onChange={(e) => set("status", e.target.value)}>{ASSET_STATUSES.map((value) => <option key={value}>{value}</option>)}</select></label>{field("Asset tag", "asset_tag", "IT-0042")}<label><span className="mb-1.5 block text-xs font-semibold text-ink-500">Owner</span><select className="input-base" value={form.owner_id} onChange={(e) => set("owner_id", e.target.value)}><option value="">Unassigned</option>{users.map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label>{field("Location", "location", "HQ · Floor 3")}{field("Vendor", "vendor", "Dell Technologies")}{field("Model", "model", "Latitude 5540")}{field("Cost", "cost", "1299.00", "number")}{field("Purchase date", "purchase_date", undefined, "date")}{field("Warranty expiry", "warranty_expiry", undefined, "date")}</div><label><span className="mb-1.5 block text-xs font-semibold text-ink-500">Notes</span><textarea className="input-base min-h-24 resize-y" value={form.notes} onChange={(e) => set("notes", e.target.value)} placeholder="Lifecycle, support, or compliance context…" /></label></div>
+  </Dialog>;
 }

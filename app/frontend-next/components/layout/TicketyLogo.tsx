@@ -1,33 +1,107 @@
-export function TicketyLogo({ className = "h-6" }: { className?: string }) {
+import { cn } from "@/lib/utils";
+
+const PRECISION_WINDOW_LEFT_PATH =
+  "M12 8H26Q28 8 28 10V14Q28 16 26 16H18Q16 16 16 18V46Q16 48 18 48H26Q28 48 28 50V54Q28 56 26 56H12Q8 56 8 52V12Q8 8 12 8Z";
+const PRECISION_WINDOW_RIGHT_PATH =
+  "M52 8H38Q36 8 36 10V14Q36 16 38 16H46Q48 16 48 18V46Q48 48 46 48H38Q36 48 36 50V54Q36 56 38 56H52Q56 56 56 52V12Q56 8 52 8Z";
+
+type MarkTone = "gradient" | "solid" | "dark" | "reversed";
+type LogoSize = "sm" | "md" | "lg" | "xl";
+
+// Keep the earlier tone names as compatibility aliases. The identity itself
+// is deliberately monochrome; cobalt is reserved for product UI.
+const markToneClasses: Record<MarkTone, string> = {
+  gradient: "text-[#0A0B0D]",
+  solid: "text-[#0A0B0D]",
+  dark: "text-[#0A0B0D]",
+  reversed: "text-white",
+};
+
+export function TicketyMark({
+  className,
+  tone = "dark",
+}: {
+  className?: string;
+  tone?: MarkTone;
+}) {
   return (
-    <div className={`flex items-center gap-2.5 ${className}`}>
-      <div
-        className="flex h-9 w-9 items-center justify-center rounded-[10px]"
-        style={{
-          background: "linear-gradient(135deg, #3B7FE5 0%, #0066BB 100%)",
-          boxShadow: "0 2px 4px rgba(0, 79, 147, 0.22), inset 0 1px 0 rgba(255,255,255,0.18)",
-        }}
+    <span
+      className={cn(
+        "inline-flex aspect-square shrink-0 items-center justify-center",
+        markToneClasses[tone],
+        className
+      )}
+    >
+      <svg
+        aria-hidden="true"
+        className="h-full w-full"
+        focusable="false"
+        viewBox="0 0 64 64"
+        xmlns="http://www.w3.org/2000/svg"
       >
-        <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-          <path
-            d="M2.5 0C1.12 0 0 1.12 0 2.5V4C0.83 4 1.5 4.67 1.5 5.5C1.5 6.33 0.83 7 0 7V11.5C0 12.88 1.12 14 2.5 14H15.5C16.88 14 18 12.88 18 11.5V7C17.17 7 16.5 6.33 16.5 5.5C16.5 4.67 17.17 4 18 4V2.5C18 1.12 16.88 0 15.5 0H2.5Z"
-            transform="translate(1, 3)"
-            fill="#FBF8F3"
-            fillOpacity="0.95"
-          />
-          <path
-            d="M4 8C3.87 8 3.74 7.95 3.64 7.85L0.4 4.6C0.2 4.4 0.2 4.09 0.4 3.89C0.6 3.69 0.91 3.69 1.11 3.89L4 6.79L9.64 1.15C9.84 0.95 10.15 0.95 10.35 1.15C10.55 1.35 10.55 1.66 10.35 1.86L4.36 7.85C4.26 7.95 4.13 8 4 8Z"
-            transform="translate(4, 5)"
-            fill="#0066BB"
-          />
-        </svg>
-      </div>
-      <div className="flex flex-col leading-none gap-0.5">
-        <span className="font-mono text-base font-semibold text-ink-700">
+        <path d={PRECISION_WINDOW_LEFT_PATH} fill="currentColor" />
+        <path d={PRECISION_WINDOW_RIGHT_PATH} fill="currentColor" />
+      </svg>
+    </span>
+  );
+}
+
+const logoSizeClasses: Record<
+  LogoSize,
+  { mark: string; word: string; descriptor: string }
+> = {
+  sm: { mark: "h-6 w-6", word: "text-[17px]", descriptor: "text-[7px]" },
+  md: { mark: "h-8 w-8", word: "text-[21px]", descriptor: "text-[8px]" },
+  lg: { mark: "h-9 w-9", word: "text-2xl", descriptor: "text-[8px]" },
+  xl: { mark: "h-10 w-10", word: "text-[27px]", descriptor: "text-[9px]" },
+};
+
+export function TicketyLogo({
+  className,
+  inverse = false,
+  showDescriptor = false,
+  size = "lg",
+}: {
+  className?: string;
+  inverse?: boolean;
+  showDescriptor?: boolean;
+  size?: LogoSize;
+}) {
+  const sizing = logoSizeClasses[size];
+
+  return (
+    <span
+      aria-label="Tickety"
+      className={cn("inline-flex items-center gap-2", className)}
+      role="img"
+    >
+      <TicketyMark className={sizing.mark} tone={inverse ? "reversed" : "dark"} />
+      <span
+        aria-hidden="true"
+        className="flex min-w-0 flex-col justify-center gap-0.5 leading-none"
+      >
+        <span
+          className={cn(
+            "whitespace-nowrap font-medium tracking-[-0.025em]",
+            sizing.word,
+            inverse ? "text-white" : "text-[#0A0B0D]"
+          )}
+          style={{ fontFamily: '"Geist", Arial, sans-serif' }}
+        >
           Tickety
         </span>
-        <span className="text-[10px] text-ink-400">Support Suite</span>
-      </div>
-    </div>
+        {showDescriptor && (
+          <span
+            className={cn(
+              "whitespace-nowrap font-medium tracking-normal",
+              sizing.descriptor,
+              inverse ? "text-white/60" : "text-[#0A0B0D]/55"
+            )}
+          >
+            Service operations
+          </span>
+        )}
+      </span>
+    </span>
   );
 }

@@ -2,100 +2,259 @@ import os
 import asyncio
 import threading
 from datetime import datetime
+from typing import Optional
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from sqlalchemy import or_
 
 from .database import SessionLocal, SyncStateRecord, TicketRecord
 from .integrations.sync import sync_tickets_from_external
 from .integrations.registry import get_adapter
 from . import settings as settings_module
 
-_scheduler: BackgroundScheduler = None
+_scheduler: Optional[BackgroundScheduler] = None
 _lock = threading.Lock()
+
+_PROCESS_ROLE_ENV = "TICKETY_PROCESS_ROLE"
+_SCHEDULER_ENABLED_ENV = "TICKETY_SCHEDULER_ENABLED"
+_VALID_PROCESS_ROLES = {"api", "worker", "all"}
+
+
+def process_role() -> str:
+    """Return this process's explicit runtime role.
+
+    Production defaults to an API-only process so adding API replicas can
+    never multiply scheduled jobs. Demo mode retains the historical combined
+    API + scheduler process unless a role is explicitly configured.
+    """
+    configured = os.getenv(_PROCESS_ROLE_ENV, "").strip().lower()
+    if configured:
+        if configured not in _VALID_PROCESS_ROLES:
+            raise ValueError(
+                f"{_PROCESS_ROLE_ENV} must be one of: "
+                f"{', '.join(sorted(_VALID_PROCESS_ROLES))}"
+            )
+        return configured
+    return "all" if settings_module.is_demo_mode() else "api"
+
+
+def scheduler_enabled_for_process() -> bool:
+    """Whether this process may own scheduled jobs.
+
+    The optional enable flag is a kill switch, not a way to turn an API role
+    into a worker. This keeps a mistaken boolean on replicated API pods from
+    reintroducing duplicate schedulers.
+    """
+    role = process_role()
+    configured = os.getenv(_SCHEDULER_ENABLED_ENV)
+    if configured is not None:
+        normalized = configured.strip().lower()
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        if normalized not in {"1", "true", "yes", "on"}:
+            raise ValueError(
+                f"{_SCHEDULER_ENABLED_ENV} must be a boolean value"
+            )
+    return role in {"worker", "all"}
+
+
+def _bounded_interval(env_name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        configured = int(os.getenv(env_name, str(default)))
+    except (TypeError, ValueError):
+        configured = default
+    return max(minimum, min(configured, maximum))
 
 
 def _auto_triage_job():
     """Background scanner: pick up tickets with missing AI data and fill
     the gaps — triage first, then summary, then resolution. Processes up
     to 10 tickets per 30‑second sweep."""
+    if not settings_module.is_production_mode():
+        return
     try:
         db = SessionLocal()
         auto_triage = settings_module.automation_enabled("AUTO_TRIAGE_ENABLED", "AUTO_TRIAGE")
         auto_summary = settings_module.automation_enabled("AUTO_SUMMARIZE_ENABLED")
         auto_resolution = settings_module.automation_enabled("AUTO_RESOLVE_ENABLED")
+        # Only Tickety-owned records are eligible for implicit gap scanning.
+        # A provider-authenticated sync or webhook proves transport integrity,
+        # not that requester-controlled ticket text is safe AI input. External
+        # and Portal tickets must therefore be explicitly queued by an
+        # authenticated workflow before the worker will process them. The
+        # separate queued query above intentionally remains source-agnostic so
+        # those reviewed requests, including expired claims, can make progress.
+        internal_automatic_source = or_(
+            TicketRecord.external_source.is_(None),
+            TicketRecord.external_source.in_(["manual", "standalone"]),
+        )
+        queued = db.query(TicketRecord).filter(
+            or_(
+                TicketRecord.ai_status == "queued",
+                (
+                    (TicketRecord.ai_status == "running")
+                    & (TicketRecord.ai_lease_expires_at < datetime.utcnow())
+                ),
+            ),
+            or_(
+                TicketRecord.ai_next_attempt_at.is_(None),
+                TicketRecord.ai_next_attempt_at <= datetime.utcnow(),
+            ),
+        ).limit(5).all()
         # Find tickets missing ANY AI data (prioritize untriaged first)
         untriaged = (
-            db.query(TicketRecord).filter(TicketRecord.ai_reasoning.is_(None)).limit(5).all()
+            db.query(TicketRecord).filter(
+                internal_automatic_source,
+                TicketRecord.ai_reasoning.is_(None),
+                or_(
+                    TicketRecord.ai_status.is_(None),
+                    TicketRecord.ai_status.notin_(["dead_letter", "failed"]),
+                ),
+            ).limit(5).all()
             if auto_triage else []
         )
         no_summary = (
             db.query(TicketRecord).filter(
+                internal_automatic_source,
                 TicketRecord.ai_reasoning.isnot(None),
-                TicketRecord.summary.is_(None)
+                TicketRecord.summary.is_(None),
+                or_(
+                    TicketRecord.ai_status.is_(None),
+                    TicketRecord.ai_status.notin_(["dead_letter", "failed", "running", "queued"]),
+                ),
+                or_(
+                    TicketRecord.ai_next_attempt_at.is_(None),
+                    TicketRecord.ai_next_attempt_at <= datetime.utcnow(),
+                ),
             ).limit(5).all()
             if auto_summary else []
         )
         no_resolution = (
             db.query(TicketRecord).filter(
+                internal_automatic_source,
                 TicketRecord.ai_reasoning.isnot(None),
                 TicketRecord.summary.isnot(None),
-                TicketRecord.recommended_solution.is_(None)
+                TicketRecord.recommended_solution.is_(None),
+                or_(
+                    TicketRecord.ai_status.is_(None),
+                    TicketRecord.ai_status.notin_(["dead_letter", "failed", "running", "queued"]),
+                ),
+                or_(
+                    TicketRecord.ai_next_attempt_at.is_(None),
+                    TicketRecord.ai_next_attempt_at <= datetime.utcnow(),
+                ),
             ).limit(5).all()
             if auto_resolution else []
         )
 
-        if untriaged or no_summary or no_resolution:
-            print(f"[auto-triage] gaps: {len(untriaged)} untriaged, {len(no_summary)} no-summary, {len(no_resolution)} no-plan")
+        if queued or untriaged or no_summary or no_resolution:
+            print(
+                f"[auto-triage] gaps: {len(queued)} queued, {len(untriaged)} untriaged, "
+                f"{len(no_summary)} no-summary, {len(no_resolution)} no-plan"
+            )
 
-        if untriaged:
+        triage_candidates = list({ticket.id: ticket for ticket in [*queued, *untriaged]}.values())
+        if triage_candidates:
             import asyncio
             from .main import _auto_process
-            for t in untriaged:
+            for t in triage_candidates:
                 try:
-                    t2 = db.query(TicketRecord).filter(TicketRecord.id == t.id).first()
-                    if t2:
-                        asyncio.run(_auto_process(t2, db))
+                    t2 = db.query(TicketRecord).filter(
+                        TicketRecord.id == t.id
+                    ).with_for_update().first()
+                    live_claim = bool(
+                        t2
+                        and t2.ai_status == "running"
+                        and t2.ai_lease_expires_at
+                        and t2.ai_lease_expires_at >= datetime.utcnow()
+                    )
+                    if t2 and not live_claim and t2.ai_status not in {"dead_letter", "failed"}:
+                        db.commit()
+                        asyncio.run(
+                            _auto_process(
+                                t2,
+                                db,
+                                force=t2.ai_status in {"queued", "running"},
+                            )
+                        )
                 except Exception as e:
-                    print(f"[auto-triage] error: {e}")
+                    print(f"[auto-triage] error kind={type(e).__name__}")
                     db.rollback()
 
         # Fill missing summaries
         if no_summary:
             import asyncio
-            from .brain import IntelligenceEngine
-            from .llm_manager import LLMManager
-            from . import intelligence as intel
-            eng = IntelligenceEngine(LLMManager())
+            from .main import _auto_process
             for t in no_summary:
                 try:
-                    t2 = db.query(TicketRecord).filter(TicketRecord.id == t.id).first()
-                    if t2:
-                        s = asyncio.run(intel.summarize_ticket(eng.llm, t2))
-                        if s:
-                            t2.summary = s
-                            db.commit()
-                            print(f"[auto-triage] summary filled for {t2.id[:8]}")
+                    t2 = db.query(TicketRecord).filter(
+                        TicketRecord.id == t.id
+                    ).with_for_update().first()
+                    live_claim = bool(
+                        t2
+                        and t2.ai_status == "running"
+                        and t2.ai_lease_expires_at
+                        and t2.ai_lease_expires_at >= datetime.utcnow()
+                    )
+                    retry_due = bool(
+                        t2
+                        and (
+                            t2.ai_next_attempt_at is None
+                            or t2.ai_next_attempt_at <= datetime.utcnow()
+                        )
+                    )
+                    if (
+                        t2
+                        and t2.summary is None
+                        and not live_claim
+                        and retry_due
+                        and t2.ai_status not in {"queued", "dead_letter", "failed"}
+                    ):
+                        t2.ai_requested_artifacts = "summary"
+                        t2.ai_status = "queued"
+                        db.commit()
+                        asyncio.run(_auto_process(t2, db, force=True))
+                        print(f"[auto-triage] summary filled for {t2.id[:8]}")
                 except Exception as e:
-                    print(f"[auto-triage] summary error: {e}")
+                    print(f"[auto-triage] summary error kind={type(e).__name__}")
                     db.rollback()
 
         # Fill missing resolution plans
         if no_resolution:
-            import asyncio, json
-            from .brain import IntelligenceEngine
-            from .llm_manager import LLMManager
-            from . import intelligence as intel
-            eng = IntelligenceEngine(LLMManager())
+            import asyncio
+            from .main import _auto_process
             for t in no_resolution:
                 try:
-                    t2 = db.query(TicketRecord).filter(TicketRecord.id == t.id).first()
-                    if t2:
-                        plan = asyncio.run(intel.recommend_resolution(eng.llm, t2))
-                        t2.recommended_solution = json.dumps(plan)
+                    t2 = db.query(TicketRecord).filter(
+                        TicketRecord.id == t.id
+                    ).with_for_update().first()
+                    live_claim = bool(
+                        t2
+                        and t2.ai_status == "running"
+                        and t2.ai_lease_expires_at
+                        and t2.ai_lease_expires_at >= datetime.utcnow()
+                    )
+                    retry_due = bool(
+                        t2
+                        and (
+                            t2.ai_next_attempt_at is None
+                            or t2.ai_next_attempt_at <= datetime.utcnow()
+                        )
+                    )
+                    if (
+                        t2
+                        and t2.recommended_solution is None
+                        and not live_claim
+                        and retry_due
+                        and t2.ai_status not in {"queued", "dead_letter", "failed"}
+                    ):
+                        t2.ai_requested_artifacts = "resolution"
+                        t2.ai_status = "queued"
                         db.commit()
+                        asyncio.run(_auto_process(t2, db, force=True))
                         print(f"[auto-triage] resolution filled for {t2.id[:8]}")
                 except Exception as e:
-                    print(f"[auto-triage] resolution error: {e}")
+                    print(f"[auto-triage] resolution error kind={type(e).__name__}")
                     db.rollback()
 
         # Fix missing escalation risk (column added later, may be NULL)
@@ -112,12 +271,12 @@ def _auto_triage_job():
                         t2.escalation_risk = intel.escalation_risk(t2)
                         db.commit()
                 except Exception as e:
-                    print(f"[auto-triage] risk error: {e}")
+                    print(f"[auto-triage] risk error kind={type(e).__name__}")
                     db.rollback()
 
         db.close()
     except Exception as e:
-        print(f"[auto-triage] job error: {e}")
+        print(f"[auto-triage] job error kind={type(e).__name__}")
 
 
 def _sync_job():
@@ -131,28 +290,69 @@ def _sync_job():
         result = sync_tickets_from_external(adapter)
         print(f"[sync_worker] {adapter.provider_name}: {result}")
     except Exception as e:
-        print(f"[sync_worker] error: {e}")
+        print(f"[sync_worker] error kind={type(e).__name__}")
 
 
-def start_sync_worker():
+def start_sync_worker() -> bool:
+    """Start the process-local scheduler once when this role owns jobs."""
     global _scheduler
+    if not scheduler_enabled_for_process():
+        return False
     with _lock:
         if _scheduler is not None:
-            return
-        interval = int(os.getenv("SYNC_INTERVAL_SECONDS", "60"))
-        _scheduler = BackgroundScheduler(daemon=True)
-        _scheduler.add_job(_sync_job, "interval", seconds=interval, id="sync_job")
-        _scheduler.add_job(_auto_triage_job, "interval", seconds=30, id="auto_triage_job")
-        _scheduler.start()
-        print(f"[sync_worker] started, sync every {interval}s, auto-triage every 30s")
+            return False
+        sync_interval = _bounded_interval("SYNC_INTERVAL_SECONDS", 60, 10, 86_400)
+        triage_interval = _bounded_interval("AUTO_TRIAGE_INTERVAL_SECONDS", 30, 10, 86_400)
+        scheduler = BackgroundScheduler(daemon=True)
+        job_defaults = {
+            "coalesce": True,
+            "max_instances": 1,
+            "replace_existing": True,
+        }
+        scheduler.add_job(
+            _sync_job,
+            "interval",
+            seconds=sync_interval,
+            id="sync_job",
+            misfire_grace_time=sync_interval,
+            next_run_time=datetime.now(),
+            **job_defaults,
+        )
+        scheduler.add_job(
+            _auto_triage_job,
+            "interval",
+            seconds=triage_interval,
+            id="auto_triage_job",
+            misfire_grace_time=triage_interval,
+            next_run_time=datetime.now(),
+            **job_defaults,
+        )
+        try:
+            scheduler.start()
+        except Exception:
+            try:
+                scheduler.shutdown(wait=False)
+            except Exception:
+                pass
+            raise
+        _scheduler = scheduler
+        print(
+            f"[sync_worker] started role={process_role()}, "
+            f"sync every {sync_interval}s, auto-triage every {triage_interval}s"
+        )
+        return True
 
 
-def stop_sync_worker():
+def stop_sync_worker(wait: bool = True) -> bool:
+    """Stop the process-local scheduler once and optionally drain jobs."""
     global _scheduler
     with _lock:
-        if _scheduler is not None:
-            _scheduler.shutdown(wait=False)
-            _scheduler = None
+        if _scheduler is None:
+            return False
+        scheduler = _scheduler
+        _scheduler = None
+        scheduler.shutdown(wait=wait)
+        return True
 
 
 def get_sync_status() -> dict:

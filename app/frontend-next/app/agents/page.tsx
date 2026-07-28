@@ -1,247 +1,173 @@
 "use client";
 
-import { useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Plus, Search, ShieldCheck, Trash2, UserCog, Users } from "lucide-react";
+import { Alert, Badge, Button, ConfirmDialog, Dialog, EmptyState, ErrorState, IconButton, Skeleton } from "@/components/ui";
 import { api } from "@/lib/api";
-import type { UserOut, UserCreateInput } from "@/lib/types";
-import {
-  Users, Plus, RefreshCw, ShieldCheck, UserCog, Trash2, X, Search,
-} from "lucide-react";
-import { cn } from "@/lib/utils";
+import type { UserCreateInput, UserOut } from "@/lib/types";
 
 const ROLES = [
-  { value: "admin", label: "Admin", icon: ShieldCheck, desc: "Full access — manage all settings and users" },
-  { value: "supervisor", label: "Supervisor", icon: UserCog, desc: "Manage tickets, agents, and view reports" },
-  { value: "agent", label: "Agent", icon: Users, desc: "Handle assigned tickets and update status" },
+  { value: "admin", label: "Admin", icon: ShieldCheck, description: "Full platform and access control" },
+  { value: "supervisor", label: "Supervisor", icon: UserCog, description: "Queue, team, and reporting oversight" },
+  { value: "agent", label: "Agent", icon: Users, description: "Assigned work and ticket updates" },
 ];
 
-const ROLE_COLORS: Record<string, string> = {
-  admin: "bg-rust-400/15 text-rust-500 border-rust-400/30",
-  supervisor: "bg-amber-400/15 text-amber-600 border-amber-400/30",
-  agent: "bg-moss-400/15 text-moss-600 border-moss-400/30",
-};
+function roleVariant(role: string): "danger" | "warning" | "success" | "neutral" {
+  if (role === "admin") return "danger";
+  if (role === "supervisor") return "warning";
+  if (role === "agent") return "success";
+  return "neutral";
+}
+
+function initials(name: string) {
+  return name.split(" ").filter(Boolean).map((part) => part[0]).join("").slice(0, 2).toUpperCase();
+}
 
 export default function AgentsPage() {
   const queryClient = useQueryClient();
-  const { data: users, isLoading } = useQuery({ queryKey: ["users"], queryFn: api.getUsers });
-  const [showForm, setShowForm] = useState(false);
+  const usersQuery = useQuery({ queryKey: ["users"], queryFn: api.getUsers });
+  const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<UserOut | null>(null);
+  const [deactivating, setDeactivating] = useState<UserOut | null>(null);
   const [search, setSearch] = useState("");
+  const [notice, setNotice] = useState<string | null>(null);
 
-  const createMut = useMutation({
+  const createMutation = useMutation({
     mutationFn: (payload: UserCreateInput) => api.createUser(payload),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["users"] });
-      queryClient.invalidateQueries({ queryKey: ["leaderboard"] });
-      setShowForm(false);
+      void queryClient.invalidateQueries({ queryKey: ["users"] });
+      void queryClient.invalidateQueries({ queryKey: ["leaderboard"] });
+      setFormOpen(false);
+      setNotice("Agent access created successfully.");
     },
   });
-
-  const updateMut = useMutation({
+  const updateMutation = useMutation({
     mutationFn: ({ id, payload }: { id: string; payload: Partial<UserCreateInput> }) => api.updateUser(id, payload),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["users"] });
+      void queryClient.invalidateQueries({ queryKey: ["users"] });
       setEditing(null);
+      setNotice("Agent profile updated.");
+    },
+  });
+  const deactivateMutation = useMutation({
+    mutationFn: (id: string) => api.deleteUser(id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["users"] });
+      setDeactivating(null);
+      setNotice("Agent access deactivated.");
     },
   });
 
-  const deactivateMut = useMutation({
-    mutationFn: (id: string) => api.deleteUser(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["users"] }),
-  });
-
-  const activeUsers = (users || []).filter((u) => u.is_active);
-  const filtered = activeUsers.filter(
-    (u) => u.name.toLowerCase().includes(search.toLowerCase()) || (u.email || "").toLowerCase().includes(search.toLowerCase())
-  );
+  const activeUsers = useMemo(() => (usersQuery.data ?? []).filter((user) => user.is_active), [usersQuery.data]);
+  const filteredUsers = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    if (!term) return activeUsers;
+    return activeUsers.filter((user) => [user.name, user.email ?? "", user.title ?? "", user.role].some((value) => value.toLowerCase().includes(term)));
+  }, [activeUsers, search]);
+  const retrying = usersQuery.isFetching && !usersQuery.isLoading;
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-end justify-between gap-4">
-        <div className="space-y-1.5">
-          <h1 className="font-serif text-3xl text-ink-700">Agents</h1>
-          <p className="text-[13px] text-ink-500">
-            {activeUsers.length} active agents · manage roles and access
-          </p>
+    <div className="mx-auto max-w-7xl space-y-6">
+      <header className="flex flex-col gap-4 border-b border-linen-400 pb-6 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-ink-400">Team operations</p>
+          <h1 className="mt-2 text-3xl font-semibold tracking-[-0.04em] text-ink-700">Agents</h1>
+          <p className="mt-2 max-w-2xl text-sm leading-6 text-ink-500">Manage operational roles, access, and team capacity from one controlled roster.</p>
         </div>
-        <div className="flex items-center gap-2">
-          <div className="relative">
-            <Search className="w-3.5 h-3.5 text-ink-400 absolute left-3 top-1/2 -translate-y-1/2" />
-            <input
-              type="text"
-              placeholder="Search agents…"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="input-base input-search text-xs w-48"
-            />
-          </div>
-          <button onClick={() => setShowForm(true)} className="btn-primary text-xs">
-            <Plus className="w-4 h-4" strokeWidth={1.5} />
-            Add Agent
-          </button>
-        </div>
-      </div>
+        <Button leadingIcon={<Plus className="h-4 w-4" />} onClick={() => { createMutation.reset(); setFormOpen(true); }}>Add agent</Button>
+      </header>
 
-      {/* Role legend */}
-      <div className="grid grid-cols-3 gap-4">
-        {ROLES.map((r) => {
-          const Icon = r.icon;
-          const count = activeUsers.filter((u) => u.role === r.value).length;
-          return (
-            <div key={r.value} className="card-surface p-4 flex items-center gap-3">
-              <div className="w-9 h-9 rounded-lg bg-linen-300 flex items-center justify-center shrink-0">
-                <Icon className="w-4 h-4 text-ink-600" strokeWidth={1.5} />
-              </div>
-              <div className="min-w-0">
-                <p className="text-sm font-semibold text-ink-700">{r.label}</p>
-                <p className="text-xs text-ink-400 truncate">{r.desc}</p>
-                <p className="text-xs text-ink-500 mt-0.5">{count} assigned</p>
-              </div>
+      {notice && <Alert variant="success" title="Saved" action={<Button size="sm" variant="ghost" onClick={() => setNotice(null)}>Dismiss</Button>}>{notice}</Alert>}
+
+      <section aria-label="Role coverage" className="grid gap-3 sm:grid-cols-3">
+        {ROLES.map(({ value, label, icon: Icon, description }) => (
+          <div key={value} className="rounded-2xl border border-linen-400 bg-linen-50 p-4 shadow-sm">
+            <div className="flex items-start justify-between gap-4">
+              <span className="grid h-9 w-9 place-items-center rounded-xl bg-linen-200 text-ink-500"><Icon className="h-4 w-4" aria-hidden="true" /></span>
+              <span className="text-2xl font-semibold tabular-nums text-ink-700">{activeUsers.filter((user) => user.role === value).length}</span>
             </div>
-          );
-        })}
-      </div>
+            <p className="mt-4 text-sm font-semibold text-ink-700">{label}</p>
+            <p className="mt-1 text-xs leading-5 text-ink-500">{description}</p>
+          </div>
+        ))}
+      </section>
 
-      {/* Agents table */}
-      {isLoading ? (
-        <div className="card-surface p-6 space-y-3">{[1, 2, 3, 4].map((i) => <div key={i} className="skeleton h-12 w-full" />)}</div>
-      ) : (
-        <div className="card-surface overflow-hidden">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-linen-300 bg-linen-100">
-                <th className="px-4 py-3 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">Agent</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">Role</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">Title</th>
-                <th className="px-4 py-3 text-right text-xs font-semibold text-ink-500 uppercase tracking-wider">Impact</th>
-                <th className="px-4 py-3 text-center text-xs font-semibold text-ink-500 uppercase tracking-wider">Tier</th>
-                <th className="px-4 py-3 text-right text-xs font-semibold text-ink-500 uppercase tracking-wider">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((u) => (
-                <tr key={u.id} className="border-b border-linen-200 last:border-0 hover:bg-linen-100">
-                  <td className="px-4 py-3">
-                    <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-full bg-clay-400/15 text-clay-500 flex items-center justify-center text-xs font-semibold shrink-0">
-                        {u.name.split(" ").map((n) => n[0]).join("").slice(0, 2)}
-                      </div>
-                      <div className="min-w-0">
-                        <p className="font-medium text-ink-700">{u.name}</p>
-                        <p className="text-xs text-ink-400">{u.email}</p>
-                      </div>
-                    </div>
-                  </td>
-                  <td className="px-4 py-3">
-                    <span className={cn("inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold border", ROLE_COLORS[u.role] || ROLE_COLORS.agent)}>
-                      {u.role}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-ink-500">{u.title || "—"}</td>
-                  <td className="px-4 py-3 text-right tabular-nums font-medium text-ink-600">{u.impact_points.toLocaleString()}</td>
-                  <td className="px-4 py-3 text-center">
-                    <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold border border-linen-400 text-ink-600">T{u.tier}</span>
-                  </td>
-                  <td className="px-4 py-3 text-right">
-                    <div className="inline-flex items-center gap-1">
-                      <button onClick={() => setEditing(u)} className="p-1.5 rounded text-ink-400 hover:text-ink-700 hover:bg-linen-200" title="Edit">
-                        <UserCog className="w-3.5 h-3.5" />
-                      </button>
-                      <button onClick={() => deactivateMut.mutate(u.id)} className="p-1.5 rounded text-ink-400 hover:text-rust-500 hover:bg-rust-400/10" title="Deactivate">
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      <section className="overflow-hidden rounded-2xl border border-linen-400 bg-linen-50 shadow-sm">
+        <div className="flex flex-col gap-3 border-b border-linen-400 p-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="text-sm font-semibold text-ink-700">Active roster</h2>
+            <p className="mt-1 text-xs text-ink-500">{activeUsers.length} active · {filteredUsers.length} shown</p>
+          </div>
+          <label className="relative block w-full sm:w-72">
+            <span className="sr-only">Search agents</span>
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-400" aria-hidden="true" />
+            <input className="input-base input-search w-full" type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search name, role, or title" />
+          </label>
         </div>
-      )}
 
-      {/* Create / Edit modal */}
-      {(showForm || editing) && (
-        <UserFormModal
-          user={editing}
-          onClose={() => { setShowForm(false); setEditing(null); }}
-          onSubmit={(payload) => {
-            if (editing) {
-              updateMut.mutate({ id: editing.id, payload });
-            } else {
-              createMut.mutate(payload);
-            }
-          }}
-          loading={createMut.isPending || updateMut.isPending}
-          error={createMut.error || updateMut.error}
-        />
-      )}
+        {usersQuery.isLoading ? (
+          <div className="space-y-3 p-5" aria-label="Loading agents">{Array.from({ length: 5 }, (_, index) => <Skeleton key={index} className="h-14 w-full" />)}</div>
+        ) : usersQuery.isError ? (
+          <ErrorState className="m-5" title="The roster could not be loaded" description="No access changes were made. Check the service connection and try again." onRetry={() => void usersQuery.refetch()} retrying={retrying} />
+        ) : filteredUsers.length === 0 ? (
+          <EmptyState className="m-5" icon={<Users className="h-5 w-5" />} title={search ? "No agents match this search" : "No active agents"} description={search ? "Try a name, role, email address, or title." : "Add an agent to begin assigning operational work."} action={search ? <Button variant="secondary" onClick={() => setSearch("")}>Clear search</Button> : <Button onClick={() => setFormOpen(true)}>Add agent</Button>} />
+        ) : (
+          <>
+            <div className="divide-y divide-linen-300 md:hidden">
+              {filteredUsers.map((user) => <AgentCard key={user.id} user={user} onEdit={() => { updateMutation.reset(); setEditing(user); }} onDeactivate={() => setDeactivating(user)} />)}
+            </div>
+            <div className="hidden overflow-x-auto md:block">
+              <table className="w-full min-w-[760px] text-sm">
+                <thead className="bg-linen-100 text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-ink-400">
+                  <tr><th className="px-5 py-3" scope="col">Agent</th><th className="px-4 py-3" scope="col">Role</th><th className="px-4 py-3" scope="col">Title</th><th className="px-4 py-3 text-right" scope="col">Impact</th><th className="px-4 py-3 text-center" scope="col">Tier</th><th className="px-5 py-3 text-right" scope="col"><span className="sr-only">Actions</span></th></tr>
+                </thead>
+                <tbody className="divide-y divide-linen-300">
+                  {filteredUsers.map((user) => (
+                    <tr key={user.id} className="transition-colors hover:bg-linen-100">
+                      <td className="px-5 py-4"><AgentIdentity user={user} /></td>
+                      <td className="px-4 py-4"><Badge variant={roleVariant(user.role)} dot>{user.role}</Badge></td>
+                      <td className="px-4 py-4 text-ink-500">{user.title || "Not set"}</td>
+                      <td className="px-4 py-4 text-right font-medium tabular-nums text-ink-700">{user.impact_points.toLocaleString()}</td>
+                      <td className="px-4 py-4 text-center"><Badge>T{user.tier}</Badge></td>
+                      <td className="px-5 py-4"><div className="flex justify-end gap-1"><IconButton size="sm" aria-label={`Edit ${user.name}`} icon={<UserCog className="h-4 w-4" />} onClick={() => { updateMutation.reset(); setEditing(user); }} /><IconButton size="sm" aria-label={`Deactivate ${user.name}`} icon={<Trash2 className="h-4 w-4" />} onClick={() => setDeactivating(user)} /></div></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </section>
+
+      <UserFormDialog open={formOpen || Boolean(editing)} user={editing} onOpenChange={(open) => { if (!open) { setFormOpen(false); setEditing(null); createMutation.reset(); updateMutation.reset(); } }} onSubmit={(payload) => editing ? updateMutation.mutate({ id: editing.id, payload }) : createMutation.mutate(payload)} pending={createMutation.isPending || updateMutation.isPending} error={createMutation.error || updateMutation.error} />
+      <ConfirmDialog open={Boolean(deactivating)} onOpenChange={(open) => { if (!open) { setDeactivating(null); deactivateMutation.reset(); } }} title="Deactivate agent access?" description={`${deactivating?.name ?? "This agent"} will no longer appear in the active roster or receive new assignments. Historical work remains available.`} confirmLabel="Deactivate agent" destructive pending={deactivateMutation.isPending} onConfirm={() => { if (deactivating) deactivateMutation.mutate(deactivating.id); }} />
+      {deactivateMutation.isError && <Alert variant="danger" title="Deactivation failed">{deactivateMutation.error instanceof Error ? deactivateMutation.error.message : "Please try again."}</Alert>}
     </div>
   );
 }
 
-function UserFormModal({ user, onClose, onSubmit, loading, error }: {
-  user: UserOut | null;
-  onClose: () => void;
-  onSubmit: (payload: UserCreateInput) => void;
-  loading: boolean;
-  error: unknown;
-}) {
-  const [name, setName] = useState(user?.name || "");
-  const [email, setEmail] = useState(user?.email || "");
-  const [title, setTitle] = useState(user?.title || "");
-  const [role, setRole] = useState(user?.role || "agent");
+function AgentIdentity({ user }: { user: UserOut }) {
+  return <div className="flex min-w-0 items-center gap-3"><span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-ink-700 text-xs font-semibold text-white">{initials(user.name)}</span><span className="min-w-0"><span className="block truncate font-semibold text-ink-700">{user.name}</span><span className="block truncate text-xs text-ink-400">{user.email || "No email"}</span></span></div>;
+}
+
+function AgentCard({ user, onEdit, onDeactivate }: { user: UserOut; onEdit: () => void; onDeactivate: () => void }) {
+  return <article className="p-4"><div className="flex items-start justify-between gap-3"><AgentIdentity user={user} /><div className="flex gap-1"><IconButton size="sm" aria-label={`Edit ${user.name}`} icon={<UserCog className="h-4 w-4" />} onClick={onEdit} /><IconButton size="sm" aria-label={`Deactivate ${user.name}`} icon={<Trash2 className="h-4 w-4" />} onClick={onDeactivate} /></div></div><div className="mt-4 flex flex-wrap items-center gap-2"><Badge variant={roleVariant(user.role)} dot>{user.role}</Badge><Badge>T{user.tier}</Badge><span className="text-xs text-ink-500">{user.impact_points.toLocaleString()} impact</span><span className="text-xs text-ink-500">{user.title || "Title not set"}</span></div></article>;
+}
+
+function UserFormDialog({ open, user, onOpenChange, onSubmit, pending, error }: { open: boolean; user: UserOut | null; onOpenChange: (open: boolean) => void; onSubmit: (payload: UserCreateInput) => void; pending: boolean; error: unknown }) {
+  const [name, setName] = useState(user?.name ?? "");
+  const [email, setEmail] = useState(user?.email ?? "");
+  const [title, setTitle] = useState(user?.title ?? "");
+  const [role, setRole] = useState(user?.role ?? "agent");
   const [password, setPassword] = useState("");
+  const key = user?.id ?? "new";
+  const errorMessage = error instanceof Error ? error.message : error ? String(error) : null;
+  return <Dialog key={key} open={open} onOpenChange={onOpenChange} title={user ? "Edit agent" : "Add agent"} description={user ? "Update this agent’s profile and access role." : "Create an operational account. Required fields are marked."} dismissible={!pending} closeOnBackdrop={!pending} footer={<><Button variant="secondary" onClick={() => onOpenChange(false)} disabled={pending}>Cancel</Button><Button onClick={() => onSubmit({ name: name.trim(), email: email.trim(), title: title.trim() || undefined, role, password: password || undefined })} pending={pending} pendingLabel={user ? "Saving…" : "Creating…"} disabled={!name.trim() || !email.trim()}>{user ? "Save changes" : "Create agent"}</Button></>}>
+    <div className="space-y-4">{errorMessage && <Alert variant="danger" title="Changes were not saved">{errorMessage}</Alert>}<Field label="Name" required><input className="input-base" autoComplete="name" value={name} onChange={(event) => setName(event.target.value)} required /></Field><Field label="Email" required><input className="input-base" type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} required /></Field><Field label="Title"><input className="input-base" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Support engineer" /></Field><Field label="Role" required><select className="input-base" value={role} onChange={(event) => setRole(event.target.value)}>{ROLES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></Field><Field label={user ? "New password" : "Password"} hint={user ? "Leave blank to keep the current password." : "Leave blank to let the service generate a password."}><input className="input-base" type="password" autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} /></Field></div>
+  </Dialog>;
+}
 
-  const errorMsg = error instanceof Error ? error.message : error ? String(error) : null;
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink-800/30 backdrop-blur-sm" onClick={onClose}>
-      <div className="card-surface w-full max-w-md p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between">
-          <h2 className="font-serif text-xl text-ink-700">{user ? "Edit Agent" : "Add Agent"}</h2>
-          <button onClick={onClose} className="p-1 rounded text-ink-400 hover:bg-linen-200">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-        <div className="space-y-3">
-          <label className="block space-y-1">
-            <span className="text-xs font-medium text-ink-500">Name</span>
-            <input value={name} onChange={(e) => setName(e.target.value)} className="input-base" placeholder="Jane Doe" />
-          </label>
-          <label className="block space-y-1">
-            <span className="text-xs font-medium text-ink-500">Email</span>
-            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} className="input-base" placeholder="jane@company.com" />
-          </label>
-          <label className="block space-y-1">
-            <span className="text-xs font-medium text-ink-500">Title</span>
-            <input value={title} onChange={(e) => setTitle(e.target.value)} className="input-base" placeholder="Support Engineer" />
-          </label>
-          <label className="block space-y-1">
-            <span className="text-xs font-medium text-ink-500">Role</span>
-            <select value={role} onChange={(e) => setRole(e.target.value)} className="input-base">
-              {ROLES.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
-            </select>
-          </label>
-          <label className="block space-y-1">
-            <span className="text-xs font-medium text-ink-500">
-              {user ? "New Password (leave blank to keep)" : "Password (auto-generated if blank)"}
-            </span>
-            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="input-base" placeholder="••••••" />
-          </label>
-        </div>
-        {errorMsg && <p className="text-xs text-rust-500">Failed: {errorMsg}</p>}
-        <div className="flex items-center justify-end gap-2">
-          <button onClick={onClose} className="px-3 py-2 rounded text-xs text-ink-500 hover:bg-linen-200">Cancel</button>
-          <button
-            onClick={() => onSubmit({ name, email, title: title || undefined, role, password: password || undefined })}
-            disabled={loading || !name.trim() || !email.trim()}
-            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-clay-500 text-linen-50 text-xs font-semibold hover:bg-clay-600 disabled:opacity-50"
-          >
-            {loading && <RefreshCw className="w-3 h-3 animate-spin" />}
-            {user ? "Save" : "Create"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
+function Field({ label, hint, required, children }: { label: string; hint?: string; required?: boolean; children: React.ReactNode }) {
+  return <label className="block"><span className="text-sm font-medium text-ink-700">{label}{required && <span className="text-semantic-danger"> *</span>}</span>{hint && <span className="mt-0.5 block text-xs text-ink-400">{hint}</span>}<span className="mt-2 block">{children}</span></label>;
 }

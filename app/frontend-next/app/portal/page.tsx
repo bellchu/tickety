@@ -1,274 +1,389 @@
 "use client";
 
-import { useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api";
-import type { PortalTicket } from "@/lib/types";
+import { useEffect, useState, type FormEvent } from "react";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import {
-  Globe, Send, FileText, Search, RefreshCw, Plus,
+  ArrowRight,
+  CalendarClock,
+  Check,
+  Clipboard,
+  ExternalLink,
+  FileCheck2,
+  KeyRound,
+  LifeBuoy,
+  LockKeyhole,
+  Send,
+  ShieldCheck,
+  Sparkles,
 } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { TicketyLogo } from "@/components/layout/TicketyLogo";
+import { Alert, Badge, Button, Dialog, ErrorState, Skeleton } from "@/components/ui";
+import { api } from "@/lib/api";
+import type { PortalTicket, PortalTicketCreated } from "@/lib/types";
 
 const PRIORITIES = [
-  { value: "low", label: "Low" },
-  { value: "medium", label: "Medium" },
-  { value: "high", label: "High" },
-  { value: "urgent", label: "Urgent" },
+  { value: "P4", label: "Low", description: "General question or minor inconvenience" },
+  { value: "P3", label: "Medium", description: "Work is affected, but a workaround exists" },
+  { value: "P2", label: "High", description: "Important work is blocked" },
+  { value: "P1", label: "Urgent", description: "Critical service or business impact" },
 ];
 
-const PRIORITY_COLORS: Record<string, string> = {
-  urgent: "bg-rust-400/15 text-rust-500 border-rust-400/30",
-  high: "bg-amber-400/15 text-amber-600 border-amber-400/30",
-  medium: "bg-blue-400/15 text-blue-600 border-blue-400/30",
-  low: "bg-moss-400/15 text-moss-600 border-moss-400/30",
-  P1: "bg-rust-400/15 text-rust-500 border-rust-400/30",
-  P2: "bg-amber-400/15 text-amber-600 border-amber-400/30",
-  P3: "bg-blue-400/15 text-blue-600 border-blue-400/30",
-  P4: "bg-moss-400/15 text-moss-600 border-moss-400/30",
+const statusVariant = (status: string): "neutral" | "info" | "success" | "warning" => {
+  const normalized = status.toLowerCase().replace(/[_-]/g, " ");
+  if (["resolved", "closed", "completed"].includes(normalized)) return "success";
+  if (["in progress", "pending", "waiting"].includes(normalized)) return "warning";
+  if (["new", "open"].includes(normalized)) return "info";
+  return "neutral";
 };
 
-const STATUS_COLORS: Record<string, string> = {
-  open: "bg-blue-400/15 text-blue-600 border-blue-400/30",
-  in_progress: "bg-violet-400/15 text-violet-600 border-violet-400/30",
-  resolved: "bg-emerald-400/15 text-emerald-600 border-emerald-400/30",
-  closed: "bg-ink-100 text-ink-600 border-ink-300",
-};
+function extractAccessToken(value: string): string {
+  const input = value.trim();
+  if (!input) return "";
+
+  try {
+    const parsed = new URL(input, window.location.origin);
+    const fragment = new URLSearchParams(parsed.hash.replace(/^#/, ""));
+    const token = fragment.get("token");
+    if (token) return token.trim();
+    if (input.includes("#") || input.includes("?") || input.includes("/")) return "";
+  } catch {
+    return "";
+  }
+
+  return input;
+}
+
+function formatDate(value: string | null, options?: Intl.DateTimeFormatOptions) {
+  if (!value) return "Not available";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Not available";
+  return new Intl.DateTimeFormat(undefined, options ?? {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
+}
+
+function TicketResult({ ticket }: { ticket: PortalTicket }) {
+  return (
+    <section aria-labelledby="request-result-title" className="overflow-hidden rounded-2xl border border-linen-400 bg-linen-50 shadow-[var(--shadow-raised)]">
+      <div className="border-b border-linen-300 bg-linen-100 px-5 py-4 sm:px-6">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-ink-400">Request found</p>
+            <h2 id="request-result-title" className="mt-1 font-mono text-sm font-semibold text-ink-700">
+              {ticket.id}
+            </h2>
+          </div>
+          <Badge variant={statusVariant(ticket.status)} dot className="capitalize">
+            {ticket.status.replace(/[_-]/g, " ")}
+          </Badge>
+        </div>
+      </div>
+      <div className="px-5 py-5 sm:px-6 sm:py-6">
+        <h3 className="text-lg font-semibold tracking-[-0.015em] text-ink-700">{ticket.subject}</h3>
+        <dl className="mt-6 grid gap-4 border-t border-linen-300 pt-5 sm:grid-cols-3">
+          <div>
+            <dt className="text-xs font-medium text-ink-400">Priority</dt>
+            <dd className="mt-1 text-sm font-semibold text-ink-700">{ticket.priority}</dd>
+          </div>
+          <div>
+            <dt className="text-xs font-medium text-ink-400">Submitted</dt>
+            <dd className="mt-1 text-sm font-medium text-ink-600">
+              {formatDate(ticket.created_at, { dateStyle: "medium" })}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-xs font-medium text-ink-400">Last updated</dt>
+            <dd className="mt-1 text-sm font-medium text-ink-600">
+              {formatDate(ticket.updated_at, { dateStyle: "medium" })}
+            </dd>
+          </div>
+        </dl>
+      </div>
+    </section>
+  );
+}
 
 export default function PortalPage() {
-  const queryClient = useQueryClient();
-
   const [reporter, setReporter] = useState("");
-  const [searchReporter, setSearchReporter] = useState("");
-  const [ticketId, setTicketId] = useState("");
-  const [searchTicketId, setSearchTicketId] = useState("");
-  const [showForm, setShowForm] = useState(false);
   const [subject, setSubject] = useState("");
   const [description, setDescription] = useState("");
-  const [priority, setPriority] = useState("medium");
+  const [priority, setPriority] = useState("P3");
+  const [tokenInput, setTokenInput] = useState("");
+  const [lookupToken, setLookupToken] = useState("");
+  const [lookupInputError, setLookupInputError] = useState("");
+  const [createdTicket, setCreatedTicket] = useState<PortalTicketCreated | null>(null);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
 
-  const {
-    data: tickets,
-    isLoading: ticketsLoading,
-    error: ticketsError,
-  } = useQuery({
-    queryKey: ["portalTickets", searchReporter, searchTicketId],
-    queryFn: () => api.portalListTickets(searchReporter, searchTicketId),
-    enabled: searchReporter.length > 0 && searchTicketId.length > 0,
+  const lookup = useQuery({
+    queryKey: ["portalTicket", lookupToken],
+    queryFn: () => api.portalGetTicket(lookupToken),
+    enabled: Boolean(lookupToken),
+    retry: false,
   });
 
-  const createMut = useMutation({
-    mutationFn: () => api.portalCreateTicket(subject, description, reporter, priority),
+  useEffect(() => {
+    const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+    const linkedToken = fragment.get("token");
+    if (!linkedToken) return;
+
+    const token = linkedToken.trim();
+    if (token) {
+      setTokenInput(token);
+      setLookupToken(token);
+    }
+
+    // Remove capability material from the address bar and history immediately
+    // after the client receives it. It remains only in this page's memory.
+    window.history.replaceState(window.history.state, "", window.location.pathname + window.location.search);
+  }, []);
+
+  const createTicket = useMutation({
+    mutationFn: () => api.portalCreateTicket(subject.trim(), description.trim(), reporter.trim(), priority),
     onSuccess: (created) => {
-      queryClient.invalidateQueries({ queryKey: ["portalTickets", reporter, created.id] });
-      setShowForm(false);
+      setCreatedTicket(created);
+      setCopyState("idle");
+      setReporter("");
       setSubject("");
       setDescription("");
-      setTicketId(created.id);
-      setSearchReporter(reporter);
-      setSearchTicketId(created.id);
+      setPriority("P3");
     },
   });
 
-  const handleLookup = () => {
-    if (reporter.trim() && ticketId.trim()) {
-      setSearchReporter(reporter.trim());
-      setSearchTicketId(ticketId.trim());
+  const handleCreate = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!createTicket.isPending) createTicket.mutate();
+  };
+
+  const handleLookup = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const token = extractAccessToken(tokenInput);
+    if (!token) {
+      setLookupInputError("Paste the complete tracking link or access token supplied when the request was created.");
+      return;
+    }
+
+    setLookupInputError("");
+    if (token === lookupToken) {
+      void lookup.refetch();
+    } else {
+      setLookupToken(token);
     }
   };
 
+  const copyTrackingLink = async () => {
+    if (!createdTicket) return;
+    try {
+      await navigator.clipboard.writeText(createdTicket.tracking_url);
+      setCopyState("copied");
+    } catch {
+      setCopyState("error");
+    }
+  };
+
+  const closeCreatedTicket = () => {
+    setCreatedTicket(null);
+    setCopyState("idle");
+    createTicket.reset();
+  };
+
   return (
-    <div className="space-y-6">
-      <div className="flex items-end justify-between gap-4">
-        <div className="space-y-1.5">
-          <h1 className="font-serif text-3xl text-ink-700">Self-Service Portal</h1>
-          <p className="text-[13px] text-ink-500">
-            Submit tickets and track your requests
-          </p>
-        </div>
-        <button onClick={() => setShowForm(true)} className="btn-primary text-xs">
-          <Plus className="w-4 h-4" strokeWidth={1.5} />
-          New Ticket
-        </button>
-      </div>
+    <div className="min-h-screen bg-linen-100 text-ink-700">
+      <a href="#portal-main" className="fixed left-4 top-3 z-[120] -translate-y-20 rounded-lg bg-semantic-primary px-3 py-2 text-sm font-semibold text-white shadow-lg transition-transform focus:translate-y-0">
+        Skip to content
+      </a>
 
-      {/* Reporter lookup */}
-      <div className="card-surface p-4">
-        <div className="grid grid-cols-1 md:grid-cols-[1fr_1fr_auto] gap-3 items-end">
-          <label className="flex-1 space-y-1">
-            <span className="text-xs font-medium text-ink-500">Your Email</span>
-            <div className="relative">
-              <Search className="w-3.5 h-3.5 text-ink-400 absolute left-3 top-1/2 -translate-y-1/2" />
-              <input
-                type="email"
-                value={reporter}
-                onChange={(e) => setReporter(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleLookup()}
-                className="input-base input-search text-xs"
-                placeholder="you@company.com"
-              />
-            </div>
-          </label>
-          <label className="flex-1 space-y-1">
-            <span className="text-xs font-medium text-ink-500">Ticket ID</span>
-            <input
-              value={ticketId}
-              onChange={(e) => setTicketId(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleLookup()}
-              className="input-base text-xs"
-              placeholder="portal-..."
-            />
-          </label>
-          <button onClick={handleLookup} disabled={!reporter.trim() || !ticketId.trim()} className="btn-secondary text-xs">
-            <Search className="w-3.5 h-3.5" strokeWidth={1.5} />
-            Look Up
-          </button>
-        </div>
-      </div>
-
-      {/* Tickets list */}
-      {!searchReporter || !searchTicketId ? (
-        <div className="card-surface p-10 text-center space-y-2">
-          <Globe className="w-10 h-10 text-ink-300 mx-auto" strokeWidth={1} />
-          <p className="text-sm text-ink-500">Enter your email and ticket ID to view a request.</p>
-        </div>
-      ) : ticketsLoading ? (
-        <div className="card-surface p-6 space-y-3">{[1, 2, 3].map((i) => <div key={i} className="skeleton h-12 w-full" />)}</div>
-      ) : ticketsError ? (
-        <div className="card-surface p-6 text-center">
-          <p className="text-sm text-rust-500">Failed to load the ticket. Check the email address and ticket ID.</p>
-        </div>
-      ) : (
-        <div className="card-surface overflow-hidden">
-          <div className="flex items-center justify-between px-4 py-3 border-b border-linen-200 bg-linen-100">
-            <p className="text-xs font-semibold text-ink-500 uppercase tracking-wider">
-              Ticket <span className="text-ink-700">{searchTicketId}</span>
-              <span className="ml-2 font-normal normal-case text-ink-400">({tickets?.length || 0})</span>
-            </p>
-            <div className="flex items-center gap-2">
-              <button onClick={handleLookup} className="p-1 rounded text-ink-400 hover:text-ink-700 hover:bg-linen-200" title="Refresh">
-                <RefreshCw className="w-3.5 h-3.5" />
-              </button>
-            </div>
+      <header className="border-b border-linen-300 bg-linen-50/95 backdrop-blur-md">
+        <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4 sm:px-6 lg:px-8">
+          <TicketyLogo />
+          <div className="flex items-center gap-2 text-xs font-medium text-ink-500">
+            <ShieldCheck className="h-4 w-4 text-semantic-success" aria-hidden="true" />
+            Secure requester portal
           </div>
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-linen-300 bg-linen-100">
-                <th className="px-4 py-3 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">Ticket</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">Subject</th>
-                <th className="px-4 py-3 text-center text-xs font-semibold text-ink-500 uppercase tracking-wider">Priority</th>
-                <th className="px-4 py-3 text-center text-xs font-semibold text-ink-500 uppercase tracking-wider">Status</th>
-                <th className="px-4 py-3 text-right text-xs font-semibold text-ink-500 uppercase tracking-wider">Created</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(tickets || []).length === 0 ? (
-                <tr>
-                  <td colSpan={5} className="px-4 py-10 text-center text-ink-400 text-sm">No ticket found for this email and ticket ID.</td>
-                </tr>
-              ) : (
-                (tickets || []).map((t: PortalTicket) => (
-                  <tr key={t.id} className="border-b border-linen-200 last:border-0 hover:bg-linen-100">
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-2">
-                        <FileText className="w-3.5 h-3.5 text-ink-400" strokeWidth={1.5} />
-                        <span className="text-xs font-mono text-ink-500">{t.id}</span>
-                      </div>
-                    </td>
-                    <td className="px-4 py-3 font-medium text-ink-700 max-w-64 truncate">{t.subject}</td>
-                    <td className="px-4 py-3 text-center">
-                      <span className={cn(
-                        "inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold border",
-                        PRIORITY_COLORS[t.priority] || PRIORITY_COLORS.medium
-                      )}>
-                        {t.priority}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-center">
-                      <span className={cn(
-                        "inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold border",
-                        STATUS_COLORS[t.status.toLowerCase()] || "bg-ink-100 text-ink-600 border-ink-300"
-                      )}>
-                        {t.status.replace(/_/g, " ")}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-right text-xs text-ink-400 tabular-nums">
-                      {t.created_at ? new Date(t.created_at).toLocaleDateString() : "—"}
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
         </div>
-      )}
+      </header>
 
-      {/* New ticket form modal */}
-      {showForm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink-800/30 backdrop-blur-sm" onClick={() => setShowForm(false)}>
-          <div className="card-surface w-full max-w-lg p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between">
-              <h2 className="font-serif text-xl text-ink-700">Submit a Ticket</h2>
-              <button onClick={() => setShowForm(false)} className="p-1 rounded text-ink-400 hover:bg-linen-200">
-                <Send className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="space-y-3">
-              <label className="block space-y-1">
-                <span className="text-xs font-medium text-ink-500">Your Email</span>
-                <input
-                  type="email"
-                  value={reporter}
-                  onChange={(e) => setReporter(e.target.value)}
-                  className="input-base"
-                  placeholder="you@company.com"
-                />
-              </label>
-              <label className="block space-y-1">
-                <span className="text-xs font-medium text-ink-500">Subject</span>
-                <input
-                  value={subject}
-                  onChange={(e) => setSubject(e.target.value)}
-                  className="input-base"
-                  placeholder="Brief summary of your issue"
-                />
-              </label>
-              <label className="block space-y-1">
-                <span className="text-xs font-medium text-ink-500">Description</span>
-                <textarea
-                  value={description}
-                  onChange={(e) => setDescription(e.target.value)}
-                  className="input-base min-h-[100px]"
-                  placeholder="Describe your issue in detail…"
-                  rows={4}
-                />
-              </label>
-              <label className="block space-y-1">
-                <span className="text-xs font-medium text-ink-500">Priority</span>
-                <select value={priority} onChange={(e) => setPriority(e.target.value)} className="input-base">
-                  {PRIORITIES.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
-                </select>
-              </label>
-            </div>
-            {createMut.error && (
-              <p className="text-xs text-rust-500">
-                Failed: {createMut.error instanceof Error ? createMut.error.message : String(createMut.error)}
+      <main id="portal-main" tabIndex={-1} className="outline-none">
+        <section className="relative overflow-hidden border-b border-linen-300 bg-linen-50">
+          <div className="pointer-events-none absolute right-[-8rem] top-[-12rem] h-[28rem] w-[28rem] rounded-full bg-[var(--color-primary-soft)] blur-3xl" aria-hidden="true" />
+          <div className="relative mx-auto grid max-w-6xl gap-8 px-4 py-12 sm:px-6 sm:py-16 lg:grid-cols-[1.15fr_0.85fr] lg:items-center lg:gap-16 lg:px-8 lg:py-20">
+            <div>
+              <Badge variant="info" icon={<Sparkles className="h-3 w-3" />}>Support that keeps you moving</Badge>
+              <h1 className="mt-5 max-w-2xl font-serif text-4xl leading-[1.05] tracking-[-0.035em] text-ink-700 sm:text-5xl lg:text-[3.5rem]">
+                Tell us what is getting in your way.
+              </h1>
+              <p className="mt-5 max-w-xl text-base leading-7 text-ink-500 sm:text-lg">
+                Submit a support request in a few minutes. You will receive a private tracking link to follow its progress—no account required.
               </p>
-            )}
-            <div className="flex items-center justify-end gap-2">
-              <button onClick={() => setShowForm(false)} className="px-3 py-2 rounded text-xs text-ink-500 hover:bg-linen-200">Cancel</button>
-              <button
-                onClick={() => createMut.mutate()}
-                disabled={createMut.isPending || !reporter.trim() || !subject.trim() || !description.trim()}
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-clay-500 text-linen-50 text-xs font-semibold hover:bg-clay-600 disabled:opacity-50"
-              >
-                {createMut.isPending && <RefreshCw className="w-3 h-3 animate-spin" />}
-                <Send className="w-3 h-3" />
-                Submit
-              </button>
+              <div className="mt-7 flex flex-wrap gap-x-6 gap-y-3 text-sm text-ink-500">
+                <span className="inline-flex items-center gap-2"><Check className="h-4 w-4 text-semantic-success" aria-hidden="true" />Clear request updates</span>
+                <span className="inline-flex items-center gap-2"><Check className="h-4 w-4 text-semantic-success" aria-hidden="true" />Private, token-based access</span>
+              </div>
             </div>
+
+            <form onSubmit={handleLookup} className="rounded-2xl border border-linen-400 bg-linen-50 p-5 shadow-[var(--shadow-raised)] sm:p-6" aria-labelledby="track-request-title">
+              <div className="flex items-start gap-3">
+                <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[var(--color-primary-soft)] text-semantic-primary" aria-hidden="true">
+                  <KeyRound className="h-5 w-5" />
+                </div>
+                <div>
+                  <h2 id="track-request-title" className="text-base font-semibold text-ink-700">Track an existing request</h2>
+                  <p className="mt-1 text-sm leading-5 text-ink-500">Use the private link or token you received after submitting.</p>
+                </div>
+              </div>
+              <label htmlFor="tracking-token" className="mt-5 block text-xs font-semibold text-ink-600">Tracking link or access token</label>
+              <div className="relative mt-1.5">
+                <LockKeyhole className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-400" aria-hidden="true" />
+                <input
+                  id="tracking-token"
+                  type="password"
+                  value={tokenInput}
+                  onChange={(event) => {
+                    setTokenInput(event.target.value);
+                    if (lookupInputError) setLookupInputError("");
+                  }}
+                  className="input-base !pl-10 font-mono text-xs"
+                  placeholder="Paste your private tracking link"
+                  autoComplete="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  aria-invalid={Boolean(lookupInputError)}
+                  aria-describedby={lookupInputError ? "tracking-token-error" : "tracking-token-help"}
+                />
+              </div>
+              <p id="tracking-token-help" className="mt-2 text-xs leading-5 text-ink-400">Treat this link like a password. It grants access to your request.</p>
+              {lookupInputError && <p id="tracking-token-error" role="alert" className="mt-2 text-xs leading-5 text-semantic-danger">{lookupInputError}</p>}
+              <Button type="submit" className="mt-4 w-full" pending={lookup.isFetching} pendingLabel="Checking securely…" trailingIcon={<ArrowRight className="h-4 w-4" />}>
+                View request
+              </Button>
+            </form>
+          </div>
+        </section>
+
+        <div className="mx-auto max-w-6xl px-4 py-10 sm:px-6 sm:py-14 lg:px-8">
+          {lookupToken && (
+            <div className="mb-10" aria-live="polite">
+              {lookup.isLoading ? (
+                <section aria-label="Loading request" aria-busy="true" className="rounded-2xl border border-linen-400 bg-linen-50 p-6">
+                  <span className="sr-only">Loading request</span>
+                  <Skeleton className="h-4 w-28" />
+                  <Skeleton className="mt-5 h-7 w-2/3" />
+                  <div className="mt-7 grid gap-4 sm:grid-cols-3"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div>
+                </section>
+              ) : lookup.isError ? (
+                <ErrorState
+                  title="This tracking link is invalid or has expired"
+                  description="For your privacy, we cannot confirm whether a request exists. Check that you pasted the complete link, or contact your support team for help."
+                  actionLabel="Try this link again"
+                  onRetry={() => void lookup.refetch()}
+                  retrying={lookup.isFetching}
+                />
+              ) : lookup.data ? <TicketResult ticket={lookup.data} /> : null}
+            </div>
+          )}
+
+          <div className="grid gap-8 lg:grid-cols-[0.72fr_1.28fr] lg:gap-12">
+            <aside className="lg:pt-4">
+              <div className="grid h-11 w-11 place-items-center rounded-xl bg-ink-700 text-linen-50" aria-hidden="true"><LifeBuoy className="h-5 w-5" /></div>
+              <h2 className="mt-5 font-serif text-3xl tracking-[-0.025em] text-ink-700">Create a new request</h2>
+              <p className="mt-3 text-sm leading-6 text-ink-500">Share enough detail for the support team to understand the impact and start resolving the issue.</p>
+              <div className="mt-6 space-y-4 border-t border-linen-300 pt-6 text-sm text-ink-500">
+                <div className="flex gap-3"><FileCheck2 className="mt-0.5 h-4 w-4 shrink-0 text-semantic-primary" aria-hidden="true" /><span>Describe what happened and what you expected.</span></div>
+                <div className="flex gap-3"><CalendarClock className="mt-0.5 h-4 w-4 shrink-0 text-semantic-primary" aria-hidden="true" /><span>Choose urgency based on the current business impact.</span></div>
+                <div className="flex gap-3"><ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-semantic-primary" aria-hidden="true" /><span>Save the tracking link shown after submission.</span></div>
+              </div>
+            </aside>
+
+            <form onSubmit={handleCreate} className="rounded-2xl border border-linen-400 bg-linen-50 p-5 shadow-sm sm:p-7" aria-labelledby="new-request-form-title">
+              <h2 id="new-request-form-title" className="sr-only">New support request details</h2>
+              <div className="grid gap-5 sm:grid-cols-2">
+                <label className="block sm:col-span-2">
+                  <span className="text-xs font-semibold text-ink-600">Work email</span>
+                  <input type="email" required value={reporter} onChange={(event) => setReporter(event.target.value)} className="input-base mt-1.5" placeholder="you@company.com" autoComplete="email" />
+                  <span className="mt-1.5 block text-xs text-ink-400">Used by the support team to contact you about this request.</span>
+                </label>
+                <label className="block sm:col-span-2">
+                  <span className="text-xs font-semibold text-ink-600">What do you need help with?</span>
+                  <input required maxLength={200} value={subject} onChange={(event) => setSubject(event.target.value)} className="input-base mt-1.5" placeholder="A short summary of the issue" />
+                </label>
+                <label className="block sm:col-span-2">
+                  <span className="text-xs font-semibold text-ink-600">Details</span>
+                  <textarea required value={description} onChange={(event) => setDescription(event.target.value)} className="input-base mt-1.5 min-h-36 resize-y" placeholder="What happened? When did it start? Include any error messages or steps you have already tried." rows={6} />
+                </label>
+                <label className="block sm:col-span-2">
+                  <span className="text-xs font-semibold text-ink-600">Impact</span>
+                  <select value={priority} onChange={(event) => setPriority(event.target.value)} className="input-base mt-1.5">
+                    {PRIORITIES.map((item) => <option key={item.value} value={item.value}>{item.label} — {item.description}</option>)}
+                  </select>
+                </label>
+              </div>
+
+              {createTicket.isError && (
+                <Alert variant="danger" title="We could not submit your request" className="mt-5">
+                  Nothing was saved. Check your connection and try again.
+                </Alert>
+              )}
+
+              <div className="mt-6 flex flex-col-reverse items-stretch gap-3 border-t border-linen-300 pt-5 sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-xs leading-5 text-ink-400"><LockKeyhole className="mr-1 inline h-3.5 w-3.5" aria-hidden="true" />Your tracking link is shown only once.</p>
+                <Button type="submit" pending={createTicket.isPending} pendingLabel="Submitting securely…" leadingIcon={<Send className="h-4 w-4" />}>
+                  Submit request
+                </Button>
+              </div>
+            </form>
           </div>
         </div>
-      )}
+      </main>
+
+      <footer className="border-t border-linen-300 bg-linen-50">
+        <div className="mx-auto flex max-w-6xl flex-col gap-2 px-4 py-6 text-xs text-ink-400 sm:flex-row sm:items-center sm:justify-between sm:px-6 lg:px-8">
+          <span>Powered by Tickety Service Operations</span>
+          <span>Private by design · No account required</span>
+        </div>
+      </footer>
+
+      <Dialog
+        open={Boolean(createdTicket)}
+        onOpenChange={(open) => { if (!open) closeCreatedTicket(); }}
+        title="Your request is on its way"
+        description="Save this private tracking link now. For your security, it cannot be recovered or shown again after you close this window."
+        closeLabel="Close and discard tracking link"
+        className="max-w-xl"
+        footer={
+          <>
+            <Button variant="secondary" onClick={closeCreatedTicket}>I have saved it</Button>
+            <Button onClick={() => createdTicket && window.open(createdTicket.tracking_url, "_blank", "noopener,noreferrer")} leadingIcon={<ExternalLink className="h-4 w-4" />}>
+              Open request
+            </Button>
+          </>
+        }
+      >
+        {createdTicket && (
+          <div>
+            <Alert variant="warning" title="This is the only copy">
+              Anyone with this link can view the request. Keep it private and store it somewhere safe before continuing.
+            </Alert>
+            <div className="mt-5 rounded-xl border border-linen-400 bg-linen-100 p-4">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-xs font-semibold uppercase tracking-[0.1em] text-ink-400">Private tracking link</span>
+                <Badge variant="success" dot>Request created</Badge>
+              </div>
+              <p className="mt-3 break-all font-mono text-xs leading-5 text-ink-600">{createdTicket.tracking_url}</p>
+              <Button variant="secondary" size="sm" className="mt-4 w-full sm:w-auto" onClick={copyTrackingLink} leadingIcon={copyState === "copied" ? <Check className="h-4 w-4" /> : <Clipboard className="h-4 w-4" />}>
+                {copyState === "copied" ? "Link copied" : "Copy tracking link"}
+              </Button>
+              <div aria-live="polite" className="mt-2 min-h-5 text-xs">
+                {copyState === "copied" && <span className="text-semantic-success">Copied. Save it in a secure place.</span>}
+                {copyState === "error" && <span role="alert" className="text-semantic-danger">Copy failed. Select and copy the link above manually.</span>}
+              </div>
+            </div>
+            <dl className="mt-5 grid gap-4 sm:grid-cols-2">
+              <div><dt className="text-xs text-ink-400">Request ID</dt><dd className="mt-1 break-all font-mono text-xs font-semibold text-ink-700">{createdTicket.id}</dd></div>
+              <div><dt className="text-xs text-ink-400">Link expires</dt><dd className="mt-1 text-sm font-semibold text-ink-700">{formatDate(createdTicket.access_expires_at)}</dd></div>
+            </dl>
+          </div>
+        )}
+      </Dialog>
     </div>
   );
 }

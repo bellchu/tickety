@@ -1,542 +1,98 @@
 "use client";
 
+import Link from "next/link";
 import { useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
+import { AlertTriangle, Gauge, ListOrdered, Radar, Search, ShieldCheck, Sparkles, Timer, TrendingUp, Users } from "lucide-react";
+import { Alert, Badge, Button, EmptyState, ErrorState, Skeleton } from "@/components/ui";
 import { api } from "@/lib/api";
-import type {
-  IntelAlertsResponse,
-  IntelPrioritizeResponse,
-  IntelSlaResponse,
-  IntelTrendsResponse,
-  AccountHealth,
-  RouteRecommendation,
-} from "@/lib/types";
-import {
-  Radar,
-  AlertTriangle,
-  Timer,
-  ListOrdered,
-  Users,
-  TrendingUp,
-  Activity,
-  Search,
-  Gauge,
-  RefreshCw,
-} from "lucide-react";
-import { cn, priorityColor } from "@/lib/utils";
+import { canAccessProtectedIntelligence, isDemoContext } from "@/lib/auth";
+import type { AccountHealth, IntelWorkloadResponse, SlaStatusItem, SystemicIssuesResponse } from "@/lib/types";
+import { cn } from "@/lib/utils";
+
+async function getWorkload(): Promise<IntelWorkloadResponse> {
+  const response = await fetch("/api/intelligence/workload", { credentials: "include", cache: "no-store" });
+  if (!response.ok) throw new Error(`Workload request failed: ${response.status}`);
+  return response.json() as Promise<IntelWorkloadResponse>;
+}
+
+function Panel({ title, description, icon, children, action, className }: { title: string; description?: string; icon: React.ReactNode; children: React.ReactNode; action?: React.ReactNode; className?: string }) {
+  return <section className={cn("overflow-hidden rounded-2xl border border-linen-400 bg-linen-50 shadow-sm", className)}><div className="flex flex-col gap-3 border-b border-linen-400 p-4 sm:flex-row sm:items-start sm:justify-between sm:p-5"><div className="flex min-w-0 gap-3"><span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-linen-200 text-ink-500">{icon}</span><div><h2 className="text-sm font-semibold text-ink-700">{title}</h2>{description && <p className="mt-1 text-xs leading-5 text-ink-500">{description}</p>}</div></div>{action}</div><div className="p-4 sm:p-5">{children}</div></section>;
+}
+
+function PanelLoading({ rows = 4 }: { rows?: number }) { return <div className="space-y-3" aria-label="Loading intelligence"><Skeleton className="h-16 w-full" />{Array.from({ length: rows }, (_, index) => <Skeleton key={index} className="h-12 w-full" />)}</div>; }
+function PanelError({ title = "Intelligence unavailable", onRetry, retrying }: { title?: string; onRetry: () => void; retrying: boolean }) { return <ErrorState className="min-h-48" title={title} description="This signal could not be refreshed. Other intelligence panels remain independent." onRetry={onRetry} retrying={retrying} />; }
+function EmptyPanel({ title, description }: { title: string; description: string }) { return <EmptyState className="min-h-44 border-0 bg-transparent" icon={<ShieldCheck className="h-5 w-5" />} title={title} description={description} />; }
+function SamplingNotice({ analyzed, total, subject = "tickets" }: { analyzed: number; total: number; subject?: string }) {
+  if (analyzed >= total) return null;
+  return <Alert variant="warning" title="Sampled result" className="text-xs">Calculated from {analyzed.toLocaleString()} of {total.toLocaleString()} {subject}; figures do not represent the full population.</Alert>;
+}
+
+function IntelligenceHeader() {
+  return <header className="grid gap-5 border-b border-linen-400 pb-6 lg:grid-cols-[1fr_auto] lg:items-end"><div><div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-ink-500"><Sparkles className="h-4 w-4" />Decision support</div><h1 className="mt-2 text-3xl font-semibold tracking-[-0.04em] text-ink-700">Intelligence</h1><p className="mt-2 max-w-2xl text-sm leading-6 text-ink-500">Explainable operational signals for escalation risk, SLA exposure, prioritization, workload, and systemic issues.</p></div><div className="rounded-xl border border-linen-400 bg-linen-50 px-4 py-3 text-xs leading-5 text-ink-500"><strong className="block text-ink-700">Advisory, not automatic</strong>Recommendations support human decisions and do not change tickets.</div></header>;
+}
 
 export default function IntelligencePage() {
-  return (
-    <div className="space-y-6 max-w-7xl">
-      <div className="flex items-center gap-3">
-        <div className="w-10 h-10 rounded-lg bg-linen-300 flex items-center justify-center">
-          <Radar className="w-5 h-5 text-ink-600" />
-        </div>
-        <div>
-          <h1 className="text-2xl font-bold text-ink-700">Intelligence</h1>
-          <p className="text-sm text-ink-500">
-            Ambient AI agents: escalation risk, SLA, prioritization, routing,
-            account health &amp; trends.
-          </p>
-        </div>
-      </div>
+  const authQuery = useQuery({ queryKey: ["auth-me"], queryFn: api.getAuthMe, retry: false });
+  const canAccessIntelligence = canAccessProtectedIntelligence(authQuery.data);
 
-      <AlertsPanel />
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <PrioritizePanel />
-        <SlaPanel />
-      </div>
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <TrendsPanel />
-        <HealthPanel />
-      </div>
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <WorkloadPanel />
-        <SystemicPanel />
-      </div>
-    </div>
-  );
+  if (authQuery.isLoading) {
+    return <div className="mx-auto max-w-7xl space-y-6"><IntelligenceHeader /><div aria-busy="true" aria-label="Checking intelligence access" className="space-y-3"><Skeleton className="h-44 w-full" /><span className="sr-only">Checking intelligence access</span></div></div>;
+  }
+
+  if (authQuery.isError) {
+    return <div className="mx-auto max-w-7xl space-y-6"><IntelligenceHeader /><ErrorState title="Intelligence access could not be checked" description="Your session and access level could not be verified, so no intelligence requests were sent." actionLabel="Retry access check" onRetry={() => void authQuery.refetch()} retrying={authQuery.isFetching} /></div>;
+  }
+
+  if (!canAccessIntelligence) {
+    const demo = isDemoContext(authQuery.data);
+    return <div className="mx-auto max-w-7xl space-y-6"><IntelligenceHeader /><EmptyState icon={<ShieldCheck className="h-5 w-5" />} title={demo ? "Intelligence is locked in demo mode" : "Administrator or supervisor access required"} description={demo ? "Protected intelligence is intentionally disabled in this sample workspace. Ticket and service views remain available, and no intelligence requests are sent." : "This page is available only to authenticated administrators and supervisors in production."} /></div>;
+  }
+
+  return <div className="mx-auto max-w-7xl space-y-6"><IntelligenceHeader /><AlertsPanel /><div className="grid gap-6 lg:grid-cols-2"><PriorityPanel /><SlaPanel /></div><div className="grid gap-6 lg:grid-cols-2"><TrendsPanel /><HealthPanel /></div><div className="grid gap-6 lg:grid-cols-2"><WorkloadPanel /><SystemicPanel /></div></div>;
 }
-
-function SectionCard({
-  title,
-  icon: Icon,
-  children,
-  right,
-}: {
-  title: string;
-  icon: React.ComponentType<{ className?: string }>;
-  children: React.ReactNode;
-  right?: React.ReactNode;
-}) {
-  return (
-    <section className="card-surface p-6 space-y-4">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <Icon className="w-5 h-5 text-ink-600" />
-          <h2 className="text-lg font-semibold text-ink-700">{title}</h2>
-        </div>
-        {right}
-      </div>
-      {children}
-    </section>
-  );
-}
-
-function StatPill({ value, tone }: { value: number; tone: "red" | "amber" | "emerald" }) {
-  const tones = {
-    red: "bg-rust-400/10 text-red-700 border-rust-400/30",
-    amber: "bg-linen-200 text-ink-600 border-linen-400",
-    emerald: "bg-linen-200 text-ink-600 border-linen-400",
-  };
-  return (
-    <span className={cn("inline-flex items-center justify-center min-w-[2.25rem] px-2 py-0.5 rounded-full text-sm font-semibold border", tones[tone])}>
-      {value}
-    </span>
-  );
-}
-
-function EmptyHint({ children }: { children: React.ReactNode }) {
-  return <p className="text-sm text-ink-400 py-2">{children}</p>;
-}
-
-// ── Proactive Alerts ──────────────────────────────────────────
 
 function AlertsPanel() {
-  const { data, isLoading } = useQuery<IntelAlertsResponse>({
-    queryKey: ["intel-alerts"],
-    queryFn: api.getIntelAlerts,
-    refetchInterval: 30000,
-  });
-
-  return (
-    <SectionCard title="Proactive Alerts" icon={AlertTriangle} right={isLoading ? <RefreshCw className="w-4 h-4 animate-spin text-ink-400" /> : null}>
-      {!data ? (
-        <EmptyHint>Loading alerts…</EmptyHint>
-      ) : (
-        <>
-          <div className="flex flex-wrap gap-3">
-            <div className="flex items-center gap-2">
-              <StatPill value={data.summary.escalation_prone} tone="red" />
-              <span className="text-sm text-ink-600">escalation-prone</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <StatPill value={data.summary.sla_at_risk} tone="amber" />
-              <span className="text-sm text-ink-600">SLA at risk</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <StatPill value={data.summary.sla_breached} tone="red" />
-              <span className="text-sm text-ink-600">SLA breached</span>
-            </div>
-          </div>
-
-          {data.escalation_prone.length > 0 && (
-            <div className="space-y-2">
-              <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-500">
-                Escalation-prone cases
-              </h3>
-              {data.escalation_prone.slice(0, 6).map((a) => (
-                <div key={a.ticket_id} className="flex items-center justify-between gap-3 p-3 rounded-lg bg-rust-400/10/50 border border-red-100">
-                  <div className="min-w-0">
-                    <a href={`/tickets/${a.ticket_id}`} className="block truncate text-sm font-medium text-ink-700 hover:text-ink-700">
-                      {a.subject}
-                    </a>
-                    <span className="text-xs text-ink-500">{a.priority} · risk {a.risk}/100</span>
-                  </div>
-                  <RiskBar value={a.risk} />
-                </div>
-              ))}
-            </div>
-          )}
-
-          {data.sla_breached.length > 0 && (
-            <div className="space-y-2">
-              <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-500">SLA breached</h3>
-              {data.sla_breached.slice(0, 4).map((s) => (
-                <SlaRow key={s.ticket_id} s={s} />
-              ))}
-            </div>
-          )}
-
-          {data.summary.escalation_prone === 0 &&
-            data.summary.sla_at_risk === 0 &&
-            data.summary.sla_breached === 0 && (
-              <EmptyHint>No cases need attention right now. ✅</EmptyHint>
-            )}
-        </>
-      )}
-    </SectionCard>
-  );
+  const query = useQuery({ queryKey: ["intel-alerts"], queryFn: api.getIntelAlerts, refetchInterval: 30_000 });
+  const data = query.data;
+  return <Panel title="Proactive alerts" description="Refreshes every 30 seconds · evidence links to source tickets" icon={<AlertTriangle className="h-4 w-4" />} action={data ? <Badge variant={data.summary.sla_breached || data.summary.escalation_prone ? "danger" : "success"} dot>{data.summary.sla_breached || data.summary.escalation_prone ? "Attention needed" : "No critical signals"}</Badge> : undefined}>{query.isLoading ? <PanelLoading rows={2} /> : query.isError ? <PanelError onRetry={() => void query.refetch()} retrying={query.isFetching} /> : !data ? <EmptyPanel title="No alert data" description="The intelligence service returned no alert summary." /> : <div className="space-y-5"><SamplingNotice analyzed={data.analyzed_tickets} total={data.total_open_tickets} subject="open tickets" /><div className="grid gap-3 sm:grid-cols-3"><Signal label="Escalation prone" value={data.summary.escalation_prone} tone="danger" /><Signal label="SLA at risk" value={data.summary.sla_at_risk} tone="warning" /><Signal label="SLA breached" value={data.summary.sla_breached} tone="danger" /></div>{data.escalation_prone.length > 0 && <div><h3 className="text-xs font-semibold uppercase tracking-[0.1em] text-ink-400">Highest escalation risk</h3><div className="mt-3 grid gap-3 md:grid-cols-2">{data.escalation_prone.slice(0, 6).map((item) => <Link key={item.ticket_id} href={`/tickets/${item.ticket_id}`} className="rounded-xl border border-rust-400/30 bg-[var(--color-danger-soft)] p-4 transition-colors hover:border-rust-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"><div className="flex items-start justify-between gap-3"><p className="line-clamp-2 text-sm font-semibold text-ink-700">{item.subject}</p><Badge variant="danger">{item.priority}</Badge></div><RiskMeter value={item.risk} /></Link>)}</div></div>}{data.sla_breached.length > 0 && <div><h3 className="text-xs font-semibold uppercase tracking-[0.1em] text-ink-400">Breached SLA clocks</h3><div className="mt-3 grid gap-3 md:grid-cols-2">{data.sla_breached.slice(0, 4).map((item) => <SlaItem key={item.ticket_id} item={item} />)}</div></div>}{data.summary.escalation_prone === 0 && data.summary.sla_at_risk === 0 && data.summary.sla_breached === 0 && <EmptyPanel title="No active exceptions" description="No exceptions were found in the analyzed ticket set." />}</div>}</Panel>;
 }
 
-function RiskBar({ value }: { value: number }) {
-  const tone = value >= 70 ? "bg-rust-400/100" : value >= 40 ? "bg-amber-500" : "bg-emerald-500";
-  return (
-    <div className="flex items-center gap-2 w-32 shrink-0">
-      <div className="h-2 flex-1 rounded-full bg-linen-300 overflow-hidden">
-        <div className={cn("h-full rounded-full", tone)} style={{ width: `${value}%` }} />
-      </div>
-      <span className="text-xs font-semibold text-ink-600 w-8 text-right">{value}</span>
-    </div>
-  );
+function Signal({ label, value, tone }: { label: string; value: number; tone: "danger" | "warning" }) { return <div className="rounded-xl border border-linen-400 bg-linen-100 p-4"><div className="flex items-center justify-between gap-3"><p className="text-xs font-medium text-ink-500">{label}</p><Badge variant={tone}>{value > 0 ? "Review" : "Clear"}</Badge></div><p className="mt-3 text-3xl font-semibold tracking-[-0.04em] tabular-nums text-ink-700">{value}</p></div>; }
+function RiskMeter({ value }: { value: number }) { const normalized = Math.max(0, Math.min(value, 100)); return <div className="mt-4"><div className="mb-1.5 flex items-center justify-between text-xs"><span className="text-ink-500">Risk score</span><strong className="tabular-nums text-ink-700">{normalized}/100</strong></div><div className="h-2 overflow-hidden rounded-full bg-white/70" role="progressbar" aria-label="Escalation risk" aria-valuenow={normalized} aria-valuemin={0} aria-valuemax={100}><div className="h-full rounded-full bg-semantic-danger" style={{ width: `${normalized}%` }} /></div></div>; }
+
+function PriorityPanel() {
+  const query = useQuery({ queryKey: ["intel-prioritize"], queryFn: api.getIntelPrioritize }); const ranked = query.data?.ranked ?? [];
+  return <Panel title="Backlog priority" description="Ranked by declared priority, age, sentiment, and escalation exposure" icon={<ListOrdered className="h-4 w-4" />}>{query.isLoading ? <PanelLoading /> : query.isError ? <PanelError onRetry={() => void query.refetch()} retrying={query.isFetching} /> : ranked.length === 0 ? <EmptyPanel title="Backlog is clear" description="No open tickets are currently available for ranking." /> : <div className="space-y-3"><SamplingNotice analyzed={query.data!.analyzed_tickets} total={query.data!.backlog_size} subject="open tickets" /><ol className="space-y-2">{ranked.slice(0, 8).map((item, index) => <li key={item.ticket_id}><Link href={`/tickets/${item.ticket_id}`} className="grid grid-cols-[2rem_minmax(0,1fr)_auto] items-center gap-3 rounded-xl border border-linen-300 p-3 transition-colors hover:border-linen-500 hover:bg-linen-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"><span className="grid h-8 w-8 place-items-center rounded-lg bg-ink-700 text-xs font-semibold text-white">{index + 1}</span><span className="min-w-0"><span className="block truncate text-sm font-semibold text-ink-700">{item.subject}</span><span className="mt-1 block truncate text-xs text-ink-500">{item.priority} · {item.category || "Uncategorized"} · {Math.round(item.age_hours)}h old · risk {Math.round(item.escalation_risk)}</span></span><span className="text-right"><strong className="block text-sm tabular-nums text-ink-700">{item.score}</strong><span className="text-[10px] uppercase tracking-wide text-ink-400">score</span></span></Link></li>)}</ol></div>}</Panel>;
 }
-
-// ── Prioritization ────────────────────────────────────────────
-
-function PrioritizePanel() {
-  const { data, isLoading } = useQuery<IntelPrioritizeResponse>({
-    queryKey: ["intel-prioritize"],
-    queryFn: api.getIntelPrioritize,
-  });
-  return (
-    <SectionCard title="Backlog Prioritization" icon={ListOrdered} right={isLoading ? <RefreshCw className="w-4 h-4 animate-spin text-ink-400" /> : null}>
-      {!data ? (
-        <EmptyHint>Loading…</EmptyHint>
-      ) : data.ranked.length === 0 ? (
-        <EmptyHint>No open tickets in the backlog.</EmptyHint>
-      ) : (
-        <ol className="space-y-2">
-          {data.ranked.slice(0, 8).map((t, i) => (
-            <li key={t.ticket_id} className="flex items-center gap-3 p-3 rounded-lg border border-linen-300">
-              <span className="w-6 h-6 rounded-full bg-linen-300 text-ink-600 text-xs font-bold flex items-center justify-center">
-                {i + 1}
-              </span>
-              <div className="min-w-0 flex-1">
-                <a href={`/tickets/${t.ticket_id}`} className="block truncate text-sm font-medium text-ink-700 hover:text-ink-700">
-                  {t.subject}
-                </a>
-                <span className="text-xs text-ink-500">
-                  {t.priority} · {t.category || "—"} · {t.age_hours}h old · risk {t.escalation_risk}
-                </span>
-              </div>
-              <div className="text-right shrink-0">
-                <div className="text-sm font-semibold text-ink-600">{t.score}</div>
-                <div className="text-[10px] uppercase text-ink-400">score</div>
-              </div>
-            </li>
-          ))}
-        </ol>
-      )}
-    </SectionCard>
-  );
-}
-
-// ── SLA ───────────────────────────────────────────────────────
 
 function SlaPanel() {
-  const { data, isLoading } = useQuery<IntelSlaResponse>({
-    queryKey: ["intel-sla"],
-    queryFn: api.getIntelSla,
-  });
-  return (
-    <SectionCard title="SLA Clocks" icon={Timer} right={isLoading ? <RefreshCw className="w-4 h-4 animate-spin text-ink-400" /> : null}>
-      {!data ? (
-        <EmptyHint>Loading…</EmptyHint>
-      ) : data.items.length === 0 ? (
-        <EmptyHint>No open tickets to track.</EmptyHint>
-      ) : (
-        <div className="space-y-2">
-          {data.items.slice(0, 10).map((s) => (
-            <SlaRow key={s.ticket_id} s={s} />
-          ))}
-        </div>
-      )}
-    </SectionCard>
-  );
+  const query = useQuery({ queryKey: ["intel-sla"], queryFn: api.getIntelSla }); const items = query.data?.items ?? [];
+  return <Panel title="SLA clocks" description="Remaining time and target exposure for open work" icon={<Timer className="h-4 w-4" />}>{query.isLoading ? <PanelLoading /> : query.isError ? <PanelError onRetry={() => void query.refetch()} retrying={query.isFetching} /> : items.length === 0 ? <EmptyPanel title="No active SLA clocks" description="No open tickets are currently being tracked." /> : <div className="space-y-3"><SamplingNotice analyzed={query.data!.analyzed_tickets} total={query.data!.count} subject="open tickets" /><div className="space-y-2">{items.slice(0, 10).map((item) => <SlaItem key={item.ticket_id} item={item} />)}</div></div>}</Panel>;
 }
 
-function SlaRow({ s }: { s: import("@/lib/types").SlaStatusItem }) {
-  const tone =
-    s.status === "breached"
-      ? "border-red-100 bg-rust-400/10/50"
-      : s.status === "at_risk"
-      ? "border-linen-400 bg-linen-200"
-      : "border-linen-300";
-  const dot =
-    s.status === "breached" ? "bg-rust-400/100" : s.status === "at_risk" ? "bg-amber-500" : "bg-emerald-500";
-  return (
-    <div className={cn("flex items-center gap-3 p-3 rounded-lg border", tone)}>
-      <span className={cn("w-2 h-2 rounded-full", dot)} />
-      <div className="min-w-0 flex-1">
-        <a href={`/tickets/${s.ticket_id}`} className="block truncate text-sm font-medium text-ink-700 hover:text-ink-700">
-          {s.subject}
-        </a>
-        <span className={cn("text-xs px-1.5 py-0.5 rounded border", priorityColor(s.priority))}>
-          {s.priority}
-        </span>
-      </div>
-      <div className="text-right shrink-0 text-xs text-ink-600">
-        {s.status === "breached"
-          ? `breached ${s.elapsed_hours}h`
-          : `${s.remaining_hours}h left`}
-        <div className="text-[10px] uppercase text-ink-400">
-          target {s.sla_target_hours}h
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ── Trends ─────────────────────────────────────────────────────
+function SlaItem({ item }: { item: SlaStatusItem }) { const variant = item.status === "breached" ? "danger" : item.status === "at_risk" ? "warning" : "success"; return <Link href={`/tickets/${item.ticket_id}`} className="flex items-center gap-3 rounded-xl border border-linen-300 p-3 transition-colors hover:bg-linen-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"><Badge variant={variant} dot>{item.status.replace("_", " ")}</Badge><span className="min-w-0 flex-1"><span className="block truncate text-sm font-semibold text-ink-700">{item.subject}</span><span className="mt-0.5 block text-xs text-ink-500">{item.priority} · {item.sla_target_hours}h target</span></span><span className="shrink-0 text-right text-xs"><strong className="block tabular-nums text-ink-700">{item.status === "breached" ? `${item.elapsed_hours}h elapsed` : `${item.remaining_hours}h left`}</strong></span></Link>; }
 
 function TrendsPanel() {
-  const { data, isLoading } = useQuery<IntelTrendsResponse>({
-    queryKey: ["intel-trends"],
-    queryFn: api.getIntelTrends,
-  });
-  if (!data) {
-    return (
-      <SectionCard title="Trends &amp; Text Analytics" icon={TrendingUp}>
-        <EmptyHint>Loading…</EmptyHint>
-      </SectionCard>
-    );
-  }
-  const maxCat = Math.max(1, ...Object.values(data.by_category));
-  return (
-    <SectionCard title="Trends & Text Analytics" icon={TrendingUp} right={isLoading ? <RefreshCw className="w-4 h-4 animate-spin text-ink-400" /> : null}>
-      <div className="grid grid-cols-2 gap-4">
-        <div>
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-500 mb-2">By category</h3>
-          {Object.entries(data.by_category).length === 0 ? (
-            <EmptyHint>No categories yet.</EmptyHint>
-          ) : (
-            <div className="space-y-1.5">
-              {Object.entries(data.by_category).slice(0, 8).map(([k, v]) => (
-                <div key={k} className="flex items-center gap-2 text-xs">
-                  <span className="w-24 truncate text-ink-600">{k}</span>
-                  <div className="flex-1 h-2 rounded-full bg-linen-300 overflow-hidden">
-                    <div className="h-full bg-linen-3000 rounded-full" style={{ width: `${(v / maxCat) * 100}%` }} />
-                  </div>
-                  <span className="w-6 text-right text-ink-500">{v}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-        <div>
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-500 mb-2">By sentiment</h3>
-          {Object.entries(data.by_sentiment).length === 0 ? (
-            <EmptyHint>No sentiment data.</EmptyHint>
-          ) : (
-            <div className="flex flex-wrap gap-1.5">
-              {Object.entries(data.by_sentiment).map(([k, v]) => (
-                <span key={k} className="text-xs px-2 py-1 rounded-lg bg-linen-200 border border-linen-400 text-ink-600">
-                  {k} <span className="font-semibold">{v}</span>
-                </span>
-              ))}
-            </div>
-          )}
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-500 mt-4 mb-2">Top terms</h3>
-          <div className="flex flex-wrap gap-1.5">
-            {data.top_terms.slice(0, 18).map(([term, n]) => (
-              <span key={term} className="text-xs px-2 py-1 rounded-lg bg-linen-300 border border-linen-400 text-ink-600">
-                {term} <span className="text-ink-400">{n}</span>
-              </span>
-            ))}
-          </div>
-        </div>
-      </div>
-    </SectionCard>
-  );
+  const query = useQuery({ queryKey: ["intel-trends"], queryFn: api.getIntelTrends }); const data = query.data; const maxCategory = data ? Math.max(1, ...Object.values(data.by_category)) : 1;
+  return <Panel title="Trends and text signals" description="Category, sentiment, and recurring language across ticket history" icon={<TrendingUp className="h-4 w-4" />}>{query.isLoading ? <PanelLoading /> : query.isError ? <PanelError onRetry={() => void query.refetch()} retrying={query.isFetching} /> : !data || data.total_tickets === 0 ? <EmptyPanel title="No trend history yet" description="Signals will appear when enough ticket activity has accumulated." /> : <div className="space-y-6"><SamplingNotice analyzed={data.analyzed_tickets} total={data.total_tickets} /><div><h3 className="text-xs font-semibold uppercase tracking-[0.1em] text-ink-400">Category volume</h3><div className="mt-3 space-y-3">{Object.entries(data.by_category).slice(0, 8).map(([category, count]) => <div key={category} className="grid grid-cols-[6rem_1fr_2rem] items-center gap-3 text-xs"><span className="truncate text-ink-600">{category}</span><div className="h-2 overflow-hidden rounded-full bg-linen-300"><div className="h-full rounded-full bg-semantic-primary" style={{ width: `${(count / maxCategory) * 100}%` }} /></div><span className="text-right tabular-nums text-ink-500">{count}</span></div>)}</div></div><div className="grid gap-5 sm:grid-cols-2"><div><h3 className="text-xs font-semibold uppercase tracking-[0.1em] text-ink-400">Sentiment</h3><div className="mt-3 flex flex-wrap gap-2">{Object.entries(data.by_sentiment).map(([sentiment, count]) => <Badge key={sentiment} variant={sentiment.toLowerCase().includes("negative") ? "danger" : sentiment.toLowerCase().includes("positive") ? "success" : "neutral"}>{sentiment}: {count}</Badge>)}</div></div><div><h3 className="text-xs font-semibold uppercase tracking-[0.1em] text-ink-400">Top terms</h3><div className="mt-3 flex flex-wrap gap-2">{data.top_terms.slice(0, 14).map(([term, count]) => <Badge key={term}>{term} · {count}</Badge>)}</div></div></div></div>}</Panel>;
 }
-
-// ── Account Health + Routing ───────────────────────────────────
 
 function HealthPanel() {
-  const [reporter, setReporter] = useState("");
-  const [activeReporter, setActiveReporter] = useState("");
-  const queryClient = useQueryClient();
-
-  const { data, isFetching } = useQuery<AccountHealth | null>({
-    queryKey: ["intel-health", activeReporter],
-    queryFn: () => (activeReporter ? api.getIntelHealth(activeReporter) : Promise.resolve(null)),
-    enabled: !!activeReporter,
-  });
-
-  const run = (e: React.FormEvent) => {
-    e.preventDefault();
-    const r = reporter.trim();
-    if (r) setActiveReporter(r);
-  };
-
-  return (
-    <SectionCard
-      title="Account Health & Routing"
-      icon={Gauge}
-      right={
-        <form onSubmit={run} className="flex gap-2">
-          <div className="relative">
-            <Search className="w-4 h-4 text-ink-400 absolute left-2 top-1/2 -translate-y-1/2" />
-            <input
-              value={reporter}
-              onChange={(e) => setReporter(e.target.value)}
-              placeholder="reporter / customer"
-              className="input-base input-search py-1.5 text-sm w-44"
-            />
-          </div>
-          <button type="submit" className="px-3 rounded-lg bg-clay-500 text-linen-50 text-sm hover:bg-clay-600">
-            Check
-          </button>
-        </form>
-      }
-    >
-      {!activeReporter ? (
-        <EmptyHint>Enter a reporter to score account health and churn risk.</EmptyHint>
-      ) : isFetching ? (
-        <EmptyHint>Scoring…</EmptyHint>
-      ) : data && data.health_score !== null ? (
-        <div className="space-y-4">
-          <div className="flex items-center gap-4">
-            <div className="relative w-20 h-20">
-              <svg viewBox="0 0 36 36" className="w-20 h-20 -rotate-90">
-                <circle cx="18" cy="18" r="15.5" fill="none" stroke="#e2e8f0" strokeWidth="4" />
-                <circle
-                  cx="18" cy="18" r="15.5" fill="none"
-                  stroke={data.churn_risk === "high" ? "#ef4444" : data.churn_risk === "medium" ? "#f59e0b" : "#10b981"}
-                  strokeWidth="4" strokeLinecap="round"
-                  strokeDasharray={`${(data.health_score ?? 0) * 0.98} 100`}
-                />
-              </svg>
-              <div className="absolute inset-0 flex items-center justify-center">
-                <span className="text-lg font-bold text-ink-700">{data.health_score}</span>
-              </div>
-            </div>
-            <div className="space-y-1 text-sm text-ink-600">
-              <div>Churn risk: <span className="font-semibold capitalize">{data.churn_risk}</span></div>
-              <div>{data.open} open · {data.resolved} resolved · {data.total} total</div>
-              <div>Avg escalation risk: {data.avg_escalation_risk}</div>
-              <div>Negative sentiment ratio: {(data.negative_sentiment_ratio * 100).toFixed(0)}%</div>
-            </div>
-          </div>
-          <RoutingWidget reporter={activeReporter} onInvalidate={() => queryClient.invalidateQueries({ queryKey: ["intel-health", activeReporter] })} />
-        </div>
-      ) : (
-        <EmptyHint>No tickets found for “{activeReporter}”.</EmptyHint>
-      )}
-    </SectionCard>
-  );
+  const [reporter, setReporter] = useState(""); const [activeReporter, setActiveReporter] = useState("");
+  const query = useQuery<AccountHealth>({ queryKey: ["intel-health", activeReporter], queryFn: () => api.getIntelHealth(activeReporter), enabled: Boolean(activeReporter) });
+  const submit = (event: React.FormEvent) => { event.preventDefault(); const value = reporter.trim(); if (value) setActiveReporter(value); };
+  const search = <form onSubmit={submit} className="flex w-full gap-2 sm:w-auto"><label className="relative min-w-0 flex-1 sm:w-52"><span className="sr-only">Reporter or customer</span><Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-400" /><input className="input-base input-search h-10 w-full" value={reporter} onChange={(event) => setReporter(event.target.value)} placeholder="Reporter or customer" /></label><Button type="submit" size="sm" disabled={!reporter.trim()}>Check</Button></form>;
+  const data = query.data;
+  return <Panel title="Account health" description="Search a reporter to summarize their ticket history and churn signal" icon={<Gauge className="h-4 w-4" />} action={search}>{!activeReporter ? <EmptyPanel title="Choose an account" description="Enter a reporter or customer identifier to calculate a health score." /> : query.isLoading ? <PanelLoading rows={2} /> : query.isError ? <PanelError title="Account health unavailable" onRetry={() => void query.refetch()} retrying={query.isFetching} /> : !data || data.health_score == null ? <EmptyPanel title={`No history for “${activeReporter}”`} description="Try the reporter name or identifier recorded on their tickets." /> : <div className="space-y-5"><SamplingNotice analyzed={data.analyzed_tickets} total={data.total} /><div className="flex flex-col gap-5 sm:flex-row sm:items-center"><div className="grid h-24 w-24 shrink-0 place-items-center rounded-full border-[10px] border-linen-300"><span className="text-2xl font-semibold tabular-nums text-ink-700">{data.health_score}</span></div><div><Badge variant={data.churn_risk === "high" ? "danger" : data.churn_risk === "medium" ? "warning" : "success"} dot>{data.churn_risk} churn risk</Badge><p className="mt-3 text-sm text-ink-600">{data.open} open · {data.resolved} resolved · {data.total} total tickets</p><p className="mt-1 text-xs text-ink-500">Average escalation risk {data.avg_escalation_risk} · negative sentiment {(data.negative_sentiment_ratio * 100).toFixed(0)}%</p></div></div><div className="rounded-xl border border-linen-400 bg-linen-100 p-4 text-xs leading-5 text-ink-500"><strong className="block text-ink-700">Routing remains ticket-specific</strong>Open a ticket to review the recommended assignee and its supporting factors.</div></div>}</Panel>;
 }
-
-function RoutingWidget({ reporter, onInvalidate }: { reporter: string; onInvalidate: () => void }) {
-  return <EmptyHint>Use the Tickets page → open a ticket → the Routing agent recommends an assignee.</EmptyHint>;
-}
-// ── Systemic Issues Panel ─────────────────────────────────────
-
-function SystemicPanel() {
-  const { data, isLoading } = useQuery({
-    queryKey: ["intel-systemic"],
-    queryFn: () => api.getIntelSystemic(2),
-  });
-
-  return (
-    <SectionCard title="Systemic Issues" icon={Radar}>
-      {isLoading ? (
-        <p className="text-sm text-ink-400 py-2">Clustering tickets…</p>
-      ) : !data || data.clusters.length === 0 ? (
-        <p className="text-sm text-ink-400 py-2">
-          No systemic clusters detected. {data?.total_tickets ?? 0} tickets
-          analysed — each issue appears to be isolated.
-        </p>
-      ) : (
-        <div className="space-y-3">
-          <p className="text-xs text-ink-500">
-            {data.clusters.length} cluster{data.clusters.length > 1 ? "s" : ""}{" "}
-            covering {data.clustered_tickets} of {data.total_tickets} tickets
-            (similarity ≥ {data.parameters.similarity_cutoff})
-          </p>
-          {data.clusters.map((c) => (
-            <div
-              key={c.cluster_id}
-              className="rounded border border-linen-400 bg-linen-50 p-4 space-y-2"
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-semibold text-ink-700">
-                  {c.cluster_id}
-                </span>
-                <div className="flex items-center gap-3 text-xs">
-                  <span className="text-ink-500">
-                    {c.ticket_count} tickets
-                  </span>
-                  <span className="font-semibold text-ink-600">
-                    impact {c.business_impact_score}
-                  </span>
-                  <span className="text-ink-500">
-                    avg risk {c.avg_escalation_risk}/100
-                  </span>
-                </div>
-              </div>
-
-              {/* Keywords */}
-              <div className="flex flex-wrap gap-1">
-                {c.shared_keywords.slice(0, 8).map((kw) => (
-                  <span
-                    key={kw}
-                    className="px-2 py-0.5 rounded border border-linen-400 bg-linen-200 text-[11px] text-ink-600"
-                  >
-                    {kw}
-                  </span>
-                ))}
-              </div>
-
-              {/* Sample tickets */}
-              <ul className="space-y-0.5">
-                {c.samples.map((s, i) => (
-                  <li key={i} className="text-xs text-ink-500 truncate">
-                    {s}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ))}
-        </div>
-      )}
-    </SectionCard>
-  );
-}
-
-// ── Agent Workload Panel ─────────────────────────────────────
 
 function WorkloadPanel() {
-  const { data, isLoading } = useQuery({
-    queryKey: ["agent-workload"],
-    queryFn: () => fetch("/api/intelligence/workload").then(r => r.json()),
-  });
+  const query = useQuery({ queryKey: ["agent-workload"], queryFn: getWorkload }); const agents = query.data?.agents ?? [];
+  return <Panel title="Agent workload" description="Open assignment load and historical delivery by agent" icon={<Users className="h-4 w-4" />}>{query.isLoading ? <PanelLoading /> : query.isError ? <PanelError title="Workload unavailable" onRetry={() => void query.refetch()} retrying={query.isFetching} /> : agents.length === 0 ? <EmptyPanel title="No active assignments" description="No agents currently have assigned tickets." /> : <div className="space-y-3"><SamplingNotice analyzed={query.data!.analyzed_users} total={query.data!.total_users} subject="users" />{query.data!.duration_rows_truncated && <Alert variant="warning" title="Sampled resolution history" className="text-xs">Average resolution time uses the latest {query.data!.duration_rows_analyzed.toLocaleString()} completed-ticket records, not the full history.</Alert>}<div className="space-y-2">{agents.slice(0, 8).map((agent) => <div key={agent.user_id} className="rounded-xl border border-linen-300 p-3"><div className="flex items-center justify-between gap-3"><div className="min-w-0"><p className="truncate text-sm font-semibold text-ink-700">{agent.name}</p><p className="mt-0.5 text-xs text-ink-400">Tier {agent.tier}</p></div><Badge variant={agent.open_tickets > 8 ? "warning" : "info"}>{agent.open_tickets} open</Badge></div><div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-500"><span>{agent.total_resolved} resolved</span>{agent.avg_resolution_hours > 0 && <span>{agent.avg_resolution_hours}h average resolution</span>}</div></div>)}</div></div>}</Panel>;
+}
 
-  const agents = data?.agents ?? [];
-
-  return (
-    <SectionCard title="Agent Workload" icon={Users}>
-      {isLoading ? (
-        <p className="text-sm text-ink-400 py-2">Loading…</p>
-      ) : agents.length === 0 ? (
-        <p className="text-sm text-ink-400 py-2">No agents with assigned tickets.</p>
-      ) : (
-        <div className="space-y-2">
-          {agents.slice(0, 8).map((a: any) => (
-            <div key={a.user_id} className="flex items-center justify-between rounded border border-linen-300 px-3 py-2">
-              <div className="min-w-0 flex-1">
-                <span className="text-sm font-medium text-ink-700">{a.name}</span>
-                {a.tier > 1 && (
-                  <span className="ml-2 text-[10px] font-semibold text-ink-500">T{a.tier}</span>
-                )}
-              </div>
-              <div className="flex items-center gap-4 text-xs">
-                <span className="tabular-nums text-ink-600">
-                  <span className="font-semibold">{a.open_tickets}</span> open
-                </span>
-                <span className="tabular-nums text-ink-500">
-                  {a.total_resolved} resolved
-                </span>
-                {a.avg_resolution_hours > 0 && (
-                  <span className="tabular-nums text-ink-400">
-                    avg {a.avg_resolution_hours}h
-                  </span>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </SectionCard>
-  );
+function SystemicPanel() {
+  const query = useQuery<SystemicIssuesResponse>({ queryKey: ["intel-systemic"], queryFn: () => api.getIntelSystemic(2) }); const data = query.data;
+  return <Panel title="Systemic issues" description="Clusters of related tickets that may share a root cause" icon={<Radar className="h-4 w-4" />}>{query.isLoading ? <PanelLoading /> : query.isError ? <PanelError title="Systemic analysis unavailable" onRetry={() => void query.refetch()} retrying={query.isFetching} /> : !data ? <EmptyPanel title="No systemic analysis" description="The intelligence service returned no cluster analysis." /> : <div className="space-y-3"><SamplingNotice analyzed={data.analyzed_tickets} total={data.total_tickets} />{data.clusters.length === 0 ? <EmptyPanel title="No systemic clusters detected" description={`No clusters were found in the ${data.analyzed_tickets.toLocaleString()} analyzed tickets.`} /> : <><p className="text-xs leading-5 text-ink-500">{data.clusters.length} cluster{data.clusters.length === 1 ? "" : "s"} cover {data.clustered_tickets} of {data.analyzed_tickets} analyzed tickets.</p>{data.clusters.map((cluster) => <article key={cluster.cluster_id} className="rounded-xl border border-linen-400 p-4"><div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between"><h3 className="text-sm font-semibold text-ink-700">{cluster.cluster_id}</h3><div className="flex flex-wrap gap-2"><Badge variant="info">{cluster.ticket_count} tickets</Badge><Badge variant={cluster.business_impact_score >= 70 ? "danger" : "warning"}>Impact {cluster.business_impact_score}</Badge></div></div><div className="mt-3 flex flex-wrap gap-1.5">{cluster.shared_keywords.slice(0, 8).map((keyword) => <Badge key={keyword}>{keyword}</Badge>)}</div><ul className="mt-3 space-y-1">{cluster.samples.map((sample, index) => <li key={`${cluster.cluster_id}-${index}`} className="truncate text-xs text-ink-500">{sample}</li>)}</ul></article>)}</>}</div>}</Panel>;
 }

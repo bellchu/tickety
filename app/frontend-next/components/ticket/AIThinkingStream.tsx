@@ -6,6 +6,7 @@ import { createTicketStreamWS } from "@/lib/ws";
 import type { TicketAnalysisResult, TriageStep } from "@/lib/types";
 import { ListChecks, Loader2, CheckCircle2, RefreshCw } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
+import { Alert, Button } from "@/components/ui";
 
 interface Props {
   ticketId: string;
@@ -17,6 +18,7 @@ export function AIThinkingStream({ ticketId, hasExisting, onComplete }: Props) {
   const [steps, setSteps] = useState<TriageStep[]>([]);
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<TicketAnalysisResult | null>(null);
+  const [error, setError] = useState("");
   const wsRef = useRef<ReturnType<typeof createTicketStreamWS> | null>(null);
   const queryClient = useQueryClient();
 
@@ -28,6 +30,7 @@ export function AIThinkingStream({ ticketId, hasExisting, onComplete }: Props) {
     setRunning(true);
     setSteps([]);
     setResult(null);
+    setError("");
     const ws = createTicketStreamWS(ticketId);
     wsRef.current = ws;
     ws.onMessage((data) => {
@@ -51,6 +54,7 @@ export function AIThinkingStream({ ticketId, hasExisting, onComplete }: Props) {
         queryClient.invalidateQueries({ queryKey: ["intel-workload"] });
         queryClient.invalidateQueries({ queryKey: ["intel-route", ticketId] });
       } else if (data.type === "error") {
+        setError(typeof data.message === "string" ? data.message : "The analysis stream stopped before it completed.");
         setRunning(false);
         wsRef.current?.disconnect();
         wsRef.current = null;
@@ -60,17 +64,16 @@ export function AIThinkingStream({ ticketId, hasExisting, onComplete }: Props) {
   };
 
   return (
-    <div className="card-surface p-6">
+    <section className="rounded-2xl border border-linen-400 bg-linen-50 p-5 shadow-sm sm:p-6" aria-labelledby="ai-analysis-title" aria-busy={running}>
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
           <ListChecks className="w-4 h-4 text-ink-600" />
-          <h3 className="text-sm font-semibold text-ink-700">AI Analysis</h3>
+          <h2 id="ai-analysis-title" className="text-sm font-semibold text-ink-700">AI analysis</h2>
         </div>
-        <button onClick={startTriage} disabled={running} className="btn-secondary text-xs">
-          {running ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
-          {running ? "Analyzing…" : "Run Analysis"}
-        </button>
+        <Button variant="secondary" size="sm" onClick={startTriage} pending={running} pendingLabel="Analyzing…" leadingIcon={<RefreshCw className="h-3.5 w-3.5" />}>Run analysis</Button>
       </div>
+
+      {error && <Alert className="mb-4" variant="danger" title="Analysis did not complete">{error}</Alert>}
 
       <AnimatePresence mode="popLayout">
         {steps.length > 0 && (
@@ -117,6 +120,6 @@ export function AIThinkingStream({ ticketId, hasExisting, onComplete }: Props) {
             : "Click &ldquo;Run Analysis&rdquo; to trigger AI triage on this ticket."}
         </p>
       )}
-    </div>
+    </section>
   );
 }

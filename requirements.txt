@@ -1,14 +1,11 @@
 fastapi
 uvicorn[standard]
 pydantic
-langchain
-langchain-openai
 litellm
-chromadb
-pandas
 requests
 python-dotenv
 sqlalchemy
+alembic>=1.13,<2
 psycopg2-binary
 apscheduler
 httpx
