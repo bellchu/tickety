@@ -85,6 +85,19 @@ export function tierName(tier: number): string {
   return `Tier ${tier}`;
 }
 
+// External ITSM links come from sync data and PATCH payloads; only ever
+// render http(s) URLs into hrefs so a javascript:/data: value cannot run.
+export function safeExternalUrl(value: string | null | undefined): string | null {
+  if (!value) return null;
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
 export function formatTimeAgo(dateStr: string | null): string {
   if (!dateStr) return "—";
   const date = new Date(dateStr);

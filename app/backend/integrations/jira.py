@@ -180,18 +180,21 @@ class JiraAdapter(BaseITSMAdapter):
         if since:
             jql += f' AND updated >= "{since.strftime("%Y-%m-%d %H:%M")}"'
         jql += " ORDER BY updated ASC"
-        return await self.search_issues(jql, max_results=100)
+        pages = max(1, max_pages or 50)
+        return await self.search_issues(jql, max_results=100 * pages, max_pages=pages)
 
-    async def search_issues(self, jql: str, max_results: int = 100) -> List[ExternalTicket]:
+    async def search_issues(self, jql: str, max_results: int = 100, max_pages: int = 50) -> List[ExternalTicket]:
         self._assert_configured()
         out: list[ExternalTicket] = []
         next_page_token = None
-        cap = max(1, max_results)
+        total_cap = max(1, max_results)
+        page_cap = max(1, max_pages)
         async with httpx.AsyncClient(timeout=30) as client:
-            while len(out) < cap:
+            page = 0
+            while len(out) < total_cap and page < page_cap:
                 payload = {
                     "jql": jql,
-                    "maxResults": min(100, cap - len(out)),
+                    "maxResults": min(100, total_cap - len(out)),
                     "fields": ["summary", "description", "priority", "status", "reporter", "assignee", "updated", "created", "duedate", "issuetype"],
                 }
                 if next_page_token:
@@ -212,6 +215,7 @@ class JiraAdapter(BaseITSMAdapter):
                 next_page_token = data.get("nextPageToken")
                 if data.get("isLast") or not next_page_token or not issues:
                     break
+                page += 1
         return out
 
     async def default_project_key(self) -> str:

@@ -1,5 +1,5 @@
 # Stage 1: Build Next.js frontend
-FROM node:20-alpine AS frontend-builder
+FROM node:22-alpine AS frontend-builder
 # Build-identifiable version metadata. Passed by deploy.sh from git HEAD +
 # the build timestamp, so the footer can show exactly which image is running.
 ARG BUILD_SHA=local
@@ -28,7 +28,7 @@ ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq-dev gcc && rm -rf /var/lib/apt/lists/* \
+    libpq-dev && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 tickety \
     && useradd --uid 10001 --gid tickety --no-create-home --shell /usr/sbin/nologin tickety
 
@@ -42,7 +42,7 @@ USER 10001:10001
 CMD ["uvicorn", "app.backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
 # Stage 3: Frontend runtime (Node)
-FROM node:20-alpine AS frontend
+FROM node:22-alpine AS frontend
 WORKDIR /app
 COPY --from=frontend-builder /frontend/package.json /frontend/package-lock.json* ./
 COPY --from=frontend-builder /frontend/next.config.js ./

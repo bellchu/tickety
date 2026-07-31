@@ -286,7 +286,7 @@ def _validate_llm_base_url(value: str) -> str:
         raise ValueError("LLM base URL must use the standard HTTPS port")
 
     hostname = parsed.hostname.lower().rstrip(".")
-    if (os.getenv("APP_MODE") or "demo").strip().lower() == "production":
+    if (os.getenv("APP_MODE") or "production").strip().lower() == "production":
         allowed_hosts = {
             "api.openai.com",
             "openrouter.ai",
@@ -326,7 +326,7 @@ def get_bool(key: str, default: bool = False, aliases: tuple[str, ...] = ()) -> 
 def app_mode() -> str:
     raw_mode = os.getenv("APP_MODE")
     if raw_mode is None or not raw_mode.strip():
-        return "demo"
+        return "production"
     mode = raw_mode.strip().lower()
     if mode not in {"demo", "production"}:
         raise ValueError("APP_MODE must be either 'demo' or 'production'")

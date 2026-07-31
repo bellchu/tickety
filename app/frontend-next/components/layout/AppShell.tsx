@@ -19,8 +19,10 @@ function isPublicRoute(pathname: string) {
 }
 
 function crossesAuthorizationBoundary(previous: AuthContext, next: AuthContext) {
+  const previousRole = typeof previous.role === "string" ? previous.role.toLowerCase() : "";
+  const nextRole = typeof next.role === "string" ? next.role.toLowerCase() : "";
   return previous.id !== next.id
-    || previous.role.toLowerCase() !== next.role.toLowerCase()
+    || previousRole !== nextRole
     || previous.is_active !== next.is_active
     || previous.auth_kind !== next.auth_kind
     || previous.app_mode !== next.app_mode;

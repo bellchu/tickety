@@ -766,7 +766,7 @@ def verify_database_schema() -> None:
 
 
 def init_db():
-    if os.getenv("APP_MODE", "demo").strip().lower() == "production":
+    if os.getenv("APP_MODE", "production").strip().lower() == "production":
         # Production startup is verification-only. DDL belongs to the explicit
         # migration job so replicas never race schema changes.
         verify_database_schema()

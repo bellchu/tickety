@@ -366,7 +366,7 @@ def _reserve_provider_request(provider: str, estimated_tokens: int) -> None:
 
 
 def _provider_controls_enabled() -> bool:
-    if (os.getenv("APP_MODE") or "demo").strip().lower() == "production":
+    if (os.getenv("APP_MODE") or "production").strip().lower() == "production":
         return True
     configured = os.getenv("LLM_ENFORCE_PROVIDER_LIMITS")
     if configured is not None:
@@ -949,7 +949,7 @@ class LLMManager:
             _validate_llm_base_url(custom_base)
         self.allow_synthetic = (
             _enabled(os.getenv("LLM_ALLOW_SYNTHETIC"))
-            and (os.getenv("APP_MODE") or "demo").strip().lower() != "production"
+            and (os.getenv("APP_MODE") or "production").strip().lower() != "production"
         )
         self.request_timeout = _bounded_number(
             os.getenv("LLM_REQUEST_TIMEOUT_SECONDS"), 30.0, 5.0, 120.0
@@ -1117,7 +1117,7 @@ class LLMManager:
                 )
                 _record_call(
                     provider=self.provider, model=self.model_name, task=task_name,
-                    status="success", attempts=1,
+                    status="success", attempts=attempt + 1,
                     latency_ms=int((time.monotonic() - attempt_started) * 1000),
                     prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                     total_tokens=total_tokens, synthetic=False, error_code=None,
@@ -1133,10 +1133,13 @@ class LLMManager:
                 failed_prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
                 failed_completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
                 failed_total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
-                if failed_total_tokens:
-                    _settle_provider_tokens(
-                        self.provider, reserved_tokens, failed_total_tokens
-                    )
+                # Always refund the per-attempt reservation: on timeouts and
+                # connection errors no usage is reported, and keeping the
+                # conservative over-reservation would permanently burn the
+                # shared daily token budget on retryable failures.
+                _settle_provider_tokens(
+                    self.provider, reserved_tokens, failed_total_tokens
+                )
                 status = getattr(e, "status_code", None) or getattr(
                     getattr(e, "response", None), "status_code", None
                 )
@@ -1160,7 +1163,7 @@ class LLMManager:
                     model=self.model_name,
                     task=task_name,
                     status="attempt_failed",
-                    attempts=1,
+                    attempts=attempt + 1,
                     latency_ms=int((time.monotonic() - attempt_started) * 1000),
                     prompt_tokens=failed_prompt_tokens,
                     completion_tokens=failed_completion_tokens,

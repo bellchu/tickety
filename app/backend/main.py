@@ -184,6 +184,19 @@ app.add_middleware(
 )
 app.add_middleware(RequestBodyLimitMiddleware)
 
+# Optional Host-header allowlist (defense in depth against host injection in
+# the origin checks and portal tracking URLs). Opt-in: deployments behind a
+# proxy should list their public hostnames in TRUSTED_HOSTS.
+_trusted_hosts = [
+    host.strip()
+    for host in os.getenv("TRUSTED_HOSTS", "").split(",")
+    if host.strip()
+]
+if _trusted_hosts:
+    from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=_trusted_hosts)
+
 llm_mgr = LLMManager()
 engine = IntelligenceEngine(llm_mgr)
 
@@ -235,8 +248,13 @@ def _request_origin_allowed(request: Request, *, require_explicit: bool = False)
     parsed = urllib.parse.urlparse(origin)
     if not parsed.scheme or not parsed.netloc:
         return False
-    forwarded_host = (request.headers.get("x-forwarded-host") or "").split(",")[0].strip()
-    forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    if settings_module.get_bool("TRUST_FORWARDED_HEADERS"):
+        forwarded_host = (request.headers.get("x-forwarded-host") or "").split(",")[0].strip()
+        forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    else:
+        # Never trust attacker-controllable forwarding headers unless the
+        # deployment explicitly confirms its proxy overwrites them.
+        forwarded_host = forwarded_proto = ""
     request_host = forwarded_host or request.url.netloc
     request_scheme = forwarded_proto or request.url.scheme
     request_origin = f"{request_scheme}://{request_host}"
@@ -489,14 +507,17 @@ async def require_auth_by_default(request: Request, call_next):
         return await call_next(request)
 
     roles = _roles_required_for_request(request.url.path, request.method)
+    # Unsafe methods must always pass the origin gate, even in no-login demo
+    # mode: anonymous POSTs would otherwise execute as the demo fallback
+    # identity with no cross-site protection at all.
+    if request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"} and not _request_origin_allowed(request):
+        return JSONResponse({"detail": "Invalid request origin"}, status_code=403)
+
     # Local demos may allow anonymous browsing, but privileged routes must
     # always be backed by a real session.  Do not let the demo fallback
     # identity reach administration, configuration, or OAuth flows.
     if not _auth_required_for_request() and not roles:
         return await call_next(request)
-
-    if request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"} and not _request_origin_allowed(request):
-        return JSONResponse({"detail": "Invalid request origin"}, status_code=403)
 
     db = SessionLocal()
     try:
@@ -516,20 +537,25 @@ async def require_auth_by_default(request: Request, call_next):
         db.close()
     return await call_next(request)
 
-# WebSocket connection manager for real-time notifications
-_notification_subscribers: list = []
+# WebSocket connection manager for real-time notifications. Each entry is a
+# (user_id, websocket) pair so recipients only receive their own events and
+# dead connections are bounded by the heartbeat-free cleanup on failure.
+_notification_subscribers: list[tuple[str, WebSocket]] = []
 
 
 async def _broadcast_notification(notification: dict):
+    recipient_id = notification.get("user_id")
     dead = []
-    for ws in _notification_subscribers:
+    for user_id, ws in list(_notification_subscribers):
+        if recipient_id is not None and user_id != recipient_id:
+            continue
         try:
-            await ws.send_json(notification)
+            await asyncio.wait_for(ws.send_json(notification), timeout=2)
         except Exception:
-            dead.append(ws)
-    for ws in dead:
-        if ws in _notification_subscribers:
-            _notification_subscribers.remove(ws)
+            dead.append((user_id, ws))
+    for entry in dead:
+        if entry in _notification_subscribers:
+            _notification_subscribers.remove(entry)
 
 
 def _prune_ai_operational_data(db: Session) -> dict[str, int]:
@@ -1278,9 +1304,13 @@ async def list_comments(
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
     _authorize_ticket_analysis(user, ticket)
-    comments = db.query(TicketCommentRecord).filter(
+    query = db.query(TicketCommentRecord).filter(
         TicketCommentRecord.ticket_id == ticket_id
-    ).order_by(
+    )
+    if (user.role or "").lower() not in {"admin", "supervisor"}:
+        # Private notes are supervisor material; agents never see them.
+        query = query.filter(TicketCommentRecord.is_private.is_(False))
+    comments = query.order_by(
         TicketCommentRecord.created_at.desc(), TicketCommentRecord.id.desc()
     ).offset(offset).limit(limit).all()
     return list(reversed(comments))
@@ -2224,13 +2254,19 @@ def _password_uses_current_hash(password_hash: Optional[str]) -> bool:
 
 def _verify_password(password: str, password_hash: Optional[str]) -> bool:
     if not password_hash:
+        # Burn the PBKDF2 cost so unknown-account lookups match known-account
+        # failures in response time.
+        _dummy_pbkdf2(password)
         return False
     if _is_legacy_sha256_hash(password_hash):
-        legacy = hashlib.sha256(password.encode("utf-8")).hexdigest()
-        return hmac.compare_digest(legacy, password_hash)
+        # Unsalted legacy hashes are trivially brute-forceable; fail closed.
+        # The operator must reset these accounts so they get a PBKDF2 hash.
+        _dummy_pbkdf2(password)
+        return False
     try:
         scheme, iterations_raw, salt, expected = password_hash.split("$", 3)
         if scheme != PASSWORD_HASH_SCHEME:
+            _dummy_pbkdf2(password)
             return False
         digest = hashlib.pbkdf2_hmac(
             "sha256",
@@ -2240,7 +2276,19 @@ def _verify_password(password: str, password_hash: Optional[str]) -> bool:
         ).hex()
         return hmac.compare_digest(digest, expected)
     except Exception:
+        _dummy_pbkdf2(password)
         return False
+
+
+def _dummy_pbkdf2(password: str) -> None:
+    """Constant-work dummy verification for accounts without a usable hash."""
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        b"tickety-dummy-salt",
+        PASSWORD_HASH_ITERATIONS,
+    ).hex()
+    hmac.compare_digest(digest, digest)
 
 
 def _cookie_secure() -> bool:
@@ -2294,6 +2342,9 @@ async def login(payload: LoginRequest, request: Request, db: Session = Depends(g
     email = payload.email.strip().lower()
     user = db.query(UserRecord).filter(func.lower(UserRecord.email) == email).first()
     if not user or not user.is_active:
+        # Burn the same PBKDF2 cost as a real verification so response
+        # timing cannot be used to enumerate registered email addresses.
+        _verify_password(payload.password, None)
         _record_login_failure(payload, request)
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if not _verify_password(payload.password, user.password_hash):
@@ -2873,6 +2924,15 @@ async def update_user(
             raise HTTPException(status_code=403, detail="Only admins can change roles")
         if user.id == _user.id and payload.role != "admin":
             raise HTTPException(status_code=400, detail="Admins cannot remove their own admin role")
+    if user.role == "admin" and _user.role != "admin":
+        if any(
+            field is not None
+            for field in (payload.password, payload.email, payload.is_active)
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="Only admins can modify admin accounts",
+            )
     if payload.is_active is False and user.role == "admin":
         active_admins = db.query(UserRecord).filter(
             UserRecord.role == "admin",
@@ -3474,10 +3534,16 @@ async def get_current_user_endpoint(user: UserRecord = Depends(get_current_user)
 
 
 @app.get("/users/{user_id}", response_model=User)
-async def get_user(user_id: str, db: Session = Depends(get_db)):
+async def get_user(
+    user_id: str,
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(get_authenticated_user),
+):
     user = db.query(UserRecord).filter(UserRecord.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    if (_user.role or "").lower() not in {"admin", "supervisor"} and user.id != _user.id:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     return user
 
 
@@ -4343,6 +4409,16 @@ async def _check_resolution_and_award(ticket: TicketRecord, db: Optional[Session
             db.close()
         return
     try:
+        # Re-read under a row lock so two concurrent webhook deliveries for
+        # the same ticket cannot both observe points_awarded_sent=False and
+        # award points twice. (No-op on SQLite; Postgres gets the lock.)
+        locked_ticket = db.query(TicketRecord).filter(
+            TicketRecord.id == ticket.id
+        ).with_for_update().first()
+        if locked_ticket and locked_ticket.points_awarded_sent:
+            if owns_db:
+                db.close()
+            return
         # Find assignee mapping
         if not ticket.external_assignee_id:
             return
@@ -5172,6 +5248,16 @@ async def send_survey(payload: SurveySend, db: Session = Depends(get_db)):
 
 @app.post("/surveys/{survey_id}/respond", status_code=201)
 async def respond_survey(survey_id: str, payload: SurveyResponseCreate, db: Session = Depends(get_db)):
+    now = datetime.utcnow()
+    minute_count = _increment_request_bucket(
+        db, f"survey:{survey_id}", "survey_response_minute", now.replace(second=0, microsecond=0)
+    )
+    day_count = _increment_request_bucket(
+        db, f"survey:{survey_id}", "survey_response_day", now.replace(hour=0, minute=0, second=0, microsecond=0)
+    )
+    if minute_count > 5 or day_count > 100:
+        db.rollback()
+        raise HTTPException(status_code=429, detail="survey_rate_limit_exceeded", headers={"Retry-After": "60"})
     survey = db.query(SurveyRecord).filter(SurveyRecord.id == survey_id).first()
     if not survey:
         raise HTTPException(status_code=404, detail="Survey not found")
@@ -5348,12 +5434,18 @@ def _websocket_origin_allowed(ws: WebSocket) -> bool:
     }
     if origin in allowed:
         return True
-    # Production WebSockets never trust forwarding headers as an origin
-    # allowlist. The reviewed deployment must declare every browser origin.
+    # Production WebSockets never trust Host-header or forwarded-header
+    # origins; the reviewed deployment must declare every browser origin.
     if settings_module.is_production_mode():
         return False
-    forwarded_host = (ws.headers.get("x-forwarded-host") or "").split(",")[0].strip()
-    forwarded_proto = (ws.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    # Demo mode: the browser's Origin must match the Host it connected to.
+    # Forwarding headers are only honored when the deployment explicitly
+    # confirms its proxy overwrites them.
+    if settings_module.get_bool("TRUST_FORWARDED_HEADERS"):
+        forwarded_host = (ws.headers.get("x-forwarded-host") or "").split(",")[0].strip()
+        forwarded_proto = (ws.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    else:
+        forwarded_host = forwarded_proto = ""
     host = forwarded_host or (ws.headers.get("host") or "").strip()
     if host and origin == f"{forwarded_proto or 'https'}://{host}".rstrip("/"):
         return True
@@ -5435,10 +5527,17 @@ async def ws_notifications(ws: WebSocket):
         await ws.close(code=1008)
         return
     await ws.accept()
-    _notification_subscribers.append(ws)
+    _notification_subscribers.append((ws_user.id, ws))
     try:
         while True:
             await ws.receive_text()
     except WebSocketDisconnect:
-        if ws in _notification_subscribers:
-            _notification_subscribers.remove(ws)
+        if (ws_user.id, ws) in _notification_subscribers:
+            _notification_subscribers.remove((ws_user.id, ws))
+    except Exception:
+        try:
+            await ws.close()
+        except Exception:
+            pass
+        if (ws_user.id, ws) in _notification_subscribers:
+            _notification_subscribers.remove((ws_user.id, ws))

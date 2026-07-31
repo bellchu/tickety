@@ -20,24 +20,57 @@ export function AIThinkingStream({ ticketId, hasExisting, onComplete }: Props) {
   const [result, setResult] = useState<TicketAnalysisResult | null>(null);
   const [error, setError] = useState("");
   const wsRef = useRef<ReturnType<typeof createTicketStreamWS> | null>(null);
+  const watchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const queryClient = useQueryClient();
 
+  const clearWatchdog = () => {
+    if (watchdogRef.current) {
+      clearTimeout(watchdogRef.current);
+      watchdogRef.current = null;
+    }
+  };
+
   useEffect(() => {
-    return () => { wsRef.current?.disconnect(); };
+    return () => {
+      clearWatchdog();
+      wsRef.current?.disconnect();
+    };
   }, []);
+
+  const finishWithError = (message: string) => {
+    setError(message);
+    setRunning(false);
+    clearWatchdog();
+    wsRef.current?.disconnect();
+    wsRef.current = null;
+  };
 
   const startTriage = async () => {
     setRunning(true);
     setSteps([]);
     setResult(null);
     setError("");
+    clearWatchdog();
+    watchdogRef.current = setTimeout(() => {
+      finishWithError("The analysis timed out before it completed. Please try again.");
+    }, 10 * 60 * 1000);
     const ws = createTicketStreamWS(ticketId);
     wsRef.current = ws;
     ws.onMessage((data) => {
       if (data.type === "progress") {
+        clearWatchdog();
+        watchdogRef.current = setTimeout(() => {
+          finishWithError("The analysis timed out before it completed. Please try again.");
+        }, 10 * 60 * 1000);
         setSteps(data.steps);
       } else if (data.type === "complete") {
-        const result = data.result as TicketAnalysisResult;
+        const payload = data.result as Partial<TicketAnalysisResult> | undefined;
+        if (!payload || typeof payload !== "object" || payload.ticket_id !== ticketId) {
+          finishWithError("The analysis returned an unexpected result. Please try again.");
+          return;
+        }
+        const result = payload as TicketAnalysisResult;
+        clearWatchdog();
         setResult(result);
         setSteps((prev) => prev.map((s) => ({ ...s, status: "done" as const })));
         setRunning(false);
@@ -54,10 +87,7 @@ export function AIThinkingStream({ ticketId, hasExisting, onComplete }: Props) {
         queryClient.invalidateQueries({ queryKey: ["intel-workload"] });
         queryClient.invalidateQueries({ queryKey: ["intel-route", ticketId] });
       } else if (data.type === "error") {
-        setError(typeof data.message === "string" ? data.message : "The analysis stream stopped before it completed.");
-        setRunning(false);
-        wsRef.current?.disconnect();
-        wsRef.current = null;
+        finishWithError(typeof data.message === "string" ? data.message : "The analysis stream stopped before it completed.");
       }
     });
     ws.connect();

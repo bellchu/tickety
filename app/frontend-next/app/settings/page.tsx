@@ -1111,7 +1111,7 @@ function FreshserviceOAuthSetup({
   productionSettingsReadOnly: boolean;
 }) {
   const { data: status } = useQuery({ queryKey: ["oauth-status"], queryFn: api.getOAuthStatus, refetchInterval: 30000 });
-  const authMut = useMutation({ mutationFn: api.getOAuthAuthorizeUrl, onSuccess: (res) => window.open(res.url, "_blank", "width=700,height=600") });
+  const authMut = useMutation({ mutationFn: api.getOAuthAuthorizeUrl, onSuccess: (res) => window.open(res.url, "_blank", "width=700,height=600,noopener,noreferrer") });
   const configured = keyReady("FRESHSERVICE_OAUTH_CLIENT_ID") && keyReady("FRESHSERVICE_OAUTH_CLIENT_SECRET") && Boolean(form.FRESHSERVICE_OAUTH_REDIRECT_URI?.trim());
 
   return (

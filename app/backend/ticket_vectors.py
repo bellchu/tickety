@@ -123,7 +123,7 @@ def embedding_enabled() -> bool:
     enabled = (os.getenv("TICKET_EMBEDDING_ENABLED", "") or "").strip().lower() in _TRUE_VALUES
     if not enabled:
         return False
-    is_demo = (os.getenv("APP_MODE") or "demo").strip().lower() == "demo"
+    is_demo = (os.getenv("APP_MODE") or "production").strip().lower() == "demo"
     login_required = (os.getenv("LOGIN_REQUIRED", "") or "").strip().lower() in _TRUE_VALUES
     return not is_demo or login_required
 
@@ -818,6 +818,21 @@ def refresh_ticket_documents_background(db: Session, ticket: TicketRecord, force
         return asyncio.run(refresh_ticket_documents(db, ticket, force=force))
     loop.create_task(_refresh_ticket_by_id(ticket.id, force=force))
     return 0
+
+
+def refresh_ticket_documents_if_indexed(db: Session, ticket: TicketRecord, force: bool = False) -> int:
+    """Refresh derived documents only when the ticket already has evidence
+    indexed. Never indexes an un-promoted external ticket: provider text must
+    be reviewed or explicitly promoted before entering shared RAG."""
+    if not _ticket_document_table_exists(db):
+        return 0
+    row = db.execute(
+        text("SELECT 1 FROM ticket_search_documents WHERE ticket_id = :ticket_id LIMIT 1"),
+        {"ticket_id": str(ticket.id)},
+    ).first()
+    if row is None:
+        return 0
+    return refresh_ticket_documents_background(db, ticket, force=force)
 
 
 def delete_ticket_documents(db: Session, ticket_id: str) -> None:

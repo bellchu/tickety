@@ -11,9 +11,13 @@ from ..database import (
 )
 from ..schema import ExternalTicket, WebhookEvent
 # Kept as a module attribute for compatibility with integrations/tests that
-# patch it. External persistence deliberately never calls it: provider ticket
-# text must be reviewed or explicitly promoted before entering shared RAG.
-from ..ticket_vectors import refresh_ticket_documents_background
+# patch it. External persistence never promotes un-indexed provider text into
+# shared RAG: only tickets that already have evidence documents are refreshed
+# when their provider content changes (see refresh_ticket_documents_if_indexed).
+from ..ticket_vectors import (
+    refresh_ticket_documents_background,
+    refresh_ticket_documents_if_indexed,
+)
 from ..ai_state import invalidate_ticket_ai, invalidate_ticket_resolution
 from .registry import get_adapter
 
@@ -63,7 +67,7 @@ def _upsert_ticket(db: Session, ext: ExternalTicket, provider: str, overwrite: b
         existing.description = ext.description
         if analysis_input_changed:
             invalidate_ticket_ai(existing)
-        elif resolution_input_changed:
+        if resolution_input_changed:
             invalidate_ticket_resolution(existing)
         existing.reporter = ext.reporter
         existing.priority = ext.priority
@@ -90,6 +94,10 @@ def _upsert_ticket(db: Session, ext: ExternalTicket, provider: str, overwrite: b
             existing.status = existing.workflow_status or ext.status
         db.commit()
         db.refresh(existing)
+        if analysis_input_changed:
+            # Keep promoted RAG evidence in sync when provider text changes;
+            # tickets without indexed documents are never auto-promoted.
+            refresh_ticket_documents_if_indexed(db, existing)
         return "updated", existing
 
     new_ticket = TicketRecord(
@@ -247,10 +255,6 @@ def fetch_tickets_by_days(adapter=None, days: int = 7, overwrite: bool = False) 
         # Pre-load existing external ids once to avoid N queries.
         existing_ids = _existing_external_ids(db, adapter.provider_name)
 
-        from .. import settings as settings_module
-        auto_triage = settings_module.automation_enabled("AUTO_TRIAGE_ENABLED", "AUTO_TRIAGE")
-        new_tickets: list = []  # collect for auto-triage
-
         max_persisted_updated_at = None
         for ext in tickets:
             try:
@@ -261,8 +265,6 @@ def fetch_tickets_by_days(adapter=None, days: int = 7, overwrite: bool = False) 
                 if action == "new":
                     existing_ids.add(ext.external_id)
                     result["new"] += 1
-                    if auto_triage and ticket:
-                        new_tickets.append(ticket)
                 elif action == "updated":
                     result["updated"] += 1
                 elif action == "skipped":
@@ -271,6 +273,10 @@ def fetch_tickets_by_days(adapter=None, days: int = 7, overwrite: bool = False) 
                     max_persisted_updated_at = max(max_persisted_updated_at or ext.updated_at, ext.updated_at)
             except Exception as e:
                 print(f"[fetch] ticket upsert failed kind={type(e).__name__}")
+                # Roll back the aborted transaction so a single poison ticket
+                # cannot stall every subsequent upsert (psycopg2 leaves the
+                # transaction aborted after a failed statement).
+                db.rollback()
                 result["errors"] += 1
 
         # Record a successful manual fetch on the sync state so the worker's
@@ -298,30 +304,24 @@ def fetch_tickets_by_days(adapter=None, days: int = 7, overwrite: bool = False) 
         sync_state.total_synced += result["new"] + result["updated"]
         db.commit()
 
-        # Auto-triage newly imported tickets
-        if auto_triage and new_tickets:
-            import asyncio
-            from ..main import _auto_process
-            db2 = SessionLocal()
-            for t in new_tickets:
-                try:
-                    t2 = db2.query(TicketRecord).filter(TicketRecord.id == t.id).first()
-                    if t2 and not t2.ai_reasoning:
-                        asyncio.run(_auto_process(t2, db2))
-                        print(f"[fetch] auto-triaged {t2.id[:8]}")
-                except Exception as e:
-                    print(f"[fetch] auto-triage error on {t.id} kind={type(e).__name__}")
-                    db2.rollback()
-            db2.close()
+        # NOTE: newly imported external tickets are deliberately NOT queued or
+        # auto-processed here. Provider-authenticated sync proves transport
+        # integrity, not that requester-controlled ticket text is safe AI
+        # input; tickets must be explicitly promoted by an authenticated
+        # workflow (see sync_worker._auto_triage_job for the same policy).
 
     except Exception as e:
-        sync_state = db.query(SyncStateRecord).filter(
-            SyncStateRecord.provider == adapter.provider_name
-        ).first()
-        if sync_state:
-            sync_state.last_status = "error"
-            sync_state.last_error = f"fetch_failed:{type(e).__name__}"
-            db.commit()
+        try:
+            db.rollback()
+            sync_state = db.query(SyncStateRecord).filter(
+                SyncStateRecord.provider == adapter.provider_name
+            ).first()
+            if sync_state:
+                sync_state.last_status = "error"
+                sync_state.last_error = f"fetch_failed:{type(e).__name__}"
+                db.commit()
+        except Exception as state_exc:
+            print(f"[fetch] failed to record sync state kind={type(state_exc).__name__}")
         result["errors"] += 1
         print(f"[fetch] fatal error kind={type(e).__name__}")
     finally:

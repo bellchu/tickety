@@ -17,7 +17,7 @@ import { ReasoningLog } from "@/components/engagement/ReasoningLog";
 import Link from "next/link";
 import {
   priorityColor, statusColor, sentimentColor, complexityDots,
-  formatTimeAgo, cn,
+  formatTimeAgo, cn, safeExternalUrl,
 } from "@/lib/utils";
 import { Alert, Button, EmptyState, ErrorState, Skeleton } from "@/components/ui";
 
@@ -108,9 +108,9 @@ export default function TicketDetailPage() {
             <h1 id="ticket-title" className="max-w-4xl text-2xl font-semibold tracking-[-0.025em] text-ink-700 sm:text-3xl">
               {ticket.subject}
             </h1>
-            {ticket.external_url && (
+            {safeExternalUrl(ticket.external_url) && (
               <a
-                href={ticket.external_url}
+                href={safeExternalUrl(ticket.external_url)!}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="mt-3 inline-flex min-h-8 items-center gap-1 rounded-md text-xs font-semibold text-semantic-primary hover:underline"

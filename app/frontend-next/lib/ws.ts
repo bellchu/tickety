@@ -27,11 +27,14 @@ export class WSClient {
   }
 
   connect() {
-    if (this.ws?.readyState === WebSocket.OPEN) return;
+    // Guard CONNECTING too: a socket mid-handshake must not spawn a second
+    // connection (duplicate notifications / duplicate triage streams).
+    if (this.ws && this.ws.readyState !== WebSocket.CLOSED) return;
     this.shouldReconnect = true;
     try {
-      this.ws = new WebSocket(this.url);
-      this.ws.onmessage = (ev) => {
+      const ws = new WebSocket(this.url);
+      this.ws = ws;
+      ws.onmessage = (ev) => {
         try {
           const data = JSON.parse(ev.data);
           this.handlers.forEach((h) => h(data));
@@ -39,7 +42,8 @@ export class WSClient {
           // ignore non-JSON
         }
       };
-      this.ws.onclose = () => {
+      ws.onclose = () => {
+        if (this.ws === ws) this.ws = null;
         // Only auto-reconnect for long-lived sockets. One-shot streams
         // (triage) are closed by the server on purpose after completion;
         // reconnecting would re-trigger the whole analysis in an infinite
@@ -48,11 +52,11 @@ export class WSClient {
           this.reconnectTimer = setTimeout(() => this.connect(), 3000);
         }
       };
-      this.ws.onerror = () => {
-        this.ws?.close();
+      ws.onerror = () => {
+        ws.close();
       };
     } catch {
-      if (this.shouldReconnect) {
+      if (this.shouldReconnect && this.autoReconnect) {
         this.reconnectTimer = setTimeout(() => this.connect(), 3000);
       }
     }

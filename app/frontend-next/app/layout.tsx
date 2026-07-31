@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { Providers } from "./providers";
 import { AppShell } from "@/components/layout/AppShell";
+import { AppErrorBoundary } from "@/components/layout/AppErrorBoundary";
 
 export const dynamic = "force-dynamic";
 
@@ -66,9 +67,11 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body>
-        <Providers>
-          <AppShell>{children}</AppShell>
-        </Providers>
+        <AppErrorBoundary>
+          <Providers>
+            <AppShell>{children}</AppShell>
+          </Providers>
+        </AppErrorBoundary>
       </body>
     </html>
   );
