@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { Menu } from "lucide-react";
 import { AppExperience } from "@/components/layout/AppExperience";
 import { Footer } from "@/components/layout/Footer";
+import { LoginLink } from "@/components/layout/LoginLink";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { TicketyLogo } from "@/components/layout/TicketyLogo";
 import { api, APIError, queryClient } from "@/lib/api";
@@ -33,6 +34,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const [navigationOpen, setNavigationOpen] = useState(false);
   const [authState, setAuthState] = useState<"checking" | "authenticated">("checking");
+  const [authContext, setAuthContext] = useState<AuthContext | null>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -44,6 +46,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       // Login is a user-isolation boundary. No data from the previous session
       // may survive into the next SPA navigation.
       queryClient.clear();
+      setAuthContext(null);
       setAuthState("authenticated");
       return;
     }
@@ -58,6 +61,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             queryClient.clear();
           }
           queryClient.setQueryData(["auth-me"], context);
+          setAuthContext(context);
           setAuthState("authenticated");
         }
       })
@@ -66,6 +70,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         // Never let a previously privileged identity survive a failed access
         // check in the shared query cache.
         queryClient.clear();
+        setAuthContext(null);
         if (error instanceof APIError && error.status === 401) {
           router.replace(`/login?next=${encodeURIComponent(pathname)}`);
           return;
@@ -157,17 +162,22 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <div className="flex min-h-screen flex-col lg:pl-64">
           <header className="sticky top-0 z-30 flex h-16 items-center justify-between border-b border-linen-300 bg-linen-50/95 px-4 backdrop-blur-md lg:hidden">
             <TicketyLogo size="md" />
-            <button
-              ref={menuButtonRef}
-              type="button"
-              aria-label="Open navigation"
-              aria-controls="app-navigation"
-              aria-expanded={navigationOpen}
-              onClick={() => setNavigationOpen(true)}
-              className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-linen-400 bg-white text-ink-600 shadow-sm transition-colors hover:bg-linen-200 focus:outline-none focus:ring-2 focus:ring-clay-400 focus:ring-offset-2"
-            >
-              <Menu className="h-5 w-5" aria-hidden="true" />
-            </button>
+            <div className="flex items-center gap-2">
+              {authContext?.auth_kind === "demo_fallback" && (
+                <LoginLink className="border-linen-400 bg-white text-ink-700 shadow-sm hover:bg-linen-200" />
+              )}
+              <button
+                ref={menuButtonRef}
+                type="button"
+                aria-label="Open navigation"
+                aria-controls="app-navigation"
+                aria-expanded={navigationOpen}
+                onClick={() => setNavigationOpen(true)}
+                className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-linen-400 bg-white text-ink-600 shadow-sm transition-colors hover:bg-linen-200 focus:outline-none focus:ring-2 focus:ring-clay-400 focus:ring-offset-2"
+              >
+                <Menu className="h-5 w-5" aria-hidden="true" />
+              </button>
+            </div>
           </header>
 
           <main id="main-content" tabIndex={-1} className="flex-1 outline-none">

@@ -17,6 +17,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { TicketyLogo } from "@/components/layout/TicketyLogo";
+import { LoginLink } from "@/components/layout/LoginLink";
 import { Alert, Badge, Button, Dialog, ErrorState, Skeleton } from "@/components/ui";
 import { api } from "@/lib/api";
 import type { PortalTicket, PortalTicketCreated } from "@/lib/types";
@@ -196,9 +197,16 @@ export default function PortalPage() {
       <header className="border-b border-linen-300 bg-linen-50/95 backdrop-blur-md">
         <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4 sm:px-6 lg:px-8">
           <TicketyLogo />
-          <div className="flex items-center gap-2 text-xs font-medium text-ink-500">
-            <ShieldCheck className="h-4 w-4 text-semantic-success" aria-hidden="true" />
-            Secure requester portal
+          <div className="flex items-center gap-3">
+            <div className="hidden items-center gap-2 text-xs font-medium text-ink-500 sm:flex">
+              <ShieldCheck className="h-4 w-4 text-semantic-success" aria-hidden="true" />
+              Secure requester portal
+            </div>
+            <LoginLink
+              label="Agent sign in"
+              nextPath="/"
+              className="border-linen-400 bg-white text-ink-700 shadow-sm hover:bg-linen-200"
+            />
           </div>
         </div>
       </header>

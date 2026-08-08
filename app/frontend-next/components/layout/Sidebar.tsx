@@ -7,6 +7,7 @@ import { api } from "@/lib/api";
 import { canAccessAdministration, canAccessProtectedIntelligence, isDemoContext } from "@/lib/auth";
 import { TicketyLogo } from "@/components/layout/TicketyLogo";
 import { SyncIndicator } from "@/components/layout/SyncIndicator";
+import { LoginLink } from "@/components/layout/LoginLink";
 import { ProductIcon } from "@/components/icons/ProductIcon";
 import {
   LayoutDashboard,
@@ -54,6 +55,7 @@ export function Sidebar({
   const canAccessAdmin = canAccessAdministration(me);
   const canAccessIntelligence = canAccessProtectedIntelligence(me);
   const isDemoWorkspace = isDemoContext(me);
+  const showLogin = me?.auth_kind === "demo_fallback";
 
   return (
     <aside
@@ -120,6 +122,13 @@ export function Sidebar({
           <div className="px-3 py-1.5 text-slate-400 [&_*]:!text-slate-400">
             <SyncIndicator enabled={canAccessAdmin} />
           </div>
+        )}
+
+        {showLogin && (
+          <LoginLink
+            onNavigate={onClose}
+            className="mb-1 w-full border-white/15 bg-white/[0.06] text-white hover:border-white/25 hover:bg-white/10 focus-visible:ring-[#3D5AFE] focus-visible:ring-offset-[#101820]"
+          />
         )}
 
         <Link
