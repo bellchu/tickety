@@ -4,6 +4,11 @@ import { useState, useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { createTicketStreamWS } from "@/lib/ws";
 import type { TicketAnalysisResult, TriageStep } from "@/lib/types";
+import {
+  isTicketAnalysisResult,
+  isTriageProgressMessage,
+  triageWatchdogDelayMs,
+} from "@/lib/realtime-validation";
 import { ListChecks, Loader2, CheckCircle2, RefreshCw } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Alert, Button } from "@/components/ui";
@@ -30,6 +35,13 @@ export function AIThinkingStream({ ticketId, hasExisting, onComplete }: Props) {
     }
   };
 
+  const startWatchdog = (timeoutSeconds?: unknown) => {
+    clearWatchdog();
+    watchdogRef.current = setTimeout(() => {
+      finishWithError("The analysis timed out before it completed. Please try again.");
+    }, triageWatchdogDelayMs(timeoutSeconds));
+  };
+
   useEffect(() => {
     return () => {
       clearWatchdog();
@@ -50,26 +62,28 @@ export function AIThinkingStream({ ticketId, hasExisting, onComplete }: Props) {
     setSteps([]);
     setResult(null);
     setError("");
-    clearWatchdog();
-    watchdogRef.current = setTimeout(() => {
-      finishWithError("The analysis timed out before it completed. Please try again.");
-    }, 10 * 60 * 1000);
+    startWatchdog();
     const ws = createTicketStreamWS(ticketId);
     wsRef.current = ws;
     ws.onMessage((data) => {
+      if (!data || typeof data !== "object") {
+        finishWithError("The analysis stream returned an unexpected message. Please try again.");
+        return;
+      }
       if (data.type === "progress") {
-        clearWatchdog();
-        watchdogRef.current = setTimeout(() => {
-          finishWithError("The analysis timed out before it completed. Please try again.");
-        }, 10 * 60 * 1000);
+        if (!isTriageProgressMessage(data)) {
+          finishWithError("The analysis stream returned an unexpected message. Please try again.");
+          return;
+        }
+        startWatchdog(data.timeout_seconds);
         setSteps(data.steps);
       } else if (data.type === "complete") {
-        const payload = data.result as Partial<TicketAnalysisResult> | undefined;
-        if (!payload || typeof payload !== "object" || payload.ticket_id !== ticketId) {
+        const payload = data.result;
+        if (!isTicketAnalysisResult(payload, ticketId)) {
           finishWithError("The analysis returned an unexpected result. Please try again.");
           return;
         }
-        const result = payload as TicketAnalysisResult;
+        const result = payload;
         clearWatchdog();
         setResult(result);
         setSteps((prev) => prev.map((s) => ({ ...s, status: "done" as const })));

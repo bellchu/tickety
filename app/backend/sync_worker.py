@@ -10,6 +10,7 @@ from sqlalchemy import or_
 from .database import SessionLocal, SyncStateRecord, TicketRecord
 from .integrations.sync import sync_tickets_from_external
 from .integrations.registry import get_adapter
+from .integrations.bindings import expire_due_bindings, get_active_binding
 from . import settings as settings_module
 
 _scheduler: Optional[BackgroundScheduler] = None
@@ -282,10 +283,28 @@ def _sync_job():
     if provider == "external":
         provider = "freshservice"
     if provider in ("standalone", "none", ""):
-        return  # No external sync in standalone mode
+        # An activated binding is authoritative over the legacy provider env.
+        db = SessionLocal()
+        try:
+            expire_due_bindings(db)
+            binding = get_active_binding(db)
+        finally:
+            db.close()
+        if binding is None:
+            return  # No external sync in standalone mode
+    else:
+        db = SessionLocal()
+        try:
+            expire_due_bindings(db)
+            binding = get_active_binding(db, provider)
+        finally:
+            db.close()
     try:
-        adapter = get_adapter()
-        result = sync_tickets_from_external(adapter)
+        adapter = get_adapter(binding=binding) if binding else get_adapter()
+        result = sync_tickets_from_external(
+            adapter,
+            binding_id=binding.id if binding else "legacy",
+        )
         print(f"[sync_worker] {adapter.provider_name}: {result}")
     except Exception as e:
         print(f"[sync_worker] error kind={type(e).__name__}")
@@ -356,19 +375,26 @@ def stop_sync_worker(wait: bool = True) -> bool:
 def get_sync_status() -> dict:
     db = SessionLocal()
     try:
-        # Always reflect the CURRENTLY configured provider from env, not the
-        # stale DB record that may still hold the previous provider's name.
+        expire_due_bindings(db)
+        active_binding = get_active_binding(db)
         current_provider = os.getenv("ITSM_PROVIDER", "standalone")
         if current_provider == "external":
             current_provider = "freshservice"
+        binding_id = "legacy"
+        if active_binding:
+            current_provider = active_binding.provider
+            binding_id = active_binding.id
         state = db.query(SyncStateRecord).filter(
+            SyncStateRecord.binding_id == binding_id,
             SyncStateRecord.provider == current_provider
         ).first()
         if not state:
-            return {"provider": current_provider, "last_synced_at": None, "last_synced": 0,
+            return {"provider": current_provider, "binding_id": binding_id,
+                    "last_synced_at": None, "last_synced": 0,
                     "last_status": "idle", "last_error": None, "total_synced": 0}
         return {
             "provider": current_provider,
+            "binding_id": binding_id,
             "last_synced_at": state.last_synced_at.isoformat() if state.last_synced_at else None,
             "last_status": state.last_status,
             "last_error": state.last_error,

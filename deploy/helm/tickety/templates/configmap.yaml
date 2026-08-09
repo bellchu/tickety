@@ -14,6 +14,7 @@ metadata:
     {{- include "tickety.labels" . | nindent 4 }}
 data:
   APP_MODE: {{ .Values.config.appMode | quote }}
+  TICKETY_DEPLOYMENT_CLASS: {{ .Values.config.deploymentClass | quote }}
   SEED_DEMO_DATA: {{ .Values.config.seedDemoData | quote }}
   LOGIN_REQUIRED: {{ .Values.config.loginRequired | quote }}
   FRONTEND_URL: {{ $frontendUrl | quote }}

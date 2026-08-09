@@ -45,6 +45,8 @@ services:
         required: false
     environment:
       APP_MODE: ${APP_MODE:-demo}
+      TICKETY_DEPLOYMENT_CLASS: ${TICKETY_DEPLOYMENT_CLASS:-production}
+      FRESHWORKS_APP_BOOTSTRAP_SECRET: ${FRESHWORKS_APP_BOOTSTRAP_SECRET:-}
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://tickety:tickety@postgres:5432/tickety}
       TICKETY_PROCESS_ROLE: api
     depends_on:
@@ -68,6 +70,7 @@ services:
         required: false
     environment:
       APP_MODE: ${APP_MODE:-demo}
+      TICKETY_DEPLOYMENT_CLASS: ${TICKETY_DEPLOYMENT_CLASS:-production}
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://tickety:tickety@postgres:5432/tickety}
       TICKETY_PROCESS_ROLE: worker
     depends_on:

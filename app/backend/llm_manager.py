@@ -9,6 +9,8 @@ import re
 import threading
 import time
 import secrets
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Type
 from litellm import acompletion
 from dotenv import load_dotenv
@@ -377,15 +379,25 @@ def _provider_controls_enabled() -> bool:
     return True
 
 
-def _reserve_provider_capacity(provider: str, estimated_tokens: int) -> int:
+@dataclass(frozen=True)
+class ProviderCapacityReservation:
+    """Token reservation plus the exact database windows it modified."""
+
+    tokens: int
+    day_start: datetime | None = None
+    minute_start: datetime | None = None
+
+
+def _reserve_provider_capacity(
+    provider: str, estimated_tokens: int
+) -> ProviderCapacityReservation:
     """Atomically reserve daily tokens plus provider RPM/TPM capacity."""
     if not _provider_controls_enabled():
-        return 0
+        return ProviderCapacityReservation(tokens=0)
     budget = int(_bounded_number(os.getenv("LLM_DAILY_TOKEN_BUDGET"), 500_000, 1_000, 100_000_000))
     rpm = int(_bounded_number(os.getenv("LLM_PROVIDER_REQUESTS_PER_MINUTE"), 120, 1, 100_000))
     tpm = int(_bounded_number(os.getenv("LLM_PROVIDER_TOKENS_PER_MINUTE"), 250_000, 1_000, 100_000_000))
     try:
-        from datetime import datetime
         from .database import AIRequestBucketRecord, SessionLocal
 
         db = SessionLocal()
@@ -418,7 +430,11 @@ def _reserve_provider_capacity(provider: str, estimated_tokens: int) -> int:
                     db.rollback()
                     raise LLMUnavailableError("AI provider capacity exceeded")
             db.commit()
-            return int(estimated_tokens)
+            return ProviderCapacityReservation(
+                tokens=int(estimated_tokens),
+                day_start=day,
+                minute_start=minute,
+            )
         finally:
             db.close()
     except LLMUnavailableError:
@@ -428,22 +444,36 @@ def _reserve_provider_capacity(provider: str, estimated_tokens: int) -> int:
         raise LLMUnavailableError("AI provider capacity could not be verified") from exc
 
 
-def _settle_provider_tokens(provider: str, reserved: int, actual: int) -> None:
+def _settle_provider_tokens(
+    provider: str,
+    reserved: ProviderCapacityReservation | int,
+    actual: int,
+) -> None:
     """Refund conservative token over-reservation after authoritative usage."""
-    refund = max(0, int(reserved) - max(0, int(actual)))
+    if isinstance(reserved, ProviderCapacityReservation):
+        reserved_tokens = reserved.tokens
+        day_start = reserved.day_start
+        minute_start = reserved.minute_start
+    else:
+        # Compatibility for callers/tests that supply a plain count. New
+        # reservations always carry their original windows.
+        reserved_tokens = int(reserved)
+        now = datetime.utcnow()
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        minute_start = now.replace(second=0, microsecond=0)
+    refund = max(0, int(reserved_tokens) - max(0, int(actual)))
     if not refund or not _provider_controls_enabled():
         return
+    if day_start is None or minute_start is None:
+        return
     try:
-        from datetime import datetime
-        from sqlalchemy import func
         from .database import AIRequestBucketRecord, SessionLocal
 
-        now = datetime.utcnow()
         db = SessionLocal()
         try:
             for kind, window in (
-                ("reserved_tokens_day", now.replace(hour=0, minute=0, second=0, microsecond=0)),
-                ("provider_tokens_minute", now.replace(second=0, microsecond=0)),
+                ("reserved_tokens_day", day_start),
+                ("provider_tokens_minute", minute_start),
             ):
                 bucket = db.query(AIRequestBucketRecord).filter_by(
                     actor_id=f"provider:{provider}",
@@ -1058,7 +1088,7 @@ class LLMManager:
             attempt_started = time.monotonic()
             response = None
             provider_lease = None
-            reserved_tokens = 0
+            reserved_tokens: ProviderCapacityReservation | int = 0
             try:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -1133,13 +1163,14 @@ class LLMManager:
                 failed_prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
                 failed_completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
                 failed_total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
-                # Always refund the per-attempt reservation: on timeouts and
-                # connection errors no usage is reported, and keeping the
-                # conservative over-reservation would permanently burn the
-                # shared daily token budget on retryable failures.
-                _settle_provider_tokens(
-                    self.provider, reserved_tokens, failed_total_tokens
-                )
+                # Only authoritative usage can reduce a reservation. A timeout
+                # may still have completed and been billed by the provider, so
+                # refunding an unreported attempt would let retries bypass the
+                # deployment's daily spend boundary.
+                if failed_total_tokens:
+                    _settle_provider_tokens(
+                        self.provider, reserved_tokens, failed_total_tokens
+                    )
                 status = getattr(e, "status_code", None) or getattr(
                     getattr(e, "response", None), "status_code", None
                 )

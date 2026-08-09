@@ -65,6 +65,7 @@ secrets: {}
 
 config:
   appMode: demo
+  deploymentClass: production
   seedDemoData: ""
   loginRequired: false
   frontendUrl: ""
@@ -100,6 +101,27 @@ postgresql:
 migration:
   activeDeadlineSeconds: 600
   backoffLimit: 3
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# Scheduled backups are available for the bundled PostgreSQL instance. Enable
+# this explicitly after choosing a retention period and backup volume size.
+backup:
+  enabled: false
+  schedule: "17 3 * * *"
+  retentionDays: 14
+  activeDeadlineSeconds: 1800
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  persistence:
+    size: 8Gi
+    storageClass: ""
+    existingClaim: ""
   resources:
     requests:
       cpu: 50m

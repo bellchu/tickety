@@ -22,12 +22,19 @@ from ..ai_state import invalidate_ticket_ai, invalidate_ticket_resolution
 from .registry import get_adapter
 
 
-def _upsert_ticket(db: Session, ext: ExternalTicket, provider: str, overwrite: bool = False) -> tuple[str, Optional[TicketRecord]]:
+def _upsert_ticket(
+    db: Session,
+    ext: ExternalTicket,
+    provider: str,
+    overwrite: bool = False,
+    binding_id: str = "legacy",
+) -> tuple[str, Optional[TicketRecord]]:
     """Upsert an external ticket. Returns (action, ticket) where action is
     one of "new" / "updated" / "skipped". When `overwrite` is False and the
     ticket already exists locally, it is left untouched and ("skipped", None)
     is returned so callers can avoid re-fetching already-imported tickets."""
     existing = db.query(TicketRecord).filter(
+        TicketRecord.binding_id == binding_id,
         TicketRecord.external_source == provider,
         TicketRecord.external_id == ext.external_id,
     ).first()
@@ -35,7 +42,7 @@ def _upsert_ticket(db: Session, ext: ExternalTicket, provider: str, overwrite: b
     if existing and not overwrite:
         return "skipped", None
 
-    assignee_id = _resolve_assignee_id(db, provider, ext.assignee_id)
+    assignee_id = _resolve_assignee_id(db, provider, ext.assignee_id, binding_id)
     workflow_status = "Closed" if ext.status.lower() in ("closed", "resolved") else ext.status
 
     if existing:
@@ -57,6 +64,7 @@ def _upsert_ticket(db: Session, ext: ExternalTicket, provider: str, overwrite: b
             or existing.external_due_by != ext.due_by
             or existing.external_fr_due_by != ext.fr_due_by
             or existing.assignee_id != assignee_id
+            or existing.ticket_type != (ext.ticket_type or existing.ticket_type or "incident").lower()
             or (ext.url and existing.external_url != ext.url)
         )
         if not changed:
@@ -94,10 +102,10 @@ def _upsert_ticket(db: Session, ext: ExternalTicket, provider: str, overwrite: b
             existing.status = existing.workflow_status or ext.status
         db.commit()
         db.refresh(existing)
-        if analysis_input_changed:
-            # Keep promoted RAG evidence in sync when provider text changes;
-            # tickets without indexed documents are never auto-promoted.
-            refresh_ticket_documents_if_indexed(db, existing)
+        # Keep already-promoted evidence current for every provider update.
+        # The refresh gate only admits the ticket's own document, so comments
+        # alone never promote requester-controlled ticket text into shared RAG.
+        refresh_ticket_documents_if_indexed(db, existing)
         return "updated", existing
 
     new_ticket = TicketRecord(
@@ -114,6 +122,7 @@ def _upsert_ticket(db: Session, ext: ExternalTicket, provider: str, overwrite: b
         response_due_at=ext.fr_due_by,
         resolution_due_at=ext.due_by,
         external_source=provider,
+        binding_id=binding_id,
         external_id=ext.external_id,
         external_url=ext.url,
         external_status=ext.status,
@@ -133,36 +142,48 @@ def _upsert_ticket(db: Session, ext: ExternalTicket, provider: str, overwrite: b
     return "new", new_ticket
 
 
-def _resolve_assignee_id(db: Session, provider: str, external_assignee_id: Optional[str]) -> Optional[str]:
+def _resolve_assignee_id(
+    db: Session,
+    provider: str,
+    external_assignee_id: Optional[str],
+    binding_id: str = "legacy",
+) -> Optional[str]:
     if not external_assignee_id:
         return None
     mapping = db.query(UserMappingRecord).filter(
+        UserMappingRecord.binding_id == binding_id,
         UserMappingRecord.external_source == provider,
         UserMappingRecord.external_assignee_id == str(external_assignee_id),
     ).first()
     return mapping.tickety_user_id if mapping else None
 
 
-def _existing_external_ids(db: Session, provider: str) -> set:
+def _existing_external_ids(db: Session, provider: str, binding_id: str = "legacy") -> set:
     """Return the set of external_ids already imported for `provider`.
     Used to pre-filter so we don't issue a DB query per fetched ticket."""
     rows = db.query(TicketRecord.external_id).filter(
+        TicketRecord.binding_id == binding_id,
         TicketRecord.external_source == provider,
         TicketRecord.external_id.isnot(None),
     ).all()
     return {r[0] for r in rows}
 
 
-def sync_tickets_from_external(adapter=None) -> dict:
+def sync_tickets_from_external(adapter=None, *, binding_id: str = "legacy") -> dict:
     adapter = adapter or get_adapter()
     db: Session = SessionLocal()
     result = {"new": 0, "updated": 0, "errors": 0}
     try:
         sync_state = db.query(SyncStateRecord).filter(
+            SyncStateRecord.binding_id == binding_id,
             SyncStateRecord.provider == adapter.provider_name
         ).first()
         if not sync_state:
-            sync_state = SyncStateRecord(provider=adapter.provider_name, last_status="running")
+            sync_state = SyncStateRecord(
+                binding_id=binding_id,
+                provider=adapter.provider_name,
+                last_status="running",
+            )
             db.add(sync_state)
             db.commit()
             db.refresh(sync_state)
@@ -184,7 +205,13 @@ def sync_tickets_from_external(adapter=None) -> dict:
         max_persisted_updated_at = None
         for ext in tickets:
             try:
-                action, ticket = _upsert_ticket(db, ext, adapter.provider_name, overwrite=True)
+                action, ticket = _upsert_ticket(
+                    db,
+                    ext,
+                    adapter.provider_name,
+                    overwrite=True,
+                    binding_id=binding_id,
+                )
                 if action == "new":
                     result["new"] += 1
                 elif action == "updated":
@@ -215,6 +242,7 @@ def sync_tickets_from_external(adapter=None) -> dict:
 
     except Exception as e:
         sync_state = db.query(SyncStateRecord).filter(
+            SyncStateRecord.binding_id == binding_id,
             SyncStateRecord.provider == adapter.provider_name
         ).first()
         if sync_state:
@@ -229,7 +257,13 @@ def sync_tickets_from_external(adapter=None) -> dict:
     return result
 
 
-def fetch_tickets_by_days(adapter=None, days: int = 7, overwrite: bool = False) -> dict:
+def fetch_tickets_by_days(
+    adapter=None,
+    days: int = 7,
+    overwrite: bool = False,
+    *,
+    binding_id: str = "legacy",
+) -> dict:
     """Manually fetch all tickets updated in the last `days` days from the
     external ITSM provider, walking every page while respecting rate limits.
 
@@ -253,7 +287,7 @@ def fetch_tickets_by_days(adapter=None, days: int = 7, overwrite: bool = False) 
         result["fetched"] = len(tickets)
 
         # Pre-load existing external ids once to avoid N queries.
-        existing_ids = _existing_external_ids(db, adapter.provider_name)
+        existing_ids = _existing_external_ids(db, adapter.provider_name, binding_id)
 
         max_persisted_updated_at = None
         for ext in tickets:
@@ -261,7 +295,13 @@ def fetch_tickets_by_days(adapter=None, days: int = 7, overwrite: bool = False) 
                 if ext.external_id in existing_ids and not overwrite:
                     result["skipped"] += 1
                     continue
-                action, ticket = _upsert_ticket(db, ext, adapter.provider_name, overwrite=overwrite)
+                action, ticket = _upsert_ticket(
+                    db,
+                    ext,
+                    adapter.provider_name,
+                    overwrite=overwrite,
+                    binding_id=binding_id,
+                )
                 if action == "new":
                     existing_ids.add(ext.external_id)
                     result["new"] += 1
@@ -282,10 +322,13 @@ def fetch_tickets_by_days(adapter=None, days: int = 7, overwrite: bool = False) 
         # Record a successful manual fetch on the sync state so the worker's
         # incremental cursor advances past what we just pulled in.
         sync_state = db.query(SyncStateRecord).filter(
+            SyncStateRecord.binding_id == binding_id,
             SyncStateRecord.provider == adapter.provider_name
         ).first()
         if not sync_state:
-            sync_state = SyncStateRecord(provider=adapter.provider_name)
+            sync_state = SyncStateRecord(
+                binding_id=binding_id, provider=adapter.provider_name
+            )
             db.add(sync_state)
         # Only advance the cursor when the manual fetch window starts at or
         # before the current cursor — i.e. it covers the gap the worker would
@@ -314,6 +357,7 @@ def fetch_tickets_by_days(adapter=None, days: int = 7, overwrite: bool = False) 
         try:
             db.rollback()
             sync_state = db.query(SyncStateRecord).filter(
+                SyncStateRecord.binding_id == binding_id,
                 SyncStateRecord.provider == adapter.provider_name
             ).first()
             if sync_state:
@@ -330,7 +374,12 @@ def fetch_tickets_by_days(adapter=None, days: int = 7, overwrite: bool = False) 
     return result
 
 
-def handle_webhook_event(event: WebhookEvent, adapter=None) -> Optional[TicketRecord]:
+def handle_webhook_event(
+    event: WebhookEvent,
+    adapter=None,
+    *,
+    binding_id: str = "legacy",
+) -> Optional[TicketRecord]:
     adapter = adapter or get_adapter()
     db: Session = SessionLocal()
     try:
@@ -354,7 +403,13 @@ def handle_webhook_event(event: WebhookEvent, adapter=None) -> Optional[TicketRe
             ticket_type=str(raw.get("type") or raw.get("ticket_type") or ""),
             url=adapter.build_ticket_url(event.external_id),
         )
-        _action, ticket = _upsert_ticket(db, ext, adapter.provider_name, overwrite=True)
+        _action, ticket = _upsert_ticket(
+            db,
+            ext,
+            adapter.provider_name,
+            overwrite=True,
+            binding_id=binding_id,
+        )
         db.commit()
         return ticket
     except Exception as e:
@@ -461,14 +516,18 @@ def _create_external_agent_user(db: Session, agent: dict[str, Any]) -> UserRecor
     return user
 
 
-def _reconcile_ticket_assignees(db: Session, provider: str) -> int:
+def _reconcile_ticket_assignees(
+    db: Session, provider: str, binding_id: str = "legacy"
+) -> int:
     rows = db.query(TicketRecord, UserMappingRecord.tickety_user_id).join(
         UserMappingRecord,
         and_(
+            TicketRecord.binding_id == UserMappingRecord.binding_id,
             TicketRecord.external_source == UserMappingRecord.external_source,
             TicketRecord.external_assignee_id == UserMappingRecord.external_assignee_id,
         ),
     ).filter(
+        TicketRecord.binding_id == binding_id,
         TicketRecord.external_source == provider,
         TicketRecord.external_assignee_id.isnot(None),
     ).all()
@@ -546,7 +605,13 @@ def _find_agent_match(
     return None, None, None
 
 
-def _import_external_agents(adapter, raw_agents: list[dict[str, Any]], options: Optional[dict[str, Any]] = None) -> dict:
+def _import_external_agents(
+    adapter,
+    raw_agents: list[dict[str, Any]],
+    options: Optional[dict[str, Any]] = None,
+    *,
+    binding_id: str = "legacy",
+) -> dict:
     sync_options = _agent_sync_options(options)
     db: Session = SessionLocal()
     result = _empty_agent_sync_result()
@@ -568,6 +633,7 @@ def _import_external_agents(adapter, raw_agents: list[dict[str, Any]], options: 
                     continue
 
                 mapping = db.query(UserMappingRecord).filter(
+                    UserMappingRecord.binding_id == binding_id,
                     UserMappingRecord.external_source == adapter.provider_name,
                     UserMappingRecord.external_assignee_id == ext_id,
                 ).first()
@@ -651,6 +717,7 @@ def _import_external_agents(adapter, raw_agents: list[dict[str, Any]], options: 
                         _limited_append(result["missing_details"], f"{agent['name']} has no Tickety account")
                         continue
                     db.add(UserMappingRecord(
+                        binding_id=binding_id,
                         tickety_user_id=user.id,
                         external_source=adapter.provider_name,
                         external_assignee_id=ext_id,
@@ -681,7 +748,9 @@ def _import_external_agents(adapter, raw_agents: list[dict[str, Any]], options: 
                 result["error_details"].append(detail)
 
         if sync_options["reassign_tickets"]:
-            result["tickets_reassigned"] = _reconcile_ticket_assignees(db, adapter.provider_name)
+            result["tickets_reassigned"] = _reconcile_ticket_assignees(
+                db, adapter.provider_name, binding_id
+            )
 
     except Exception as e:
         print(f"[agents] fatal error kind={type(e).__name__}")
@@ -692,7 +761,12 @@ def _import_external_agents(adapter, raw_agents: list[dict[str, Any]], options: 
     return result
 
 
-async def async_sync_agents_from_external(adapter=None, options: Optional[dict[str, Any]] = None) -> dict:
+async def async_sync_agents_from_external(
+    adapter=None,
+    options: Optional[dict[str, Any]] = None,
+    *,
+    binding_id: str = "legacy",
+) -> dict:
     """Fetch agents from the external ITSM provider and create / update
     Tickety user accounts.
 
@@ -717,17 +791,28 @@ async def async_sync_agents_from_external(adapter=None, options: Optional[dict[s
         result["errors"] += 1
         result["error_details"].append(f"agent_fetch_failed:{type(e).__name__}")
         return result
-    return _import_external_agents(adapter, raw_agents, options=options)
+    return _import_external_agents(
+        adapter, raw_agents, options=options, binding_id=binding_id
+    )
 
 
-def sync_agents_from_external(adapter=None, options: Optional[dict[str, Any]] = None) -> dict:
+def sync_agents_from_external(
+    adapter=None,
+    options: Optional[dict[str, Any]] = None,
+    *,
+    binding_id: str = "legacy",
+) -> dict:
     adapter = adapter or get_adapter()
     import asyncio
 
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(async_sync_agents_from_external(adapter, options=options))
+        return asyncio.run(
+            async_sync_agents_from_external(
+                adapter, options=options, binding_id=binding_id
+            )
+        )
 
     raise RuntimeError(
         "sync_agents_from_external cannot run inside an active event loop; "

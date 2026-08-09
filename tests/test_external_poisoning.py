@@ -5,11 +5,11 @@ from datetime import datetime
 from unittest.mock import AsyncMock, patch
 
 from pydantic import ValidationError
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.backend import main, sync_worker
+from app.backend import main, sync_worker, ticket_vectors
 from app.backend.database import (
     SyncStateRecord,
     TicketRecord,
@@ -162,6 +162,65 @@ class ExternalPersistenceBoundaryTests(unittest.TestCase):
         with self.session_factory() as db:
             ticket = db.query(TicketRecord).one()
             self.assertEqual(ticket.external_source, "freshservice")
+
+    def test_comment_only_evidence_does_not_promote_external_ticket_document(self):
+        ticket = TicketRecord(
+            id="comment-only-ticket",
+            subject="Unreviewed provider ticket",
+            external_source="freshservice",
+        )
+        with self.session_factory() as db:
+            db.execute(text(
+                "CREATE TABLE ticket_search_documents "
+                "(source_type TEXT, source_id TEXT, ticket_id TEXT)"
+            ))
+            # A reviewed comment is evidence for this ticket, but it must not
+            # authorize provider subject/description as ticket evidence.
+            db.execute(text(
+                "INSERT INTO ticket_search_documents (source_type, source_id, ticket_id) "
+                "VALUES ('comment', 'comment-1', :ticket_id)"
+            ), {"ticket_id": ticket.id})
+            db.commit()
+
+            with (
+                patch.object(ticket_vectors, "_ticket_document_table_exists", return_value=True),
+                patch.object(ticket_vectors, "refresh_ticket_documents_background") as refresh,
+            ):
+                changed = ticket_vectors.refresh_ticket_documents_if_indexed(db, ticket)
+
+        self.assertEqual(changed, 0)
+        refresh.assert_not_called()
+
+    def test_metadata_only_provider_update_refreshes_promoted_ticket(self):
+        with self.session_factory() as db:
+            existing = TicketRecord(
+                id="promoted-ticket",
+                subject="Valid provider ticket",
+                description="Bounded requester content",
+                reporter="requester@example.test",
+                priority="P3",
+                status="Open",
+                workflow_status="Open",
+                ticket_type="incident",
+                external_source="freshservice",
+                external_id="provider-1",
+                external_status="Open",
+            )
+            db.add(existing)
+            db.commit()
+
+            with patch.object(sync, "refresh_ticket_documents_if_indexed") as refresh:
+                action, ticket = sync._upsert_ticket(
+                    db,
+                    _external_ticket(ticket_type="service_request"),
+                    "freshservice",
+                    overwrite=True,
+                )
+
+            self.assertEqual(action, "updated")
+            self.assertEqual(ticket.priority, "P3")
+            self.assertEqual(ticket.ticket_type, "service_request")
+            refresh.assert_called_once_with(db, ticket)
 
 
 class ProviderParserIsolationTests(unittest.TestCase):

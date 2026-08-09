@@ -6,18 +6,7 @@ import { SuccessBurst } from "@/components/engagement/SuccessBurst";
 import { TierPromotionModal } from "@/components/engagement/TierPromotionModal";
 import { useEngagementStore } from "@/lib/engagement-state";
 import { createNotificationsWS } from "@/lib/ws";
-import type { PointsNotification } from "@/lib/types";
-
-function isPointsNotification(data: unknown): data is PointsNotification {
-  if (!data || typeof data !== "object") return false;
-  const candidate = data as Record<string, unknown>;
-  return (
-    typeof candidate.ticket_id === "string"
-    && typeof candidate.points_earned === "number"
-    && typeof candidate.user_id === "string"
-    && Array.isArray(candidate.recognitions_unlocked)
-  );
-}
+import { isPointsNotification } from "@/lib/realtime-validation";
 
 export function AppExperience({ children }: { children: React.ReactNode }) {
   const setNotification = useEngagementStore((state) => state.setNotification);

@@ -212,6 +212,8 @@ environment/Secret and roll out the affected workloads.
 
 ## Production mode
 
+For an isolated Freshservice proof of concept, see the [Freshservice trial POC guide](docs/freshservice-trial-poc.md). Trial bindings use a dedicated POC deployment and are never promoted into production.
+
 Tickety ships in **demo mode** for evaluation with anonymous read access and an
 explicitly authenticated administrator feature path. Production remains the
 required mode for private deployments and deployment-managed security controls.

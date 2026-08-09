@@ -52,11 +52,20 @@ Important groups are:
 - `ingress` and `frontend.service`: choose one public exposure mechanism.
 - `networkPolicy`: public HTTPS egress plus narrowly scoped exceptions for
   private database, AI, or ITSM endpoints.
+- `backup`: optional custom-format PostgreSQL backups on a dedicated PVC, with
+  archive validation, overlap prevention, and age-based retention. This
+  currently requires the bundled PostgreSQL instance.
 
 When the chart owns the Secret and bundled PostgreSQL, it generates an
 alphanumeric database password on first install and reuses it on upgrades.
 Changing that password later requires a coordinated PostgreSQL role-password
 rotation; changing only the Helm value is intentionally not a rotation method.
+
+When `backup.enabled=true`, the CronJob writes mode-restricted custom-format
+dumps to its backup PVC and validates each archive with `pg_restore --list`
+before publishing it. A valid archive is still not a disaster-recovery test:
+regularly restore a dump into an isolated PostgreSQL instance and verify the
+application against it.
 
 For production, first create a real administrator while running the default
 demo installation, then apply production values. This follows Tickety's

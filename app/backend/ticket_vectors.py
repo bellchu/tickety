@@ -827,8 +827,11 @@ def refresh_ticket_documents_if_indexed(db: Session, ticket: TicketRecord, force
     if not _ticket_document_table_exists(db):
         return 0
     row = db.execute(
-        text("SELECT 1 FROM ticket_search_documents WHERE ticket_id = :ticket_id LIMIT 1"),
-        {"ticket_id": str(ticket.id)},
+        text(
+            "SELECT 1 FROM ticket_search_documents "
+            "WHERE source_type = 'ticket' AND source_id = :source_id LIMIT 1"
+        ),
+        {"source_id": str(ticket.id)},
     ).first()
     if row is None:
         return 0

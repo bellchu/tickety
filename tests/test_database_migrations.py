@@ -43,7 +43,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             for table_name, table in Base.metadata.tables.items():
                 actual_columns = {column["name"] for column in inspector.get_columns(table_name)}
                 self.assertEqual(actual_columns, set(table.columns.keys()), table_name)
-            self.assertEqual(self._current_revision(engine), "0005")
+            self.assertEqual(self._current_revision(engine), "0007")
             command.check(self.config)
         finally:
             engine.dispose()
@@ -67,6 +67,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("portal_access_token_hash", ticket_columns)
             self.assertIn("portal_access_expires_at", ticket_columns)
             self.assertIn("ai_suggested_category", ticket_columns)
+            self.assertIn("binding_id", ticket_columns)
             indexes = {index["name"]: index for index in inspector.get_indexes("tickets")}
             self.assertTrue(indexes["ix_tickets_portal_access_token_hash"]["unique"])
             with engine.connect() as connection:
@@ -83,7 +84,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertEqual(user["name"], "Legacy User")
             self.assertEqual(user["role"], "agent")
             self.assertTrue(user["is_active"])
-            self.assertEqual(self._current_revision(engine), "0005")
+            self.assertEqual(self._current_revision(engine), "0007")
         finally:
             engine.dispose()
 
@@ -148,6 +149,21 @@ class DatabaseMigrationTests(unittest.TestCase):
     def test_production_startup_verifies_only_and_never_bootstraps(self):
         with (
             patch.dict(os.environ, {"APP_MODE": "production"}),
+            patch.object(database, "verify_database_schema") as verify,
+            patch.object(database.Base.metadata, "create_all") as create_all,
+            patch.object(database, "_ensure_columns") as ensure_columns,
+            patch.object(database, "_ensure_ticket_search_documents") as ensure_vectors,
+        ):
+            database.init_db()
+
+        verify.assert_called_once_with()
+        create_all.assert_not_called()
+        ensure_columns.assert_not_called()
+        ensure_vectors.assert_not_called()
+
+    def test_blank_app_mode_uses_production_verification_path(self):
+        with (
+            patch.dict(os.environ, {"APP_MODE": ""}),
             patch.object(database, "verify_database_schema") as verify,
             patch.object(database.Base.metadata, "create_all") as create_all,
             patch.object(database, "_ensure_columns") as ensure_columns,

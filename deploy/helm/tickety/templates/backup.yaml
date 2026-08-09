@@ -1,0 +1,119 @@
+{{- if and .Values.backup.enabled (not .Values.postgresql.enabled) }}
+  {{- fail "backup.enabled requires postgresql.enabled=true" }}
+{{- end }}
+{{- if .Values.backup.enabled }}
+{{- $backupClaim := default (printf "%s-backups" (include "tickety.fullname" .)) .Values.backup.persistence.existingClaim }}
+{{- if not .Values.backup.persistence.existingClaim }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $backupClaim }}
+  labels:
+    {{- include "tickety.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- if eq .Values.backup.persistence.storageClass "-" }}
+  storageClassName: ""
+  {{- else if .Values.backup.persistence.storageClass }}
+  storageClassName: {{ .Values.backup.persistence.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.backup.persistence.size }}
+---
+{{- end }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "tickety.fullname" . }}-postgresql-backup
+  labels:
+    {{- include "tickety.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: {{ .Values.backup.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.backup.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: {{ .Values.backup.activeDeadlineSeconds }}
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            {{- include "tickety.componentLabels" (dict "root" . "component" "backup") | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            fsGroup: 999
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: backup
+              image: {{ printf "%s:%s" .Values.postgresql.image.repository .Values.postgresql.image.tag | quote }}
+              imagePullPolicy: {{ .Values.postgresql.image.pullPolicy }}
+              command:
+                - /bin/sh
+                - -ec
+                - |
+                  umask 077
+                  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+                  temporary="/backups/.tickety-${timestamp}.dump.tmp"
+                  destination="/backups/tickety-${timestamp}.dump"
+                  database_ready=false
+                  for attempt in $(seq 1 30); do
+                    if pg_isready --host="{{ include "tickety.postgresqlName" . }}" --username="$POSTGRES_USER" --dbname="$POSTGRES_DB" >/dev/null; then
+                      database_ready=true
+                      break
+                    fi
+                    sleep 2
+                  done
+                  if [ "$database_ready" != true ]; then
+                    echo "PostgreSQL did not become reachable before backup" >&2
+                    exit 1
+                  fi
+                  pg_dump --format=custom --host="{{ include "tickety.postgresqlName" . }}" --username="$POSTGRES_USER" --dbname="$POSTGRES_DB" --file="$temporary"
+                  pg_restore --list "$temporary" >/dev/null
+                  mv "$temporary" "$destination"
+                  find /backups -type f -name 'tickety-*.dump' -mtime +{{ .Values.backup.retentionDays }} -delete
+              env:
+                - name: POSTGRES_USER
+                  value: {{ .Values.postgresql.auth.username | quote }}
+                - name: POSTGRES_DB
+                  value: {{ .Values.postgresql.auth.database | quote }}
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "tickety.secretName" . }}
+                      key: POSTGRES_PASSWORD
+              resources:
+                {{- toYaml .Values.backup.resources | nindent 16 }}
+              securityContext:
+                runAsUser: 999
+                runAsGroup: 999
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: backups
+                  mountPath: /backups
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: backups
+              persistentVolumeClaim:
+                claimName: {{ $backupClaim }}
+            - name: tmp
+              emptyDir:
+                sizeLimit: 64Mi
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

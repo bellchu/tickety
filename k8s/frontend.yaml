@@ -112,9 +112,7 @@ metadata:
   name: frontend-service
   namespace: tickety
 spec:
-  # ClusterIP keeps the app behind the ingress; a public LoadBalancer would
-  # bypass TLS termination and expose the app in plaintext on port 17000.
-  type: ClusterIP
+  type: LoadBalancer
   selector:
     app: frontend
   ports:
@@ -128,17 +126,8 @@ kind: Ingress
 metadata:
   name: frontend-ingress
   namespace: tickety
-  annotations:
-    # Terminate TLS at the ingress. Provision the certificate out-of-band
-    # (e.g. cert-manager + Let's Encrypt, or an existing tls secret named
-    # tickety-tls in this namespace).
-    cert-manager.io/cluster-issuer: letsencrypt-prod
 spec:
   ingressClassName: traefik
-  tls:
-    - hosts:
-        - tickety.situ.io
-      secretName: tickety-tls
   rules:
     - host: tickety.situ.io
       http:

@@ -7,7 +7,7 @@ import hashlib
 import base64
 import urllib.parse
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import httpx
 
@@ -74,20 +74,38 @@ PLACEHOLDER_FRESHSERVICE_DOMAINS = {
 class FreshserviceAdapter(BaseITSMAdapter):
     provider_name = "freshservice"
 
-    def __init__(self):
-        self.domain = self._normalize_domain(os.getenv("FRESHSERVICE_DOMAIN") or "yourdomain.freshservice.com")
-        self.org_domain = self._normalize_domain(os.getenv("FRESHWORKS_ORG_DOMAIN") or self.domain)
-        self.api_key = os.getenv("FRESHSERVICE_API_KEY", "dummy-key")
+    def __init__(self, config: Optional[dict[str, Any]] = None):
+        config = config or {}
+
+        def configured(name: str, default: str = "") -> str:
+            value = config.get(name)
+            return str(value) if value is not None else os.getenv(name, default)
+
+        self.domain = self._normalize_domain(
+            configured("FRESHSERVICE_DOMAIN", "yourdomain.freshservice.com")
+        )
+        self.org_domain = self._normalize_domain(
+            configured("FRESHWORKS_ORG_DOMAIN", self.domain)
+        )
+        self.api_key = configured("FRESHSERVICE_API_KEY", "dummy-key")
         self.base_url = f"https://{self.domain}"
         self.org_base_url = f"https://{self.org_domain}"
-        self.webhook_secret = os.getenv("WEBHOOK_SECRET", "")
+        self.webhook_secret = configured("WEBHOOK_SECRET")
+        self.workspace_id = configured("FRESHSERVICE_WORKSPACE_ID").strip()
+        self.ticket_includes = configured(
+            "FRESHSERVICE_TICKET_INCLUDES", DEFAULT_TICKET_LIST_INCLUDES
+        )
+        self.agent_state = configured("FRESHSERVICE_AGENT_STATE").strip().lower()
 
         # OAuth 2.0
-        self.oauth_client_id = os.getenv("FRESHSERVICE_OAUTH_CLIENT_ID", "")
-        self.oauth_client_secret = os.getenv("FRESHSERVICE_OAUTH_CLIENT_SECRET", "")
-        self.oauth_redirect_uri = os.getenv("FRESHSERVICE_OAUTH_REDIRECT_URI", "")
-        self.oauth_access_token = os.getenv("FRESHSERVICE_OAUTH_ACCESS_TOKEN", "")
-        self.oauth_refresh_token = os.getenv("FRESHSERVICE_OAUTH_REFRESH_TOKEN", "")
+        self.oauth_client_id = configured("FRESHSERVICE_OAUTH_CLIENT_ID")
+        self.oauth_client_secret = configured("FRESHSERVICE_OAUTH_CLIENT_SECRET")
+        self.oauth_redirect_uri = configured("FRESHSERVICE_OAUTH_REDIRECT_URI")
+        self.oauth_scopes = configured(
+            "FRESHSERVICE_OAUTH_SCOPES", DEFAULT_FRESHSERVICE_OAUTH_SCOPES
+        )
+        self.oauth_access_token = configured("FRESHSERVICE_OAUTH_ACCESS_TOKEN")
+        self.oauth_refresh_token = configured("FRESHSERVICE_OAUTH_REFRESH_TOKEN")
 
     @staticmethod
     def _normalize_domain(value: str) -> str:
@@ -118,7 +136,7 @@ class FreshserviceAdapter(BaseITSMAdapter):
             "client_id": self.oauth_client_id,
             "redirect_uri": self.oauth_redirect_uri,
             "response_type": "code",
-            "scope": os.getenv("FRESHSERVICE_OAUTH_SCOPES", DEFAULT_FRESHSERVICE_OAUTH_SCOPES),
+            "scope": self.oauth_scopes,
             "state": state,
         }
         return f"{self.org_base_url}/org/oauth/v2/authorize?{urllib.parse.urlencode(params)}"
@@ -256,9 +274,8 @@ class FreshserviceAdapter(BaseITSMAdapter):
             value = value.astimezone(timezone.utc).replace(tzinfo=None)
         return value.replace(microsecond=0).isoformat() + "Z"
 
-    @staticmethod
-    def _configured_ticket_includes() -> str:
-        raw = os.getenv("FRESHSERVICE_TICKET_INCLUDES", DEFAULT_TICKET_LIST_INCLUDES)
+    def _configured_ticket_includes(self) -> str:
+        raw = self.ticket_includes
         includes: list[str] = []
         for item in raw.split(","):
             include = item.strip()
@@ -375,6 +392,23 @@ class FreshserviceAdapter(BaseITSMAdapter):
             resp = await client.post(url, auth=self._auth(), headers=self._headers(), json=payload)
         return resp
 
+    async def _rate_limited_put(self, client: httpx.AsyncClient, url: str, payload: dict) -> httpx.Response:
+        """PUT with the same bounded retry and OAuth refresh behavior as POST."""
+        elapsed = time.monotonic() - getattr(self, "_last_put_ts", 0.0)
+        if elapsed < self._MIN_INTERVAL_S:
+            await asyncio.sleep(self._MIN_INTERVAL_S - elapsed)
+        resp = await client.put(url, auth=self._auth(), headers=self._headers(), json=payload)
+        self._last_put_ts = time.monotonic()
+        if resp.status_code == 429:
+            retry_after = float(resp.headers.get("Retry-After", "5") or "5")
+            await asyncio.sleep(retry_after + 0.5)
+            self._last_put_ts = time.monotonic()
+            resp = await client.put(url, auth=self._auth(), headers=self._headers(), json=payload)
+        if resp.status_code == 401 and await self._refresh_oauth_access_token():
+            self._last_put_ts = time.monotonic()
+            resp = await client.put(url, auth=self._auth(), headers=self._headers(), json=payload)
+        return resp
+
     @staticmethod
     def _parse_link_next(link_header: Optional[str], base_url: str) -> Optional[str]:
         """Extract the rel=\"next\" URL from a Link header."""
@@ -410,7 +444,7 @@ class FreshserviceAdapter(BaseITSMAdapter):
         includes = self._configured_ticket_includes()
         if includes:
             params["include"] = includes
-        workspace_id = os.getenv("FRESHSERVICE_WORKSPACE_ID", "").strip()
+        workspace_id = self.workspace_id
         if workspace_id:
             params["workspace_id"] = workspace_id
         if since:
@@ -449,7 +483,7 @@ class FreshserviceAdapter(BaseITSMAdapter):
         url = f"{self.base_url}/api/v2/agents"
         # Provider API detail: filter to active agents only.
         params: dict = {"per_page": 100, "active": "true"}
-        agent_state = os.getenv("FRESHSERVICE_AGENT_STATE", "").strip().lower()
+        agent_state = self.agent_state
         if agent_state in {"fulltime", "occasional"}:
             params["state"] = agent_state
         async with httpx.AsyncClient(timeout=30) as client:
@@ -478,6 +512,111 @@ class FreshserviceAdapter(BaseITSMAdapter):
             resp.raise_for_status()
             data = resp.json()
             return data.get("ticket", data)
+
+    async def fetch_ticket_raw(self, external_id: str) -> dict:
+        """Fetch one ticket for optimistic-concurrency validation."""
+        self._ensure_provider_configured()
+        if not str(external_id).isdigit():
+            raise ValueError("Freshservice ticket ID must be numeric")
+        url = f"{self.base_url}/api/v2/tickets/{external_id}"
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await self._rate_limited_get(client, url, {})
+            resp.raise_for_status()
+            data = resp.json()
+        ticket = data.get("ticket") if isinstance(data, dict) else None
+        if not isinstance(ticket, dict):
+            raise RuntimeError("Freshservice ticket response is invalid")
+        return ticket
+
+    async def update_ticket_raw(self, external_id: str, payload: dict) -> dict:
+        """Apply a bounded Freshservice ticket update and return its snapshot."""
+        self._ensure_provider_configured()
+        if not str(external_id).isdigit():
+            raise ValueError("Freshservice ticket ID must be numeric")
+        allowed = {key: payload[key] for key in ("status", "priority") if key in payload}
+        if not allowed:
+            raise ValueError("No supported Freshservice update fields were supplied")
+        url = f"{self.base_url}/api/v2/tickets/{external_id}"
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await self._rate_limited_put(client, url, allowed)
+            resp.raise_for_status()
+            data = resp.json()
+        ticket = data.get("ticket") if isinstance(data, dict) else None
+        if not isinstance(ticket, dict):
+            raise RuntimeError("Freshservice update response is invalid")
+        return ticket
+
+    def capability_manifest(self) -> dict[str, dict[str, Any]]:
+        return {
+            "ticket.read": {"status": "supported", "scope": "freshservice.tickets.view"},
+            "agent.read": {"status": "supported", "scope": "freshservice.agents.manage"},
+            "ticket.create": {
+                "status": "unknown",
+                "scope": "freshservice.tickets.edit",
+                "implementation": "available",
+                "verification": "write_probe_not_run",
+            },
+            "ticket.update": {
+                "status": "unknown",
+                "scope": "freshservice.tickets.edit",
+                "implementation": "status_priority",
+                "verification": "write_probe_not_run",
+            },
+            "ticket.reply": {"status": "unsupported"},
+            "ticket.note": {"status": "unsupported"},
+            "ticket.attachment": {"status": "unsupported"},
+            "service_request.create": {"status": "unsupported"},
+            "webhook.ingest": {"status": "supported"},
+            "freshworks.full_page_app": {"status": "unknown"},
+            "freshworks.ticket_sidebar": {"status": "unknown"},
+            "freshworks.trusted_agent_identity": {"status": "unknown"},
+        }
+
+    async def probe_capabilities(self) -> dict[str, dict[str, Any]]:
+        """Probe only bounded API reads; app-placement checks remain client-side."""
+        manifest = {key: dict(value) for key, value in self.capability_manifest().items()}
+        try:
+            self._ensure_provider_configured()
+        except Exception as exc:
+            detail = type(exc).__name__
+            for key in ("ticket.read", "agent.read", "ticket.create"):
+                manifest[key] = {**manifest[key], "status": "degraded", "detail": detail}
+            return manifest
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            probes = {
+                "ticket.read": (f"{self.base_url}/api/v2/tickets", {"per_page": 1}),
+                "agent.read": (f"{self.base_url}/api/v2/agents", {"per_page": 1, "active": "true"}),
+            }
+            for capability, (url, params) in probes.items():
+                try:
+                    response = await self._rate_limited_get(client, url, params)
+                    if response.status_code < 400:
+                        status = "supported"
+                    elif response.status_code in {401, 403}:
+                        status = "restricted"
+                    elif response.status_code == 429:
+                        status = "degraded"
+                    else:
+                        status = "unsupported"
+                    manifest[capability] = {
+                        **manifest[capability],
+                        "status": status,
+                        "http_status": response.status_code,
+                    }
+                except Exception as exc:
+                    manifest[capability] = {
+                        **manifest[capability],
+                        "status": "degraded",
+                        "detail": type(exc).__name__,
+                    }
+        if manifest["ticket.read"]["status"] != "supported":
+            manifest["ticket.create"] = {
+                **manifest["ticket.create"],
+                "status": "unknown",
+                "detail": "write_not_probed_without_ticket_read",
+            }
+        return manifest
 
     def parse_webhook(
         self,

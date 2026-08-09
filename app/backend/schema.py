@@ -35,6 +35,7 @@ class Ticket(BaseModel):
     tags: Optional[str] = None
 
     external_source: Optional[str] = None
+    binding_id: str = "legacy"
     external_id: Optional[str] = None
     external_url: Optional[str] = None
     external_status: Optional[str] = None
@@ -150,10 +151,47 @@ class PointsAwardedNotification(BaseModel):
 
 class SyncStatus(BaseModel):
     provider: str
+    binding_id: Optional[str] = None
     last_synced_at: Optional[datetime] = None
     last_status: str = "idle"
     last_error: Optional[str] = None
     total_synced: int = 0
+
+
+class IntegrationBindingCreate(BaseModel):
+    provider: Literal["freshservice"] = "freshservice"
+    environment: Literal["trial", "sandbox", "production"]
+    canonical_account_host: str = Field(..., min_length=1, max_length=255)
+    workspace_ids: List[str] = Field(default_factory=list, max_length=50)
+    installation_id: Optional[str] = Field(None, max_length=255)
+    product_variant: Optional[Literal["ITSM", "MSP"]] = None
+    credential_reference: Literal["env://freshservice"] = "env://freshservice"
+    expires_at: Optional[datetime] = None
+
+
+class IntegrationBindingSuspend(BaseModel):
+    reason: str = Field(..., min_length=1, max_length=200)
+
+
+class FreshworksBootstrapRequest(BaseModel):
+    binding_id: str = Field(..., min_length=36, max_length=36)
+    account_host: str = Field(..., min_length=1, max_length=255)
+    external_user_id: str = Field(..., min_length=1, max_length=255)
+    workspace_id: Optional[str] = Field(None, max_length=255)
+    external_ticket_id: Optional[str] = Field(None, pattern=r"^[0-9]+$", max_length=255)
+    ticket_updated_at: Optional[datetime] = None
+    audience: Literal["ticket_sidebar", "full_page_app"]
+
+
+class FreshworksBootstrapRedeem(BaseModel):
+    binding_id: str = Field(..., min_length=36, max_length=36)
+    code: str = Field(..., min_length=32, max_length=255)
+
+
+class FreshworksTicketWriteback(BaseModel):
+    status: Optional[Literal["Open", "Pending", "Resolved", "Closed", "Escalated"]] = None
+    priority: Optional[Literal["P1", "P2", "P3", "P4"]] = None
+    expected_updated_at: datetime
 
 
 class TicketCreate(BaseModel):

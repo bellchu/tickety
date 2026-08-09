@@ -74,9 +74,10 @@
     },
     "config": {
       "type": "object",
-      "required": ["appMode", "loginRequired", "cookieSecure", "cookieSameSite", "extra"],
+      "required": ["appMode", "deploymentClass", "loginRequired", "cookieSecure", "cookieSameSite", "extra"],
       "properties": {
         "appMode": { "enum": ["demo", "production"] },
+        "deploymentClass": { "enum": ["poc", "production"] },
         "seedDemoData": { "type": "string" },
         "loginRequired": { "type": "boolean" },
         "frontendUrl": { "type": "string" },
@@ -89,6 +90,7 @@
             "not": {
               "enum": [
                 "APP_MODE",
+                "TICKETY_DEPLOYMENT_CLASS",
                 "SEED_DEMO_DATA",
                 "LOGIN_REQUIRED",
                 "FRONTEND_URL",
@@ -127,6 +129,35 @@
             "enabled": { "type": "boolean" },
             "size": { "type": "string", "minLength": 1 },
             "storageClass": { "type": "string" }
+          }
+        }
+      }
+    },
+    "backup": {
+      "type": "object",
+      "required": [
+        "enabled",
+        "schedule",
+        "retentionDays",
+        "activeDeadlineSeconds",
+        "successfulJobsHistoryLimit",
+        "failedJobsHistoryLimit",
+        "persistence"
+      ],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "schedule": { "type": "string", "minLength": 1 },
+        "retentionDays": { "type": "integer", "minimum": 1 },
+        "activeDeadlineSeconds": { "type": "integer", "minimum": 60 },
+        "successfulJobsHistoryLimit": { "type": "integer", "minimum": 0 },
+        "failedJobsHistoryLimit": { "type": "integer", "minimum": 0 },
+        "persistence": {
+          "type": "object",
+          "required": ["size", "storageClass", "existingClaim"],
+          "properties": {
+            "size": { "type": "string", "minLength": 1 },
+            "storageClass": { "type": "string" },
+            "existingClaim": { "type": "string" }
           }
         }
       }
@@ -173,6 +204,24 @@
         "properties": {
           "config": {
             "properties": { "cookieSecure": { "const": true } }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "backup": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "postgresql": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
           }
         }
       }

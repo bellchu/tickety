@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from ..schema import ExternalTicket, WebhookEvent
 
@@ -14,6 +14,24 @@ class BaseITSMAdapter(ABC):
     def oauth_configured(self) -> bool:
         """OAuth is unsupported unless an adapter explicitly implements it."""
         return False
+
+    def capability_manifest(self) -> dict[str, dict[str, Any]]:
+        """Declare provider operations without implying unimplemented parity."""
+        return {
+            "ticket.read": {"status": "supported"},
+            "agent.read": {"status": "unsupported"},
+            "ticket.create": {"status": "unsupported"},
+            "ticket.update": {"status": "unsupported"},
+            "ticket.reply": {"status": "unsupported"},
+            "ticket.note": {"status": "unsupported"},
+            "ticket.attachment": {"status": "unsupported"},
+            "service_request.create": {"status": "unsupported"},
+            "webhook.ingest": {"status": "supported"},
+        }
+
+    async def probe_capabilities(self) -> dict[str, dict[str, Any]]:
+        """Return observed capabilities; adapters should override live probes."""
+        return self.capability_manifest()
 
     @abstractmethod
     async def fetch_new_tickets(self, since: Optional[datetime] = None) -> List[ExternalTicket]:

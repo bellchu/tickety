@@ -8,12 +8,12 @@ import unicodedata
 import urllib.parse
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
 
-from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query, Request, Response, Cookie, Body
+from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query, Request, Response, Cookie, Body, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy.orm import Session
@@ -38,6 +38,10 @@ from .database import (
     LLMCallRecord,
     AIArtifactRecord,
     SettingsRecord,
+    IntegrationBindingRecord,
+    IntegrationCapabilityRecord,
+    ProviderOperationRecord,
+    ProviderConflictRecord,
 )
 from .schema import (
     Ticket, User, UserSummary, Recognition, SyncStatus,
@@ -62,6 +66,9 @@ from .schema import (
     SurveyTemplate, SurveyOut, SurveySend, SurveyResponseCreate,
     TimeEntry, TimeEntryCreate,
     PortalTicketCreate, PortalTicketOut, PortalTicketCreated,
+    IntegrationBindingCreate, IntegrationBindingSuspend,
+    FreshworksBootstrapRequest, FreshworksBootstrapRedeem,
+    FreshworksTicketWriteback,
 )
 from .llm_manager import (
     LLMAnalysisError,
@@ -96,6 +103,25 @@ from .prompts import (
 from .integrations.registry import get_adapter
 from .integrations.sync import sync_tickets_from_external, handle_webhook_event, fetch_tickets_by_days, async_sync_agents_from_external
 from .integrations.freshservice import FreshserviceAdapter
+from .integrations.bindings import (
+    BindingValidationError,
+    activate_binding,
+    create_binding,
+    get_active_binding,
+    get_binding,
+    list_capabilities,
+    serialize_binding,
+    suspend_binding,
+    validate_binding,
+)
+from .integrations.embedded import (
+    EmbeddedAuthError,
+    authenticate_session,
+    issue_bootstrap_code,
+    redeem_bootstrap_code,
+    require_ticket_scope,
+    verify_installation_secret,
+)
 from .sync_worker import start_sync_worker, stop_sync_worker, get_sync_status
 from . import settings as settings_module
 from .security import RequestBodyLimitMiddleware
@@ -224,7 +250,13 @@ _PUBLIC_HTTP_PATHS = {
     "/webhooks/external",
     "/openapi.json",
 }
-_PUBLIC_HTTP_PREFIXES = ("/portal/", "/docs", "/redoc")
+_PUBLIC_HTTP_PREFIXES = (
+    "/portal/",
+    "/webhooks/external/",
+    "/integrations/freshworks/",
+    "/docs",
+    "/redoc",
+)
 
 
 def _is_public_http_path(path: str) -> bool:
@@ -248,6 +280,13 @@ def _request_origin_allowed(request: Request, *, require_explicit: bool = False)
     parsed = urllib.parse.urlparse(origin)
     if not parsed.scheme or not parsed.netloc:
         return False
+    supplied_origin = f"{parsed.scheme}://{parsed.netloc}"
+    allowed = _cors_allow_origins()
+    # In production the browser origin is a configured deployment boundary.
+    # Do not turn the request Host header into an origin allowlist: a direct
+    # client can supply both Host and Origin values.
+    if settings_module.is_production_mode():
+        return supplied_origin in allowed
     if settings_module.get_bool("TRUST_FORWARDED_HEADERS"):
         forwarded_host = (request.headers.get("x-forwarded-host") or "").split(",")[0].strip()
         forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
@@ -258,10 +297,8 @@ def _request_origin_allowed(request: Request, *, require_explicit: bool = False)
     request_host = forwarded_host or request.url.netloc
     request_scheme = forwarded_proto or request.url.scheme
     request_origin = f"{request_scheme}://{request_host}"
-    supplied_origin = f"{parsed.scheme}://{parsed.netloc}"
     if supplied_origin == request_origin:
         return True
-    allowed = _cors_allow_origins()
     return "*" in allowed or supplied_origin in allowed
 
 
@@ -503,15 +540,16 @@ def _clear_login_failures(payload: LoginRequest, request: Request):
 
 @app.middleware("http")
 async def require_auth_by_default(request: Request, call_next):
-    if request.method == "OPTIONS" or _is_public_http_path(request.url.path):
-        return await call_next(request)
-
-    roles = _roles_required_for_request(request.url.path, request.method)
     # Unsafe methods must always pass the origin gate, even in no-login demo
     # mode: anonymous POSTs would otherwise execute as the demo fallback
     # identity with no cross-site protection at all.
     if request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"} and not _request_origin_allowed(request):
         return JSONResponse({"detail": "Invalid request origin"}, status_code=403)
+
+    if request.method == "OPTIONS" or _is_public_http_path(request.url.path):
+        return await call_next(request)
+
+    roles = _roles_required_for_request(request.url.path, request.method)
 
     # Local demos may allow anonymous browsing, but privileged routes must
     # always be backed by a real session.  Do not let the demo fallback
@@ -545,9 +583,11 @@ _notification_subscribers: list[tuple[str, WebSocket]] = []
 
 async def _broadcast_notification(notification: dict):
     recipient_id = notification.get("user_id")
+    if not isinstance(recipient_id, str) or not recipient_id:
+        return
     dead = []
     for user_id, ws in list(_notification_subscribers):
-        if recipient_id is not None and user_id != recipient_id:
+        if user_id != recipient_id:
             continue
         try:
             await asyncio.wait_for(ws.send_json(notification), timeout=2)
@@ -1138,6 +1178,47 @@ def _reserve_portal_ticket_request(
     db.commit()
 
 
+def _reserve_survey_response_request(db: Session, survey_id: str) -> None:
+    """Durably bound survey submissions without storing attacker-controlled IDs."""
+    now = datetime.utcnow()
+    per_survey_id = "survey:" + hashlib.sha256(
+        survey_id.encode("utf-8")
+    ).hexdigest()[:32]
+    limits = (
+        (
+            per_survey_id,
+            "survey_response_minute",
+            "survey_response_day",
+            5,
+            100,
+        ),
+        (
+            "survey-global",
+            "survey_response_global_minute",
+            "survey_response_global_day",
+            _bounded_env_int("SURVEY_RESPONSES_GLOBAL_PER_MINUTE", 100, 1, 10_000),
+            _bounded_env_int("SURVEY_RESPONSES_GLOBAL_PER_DAY", 5_000, 1, 1_000_000),
+        ),
+    )
+    for actor_id, minute_kind, day_kind, minute_limit, day_limit in limits:
+        minute_count = _increment_request_bucket(
+            db, actor_id, minute_kind, now.replace(second=0, microsecond=0)
+        )
+        day_count = _increment_request_bucket(
+            db, actor_id, day_kind, now.replace(hour=0, minute=0, second=0, microsecond=0)
+        )
+        if minute_count > minute_limit or day_count > day_limit:
+            db.rollback()
+            raise HTTPException(
+                status_code=429,
+                detail="survey_rate_limit_exceeded",
+                headers={"Retry-After": "60" if minute_count > minute_limit else "3600"},
+            )
+    # Persist before checking the survey state so failed submissions cannot
+    # evade the rate limit through a later 404/409 response.
+    db.commit()
+
+
 def _reserve_embedding_request(
     db: Session,
     user: UserRecord,
@@ -1724,10 +1805,12 @@ def _ticket_analysis_hash(ticket: TicketRecord) -> str:
 def _analysis_lease_seconds() -> int:
     configured = _bounded_env_int("AI_ANALYSIS_LEASE_SECONDS", 1800, 300, 7200)
     provider_floor = int(3 * getattr(engine.llm, "overall_timeout", 90) + 180)
-    pipeline_floor = _bounded_env_int(
-        "AI_PIPELINE_TIMEOUT_SECONDS", 900, 120, 3600
-    ) + 60
+    pipeline_floor = _analysis_pipeline_timeout_seconds() + 60
     return max(configured, provider_floor, pipeline_floor)
+
+
+def _analysis_pipeline_timeout_seconds() -> int:
+    return _bounded_env_int("AI_PIPELINE_TIMEOUT_SECONDS", 900, 120, 3600)
 
 
 def _artifact_input_hash(ticket: TicketRecord, artifact: str) -> str:
@@ -1952,9 +2035,7 @@ async def _run_ticket_analysis(
         if ticket.ai_status == "running":
             raise HTTPException(status_code=409, detail="analysis_in_progress")
         return _cached_analysis_payload(ticket, db)
-    pipeline_deadline = time.monotonic() + _bounded_env_int(
-        "AI_PIPELINE_TIMEOUT_SECONDS", 900, 120, 3600
-    )
+    pipeline_deadline = time.monotonic() + _analysis_pipeline_timeout_seconds()
 
     async def emit(step: str, status: str):
         if progress:
@@ -2259,10 +2340,14 @@ def _verify_password(password: str, password_hash: Optional[str]) -> bool:
         _dummy_pbkdf2(password)
         return False
     if _is_legacy_sha256_hash(password_hash):
-        # Unsalted legacy hashes are trivially brute-forceable; fail closed.
-        # The operator must reset these accounts so they get a PBKDF2 hash.
-        _dummy_pbkdf2(password)
-        return False
+        # Preserve one successful login as a migration path; the caller
+        # immediately replaces this legacy hash with PBKDF2. Failed checks do
+        # PBKDF2 dummy work so they do not become a cheap timing oracle.
+        legacy = hashlib.sha256(password.encode("utf-8")).hexdigest()
+        verified = hmac.compare_digest(legacy, password_hash)
+        if not verified:
+            _dummy_pbkdf2(password)
+        return verified
     try:
         scheme, iterations_raw, salt, expected = password_hash.split("$", 3)
         if scheme != PASSWORD_HASH_SCHEME:
@@ -3591,16 +3676,434 @@ async def get_user_recognitions(user_id: str, db: Session = Depends(get_db)):
     return result
 
 
+# ── Freshworks embedded app ──────────────────────────────────
+
+def _embedded_auth_error(exc: Exception) -> HTTPException:
+    return HTTPException(status_code=401, detail="Freshworks embedded authentication failed")
+
+
+@app.post("/integrations/freshworks/bootstrap")
+def freshworks_bootstrap(
+    payload: FreshworksBootstrapRequest,
+    response: Response,
+    x_tickety_app_secret: Optional[str] = Header(None, alias="X-Tickety-App-Secret"),
+    db: Session = Depends(get_db),
+):
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        verify_installation_secret(x_tickety_app_secret)
+        code, expires_at = issue_bootstrap_code(
+            db,
+            binding_id=payload.binding_id,
+            account_host=payload.account_host,
+            external_user_id=payload.external_user_id,
+            workspace_id=payload.workspace_id,
+            external_ticket_id=payload.external_ticket_id,
+            ticket_updated_at=payload.ticket_updated_at,
+            audience=payload.audience,
+        )
+    except (EmbeddedAuthError, BindingValidationError) as exc:
+        db.rollback()
+        raise _embedded_auth_error(exc) from exc
+    return {"code": code, "expires_at": expires_at}
+
+
+@app.post("/integrations/freshworks/session")
+def freshworks_session(
+    payload: FreshworksBootstrapRedeem,
+    response: Response,
+    x_tickety_app_secret: Optional[str] = Header(None, alias="X-Tickety-App-Secret"),
+    db: Session = Depends(get_db),
+):
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        verify_installation_secret(x_tickety_app_secret)
+        token, session = redeem_bootstrap_code(
+            db, binding_id=payload.binding_id, code=payload.code
+        )
+    except EmbeddedAuthError as exc:
+        db.rollback()
+        raise _embedded_auth_error(exc) from exc
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "expires_at": session.expires_at,
+        "binding_id": session.binding_id,
+        "external_ticket_id": session.external_ticket_id,
+    }
+
+
+def _embedded_ticket_context(
+    db: Session, authorization: Optional[str], external_ticket_id: str
+):
+    try:
+        principal = authenticate_session(db, authorization)
+        require_ticket_scope(principal, external_ticket_id)
+    except EmbeddedAuthError as exc:
+        db.rollback()
+        raise _embedded_auth_error(exc) from exc
+    ticket = db.query(TicketRecord).filter(
+        TicketRecord.binding_id == principal.binding.id,
+        TicketRecord.external_source == "freshservice",
+        TicketRecord.external_id == external_ticket_id,
+    ).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket has not been synchronized to Tickety")
+    _authorize_ticket_analysis(principal.user, ticket)
+    return principal, ticket
+
+
+def _stored_json(value: Optional[str]):
+    if not value:
+        return None
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return None
+
+
+@app.get("/integrations/freshworks/tickets/{external_ticket_id}")
+def freshworks_ticket_context(
+    external_ticket_id: str,
+    response: Response,
+    authorization: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+):
+    response.headers["Cache-Control"] = "no-store"
+    if not external_ticket_id.isdigit():
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    principal, ticket = _embedded_ticket_context(
+        db, authorization, external_ticket_id
+    )
+    capabilities = {
+        row.capability: row.status
+        for row in db.query(IntegrationCapabilityRecord).filter(
+            IntegrationCapabilityRecord.binding_id == principal.binding.id
+        ).all()
+    }
+    return {
+        "binding": {
+            "id": principal.binding.id,
+            "environment": principal.binding.environment,
+            "expires_at": principal.binding.expires_at,
+        },
+        "actor": {
+            "id": principal.user.id,
+            "name": principal.user.name,
+            "role": principal.user.role,
+        },
+        "ticket": {
+            "id": ticket.id,
+            "external_id": ticket.external_id,
+            "subject": ticket.subject,
+            "summary": ticket.summary,
+            "status": ticket.status,
+            "priority": ticket.priority,
+            "assignee_id": ticket.assignee_id,
+            "updated_at": ticket.external_updated_at or ticket.updated_at,
+            "recommended_solution": _stored_json(ticket.recommended_solution),
+        },
+        "capabilities": capabilities,
+    }
+
+
+@app.patch("/integrations/freshworks/tickets/{external_ticket_id}")
+async def freshworks_ticket_writeback(
+    external_ticket_id: str,
+    payload: FreshworksTicketWriteback,
+    response: Response,
+    authorization: Optional[str] = Header(None),
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
+    db: Session = Depends(get_db),
+):
+    response.headers["Cache-Control"] = "no-store"
+    if not external_ticket_id.isdigit():
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    if not idempotency_key or not re.fullmatch(r"[A-Za-z0-9._:-]{16,128}", idempotency_key):
+        raise HTTPException(status_code=400, detail="A valid Idempotency-Key is required")
+    changes = payload.model_dump(exclude_unset=True, exclude={"expected_updated_at"})
+    changes = {key: value for key, value in changes.items() if value is not None}
+    if not changes:
+        raise HTTPException(status_code=400, detail="No supported write-back fields supplied")
+
+    principal, ticket = _embedded_ticket_context(db, authorization, external_ticket_id)
+    identity_capability = db.query(IntegrationCapabilityRecord).filter(
+        IntegrationCapabilityRecord.binding_id == principal.binding.id,
+        IntegrationCapabilityRecord.capability == "freshworks.trusted_agent_identity",
+        IntegrationCapabilityRecord.status == "supported",
+    ).first()
+    if not identity_capability:
+        raise HTTPException(
+            status_code=409,
+            detail="Write-back requires verified Freshworks agent identity",
+        )
+    _authorize_ticket_mutation(principal.user, ticket, changed_fields=set(changes))
+    digest_payload = payload.model_dump(mode="json")
+    request_digest = hashlib.sha256(json.dumps(
+        digest_payload, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")).hexdigest()
+    existing = db.query(ProviderOperationRecord).filter(
+        ProviderOperationRecord.binding_id == principal.binding.id,
+        ProviderOperationRecord.idempotency_key == idempotency_key,
+    ).first()
+    if existing:
+        if existing.request_digest != request_digest:
+            raise HTTPException(status_code=409, detail="Idempotency key was used for another request")
+        if existing.status == "succeeded" and existing.response_reference:
+            return json.loads(existing.response_reference)
+        raise HTTPException(status_code=409, detail=f"Write-back operation is {existing.status}")
+
+    operation = ProviderOperationRecord(
+        id=secrets.token_hex(16),
+        binding_id=principal.binding.id,
+        ticket_id=ticket.id,
+        operation="ticket.update",
+        idempotency_key=idempotency_key,
+        expected_external_version=payload.expected_updated_at.isoformat(),
+        status="pending",
+        request_digest=request_digest,
+        created_by=principal.user.id,
+    )
+    db.add(operation)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Duplicate write-back operation") from exc
+
+    adapter = get_adapter(binding=principal.binding)
+    try:
+        provider_before = await adapter.fetch_ticket_raw(external_ticket_id)
+        observed_version = adapter._parse_datetime(provider_before.get("updated_at"))
+        expected_version = payload.expected_updated_at
+        if expected_version.tzinfo is not None:
+            expected_version = expected_version.astimezone(timezone.utc).replace(tzinfo=None)
+        if (
+            observed_version is None
+            or observed_version.replace(microsecond=0)
+            != expected_version.replace(microsecond=0)
+        ):
+            operation.status = "conflict"
+            operation.error_code = "external_version_mismatch"
+            db.add(ProviderConflictRecord(
+                id=secrets.token_hex(16),
+                operation_id=operation.id,
+                binding_id=principal.binding.id,
+                ticket_id=ticket.id,
+                field="updated_at",
+                provider_snapshot=json.dumps({
+                    "updated_at": provider_before.get("updated_at"),
+                    "status": provider_before.get("status"),
+                    "priority": provider_before.get("priority"),
+                }, sort_keys=True, separators=(",", ":")),
+                tickety_snapshot=json.dumps({
+                    "expected_updated_at": payload.expected_updated_at.isoformat(),
+                    **changes,
+                }, sort_keys=True, separators=(",", ":")),
+            ))
+            db.commit()
+            raise HTTPException(status_code=409, detail="Freshservice ticket changed; refresh before writing")
+
+        provider_payload = {}
+        if "status" in changes:
+            provider_payload["status"] = adapter.to_freshservice_status(changes["status"])
+        if "priority" in changes:
+            provider_payload["priority"] = adapter.to_freshservice_priority(changes["priority"])
+        provider_after = await adapter.update_ticket_raw(external_ticket_id, provider_payload)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        operation.status = "failed"
+        operation.error_code = type(exc).__name__[:96]
+        db.commit()
+        raise HTTPException(status_code=502, detail="Freshservice write-back failed") from exc
+
+    for field, value in changes.items():
+        old_value = getattr(ticket, field)
+        if old_value != value:
+            db.add(TicketAuditLogRecord(
+                ticket_id=ticket.id,
+                field=field,
+                old_value=str(old_value) if old_value is not None else None,
+                new_value=str(value),
+                changed_by=principal.user.name,
+            ))
+            setattr(ticket, field, value)
+    ticket.external_status = adapter.map_status(provider_after.get("status"))
+    ticket.external_updated_at = adapter._parse_datetime(provider_after.get("updated_at"))
+    operation.status = "succeeded"
+    response = {
+        "operation_id": operation.id,
+        "status": "succeeded",
+        "ticket": {
+            "external_id": ticket.external_id,
+            "status": ticket.status,
+            "priority": ticket.priority,
+            "updated_at": ticket.external_updated_at.isoformat()
+            if ticket.external_updated_at else None,
+        },
+    }
+    operation.response_reference = json.dumps(
+        response, default=str, sort_keys=True, separators=(",", ":")
+    )
+    capability = db.query(IntegrationCapabilityRecord).filter(
+        IntegrationCapabilityRecord.binding_id == principal.binding.id,
+        IntegrationCapabilityRecord.capability == "ticket.update",
+    ).first()
+    if capability:
+        capability.status = "supported"
+        capability.details = json.dumps({
+            "status": "supported", "verified_by": "successful_writeback"
+        }, sort_keys=True, separators=(",", ":"))
+        capability.checked_at = datetime.utcnow()
+    else:
+        db.add(IntegrationCapabilityRecord(
+            binding_id=principal.binding.id,
+            capability="ticket.update",
+            status="supported",
+            details=json.dumps({
+                "status": "supported", "verified_by": "successful_writeback"
+            }, sort_keys=True, separators=(",", ":")),
+            checked_at=datetime.utcnow(),
+        ))
+    db.commit()
+    return response
+
+
 # ── Sync / Admin ─────────────────────────────────────────────
+
+def _binding_or_404(db: Session, binding_id: str) -> IntegrationBindingRecord:
+    binding = get_binding(db, binding_id)
+    if not binding:
+        raise HTTPException(status_code=404, detail="Integration binding not found")
+    return binding
+
+
+def _sync_adapter_for_binding(
+    db: Session, binding_id: Optional[str]
+) -> tuple[Any, str]:
+    binding = _binding_or_404(db, binding_id) if binding_id else get_active_binding(db)
+    if binding:
+        if binding.state != "active":
+            raise HTTPException(status_code=409, detail="Integration binding is not active")
+        if binding.expires_at and binding.expires_at <= datetime.utcnow():
+            raise HTTPException(status_code=409, detail="Integration binding has expired")
+        return get_adapter(binding=binding), binding.id
+    return get_adapter(), "legacy"
+
+
+@app.post("/admin/integrations/bindings", status_code=201)
+def create_integration_binding(
+    payload: IntegrationBindingCreate,
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(require_protected_ai_role("admin")),
+):
+    try:
+        binding = create_binding(
+            db,
+            provider=payload.provider,
+            environment=payload.environment,
+            canonical_account_host=payload.canonical_account_host,
+            workspace_ids=payload.workspace_ids,
+            installation_id=payload.installation_id,
+            product_variant=payload.product_variant,
+            credential_reference=payload.credential_reference,
+            expires_at=payload.expires_at,
+            actor_id=user.id,
+        )
+    except BindingValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Integration binding already exists") from exc
+    return serialize_binding(binding)
+
+
+@app.get("/admin/integrations/bindings")
+def list_integration_bindings(
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
+):
+    rows = db.query(IntegrationBindingRecord).order_by(
+        IntegrationBindingRecord.created_at.desc()
+    ).all()
+    return {"bindings": [serialize_binding(row) for row in rows]}
+
+
+@app.get("/admin/integrations/bindings/{binding_id}/capabilities")
+def get_integration_capabilities(
+    binding_id: str,
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
+):
+    _binding_or_404(db, binding_id)
+    return {
+        "binding_id": binding_id,
+        "capabilities": [
+            {
+                "capability": row.capability,
+                "status": row.status,
+                "details": json.loads(row.details or "{}"),
+                "checked_at": row.checked_at,
+            }
+            for row in list_capabilities(db, binding_id)
+        ],
+    }
+
+
+@app.post("/admin/integrations/bindings/{binding_id}/validate")
+async def validate_integration_binding(
+    binding_id: str,
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(require_protected_ai_role("admin")),
+):
+    binding = _binding_or_404(db, binding_id)
+    try:
+        result = await validate_binding(db, binding, actor_id=user.id)
+    except BindingValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"binding": serialize_binding(binding), **result}
+
+
+@app.post("/admin/integrations/bindings/{binding_id}/activate")
+def activate_integration_binding(
+    binding_id: str,
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(require_protected_ai_role("admin")),
+):
+    binding = _binding_or_404(db, binding_id)
+    try:
+        binding = activate_binding(db, binding, actor_id=user.id)
+    except BindingValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return serialize_binding(binding)
+
+
+@app.post("/admin/integrations/bindings/{binding_id}/suspend")
+def suspend_integration_binding(
+    binding_id: str,
+    payload: IntegrationBindingSuspend,
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(require_protected_ai_role("admin")),
+):
+    binding = _binding_or_404(db, binding_id)
+    try:
+        binding = suspend_binding(
+            db, binding, actor_id=user.id, reason=payload.reason
+        )
+    except BindingValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return serialize_binding(binding)
 
 @app.post("/admin/sync/trigger")
 def trigger_sync(
+    binding_id: Optional[str] = Query(None, max_length=36),
     db: Session = Depends(get_db),
     user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
     _reserve_ai_request(db, user.id, "itsm_sync")
-    adapter = get_adapter()
-    result = sync_tickets_from_external(adapter)
+    adapter, effective_binding_id = _sync_adapter_for_binding(db, binding_id)
+    result = sync_tickets_from_external(adapter, binding_id=effective_binding_id)
     return {"status": "completed", "result": result}
 
 
@@ -3608,6 +4111,7 @@ def trigger_sync(
 def fetch_sync(
     days: int = Query(7, ge=1, le=365, description="Fetch tickets updated in the last N days"),
     overwrite: bool = Query(False, description="Overwrite already-imported tickets from the source"),
+    binding_id: Optional[str] = Query(None, max_length=36),
     db: Session = Depends(get_db),
     user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
@@ -3620,8 +4124,13 @@ def fetch_sync(
     changes; pass overwrite=true to force-refresh them from the source.
     """
     _reserve_ai_request(db, user.id, "itsm_fetch")
-    adapter = get_adapter()
-    result = fetch_tickets_by_days(adapter, days=days, overwrite=overwrite)
+    adapter, effective_binding_id = _sync_adapter_for_binding(db, binding_id)
+    result = fetch_tickets_by_days(
+        adapter,
+        days=days,
+        overwrite=overwrite,
+        binding_id=effective_binding_id,
+    )
     return {"status": "completed", "result": result}
 
 
@@ -3632,6 +4141,7 @@ async def sync_status(
     s = get_sync_status()
     return SyncStatus(
         provider=s.get("provider", "none"),
+        binding_id=s.get("binding_id"),
         last_synced_at=datetime.fromisoformat(s["last_synced_at"]) if s.get("last_synced_at") else None,
         last_status=s.get("last_status", "idle"),
         last_error="sync_failed" if s.get("last_error") else None,
@@ -3643,6 +4153,7 @@ async def sync_status(
 
 @app.post("/admin/sync/agents")
 async def sync_agents(
+    binding_id: Optional[str] = Query(None, max_length=36),
     payload: dict = Body(default_factory=dict),
     db: Session = Depends(get_db),
     user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
@@ -3653,8 +4164,10 @@ async def sync_agents(
     then creates or updates a matching Tickety UserRecord + UserMappingRecord.
     Returns {created, updated, errors, total}."""
     _reserve_ai_request(db, user.id, "itsm_agent_sync")
-    adapter = get_adapter()
-    result = await async_sync_agents_from_external(adapter, options=payload)
+    adapter, effective_binding_id = _sync_adapter_for_binding(db, binding_id)
+    result = await async_sync_agents_from_external(
+        adapter, options=payload, binding_id=effective_binding_id
+    )
     changed = (
         result.get("created", 0)
         + result.get("updated", 0)
@@ -3696,6 +4209,7 @@ async def list_agents(
             "impact_points": u.impact_points,
             "external_source": m.external_source if m else None,
             "external_assignee_id": m.external_assignee_id if m else None,
+            "binding_id": m.binding_id if m else None,
         })
     return {"agents": out}
 
@@ -4276,12 +4790,15 @@ async def ticket_resolve(
 _WEBHOOK_DELIVERY_PREFIX = "WEBHOOK_DELIVERY_"
 
 
-def _claim_webhook_delivery(request: Request, raw_body: bytes) -> str:
+def _claim_webhook_delivery(
+    request: Request, raw_body: bytes, binding_id: str = "legacy"
+) -> str:
     """Atomically reject duplicate signed deliveries without retaining payloads."""
     timestamp = (request.headers.get("x-freshservice-webhook-timestamp") or "").strip()
     signature = (request.headers.get("x-freshservice-webhook-signature") or "").strip()
     digest = hashlib.sha256(
-        timestamp.encode("ascii") + b"\0" + signature.encode("ascii") + b"\0" + raw_body
+        binding_id.encode("ascii") + b"\0" + timestamp.encode("ascii")
+        + b"\0" + signature.encode("ascii") + b"\0" + raw_body
     ).hexdigest()
     key = f"{_WEBHOOK_DELIVERY_PREFIX}{digest}"
     db = SessionLocal()
@@ -4351,10 +4868,12 @@ def _release_webhook_delivery(key: str) -> None:
     finally:
         db.close()
 
-@app.post("/webhooks/external")
-async def freshservice_webhook(request: Request):
+async def _process_freshservice_webhook(
+    request: Request, binding: Optional[IntegrationBindingRecord] = None
+):
     raw_body = await request.body()
-    adapter = get_adapter("freshservice")
+    binding_id = binding.id if binding else "legacy"
+    adapter = get_adapter(binding=binding) if binding else get_adapter("freshservice")
     request_headers = dict(request.headers)
     if not adapter.verify_webhook_signature(request_headers, raw_body):
         raise HTTPException(status_code=400, detail="Invalid webhook payload")
@@ -4365,9 +4884,9 @@ async def freshservice_webhook(request: Request):
     event = adapter.parse_verified_webhook(payload)
     if not event:
         raise HTTPException(status_code=400, detail="Invalid webhook payload")
-    delivery_key = _claim_webhook_delivery(request, raw_body)
+    delivery_key = _claim_webhook_delivery(request, raw_body, binding_id)
     try:
-        ticket = handle_webhook_event(event, adapter)
+        ticket = handle_webhook_event(event, adapter, binding_id=binding_id)
         if not ticket:
             raise RuntimeError("webhook event was not applied")
         db = SessionLocal()
@@ -4389,13 +4908,34 @@ async def freshservice_webhook(request: Request):
     return {"status": "received", "ticket_id": ticket.id if ticket else None}
 
 
+@app.post("/webhooks/external")
+async def freshservice_webhook(request: Request):
+    return await _process_freshservice_webhook(request)
+
+
+@app.post("/webhooks/external/{binding_id}")
+async def freshservice_binding_webhook(
+    binding_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    binding = _binding_or_404(db, binding_id)
+    if binding.provider != "freshservice" or binding.state != "active":
+        raise HTTPException(status_code=404, detail="Integration binding not found")
+    if binding.expires_at and binding.expires_at <= datetime.utcnow():
+        raise HTTPException(status_code=410, detail="Integration binding expired")
+    return await _process_freshservice_webhook(request, binding)
+
+
 # ── Resolution & Points Awarding ─────────────────────────────
 
 async def _check_resolution_and_award(ticket: TicketRecord, db: Optional[Session] = None):
     """Check if a ticket transitioned to Closed and award points to the assignee."""
     owns_db = db is None
     db = db or SessionLocal()
-    ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket.id).first()
+    ticket = db.query(TicketRecord).filter(
+        TicketRecord.id == ticket.id
+    ).populate_existing().with_for_update().first()
     if not ticket:
         if owns_db:
             db.close()
@@ -4409,20 +4949,11 @@ async def _check_resolution_and_award(ticket: TicketRecord, db: Optional[Session
             db.close()
         return
     try:
-        # Re-read under a row lock so two concurrent webhook deliveries for
-        # the same ticket cannot both observe points_awarded_sent=False and
-        # award points twice. (No-op on SQLite; Postgres gets the lock.)
-        locked_ticket = db.query(TicketRecord).filter(
-            TicketRecord.id == ticket.id
-        ).with_for_update().first()
-        if locked_ticket and locked_ticket.points_awarded_sent:
-            if owns_db:
-                db.close()
-            return
         # Find assignee mapping
         if not ticket.external_assignee_id:
             return
         mapping = db.query(UserMappingRecord).filter(
+            UserMappingRecord.binding_id == ticket.binding_id,
             UserMappingRecord.external_source == ticket.external_source,
             UserMappingRecord.external_assignee_id == ticket.external_assignee_id,
         ).first()
@@ -5248,16 +5779,7 @@ async def send_survey(payload: SurveySend, db: Session = Depends(get_db)):
 
 @app.post("/surveys/{survey_id}/respond", status_code=201)
 async def respond_survey(survey_id: str, payload: SurveyResponseCreate, db: Session = Depends(get_db)):
-    now = datetime.utcnow()
-    minute_count = _increment_request_bucket(
-        db, f"survey:{survey_id}", "survey_response_minute", now.replace(second=0, microsecond=0)
-    )
-    day_count = _increment_request_bucket(
-        db, f"survey:{survey_id}", "survey_response_day", now.replace(hour=0, minute=0, second=0, microsecond=0)
-    )
-    if minute_count > 5 or day_count > 100:
-        db.rollback()
-        raise HTTPException(status_code=429, detail="survey_rate_limit_exceeded", headers={"Retry-After": "60"})
+    _reserve_survey_response_request(db, survey_id)
     survey = db.query(SurveyRecord).filter(SurveyRecord.id == survey_id).first()
     if not survey:
         raise HTTPException(status_code=404, detail="Survey not found")
@@ -5491,14 +6013,21 @@ async def ws_ticket_stream(ws: WebSocket, ticket_id: str):
             {"step": "done", "label": "Analysis complete", "status": "pending"},
         ]
 
-        await ws.send_json({"type": "progress", "steps": steps})
+        def progress_payload() -> dict:
+            return {
+                "type": "progress",
+                "steps": steps,
+                "timeout_seconds": _analysis_pipeline_timeout_seconds(),
+            }
+
+        await ws.send_json(progress_payload())
 
         async def report_progress(step_name: str, status: str):
             for item in steps:
                 if item["step"] == step_name:
                     item["status"] = status
                     break
-            await ws.send_json({"type": "progress", "steps": steps})
+            await ws.send_json(progress_payload())
 
         result = await _run_ticket_analysis(ticket, db, progress=report_progress)
 

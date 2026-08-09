@@ -182,6 +182,44 @@ class LLMContractTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(LLMUnavailableError):
                 await manager.analyze("ticket", response_model=TriageAnalysis)
 
+    async def test_timeout_without_usage_keeps_conservative_token_reservation(self):
+        reservation = llm_module.ProviderCapacityReservation(
+            tokens=500,
+            day_start=datetime(2026, 7, 30),
+            minute_start=datetime(2026, 7, 30, 23, 59),
+        )
+        with (
+            patch.dict(os.environ, {
+                "APP_MODE": "production",
+                "DEFAULT_MODEL": "deepseek-v4-flash",
+                "DEEPSEEK_API_KEY": "configured-key",
+            }, clear=False),
+            patch.object(
+                llm_module,
+                "acompletion",
+                new=AsyncMock(side_effect=asyncio.TimeoutError("timed out")),
+            ),
+            patch.object(
+                llm_module,
+                "_reserve_provider_capacity",
+                return_value=reservation,
+            ),
+            patch.object(
+                llm_module,
+                "_try_acquire_provider_lease",
+                return_value="local-only",
+            ),
+            patch.object(llm_module, "_release_provider_lease"),
+            patch.object(llm_module, "_settle_provider_tokens") as settle,
+            patch.object(llm_module, "_record_call"),
+            patch.object(llm_module, "_MAX_RETRIES", 1),
+        ):
+            manager = LLMManager()
+            with self.assertRaises(LLMUnavailableError):
+                await manager.analyze("ticket", response_model=TriageAnalysis)
+
+        settle.assert_not_called()
+
     async def test_provider_concurrency_is_bounded(self):
         active = 0
         peak = 0
@@ -586,6 +624,51 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 window_kind="reserved_tokens_day",
             ).one()
             self.assertEqual(daily.request_count, 100)
+
+    def test_provider_settlement_updates_the_original_reservation_windows(self):
+        day_start = datetime(2026, 7, 30)
+        minute_start = datetime(2026, 7, 30, 23, 59)
+        with self.session_factory() as db:
+            db.add_all([
+                AIRequestBucketRecord(
+                    actor_id="provider:test-provider",
+                    window_kind="reserved_tokens_day",
+                    window_start=day_start,
+                    request_count=100,
+                ),
+                AIRequestBucketRecord(
+                    actor_id="provider:test-provider",
+                    window_kind="provider_tokens_minute",
+                    window_start=minute_start,
+                    request_count=100,
+                ),
+            ])
+            db.commit()
+
+        reservation = llm_module.ProviderCapacityReservation(
+            tokens=100,
+            day_start=day_start,
+            minute_start=minute_start,
+        )
+        with (
+            patch.dict(os.environ, {"APP_MODE": "production"}, clear=False),
+            patch.object(database_module, "SessionLocal", self.session_factory),
+        ):
+            llm_module._settle_provider_tokens(
+                "test-provider", reservation, actual=40
+            )
+
+        with self.session_factory() as db:
+            counts = {
+                row.window_kind: row.request_count
+                for row in db.query(AIRequestBucketRecord).filter_by(
+                    actor_id="provider:test-provider"
+                )
+            }
+        self.assertEqual(counts, {
+            "reserved_tokens_day": 40,
+            "provider_tokens_minute": 40,
+        })
 
     def test_retry_scheduler_never_clears_a_replacement_claim(self):
         with self.session_factory() as db:

@@ -260,7 +260,6 @@ HELM_ARGS=(
   "${HELM_VALUE_ARGS[@]}"
   --wait
   --wait-for-jobs
-  --atomic
   --timeout "$HELM_TIMEOUT"
 )
 

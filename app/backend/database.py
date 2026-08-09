@@ -74,6 +74,7 @@ class TicketRecord(Base):
     portal_access_expires_at = Column(DateTime, nullable=True)
 
     # ITSM external linkage
+    binding_id = Column(String(36), nullable=False, default="legacy", index=True)
     external_source = Column(String, nullable=True)
     external_id = Column(String, nullable=True, index=True)
     external_url = Column(String, nullable=True)
@@ -100,7 +101,12 @@ class TicketRecord(Base):
     summary = Column(Text, nullable=True)
     recommended_solution = Column(Text, nullable=True)
 
-    __table_args__ = (UniqueConstraint("external_source", "external_id", name="uix_external_ticket"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "binding_id", "external_source", "external_id",
+            name="uix_binding_external_ticket",
+        ),
+    )
 
 
 class AIUsageEventRecord(Base):
@@ -201,14 +207,15 @@ class UserMappingRecord(Base):
     __tablename__ = "user_mappings"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    binding_id = Column(String(36), nullable=False, default="legacy", index=True)
     tickety_user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
     external_source = Column(String, nullable=False)
     external_assignee_id = Column(String, nullable=False)
 
     __table_args__ = (
         UniqueConstraint(
-            "external_source", "external_assignee_id",
-            name="uix_external_assignee",
+            "binding_id", "external_source", "external_assignee_id",
+            name="uix_binding_external_assignee",
         ),
     )
 
@@ -217,11 +224,166 @@ class SyncStateRecord(Base):
     __tablename__ = "sync_state"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    provider = Column(String, nullable=False, unique=True)
+    binding_id = Column(String(36), nullable=False, default="legacy", index=True)
+    provider = Column(String, nullable=False)
     last_synced_at = Column(DateTime, default=datetime.utcnow)
     last_status = Column(String, default="idle")
     last_error = Column(Text, nullable=True)
     total_synced = Column(Integer, default=0)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "binding_id", "provider", name="uix_sync_state_binding_provider"
+        ),
+    )
+
+
+class IntegrationBindingRecord(Base):
+    """Immutable account boundary for one external ITSM installation."""
+    __tablename__ = "integration_bindings"
+
+    id = Column(String(36), primary_key=True)
+    provider = Column(String(64), nullable=False, index=True)
+    environment = Column(String(16), nullable=False, index=True)
+    state = Column(String(16), nullable=False, default="draft", index=True)
+    canonical_account_host = Column(String(255), nullable=False)
+    installation_id = Column(String(255), nullable=True)
+    workspace_ids = Column(Text, nullable=False, default="[]")
+    product_variant = Column(String(32), nullable=True)
+    credential_reference = Column(String(255), nullable=False, default="env://freshservice")
+    capability_version = Column(Integer, nullable=False, default=1)
+    validation_evidence = Column(Text, nullable=True)
+    expires_at = Column(DateTime, nullable=True, index=True)
+    activated_by = Column(String, ForeignKey("users.id"), nullable=True)
+    activated_at = Column(DateTime, nullable=True)
+    suspended_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider", "environment", "canonical_account_host", "installation_id",
+            name="uix_integration_binding_installation",
+        ),
+        Index(
+            "ix_integration_binding_lookup",
+            "provider", "environment", "state",
+        ),
+    )
+
+
+class IntegrationCapabilityRecord(Base):
+    __tablename__ = "integration_capabilities"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    binding_id = Column(
+        String(36), ForeignKey("integration_bindings.id"), nullable=False, index=True
+    )
+    capability = Column(String(96), nullable=False)
+    status = Column(String(16), nullable=False)
+    details = Column(Text, nullable=True)
+    checked_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "binding_id", "capability", name="uix_binding_capability"
+        ),
+    )
+
+
+class IntegrationBootstrapRecord(Base):
+    """One-time, hashed embedded-session bootstrap code."""
+    __tablename__ = "integration_bootstrap_codes"
+
+    code_hash = Column(String(64), primary_key=True)
+    binding_id = Column(
+        String(36), ForeignKey("integration_bindings.id"), nullable=False, index=True
+    )
+    external_user_id = Column(String(255), nullable=True)
+    workspace_id = Column(String(255), nullable=True)
+    audience = Column(String(255), nullable=False)
+    context_json = Column(Text, nullable=True)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    redeemed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class IntegrationSessionRecord(Base):
+    """Short-lived bearer session issued to an embedded Freshworks app."""
+    __tablename__ = "integration_sessions"
+
+    token_hash = Column(String(64), primary_key=True)
+    binding_id = Column(
+        String(36), ForeignKey("integration_bindings.id"), nullable=False, index=True
+    )
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    external_user_id = Column(String(255), nullable=False)
+    workspace_id = Column(String(255), nullable=True)
+    external_ticket_id = Column(String(255), nullable=True)
+    audience = Column(String(255), nullable=False)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    revoked_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    last_seen_at = Column(DateTime, nullable=True)
+
+
+class IntegrationAuditRecord(Base):
+    __tablename__ = "integration_audit_log"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    binding_id = Column(
+        String(36), ForeignKey("integration_bindings.id"), nullable=False, index=True
+    )
+    action = Column(String(96), nullable=False, index=True)
+    actor_id = Column(String, ForeignKey("users.id"), nullable=True)
+    details = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+
+class ProviderOperationRecord(Base):
+    __tablename__ = "provider_operations"
+
+    id = Column(String(36), primary_key=True)
+    binding_id = Column(
+        String(36), ForeignKey("integration_bindings.id"), nullable=False, index=True
+    )
+    ticket_id = Column(String, ForeignKey("tickets.id"), nullable=True, index=True)
+    operation = Column(String(96), nullable=False)
+    idempotency_key = Column(String(128), nullable=False)
+    expected_external_version = Column(String(128), nullable=True)
+    status = Column(String(16), nullable=False, default="pending", index=True)
+    request_digest = Column(String(64), nullable=False)
+    response_reference = Column(Text, nullable=True)
+    error_code = Column(String(96), nullable=True)
+    created_by = Column(String, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "binding_id", "idempotency_key", name="uix_binding_idempotency_key"
+        ),
+    )
+
+
+class ProviderConflictRecord(Base):
+    __tablename__ = "provider_conflicts"
+
+    id = Column(String(36), primary_key=True)
+    operation_id = Column(
+        String(36), ForeignKey("provider_operations.id"), nullable=False, index=True
+    )
+    binding_id = Column(
+        String(36), ForeignKey("integration_bindings.id"), nullable=False, index=True
+    )
+    ticket_id = Column(String, ForeignKey("tickets.id"), nullable=True, index=True)
+    field = Column(String(96), nullable=False)
+    provider_snapshot = Column(Text, nullable=False)
+    tickety_snapshot = Column(Text, nullable=False)
+    status = Column(String(16), nullable=False, default="open", index=True)
+    resolved_by = Column(String, ForeignKey("users.id"), nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
 class SettingsRecord(Base):
@@ -766,7 +928,7 @@ def verify_database_schema() -> None:
 
 
 def init_db():
-    if os.getenv("APP_MODE", "production").strip().lower() == "production":
+    if (os.getenv("APP_MODE") or "production").strip().lower() == "production":
         # Production startup is verification-only. DDL belongs to the explicit
         # migration job so replicas never race schema changes.
         verify_database_schema()

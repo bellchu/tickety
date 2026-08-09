@@ -150,14 +150,14 @@ if require_or_skip "$REQUIRE_HELM" helm; then
   fi
 
   echo "Linting Helm chart..."
-  helm lint --strict "$CHART_DIR"
+  helm lint --strict --kube-version 1.25.0 "$CHART_DIR"
 
   temporary_dir=$(mktemp -d)
   render_chart() {
     local name=$1
     shift
     local output="$temporary_dir/$name.yaml"
-    helm template tickety "$CHART_DIR" --namespace tickety "$@" >"$output"
+    helm template tickety "$CHART_DIR" --namespace tickety --kube-version 1.25.0 "$@" >"$output"
     rendered_files+=("$output")
   }
 
@@ -165,6 +165,7 @@ if require_or_skip "$REQUIRE_HELM" helm; then
   render_chart default
   render_chart production --values "$ROOT_DIR/deploy/examples/production-values.yaml"
   render_chart ingress --set ingress.enabled=true --set ingress.host=tickety.example.test
+  render_chart backup --set backup.enabled=true
   render_chart external-database \
     --set postgresql.enabled=false \
     --set-string postgresql.externalDatabaseUrl='postgresql+psycopg2://tickety:password@database.example.test:5432/tickety'

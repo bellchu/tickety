@@ -21,11 +21,13 @@ from starlette.websockets import WebSocketDisconnect
 
 from app.backend import llm_manager, main, ticket_vectors, worker
 from app.backend.database import (
+    AIRequestBucketRecord,
     Base,
     KbArticleRecord,
     ProblemRecord,
     ProblemTicketLinkRecord,
     SessionRecord,
+    SurveyRecord,
     TicketCommentRecord,
     TicketRecord,
     TicketLinkRecord,
@@ -676,6 +678,79 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
             headers={"Origin": "https://attacker.example"},
         )
         self.assertEqual(response.status_code, 403)
+
+    def test_public_logout_still_rejects_cross_origin_write(self):
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
+
+        response = self.client.post(
+            "/auth/logout",
+            headers={"Origin": "https://attacker.example"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_production_origin_check_never_uses_untrusted_host_header(self):
+        request = MagicMock()
+        request.headers = {
+            "origin": "https://attacker.example",
+            "host": "attacker.example",
+        }
+        request.url.netloc = "attacker.example"
+        request.url.scheme = "https"
+
+        self.assertFalse(main._request_origin_allowed(request))
+
+    def test_legacy_password_login_is_migrated_to_pbkdf2(self):
+        password = "legacy-password"
+        legacy_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
+        with self.session_factory() as db:
+            db.add(UserRecord(
+                id="legacy-password-user",
+                name="Legacy Password User",
+                email="legacy-password@example.com",
+                role="agent",
+                is_active=True,
+                password_hash=legacy_hash,
+            ))
+            db.commit()
+
+        response = self.client.post(
+            "/auth/login",
+            headers={"Origin": "https://tickety.example"},
+            json={"email": "legacy-password@example.com", "password": password},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        with self.session_factory() as db:
+            user = db.get(UserRecord, "legacy-password-user")
+            self.assertTrue(user.password_hash.startswith(f"{main.PASSWORD_HASH_SCHEME}$"))
+
+    def test_survey_limit_persists_for_rejected_responses_without_raw_id_keys(self):
+        survey_id = "survey-id-not-for-rate-limit-storage"
+        with self.session_factory() as db:
+            db.add(SurveyRecord(id=survey_id, ticket_id="own-ticket"))
+            db.commit()
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
+
+        statuses = []
+        for _ in range(6):
+            response = self.client.post(
+                f"/surveys/{survey_id}/respond",
+                headers={"Origin": "https://tickety.example"},
+                json={"rating": 5, "comment": "Thanks"},
+            )
+            statuses.append(response.status_code)
+
+        self.assertEqual(statuses, [201, 409, 409, 409, 409, 429])
+        with self.session_factory() as db:
+            actor_ids = {
+                row.actor_id for row in db.query(AIRequestBucketRecord).filter(
+                    AIRequestBucketRecord.window_kind == "survey_response_minute"
+                ).all()
+            }
+        self.assertNotIn(f"survey:{survey_id}", actor_ids)
+        self.assertEqual(len(actor_ids), 1)
+        self.assertTrue(next(iter(actor_ids)).startswith("survey:"))
 
     def test_agent_cannot_trigger_ai_for_another_agents_ticket(self):
         self.client.cookies.set(main.SESSION_COOKIE, "prod-agent-session")
@@ -1494,6 +1569,51 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, 1008)
 
+    def test_notifications_without_recipient_are_not_broadcast(self):
+        recipient = MagicMock()
+        recipient.send_json = AsyncMock()
+        other = MagicMock()
+        other.send_json = AsyncMock()
+        previous = list(main._notification_subscribers)
+        main._notification_subscribers[:] = [
+            ("prod-admin", recipient),
+            ("prod-agent", other),
+        ]
+        try:
+            asyncio.run(main._broadcast_notification({"type": "unexpected"}))
+        finally:
+            main._notification_subscribers[:] = previous
+
+        recipient.send_json.assert_not_awaited()
+        other.send_json.assert_not_awaited()
+
+    def test_resolution_award_locks_and_refreshes_before_reading_ticket_state(self):
+        db = MagicMock()
+        filtered = db.query.return_value.filter.return_value
+        filtered.first.return_value = None
+        filtered.populate_existing.return_value.with_for_update.return_value.first.return_value = None
+
+        asyncio.run(main._check_resolution_and_award(TicketRecord(id="ticket-1"), db=db))
+
+        filtered.populate_existing.assert_called_once_with()
+        filtered.populate_existing.return_value.with_for_update.assert_called_once_with()
+
+    def test_ticket_websocket_progress_includes_bounded_pipeline_timeout(self):
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-agent-session")
+        with (
+            patch.dict(os.environ, {"AI_PIPELINE_TIMEOUT_SECONDS": "120"}, clear=False),
+            patch.object(main, "_reserve_ai_request"),
+            patch.object(main, "_run_ticket_analysis", new=AsyncMock(return_value={})),
+        ):
+            with self.client.websocket_connect(
+                "/ws/tickets/own-ticket/stream",
+                headers={"Origin": "https://tickety.example"},
+            ) as websocket:
+                progress = websocket.receive_json()
+
+        self.assertEqual(progress["type"], "progress")
+        self.assertEqual(progress["timeout_seconds"], 120)
+
     def test_notification_websocket_rejects_missing_session(self):
         self.client.cookies.clear()
         with (
@@ -1592,6 +1712,10 @@ class LLMInterfaceContractTests(unittest.TestCase):
                 "OPENAI_API_KEY": "catalog-test-key",
             }, clear=True),
             patch.object(llm_manager, "_reserve_provider_capacity") as reserve,
+            patch(
+                "app.backend.settings._validate_llm_base_url",
+                return_value="https://api.openai.com/v1",
+            ),
             patch.object(
                 llm_manager,
                 "_get_json_limited",
@@ -1616,6 +1740,10 @@ class LLMInterfaceContractTests(unittest.TestCase):
                 llm_manager,
                 "_reserve_provider_capacity",
                 side_effect=llm_manager.LLMUnavailableError("capacity exceeded"),
+            ),
+            patch(
+                "app.backend.settings._validate_llm_base_url",
+                return_value="https://api.openai.com/v1",
             ),
             patch.object(llm_manager, "_get_json_limited", new=fetch),
             patch.object(llm_manager, "_save_fetched_models"),
