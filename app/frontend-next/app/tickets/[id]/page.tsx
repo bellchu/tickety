@@ -11,7 +11,7 @@ import { SentimentTag } from "@/components/engagement/SentimentTag";
 import {
   ShieldCheck, AlertTriangle,
   ArrowLeft, ArrowUpRight, User, Tag, Flag, MessageSquare,
-  CheckCircle2, Clock, Gauge, FileText, Users, Wrench, Inbox,
+  CheckCircle2, Gauge, FileText, Users, Wrench, Inbox,
 } from "lucide-react";
 import { ReasoningLog } from "@/components/engagement/ReasoningLog";
 import Link from "next/link";
@@ -20,6 +20,7 @@ import {
   formatTimeAgo, cn, safeExternalUrl,
 } from "@/lib/utils";
 import { Alert, Button, EmptyState, ErrorState, Skeleton } from "@/components/ui";
+import { PageFrame } from "@/components/layout/PageLayout";
 
 export default function TicketDetailPage() {
   const params = useParams();
@@ -71,7 +72,7 @@ export default function TicketDetailPage() {
   const dots = complexityDots(ticket.complexity);
 
   return (
-    <div className="space-y-6">
+    <PageFrame width="wide">
       <Link
         href="/tickets"
         className="inline-flex min-h-9 items-center gap-1.5 rounded-lg px-2 text-xs font-semibold text-ink-500 hover:bg-linen-200 hover:text-ink-700"
@@ -127,7 +128,7 @@ export default function TicketDetailPage() {
             {ticket.description || "No description was provided for this ticket."}
           </p>
 
-        <div className="mt-6 grid grid-cols-2 gap-4 border-t border-linen-300 pt-5 md:grid-cols-4">
+        <div className="mt-6 grid grid-cols-2 gap-4 border-t border-linen-300 pt-5 md:grid-cols-3">
           <InfoItem icon={<User className="w-3.5 h-3.5" />} label="Reporter" value={ticket.reporter || "—"} />
           <InfoItem icon={<Tag className="w-3.5 h-3.5" />} label="Category" value={ticket.category || "—"} />
           <div>
@@ -145,12 +146,19 @@ export default function TicketDetailPage() {
               <p className="text-sm text-ink-600">—</p>
             )}
           </div>
-          <InfoItem icon={<Clock className="w-3.5 h-3.5" />} label="Created" value={formatTimeAgo(ticket.created_at)} />
         </div>
 
-        <div className="mt-5 flex items-center gap-3 rounded-xl bg-linen-100 px-4 py-3">
-          <span className="text-xs text-ink-400">Customer Mood:</span>
-          <SentimentTag mood={ticket.mood} size="md" />
+        <div className="mt-5 flex flex-col gap-3 rounded-xl bg-linen-100 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-ink-400">Customer Mood:</span>
+            <SentimentTag mood={ticket.mood} size="md" />
+          </div>
+          {ticket.points_awarded > 0 && (
+            <div className="flex items-center gap-2 text-xs text-ink-500">
+              <CheckCircle2 className="h-4 w-4 text-semantic-success" aria-hidden="true" />
+              <span><strong className="text-ink-700">+{ticket.points_awarded} impact</strong>{ticket.resolved_at ? ` · Resolved ${formatTimeAgo(ticket.resolved_at)}` : ""}</span>
+            </div>
+          )}
         </div>
         </div>
       </section>
@@ -177,34 +185,7 @@ export default function TicketDetailPage() {
 
       {ticket.ai_reasoning && <ReasoningLog text={ticket.ai_reasoning} />}
 
-      {ticket.suggested_response && (
-        <div className="card-surface p-6">
-          <div className="flex items-center gap-2 mb-3">
-            <MessageSquare className="w-4 h-4 text-ink-500" />
-            <h3 className="text-sm font-semibold text-ink-700">Suggested Response</h3>
-          </div>
-          <p className="text-sm text-ink-600 whitespace-pre-wrap bg-linen-200 rounded p-4 border border-linen-300">
-            {ticket.suggested_response}
-          </p>
-        </div>
-      )}
-
-      {ticket.points_awarded > 0 && (
-        <div className="card-surface p-4 flex items-center gap-3">
-          <div className="w-8 h-8 rounded border border-linen-400 flex items-center justify-center shrink-0">
-            <CheckCircle2 className="w-4 h-4 text-ink-500" />
-          </div>
-          <div>
-            <p className="text-sm font-semibold text-ink-700">
-              +{ticket.points_awarded} Impact Points
-            </p>
-            <p className="text-xs text-ink-500">
-              Resolved {formatTimeAgo(ticket.resolved_at)}
-            </p>
-          </div>
-        </div>
-      )}
-    </div>
+    </PageFrame>
   );
 }
 
@@ -297,47 +278,28 @@ function AgentActionPanel({ ticket }: { ticket: Ticket }) {
 
       {saveNotice && <Alert variant={saveNotice.variant} title={saveNotice.variant === "success" ? "Changes saved" : "Save failed"}>{saveNotice.message}</Alert>}
 
-      <div className="grid grid-cols-1 gap-4 rounded-xl border border-linen-300 bg-linen-100 p-4 sm:grid-cols-2 xl:grid-cols-5">
-        <label className="space-y-1">
-          <span className="text-xs font-medium text-ink-500">Status</span>
-          <select value={status} onChange={(e) => setStatus(e.target.value)} className="input-base text-xs">
-            {["New", "Open", "Awaiting Review", "Pending", "Escalated", "Resolved", "Closed"].map((s) => (
-              <option key={s} value={s}>{s}</option>
-            ))}
-          </select>
-        </label>
-        <label className="space-y-1">
-          <span className="text-xs font-medium text-ink-500">Priority</span>
-          <select value={priority} onChange={(e) => setPriority(e.target.value)} className="input-base text-xs">
-            {["P1", "P2", "P3", "P4"].map((p) => <option key={p} value={p}>{p}</option>)}
-          </select>
-        </label>
-        <label className="space-y-1">
-          <span className="text-xs font-medium text-ink-500">Assignee</span>
-          <select value={assigneeId} disabled={!canManageAssignment || usersQuery.isError} onChange={(e) => setAssigneeId(e.target.value)} className="input-base text-xs">
-            <option value="">{!canManageAssignment ? "Supervisor access required" : usersQuery.isError ? "Assignees unavailable" : "Unassigned"}</option>
-            {(users || []).map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
-          </select>
-        </label>
-        <label className="space-y-1">
-          <span className="text-xs font-medium text-ink-500">Due</span>
-          <input type="datetime-local" value={dueBy} onChange={(e) => setDueBy(e.target.value)} className="input-base text-xs" />
-        </label>
-        <label className="space-y-1">
-          <span className="text-xs font-medium text-ink-500">Tags</span>
-          <input value={tags} onChange={(e) => setTags(e.target.value)} className="input-base text-xs" placeholder="vpn, vip" />
-        </label>
-      </div>
-
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
-        <div className="space-y-3">
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_22rem] xl:items-start">
+        <div className="min-w-0 space-y-5">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-ink-500">Conversation</span>
+            <div>
+              <h3 className="text-base font-semibold text-ink-700">Conversation</h3>
+              <p className="mt-1 text-xs text-ink-500">Reply to the requester or add an internal note.</p>
+            </div>
             <label className="inline-flex items-center gap-1.5 text-xs text-ink-500">
               <input type="checkbox" checked={isPrivate} onChange={(e) => setIsPrivate(e.target.checked)} />
               Private note
             </label>
           </div>
+          {ticket.suggested_response && (
+            <details className="rounded-xl border border-clay-200 bg-[var(--color-primary-soft)] p-4">
+              <summary className="flex cursor-pointer list-none items-center gap-2 text-sm font-semibold text-ink-700">
+                <MessageSquare className="h-4 w-4 text-semantic-primary" aria-hidden="true" />
+                Suggested response
+              </summary>
+              <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-ink-600">{ticket.suggested_response}</p>
+              <Button className="mt-3" size="sm" variant="secondary" onClick={() => setComment(ticket.suggested_response || "")}>Use in composer</Button>
+            </details>
+          )}
           <textarea
             value={comment}
             onChange={(e) => setComment(e.target.value)}
@@ -361,7 +323,7 @@ function AgentActionPanel({ ticket }: { ticket: Ticket }) {
             <Alert variant="warning" title="Conversation unavailable" action={<Button size="sm" variant="secondary" onClick={() => void commentsQuery.refetch()}>Retry</Button>}>Existing replies are not being shown.</Alert>
           ) : comments?.length === 0 ? (
             <p className="rounded-xl border border-dashed border-linen-400 px-4 py-6 text-center text-xs text-ink-400">No conversation yet.</p>
-          ) : <div className="max-h-72 space-y-2 overflow-auto pr-1">
+          ) : <div className="max-h-[28rem] space-y-2 overflow-auto pr-1">
             {(comments || []).map((c) => (
               <article key={c.id} className="rounded-xl border border-linen-300 bg-linen-100 p-3">
                 <div className="flex items-center justify-between text-[11px] text-ink-400">
@@ -372,29 +334,67 @@ function AgentActionPanel({ ticket }: { ticket: Ticket }) {
               </article>
             ))}
           </div>}
+          <details className="rounded-xl border border-linen-400 bg-linen-100 p-4">
+            <summary className="cursor-pointer text-sm font-semibold text-ink-700">Audit trail{audit?.length ? ` (${audit.length})` : ""}</summary>
+            <div className="mt-4">
+              {auditQuery.isLoading ? (
+                <div className="space-y-2" aria-label="Loading audit trail"><Skeleton className="h-16" /><Skeleton className="h-16" /></div>
+              ) : auditQuery.isError ? (
+                <Alert variant="warning" title="Audit trail unavailable" action={<Button size="sm" variant="secondary" onClick={() => void auditQuery.refetch()}>Retry</Button>}>Change history is not being shown.</Alert>
+              ) : <div className="max-h-96 space-y-2 overflow-auto pr-1">
+                {(audit || []).length === 0 ? (
+                  <p className="text-xs text-ink-400">No audit entries yet.</p>
+                ) : (audit || []).map((a) => (
+                  <article key={a.id} className="rounded-xl border border-linen-300 bg-linen-50 p-3 text-xs">
+                    <div className="flex items-center justify-between text-ink-400">
+                      <span>{a.changed_by}</span>
+                      <span>{formatTimeAgo(a.changed_at)}</span>
+                    </div>
+                    <p className="mt-1 text-ink-600">
+                      <span className="font-semibold">{a.field}</span>: {a.old_value || "-"} -&gt; {a.new_value || "-"}
+                    </p>
+                  </article>
+                ))}
+              </div>}
+            </div>
+          </details>
         </div>
-        <div className="space-y-3">
-          <span className="text-xs font-medium text-ink-500">Audit trail</span>
-          {auditQuery.isLoading ? (
-            <div className="space-y-2" aria-label="Loading audit trail"><Skeleton className="h-16" /><Skeleton className="h-16" /></div>
-          ) : auditQuery.isError ? (
-            <Alert variant="warning" title="Audit trail unavailable" action={<Button size="sm" variant="secondary" onClick={() => void auditQuery.refetch()}>Retry</Button>}>Change history is not being shown.</Alert>
-          ) : <div className="max-h-96 space-y-2 overflow-auto pr-1">
-            {(audit || []).length === 0 ? (
-              <p className="text-xs text-ink-400">No audit entries yet.</p>
-            ) : (audit || []).map((a) => (
-              <article key={a.id} className="rounded-xl border border-linen-300 bg-linen-100 p-3 text-xs">
-                <div className="flex items-center justify-between text-ink-400">
-                  <span>{a.changed_by}</span>
-                  <span>{formatTimeAgo(a.changed_at)}</span>
-                </div>
-                <p className="mt-1 text-ink-600">
-                  <span className="font-semibold">{a.field}</span>: {a.old_value || "-"} -&gt; {a.new_value || "-"}
-                </p>
-              </article>
-            ))}
-          </div>}
-        </div>
+
+        <aside className="rounded-xl border border-linen-300 bg-linen-100 p-4 xl:sticky xl:top-24" aria-label="Ticket properties">
+          <div className="mb-4">
+            <h3 className="text-sm font-semibold text-ink-700">Properties</h3>
+            <p className="mt-1 text-xs text-ink-500">Status, ownership, timing, and classification.</p>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-1">
+            <label className="space-y-1">
+              <span className="text-xs font-medium text-ink-500">Status</span>
+              <select value={status} onChange={(e) => setStatus(e.target.value)} className="input-base text-xs">
+                {["New", "Open", "Awaiting Review", "Pending", "Escalated", "Resolved", "Closed"].map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </label>
+            <label className="space-y-1">
+              <span className="text-xs font-medium text-ink-500">Priority</span>
+              <select value={priority} onChange={(e) => setPriority(e.target.value)} className="input-base text-xs">
+                {["P1", "P2", "P3", "P4"].map((p) => <option key={p} value={p}>{p}</option>)}
+              </select>
+            </label>
+            <label className="space-y-1">
+              <span className="text-xs font-medium text-ink-500">Assignee</span>
+              <select value={assigneeId} disabled={!canManageAssignment || usersQuery.isError} onChange={(e) => setAssigneeId(e.target.value)} className="input-base text-xs">
+                <option value="">{!canManageAssignment ? "Supervisor access required" : usersQuery.isError ? "Assignees unavailable" : "Unassigned"}</option>
+                {(users || []).map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+              </select>
+            </label>
+            <label className="space-y-1">
+              <span className="text-xs font-medium text-ink-500">Due</span>
+              <input type="datetime-local" value={dueBy} onChange={(e) => setDueBy(e.target.value)} className="input-base text-xs" />
+            </label>
+            <label className="space-y-1 sm:col-span-2 xl:col-span-1">
+              <span className="text-xs font-medium text-ink-500">Tags</span>
+              <input value={tags} onChange={(e) => setTags(e.target.value)} className="input-base text-xs" placeholder="vpn, vip" />
+            </label>
+          </div>
+        </aside>
       </div>
     </section>
   );

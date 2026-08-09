@@ -7,6 +7,7 @@ import { Alert, Badge, Button, ConfirmDialog, Dialog, EmptyState, ErrorState, Ic
 import { api } from "@/lib/api";
 import { canAccessAdministration, isDemoContext } from "@/lib/auth";
 import type { UserCreateInput, UserOut } from "@/lib/types";
+import { PageFrame, PageHeader } from "@/components/layout/PageLayout";
 
 const ROLES = [
   { value: "admin", label: "Admin", icon: ShieldCheck, description: "Full platform and access control" },
@@ -84,15 +85,8 @@ export default function AgentsPage() {
   }
 
   return (
-    <div className="mx-auto max-w-7xl space-y-6">
-      <header className="flex flex-col gap-4 border-b border-linen-400 pb-6 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-ink-400">Team operations</p>
-          <h1 className="mt-2 text-3xl font-semibold tracking-[-0.04em] text-ink-700">Agents</h1>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-ink-500">Manage operational roles, access, and team capacity from one controlled roster.</p>
-        </div>
-        <Button leadingIcon={<Plus className="h-4 w-4" />} onClick={() => { createMutation.reset(); setFormOpen(true); }}>Add agent</Button>
-      </header>
+    <PageFrame>
+      <PageHeader eyebrow="Team operations" icon={<Users className="h-4 w-4" />} title="Agents" description="Manage operational roles, access, and team capacity from one controlled roster." actions={<Button leadingIcon={<Plus className="h-4 w-4" />} onClick={() => { createMutation.reset(); setFormOpen(true); }}>Add agent</Button>} />
 
       {notice && <Alert variant="success" title="Saved" action={<Button size="sm" variant="ghost" onClick={() => setNotice(null)}>Dismiss</Button>}>{notice}</Alert>}
 
@@ -159,7 +153,7 @@ export default function AgentsPage() {
       <UserFormDialog open={formOpen || Boolean(editing)} user={editing} demoMode={isDemoMode} onOpenChange={(open) => { if (!open) { setFormOpen(false); setEditing(null); createMutation.reset(); updateMutation.reset(); } }} onSubmit={(payload) => editing ? updateMutation.mutate({ id: editing.id, payload }) : createMutation.mutate(payload)} pending={createMutation.isPending || updateMutation.isPending} error={createMutation.error || updateMutation.error} />
       <ConfirmDialog open={Boolean(deactivating)} onOpenChange={(open) => { if (!open) { setDeactivating(null); deactivateMutation.reset(); } }} title="Deactivate agent access?" description={`${deactivating?.name ?? "This agent"} will no longer appear in the active roster or receive new assignments. Historical work remains available.`} confirmLabel="Deactivate agent" destructive pending={deactivateMutation.isPending} onConfirm={() => { if (deactivating) deactivateMutation.mutate(deactivating.id); }} />
       {deactivateMutation.isError && <Alert variant="danger" title="Deactivation failed">{deactivateMutation.error instanceof Error ? deactivateMutation.error.message : "Please try again."}</Alert>}
-    </div>
+    </PageFrame>
   );
 }
 

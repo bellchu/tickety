@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { NewTicketModal } from "@/components/ticket/NewTicketModal";
 import { Alert, Badge, Button, EmptyState, ErrorState, Skeleton } from "@/components/ui";
+import { PageFrame, PageHeader, SummaryStrip } from "@/components/layout/PageLayout";
 import { api } from "@/lib/api";
 import {
   canAccessProtectedIntelligence,
@@ -303,24 +304,23 @@ export default function DashboardPage() {
     : { label: "Unassigned", value: unassignedCount };
 
   return (
-    <div className="space-y-7">
-      <header className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.12em] text-ink-500">
-            <Activity className="h-3.5 w-3.5 text-semantic-primary" aria-hidden="true" />
-            {demoWorkspace ? "Demo workspace" : "Operations workspace"}
-          </div>
-          <h1 className="mt-2 font-serif text-3xl tracking-[-0.025em] text-ink-700 sm:text-4xl">Operations Overview</h1>
-          <p className="mt-2 text-sm text-ink-500">
+    <PageFrame width="wide">
+      <PageHeader
+        eyebrow={demoWorkspace ? "Demo workspace" : "Operations workspace"}
+        icon={<Activity className="h-3.5 w-3.5" />}
+        title="Operations Overview"
+        description={
+          <>
             {demoWorkspace
               ? "Sample ticket and service data"
               : authQuery.data?.name
                 ? `Welcome back, ${authQuery.data.name.split(" ")[0]}`
                 : "Current ticket and service data"}
             {" · "}{formatRefreshedAt(ticketsQuery.dataUpdatedAt)}
-          </p>
-        </div>
-        <div className="flex flex-col gap-2 xs:flex-row sm:flex-row">
+          </>
+        }
+        actions={
+          <>
           <Button
             variant="secondary"
             onClick={() => exportTickets(tickets)}
@@ -330,8 +330,9 @@ export default function DashboardPage() {
             Export CSV
           </Button>
           {canCreateTicket && <Button onClick={() => setNewTicketOpen(true)} leadingIcon={<Plus className="h-4 w-4" />}>New ticket</Button>}
-        </div>
-      </header>
+          </>
+        }
+      />
 
       {(priorityData?.truncated || slaData?.truncated) && (
         <Alert role="note" variant="warning" title="Operational intelligence is sampled" className="text-xs">
@@ -351,7 +352,7 @@ export default function DashboardPage() {
       )}
 
       <section aria-labelledby="operational-pulse-title" className="overflow-hidden rounded-2xl bg-ink-700 text-linen-50 shadow-[var(--shadow-raised)]">
-        <div className="grid gap-6 p-5 sm:p-7 lg:grid-cols-[1.3fr_0.7fr] lg:items-center">
+        <div className="grid gap-5 p-5 sm:p-6 lg:grid-cols-[1.35fr_0.65fr] lg:items-center">
           <div>
             <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.13em] text-linen-400">
               <span className={cn("h-2 w-2 rounded-full", pulse.tone === "danger" ? "bg-rust-400" : pulse.tone === "warning" ? "bg-amber-400" : "bg-moss-400")} aria-hidden="true" />
@@ -361,7 +362,7 @@ export default function DashboardPage() {
               <><Skeleton className="mt-5 h-8 w-56 bg-white/15" /><Skeleton className="mt-3 h-4 w-full max-w-md bg-white/15" /></>
             ) : (
               <>
-                <h2 id="operational-pulse-title" className="mt-4 text-2xl font-semibold tracking-[-0.025em] text-white">{pulse.label}</h2>
+                <h2 id="operational-pulse-title" className="mt-3 text-xl font-semibold tracking-[-0.02em] text-white">{pulse.label}</h2>
                 <p className="mt-2 max-w-2xl text-sm leading-6 text-linen-400">{pulse.body}</p>
               </>
             )}
@@ -374,63 +375,7 @@ export default function DashboardPage() {
         </div>
       </section>
 
-      <section aria-label="Current operations metrics" className="grid gap-4 sm:grid-cols-2 2xl:grid-cols-4">
-        <MetricCard
-          label="Ticket volume"
-          value={tickets.length}
-          supporting={`${activeTickets.length} active · ${inactiveCount} inactive`}
-          icon={<TicketIcon className="h-4 w-4" />}
-          loading={ticketsQuery.isLoading}
-        />
-        {canUseIntelligence ? (
-          <MetricCard
-            label="SLA on track"
-            value={slaQuery.isError ? "Unavailable" : slaHealth == null ? "—" : `${slaHealth}%`}
-            supporting={slaQuery.isError ? "SLA data needs to be refreshed" : slaItems.length ? `${onTrack} of ${slaItems.length} tracked clocks` : "No active SLA clocks"}
-            icon={<ShieldCheck className="h-4 w-4" />}
-            tone={slaQuery.isError ? "danger" : slaHealth != null && slaHealth < 80 ? "warning" : "success"}
-            loading={slaQuery.isLoading}
-          />
-        ) : (
-          <MetricCard
-            label="Escalated"
-            value={escalatedCount}
-            supporting={escalatedCount ? "Active tickets requiring attention" : "No active escalations"}
-            icon={<AlertTriangle className="h-4 w-4" />}
-            tone={escalatedCount ? "warning" : "success"}
-            loading={ticketsQuery.isLoading || authQuery.isLoading}
-          />
-        )}
-        {canUseIntelligence ? (
-          <MetricCard
-            label="SLA attention"
-            value={slaQuery.isError ? "Unavailable" : attentionCount}
-            supporting={slaQuery.isError ? "SLA data needs to be refreshed" : `${atRisk} at risk · ${breached} breached`}
-            icon={<AlertTriangle className="h-4 w-4" />}
-            tone={slaQuery.isError ? "danger" : breached ? "danger" : atRisk ? "warning" : "success"}
-            loading={slaQuery.isLoading}
-          />
-        ) : (
-          <MetricCard
-            label="Unassigned"
-            value={unassignedCount}
-            supporting={`${unassignedCount} of ${activeTickets.length} active tickets`}
-            icon={<UserRound className="h-4 w-4" />}
-            tone={unassignedCount ? "warning" : "success"}
-            loading={ticketsQuery.isLoading || authQuery.isLoading}
-          />
-        )}
-        <MetricCard
-          label="Active services"
-          value={servicesQuery.isError ? "Unavailable" : activeServices}
-          supporting={serviceRequestsQuery.isError ? "Request status needs to be refreshed" : `${openServiceRequests} open service ${openServiceRequests === 1 ? "request" : "requests"}`}
-          icon={<ServerCog className="h-4 w-4" />}
-          tone={servicesQuery.isError || serviceRequestsQuery.isError ? "danger" : openServiceRequests ? "warning" : "neutral"}
-          loading={servicesQuery.isLoading || serviceRequestsQuery.isLoading}
-        />
-      </section>
-
-      <div className="grid gap-6 2xl:grid-cols-[minmax(0,1.55fr)_minmax(18rem,0.75fr)]">
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1.55fr)_minmax(18rem,0.75fr)]">
         <section aria-labelledby="priority-queue-title" className="min-w-0 overflow-hidden rounded-2xl border border-linen-400 bg-linen-50 shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-linen-300 px-5 py-4 sm:px-6">
             <div className="min-w-0">
@@ -568,7 +513,44 @@ export default function DashboardPage() {
         </aside>
       </div>
 
+      <SummaryStrip label="Supporting operations metrics" className="xl:grid-cols-3">
+        <MetricCard
+          label="Ticket volume"
+          value={tickets.length}
+          supporting={`${activeTickets.length} active · ${inactiveCount} inactive`}
+          icon={<TicketIcon className="h-4 w-4" />}
+          loading={ticketsQuery.isLoading}
+        />
+        {canUseIntelligence ? (
+          <MetricCard
+            label="SLA on track"
+            value={slaQuery.isError ? "Unavailable" : slaHealth == null ? "—" : `${slaHealth}%`}
+            supporting={slaQuery.isError ? "SLA data needs to be refreshed" : slaItems.length ? `${onTrack} of ${slaItems.length} tracked clocks` : "No active SLA clocks"}
+            icon={<ShieldCheck className="h-4 w-4" />}
+            tone={slaQuery.isError ? "danger" : slaHealth != null && slaHealth < 80 ? "warning" : "success"}
+            loading={slaQuery.isLoading}
+          />
+        ) : (
+          <MetricCard
+            label="Escalated"
+            value={escalatedCount}
+            supporting={escalatedCount ? "Active tickets requiring attention" : "No active escalations"}
+            icon={<AlertTriangle className="h-4 w-4" />}
+            tone={escalatedCount ? "warning" : "success"}
+            loading={ticketsQuery.isLoading || authQuery.isLoading}
+          />
+        )}
+        <MetricCard
+          label="Active services"
+          value={servicesQuery.isError ? "Unavailable" : activeServices}
+          supporting={serviceRequestsQuery.isError ? "Request status needs to be refreshed" : `${openServiceRequests} open service ${openServiceRequests === 1 ? "request" : "requests"}`}
+          icon={<ServerCog className="h-4 w-4" />}
+          tone={servicesQuery.isError || serviceRequestsQuery.isError ? "danger" : openServiceRequests ? "warning" : "neutral"}
+          loading={servicesQuery.isLoading || serviceRequestsQuery.isLoading}
+        />
+      </SummaryStrip>
+
       {canCreateTicket && <NewTicketModal open={newTicketOpen} onClose={() => setNewTicketOpen(false)} />}
-    </div>
+    </PageFrame>
   );
 }

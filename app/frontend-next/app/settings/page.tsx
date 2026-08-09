@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import { Alert, Button, ErrorState, Skeleton } from "@/components/ui";
+import { PageFrame, PageHeader } from "@/components/layout/PageLayout";
 
 const PROVIDER_OPTIONS = [
   { value: "standalone", label: "Standalone", description: "Built-in ticketing" },
@@ -441,18 +442,8 @@ export default function SettingsPage() {
   }
 
   return (
-    <div className="mx-auto max-w-5xl space-y-8">
-      {/* Header */}
-      <header className="flex items-start gap-4 border-b border-linen-300 pb-6">
-        <div className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-[var(--color-primary-soft)] text-semantic-primary">
-          <SettingsIcon className="h-5 w-5" aria-hidden="true" />
-        </div>
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-semantic-primary">Administration</p>
-          <h1 className="mt-1 text-3xl font-semibold tracking-[-0.03em] text-ink-700">System settings</h1>
-          <p className="mt-2 text-sm leading-6 text-ink-500">Configure intelligence, ticketing, security, workflow, and operational maintenance.</p>
-        </div>
-      </header>
+    <PageFrame className="max-w-6xl space-y-8">
+      <PageHeader eyebrow="Administration" icon={<SettingsIcon className="h-5 w-5" />} title="System settings" description="Configure intelligence, ticketing, security, workflow, and operational maintenance." />
 
       {catalogError && !isAuthError(catalogError) && (
         <Alert variant="warning" title="Model catalog unavailable" action={<Button variant="secondary" size="sm" onClick={() => void catalogQuery.refetch()} pending={catalogQuery.isFetching} pendingLabel="Retrying…">Retry</Button>}>
@@ -460,9 +451,19 @@ export default function SettingsPage() {
         </Alert>
       )}
 
+      <nav aria-label="Settings sections" className="sticky top-20 z-20 -mx-1 flex gap-1 overflow-x-auto rounded-xl border border-linen-400 bg-linen-50/95 p-1 shadow-sm backdrop-blur">
+        {[
+          ["settings-ai", "AI"],
+          ["settings-ticketing", "Ticketing & integrations"],
+          ["settings-workspace", "Workspace"],
+          ["settings-access", "Access"],
+          ["settings-system", "System"],
+        ].map(([id, label]) => <a key={id} href={`#${id}`} className="inline-flex min-h-10 shrink-0 items-center rounded-lg px-3 text-xs font-semibold text-ink-500 hover:bg-linen-200 hover:text-ink-700">{label}</a>)}
+      </nav>
+
       <form onSubmit={handleSubmit} className="space-y-8">
         {/* ═══ LLM Configuration ═══ */}
-        <SettingsSection title="LLM Configuration" subtitle="Choose the AI provider and model for ticket triage, summarization, and resolution">
+        <SettingsSection id="settings-ai" title="LLM Configuration" subtitle="Choose the AI provider and model for ticket triage, summarization, and resolution">
           {productionSettingsReadOnly && (
             <DeploymentManagedNotice>
               Provider selection, model routing, endpoints, and credentials are read-only here. Update the deployment environment/Secret and roll out the workloads to change them.
@@ -541,7 +542,7 @@ export default function SettingsPage() {
         </SettingsSection>
 
         {/* ═══ Ticketing Mode ═══ */}
-        <SettingsSection title="Ticketing Mode" subtitle="Choose whether Tickety uses its own built-in ticketing system or connects to an external ITSM provider">
+        <SettingsSection id="settings-ticketing" title="Ticketing Mode" subtitle="Choose whether Tickety uses its own built-in ticketing system or connects to an external ITSM provider">
           <Field label="Provider">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
               {PROVIDER_OPTIONS.map((provider) => {
@@ -732,7 +733,7 @@ export default function SettingsPage() {
         <CategorySection />
 
         {/* ═══ Organization / Branding ═══ */}
-        <SettingsSection title="Organization" subtitle="Customize the workspace name and branding shown across Tickety">
+        <SettingsSection id="settings-workspace" title="Organization" subtitle="Customize the workspace name and branding shown across Tickety">
           <Field label="Organization Name">
             <input type="text" value={form.ORG_NAME || ""} onChange={(e) => handleChange("ORG_NAME", e.target.value)} placeholder="Acme IT Support" className="input-base" />
           </Field>
@@ -768,7 +769,7 @@ export default function SettingsPage() {
         </SettingsSection>
 
         {/* ═══ Security & Auth ═══ */}
-        <SettingsSection title="Security & Authentication" subtitle="Require login and configure Single Sign-On (OIDC) for production deployments">
+        <SettingsSection id="settings-access" title="Security & Authentication" subtitle="Require login and configure Single Sign-On (OIDC) for production deployments">
           {productionSettingsReadOnly && (
             <DeploymentManagedNotice>
               Authentication, SSO, CORS, and cookie controls are read-only here. Their effective values come from the deployment environment/Secret.
@@ -919,7 +920,7 @@ export default function SettingsPage() {
         <NotificationSection />
 
         {/* ═══ System Maintenance ═══ */}
-        <SettingsSection title="System Maintenance" subtitle="Run AI pipeline sweeps and repair data gaps across all tickets">
+        <SettingsSection id="settings-system" title="System Maintenance" subtitle="Run AI pipeline sweeps and repair data gaps across all tickets">
           <div className="space-y-3">
             <MaintenanceButton
               label="Repair AI Gaps"
@@ -944,7 +945,7 @@ export default function SettingsPage() {
         <SystemInfoSection version={version} syncStatus={syncStatus} />
 
         {/* ═══ Save Bar ═══ */}
-        <div className="sticky bottom-4 z-30 flex flex-col gap-3 rounded-xl border border-linen-400 bg-linen-50/95 px-4 py-3 shadow-[var(--shadow-raised)] backdrop-blur sm:flex-row sm:items-center sm:justify-between">
+        {(isDirty || saved || mutation.isError) && <div className="sticky bottom-4 z-30 flex flex-col gap-3 rounded-xl border border-linen-400 bg-linen-50/95 px-4 py-3 shadow-[var(--shadow-raised)] backdrop-blur sm:flex-row sm:items-center sm:justify-between">
           <p className="text-xs text-ink-500">{isDirty ? "You have unsaved configuration changes." : "Configuration is up to date."}</p>
           <div className="flex items-center justify-end gap-3">
           {saved && (
@@ -957,29 +958,21 @@ export default function SettingsPage() {
               <AlertCircle className="w-4 h-4" /> {mutation.error instanceof Error ? mutation.error.message : "Failed to save"}
             </span>
           )}
+          {isDirty && <Button type="button" variant="secondary" disabled={mutation.isPending} onClick={() => { if (baselineForm) setForm(baselineForm); mutation.reset(); setSaved(false); }}>Discard</Button>}
           <Button type="submit" disabled={!isDirty} pending={mutation.isPending} pendingLabel="Saving…" leadingIcon={<Save className="h-4 w-4" />}>
             Save Changes
           </Button>
           </div>
-        </div>
+        </div>}
       </form>
-    </div>
+    </PageFrame>
   );
 }
 
 function DemoAdministrationState({ version }: { version?: BuildInfo }) {
   return (
-    <div className="mx-auto max-w-5xl space-y-8">
-      <header className="flex items-start gap-4 border-b border-linen-300 pb-6">
-        <div className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-[var(--color-primary-soft)] text-semantic-primary">
-          <SettingsIcon className="h-5 w-5" aria-hidden="true" />
-        </div>
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-semantic-primary">Administration</p>
-          <h1 className="mt-1 text-3xl font-semibold tracking-[-0.03em] text-ink-700">System settings</h1>
-          <p className="mt-2 text-sm leading-6 text-ink-500">Sign in with a demo administrator account to configure this demo workspace.</p>
-        </div>
-      </header>
+    <PageFrame className="max-w-5xl space-y-8">
+      <PageHeader eyebrow="Administration" icon={<SettingsIcon className="h-5 w-5" />} title="System settings" description="Sign in with a demo administrator account to configure this demo workspace." />
 
       <div className="rounded-xl border border-blue-400/30 bg-blue-400/5 p-6 sm:p-8" role="status">
         <div className="flex items-start gap-4">
@@ -1003,7 +996,7 @@ function DemoAdministrationState({ version }: { version?: BuildInfo }) {
           <InfoTile label="Build SHA" value={version?.build_sha || "—"} mono />
         </div>
       </SettingsSection>
-    </div>
+    </PageFrame>
   );
 }
 
@@ -1164,9 +1157,9 @@ function FreshserviceOAuthSetup({
 
 // ═══ Reusable Section Wrapper ════════════════════════════════
 
-function SettingsSection({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
+function SettingsSection({ id, title, subtitle, children }: { id?: string; title: string; subtitle?: string; children: React.ReactNode }) {
   return (
-    <section className="space-y-5 rounded-2xl border border-linen-400 bg-linen-50 p-5 shadow-sm sm:p-6">
+    <section id={id} className="scroll-mt-36 space-y-5 rounded-2xl border border-linen-400 bg-linen-50 p-5 shadow-sm sm:p-6">
       <div className="border-b border-linen-300 pb-4">
         <h2 className="text-lg font-semibold tracking-[-0.01em] text-ink-700">{title}</h2>
         {subtitle && <p className="mt-1 max-w-3xl text-xs leading-5 text-ink-500">{subtitle}</p>}

@@ -9,6 +9,7 @@ import { api } from "@/lib/api";
 import { canAccessProtectedIntelligence, isDemoContext } from "@/lib/auth";
 import type { AccountHealth, IntelWorkloadResponse, SlaStatusItem, SystemicIssuesResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { PageFrame, PageHeader } from "@/components/layout/PageLayout";
 
 async function getWorkload(): Promise<IntelWorkloadResponse> {
   const response = await fetch("/api/intelligence/workload", { credentials: "include", cache: "no-store" });
@@ -29,7 +30,7 @@ function SamplingNotice({ analyzed, total, subject = "tickets" }: { analyzed: nu
 }
 
 function IntelligenceHeader() {
-  return <header className="grid gap-5 border-b border-linen-400 pb-6 lg:grid-cols-[1fr_auto] lg:items-end"><div><div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-ink-500"><Sparkles className="h-4 w-4" />Decision support</div><h1 className="mt-2 text-3xl font-semibold tracking-[-0.04em] text-ink-700">Intelligence</h1><p className="mt-2 max-w-2xl text-sm leading-6 text-ink-500">Explainable operational signals for escalation risk, SLA exposure, prioritization, workload, and systemic issues.</p></div><div className="rounded-xl border border-linen-400 bg-linen-50 px-4 py-3 text-xs leading-5 text-ink-500"><strong className="block text-ink-700">Advisory, not automatic</strong>Recommendations support human decisions and do not change tickets.</div></header>;
+  return <PageHeader eyebrow="Decision support" icon={<Sparkles className="h-4 w-4" />} title="Intelligence" description="Explainable operational signals for escalation risk, SLA exposure, prioritization, workload, and systemic issues." actions={<div className="max-w-xs rounded-xl border border-linen-400 bg-linen-50 px-4 py-3 text-xs leading-5 text-ink-500"><strong className="block text-ink-700">Advisory, not automatic</strong>Recommendations support human decisions and do not change tickets.</div>} />;
 }
 
 export default function IntelligencePage() {
@@ -37,19 +38,19 @@ export default function IntelligencePage() {
   const canAccessIntelligence = canAccessProtectedIntelligence(authQuery.data);
 
   if (authQuery.isLoading) {
-    return <div className="mx-auto max-w-7xl space-y-6"><IntelligenceHeader /><div aria-busy="true" aria-label="Checking intelligence access" className="space-y-3"><Skeleton className="h-44 w-full" /><span className="sr-only">Checking intelligence access</span></div></div>;
+    return <PageFrame><IntelligenceHeader /><div aria-busy="true" aria-label="Checking intelligence access" className="space-y-3"><Skeleton className="h-44 w-full" /><span className="sr-only">Checking intelligence access</span></div></PageFrame>;
   }
 
   if (authQuery.isError) {
-    return <div className="mx-auto max-w-7xl space-y-6"><IntelligenceHeader /><ErrorState title="Intelligence access could not be checked" description="Your session and access level could not be verified, so no intelligence requests were sent." actionLabel="Retry access check" onRetry={() => void authQuery.refetch()} retrying={authQuery.isFetching} /></div>;
+    return <PageFrame><IntelligenceHeader /><ErrorState title="Intelligence access could not be checked" description="Your session and access level could not be verified, so no intelligence requests were sent." actionLabel="Retry access check" onRetry={() => void authQuery.refetch()} retrying={authQuery.isFetching} /></PageFrame>;
   }
 
   if (!canAccessIntelligence) {
     const demo = isDemoContext(authQuery.data);
-    return <div className="mx-auto max-w-7xl space-y-6"><IntelligenceHeader /><EmptyState icon={<ShieldCheck className="h-5 w-5" />} title={demo ? "Demo administrator access required" : "Administrator or supervisor access required"} description={demo ? "Sign in with an active demo administrator account to view protected intelligence. Public demo sessions and demo supervisors do not send intelligence requests." : "This page is available only to authenticated administrators and supervisors in production."} /></div>;
+    return <PageFrame><IntelligenceHeader /><EmptyState icon={<ShieldCheck className="h-5 w-5" />} title={demo ? "Demo administrator access required" : "Administrator or supervisor access required"} description={demo ? "Sign in with an active demo administrator account to view protected intelligence. Public demo sessions and demo supervisors do not send intelligence requests." : "This page is available only to authenticated administrators and supervisors in production."} /></PageFrame>;
   }
 
-  return <div className="mx-auto max-w-7xl space-y-6"><IntelligenceHeader /><AlertsPanel /><div className="grid gap-6 lg:grid-cols-2"><PriorityPanel /><SlaPanel /></div><div className="grid gap-6 lg:grid-cols-2"><TrendsPanel /><HealthPanel /></div><div className="grid gap-6 lg:grid-cols-2"><WorkloadPanel /><SystemicPanel /></div></div>;
+  return <PageFrame><IntelligenceHeader /><AlertsPanel /><div className="grid gap-6 lg:grid-cols-2"><PriorityPanel /><SlaPanel /></div><div className="grid gap-6 lg:grid-cols-2"><TrendsPanel /><HealthPanel /></div><div className="grid gap-6 lg:grid-cols-2"><WorkloadPanel /><SystemicPanel /></div></PageFrame>;
 }
 
 function AlertsPanel() {

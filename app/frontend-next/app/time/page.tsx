@@ -6,6 +6,7 @@ import { Clock3, Plus, Ticket as TicketIcon, Timer } from "lucide-react";
 import { Alert, Button, Dialog, EmptyState, ErrorState, Skeleton } from "@/components/ui";
 import { api } from "@/lib/api";
 import type { Ticket } from "@/lib/types";
+import { PageFrame, PageHeader } from "@/components/layout/PageLayout";
 
 function formatDuration(minutes: number) {
   const hours = Math.floor(minutes / 60);
@@ -42,11 +43,8 @@ export default function TimePage() {
   const average = summaryQuery.data && uniqueTicketCount ? summaryQuery.data.total_hours / uniqueTicketCount : null;
 
   return (
-    <div className="mx-auto max-w-7xl space-y-6">
-      <header className="flex flex-col gap-4 border-b border-linen-400 pb-6 sm:flex-row sm:items-end sm:justify-between">
-        <div><p className="text-xs font-semibold uppercase tracking-[0.16em] text-ink-400">Work accounting</p><h1 className="mt-2 text-3xl font-semibold tracking-[-0.04em] text-ink-700">My time</h1><p className="mt-2 max-w-2xl text-sm leading-6 text-ink-500">Capture effort against service work and keep delivery records audit-ready.</p></div>
-        <Button leadingIcon={<Plus className="h-4 w-4" />} onClick={() => { createMutation.reset(); setFormOpen(true); }}>Log time</Button>
-      </header>
+    <PageFrame>
+      <PageHeader eyebrow="Work accounting" icon={<Clock3 className="h-4 w-4" />} title="My time" description="Capture effort against service work and keep delivery records audit-ready." actions={<Button leadingIcon={<Plus className="h-4 w-4" />} onClick={() => { createMutation.reset(); setFormOpen(true); }}>Log time</Button>} />
 
       {notice && <Alert variant="success" title="Time entry recorded" action={<Button size="sm" variant="ghost" onClick={() => setNotice(false)}>Dismiss</Button>}>Summaries and ticket totals have been refreshed.</Alert>}
 
@@ -68,7 +66,7 @@ export default function TimePage() {
         </>}
       </section>
       <LogTimeDialog open={formOpen} tickets={ticketsQuery.data ?? []} ticketsLoading={ticketsQuery.isLoading} ticketsError={ticketsQuery.isError} onOpenChange={(open) => { if (!open) createMutation.reset(); setFormOpen(open); }} onSubmit={(ticketId, description, minutes) => createMutation.mutate({ ticketId, description, minutes })} pending={createMutation.isPending} error={createMutation.error} />
-    </div>
+    </PageFrame>
   );
 }
 

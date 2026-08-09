@@ -18,6 +18,7 @@ import {
   X,
 } from "lucide-react";
 import { Alert, Badge, Button, Dialog, EmptyState, ErrorState, IconButton, Skeleton } from "@/components/ui";
+import { DataToolbar, PageFrame, PageHeader } from "@/components/layout/PageLayout";
 import { api } from "@/lib/api";
 import { canAccessProtectedIntelligence } from "@/lib/auth";
 import type { Ticket, TicketListSort } from "@/lib/types";
@@ -135,6 +136,7 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
   const [bulkAction, setBulkAction] = useState("");
   const [bulkValue, setBulkValue] = useState("");
   const [closeConfirmOpen, setCloseConfirmOpen] = useState(false);
+  const [moreFiltersOpen, setMoreFiltersOpen] = useState(false);
   const [bulkNotice, setBulkNotice] = useState<{ variant: "success" | "danger"; message: string } | null>(null);
 
   useEffect(() => {
@@ -294,21 +296,22 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
   const end = pageQuery.data ? pageQuery.data.offset + tickets.length : 0;
 
   return (
-    <div className="space-y-6">
-      <header className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.12em] text-ink-400"><Inbox className="h-3.5 w-3.5 text-semantic-primary" aria-hidden="true" />Support operations</div>
-          <h1 className="mt-2 font-serif text-3xl tracking-[-0.025em] text-ink-700 sm:text-4xl">Ticket Queue</h1>
-          <p className="mt-2 text-sm text-ink-500">Search, prioritize, and move requests through the support workflow.</p>
-        </div>
-        <div className="flex flex-col gap-2 sm:flex-row">
+    <PageFrame width="wide">
+      <PageHeader
+        eyebrow="Support operations"
+        icon={<Inbox className="h-3.5 w-3.5" />}
+        title="Tickets"
+        description="Search, prioritize, and move requests through the support workflow."
+        actions={
+          <>
           <Button variant="secondary" onClick={() => exportPage(tickets)} disabled={!tickets.length || pageQuery.isLoading || pageTransitioning} leadingIcon={<Download className="h-4 w-4" />}>Export page</Button>
           {onCreate && <Button onClick={onCreate} leadingIcon={<Plus className="h-4 w-4" />}>New ticket</Button>}
-        </div>
-      </header>
+          </>
+        }
+      />
 
-      <section aria-labelledby="saved-views-title" className="rounded-2xl border border-linen-400 bg-linen-50 p-4 shadow-sm">
-        <div className="flex flex-wrap items-center gap-2">
+      <DataToolbar label="Ticket queue controls" className="space-y-4">
+        <div className="flex flex-wrap items-center gap-2 border-b border-linen-300 pb-4">
           <span id="saved-views-title" className="mr-1 inline-flex items-center gap-1.5 text-xs font-semibold text-ink-500"><Bookmark className="h-3.5 w-3.5" aria-hidden="true" />Saved views</span>
           {[...BUILT_IN_VIEWS, ...customViews].map((view) => (
             <div key={view.id} className="inline-flex items-center">
@@ -318,9 +321,8 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
           ))}
           <Button variant="ghost" size="sm" onClick={() => setSaveDialogOpen(true)} leadingIcon={<Plus className="h-3.5 w-3.5" />}>Save current</Button>
         </div>
-      </section>
 
-      <section aria-label="Ticket filters" className="space-y-3 rounded-2xl border border-linen-400 bg-linen-50 p-4 shadow-sm sm:p-5">
+        <div className="space-y-3">
         <div className="flex flex-col gap-3 lg:flex-row">
           <div className="relative min-w-0 flex-1">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-400" aria-hidden="true" />
@@ -329,19 +331,43 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
           </div>
           <label className="min-w-44"><span className="sr-only">Sort tickets</span><select value={sort} onChange={(event) => { setSort(event.target.value as TicketListSort); markFiltersChanged(); }} className="input-base"><option disabled>Sort tickets</option>{SORT_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-ink-500"><Filter className="h-3.5 w-3.5" aria-hidden="true" />Status</span>
-          <button type="button" aria-pressed={!status} onClick={() => { setStatus(""); markFiltersChanged(); }} className={cn("min-h-8 rounded-full border px-3 text-xs font-semibold", !status ? "border-clay-300 bg-[var(--color-primary-soft)] text-semantic-primary" : "border-linen-400 text-ink-500 hover:bg-linen-200")}>All</button>
-          {STATUS_FILTERS.map((item) => <button key={item} type="button" aria-pressed={status === item} onClick={() => { setStatus(item); markFiltersChanged(); }} className={cn("min-h-8 rounded-full border px-3 text-xs font-semibold", status === item ? "border-clay-300 bg-[var(--color-primary-soft)] text-semantic-primary" : "border-linen-400 text-ink-500 hover:bg-linen-200")}>{item}</button>)}
+        <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-ink-500"><Filter className="h-3.5 w-3.5" aria-hidden="true" />Status</span>
+            <button type="button" aria-pressed={!status} onClick={() => { setStatus(""); markFiltersChanged(); }} className={cn("min-h-11 rounded-full border px-3 text-xs font-semibold sm:min-h-8", !status ? "border-clay-300 bg-[var(--color-primary-soft)] text-semantic-primary" : "border-linen-400 text-ink-500 hover:bg-linen-200")}>All</button>
+            {STATUS_FILTERS.map((item) => <button key={item} type="button" aria-pressed={status === item} onClick={() => { setStatus(item); markFiltersChanged(); }} className={cn("min-h-11 rounded-full border px-3 text-xs font-semibold sm:min-h-8", status === item ? "border-clay-300 bg-[var(--color-primary-soft)] text-semantic-primary" : "border-linen-400 text-ink-500 hover:bg-linen-200")}>{item}</button>)}
+          </div>
+          <Button
+            variant="secondary"
+            size="sm"
+            aria-expanded={moreFiltersOpen}
+            aria-controls="ticket-more-filters"
+            onClick={() => setMoreFiltersOpen((open) => !open)}
+            leadingIcon={<Filter className="h-3.5 w-3.5" />}
+          >
+            More filters{activeFilterCount > (status ? 1 : 0) ? ` (${activeFilterCount - (status ? 1 : 0)})` : ""}
+          </Button>
         </div>
-        <div className="grid gap-3 border-t border-linen-300 pt-3 sm:grid-cols-2 lg:grid-cols-4">
+        {moreFiltersOpen && <div id="ticket-more-filters" className="grid gap-3 border-t border-linen-300 pt-3 sm:grid-cols-2 lg:grid-cols-4">
           <label><span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-ink-400">Priority</span><select value={priority} onChange={(event) => { setPriority(event.target.value); markFiltersChanged(); }} className="input-base"><option value="">Any priority</option>{PRIORITIES.map((item) => <option key={item}>{item}</option>)}</select></label>
           <label><span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-ink-400">Category</span><select value={category} disabled={categoriesQuery.isError} onChange={(event) => { setCategory(event.target.value); markFiltersChanged(); }} className="input-base"><option value="">{categoriesQuery.isError ? "Categories unavailable" : "Any category"}</option>{(categoriesQuery.data ?? []).map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select></label>
           <label><span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-ink-400">Assignee</span><select value={assigneeId} disabled={!canBulk || usersQuery.isError} onChange={(event) => { setAssigneeId(event.target.value); markFiltersChanged(); }} className="input-base"><option value="">{!canBulk ? "Supervisor access required" : usersQuery.isError ? "Assignees unavailable" : "Any assignee"}</option>{(usersQuery.data ?? []).filter((user) => user.is_active).map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label>
           <label><span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-ink-400">Rows per page</span><select value={limit} onChange={(event) => { setLimit(Number(event.target.value)); markFiltersChanged(); }} className="input-base">{PAGE_SIZES.map((size) => <option key={size} value={size}>{size} rows</option>)}</select></label>
+        </div>}
+        {(activeFilterCount > 0 || searchInput) && (
+          <div className="flex flex-col gap-3 border-t border-linen-300 pt-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-wrap gap-2" aria-label="Applied ticket filters">
+              {searchInput && <FilterChip label={`Search: ${searchInput}`} onRemove={() => setSearchInput("")} />}
+              {status && <FilterChip label={`Status: ${status}`} onRemove={() => { setStatus(""); markFiltersChanged(); }} />}
+              {priority && <FilterChip label={`Priority: ${priority}`} onRemove={() => { setPriority(""); markFiltersChanged(); }} />}
+              {category && <FilterChip label={`Category: ${category}`} onRemove={() => { setCategory(""); markFiltersChanged(); }} />}
+              {assigneeId && <FilterChip label={`Assignee: ${(usersQuery.data ?? []).find((user) => user.id === assigneeId)?.name || "Selected"}`} onRemove={() => { setAssigneeId(""); markFiltersChanged(); }} />}
+            </div>
+            <Button variant="ghost" size="sm" onClick={clearFilters}>Clear all</Button>
+          </div>
+        )}
         </div>
-        {(activeFilterCount > 0 || searchInput) && <div className="flex items-center justify-between gap-3 border-t border-linen-300 pt-3"><p className="text-xs text-ink-400">{activeFilterCount} structured {activeFilterCount === 1 ? "filter" : "filters"}{searchInput ? " plus search" : ""}</p><Button variant="ghost" size="sm" onClick={clearFilters}>Clear all</Button></div>}
-      </section>
+      </DataToolbar>
 
       {(categoriesQuery.isError || (canBulk && usersQuery.isError)) && (
         <Alert
@@ -441,6 +467,17 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
         closeOnBackdrop={!bulkMutation.isPending}
         footer={<><Button variant="secondary" onClick={() => setCloseConfirmOpen(false)} disabled={bulkMutation.isPending}>Keep open</Button><Button variant="destructive" pending={bulkMutation.isPending} pendingLabel="Closing…" onClick={() => bulkMutation.mutate({ action: "close" }, { onSuccess: () => setCloseConfirmOpen(false) })}>Close tickets</Button></>}
       />
-    </div>
+    </PageFrame>
+  );
+}
+
+function FilterChip({ label, onRemove }: { label: string; onRemove: () => void }) {
+  return (
+    <span className="inline-flex min-h-7 items-center gap-1 rounded-full border border-linen-400 bg-linen-100 pl-2.5 pr-1 text-[11px] font-semibold text-ink-500">
+      <span className="max-w-52 truncate">{label}</span>
+      <button type="button" onClick={onRemove} aria-label={`Remove ${label}`} className="grid h-8 w-8 place-items-center rounded-full hover:bg-linen-300 hover:text-ink-700 sm:h-6 sm:w-6">
+        <X className="h-3 w-3" aria-hidden="true" />
+      </button>
+    </span>
   );
 }

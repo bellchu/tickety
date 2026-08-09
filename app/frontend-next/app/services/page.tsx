@@ -9,6 +9,7 @@ import { Badge, type BadgeVariant } from "@/components/ui/Badge";
 import { Button, IconButton } from "@/components/ui/Button";
 import { ConfirmDialog, Dialog } from "@/components/ui/Dialog";
 import { Alert, EmptyState, ErrorState, Skeleton } from "@/components/ui/Feedback";
+import { PageFrame, PageHeader, SummaryStrip } from "@/components/layout/PageLayout";
 
 type ServicePayload = { name: string; description?: string; category?: string; pricing?: string; sla_hours?: number; approval_required?: boolean };
 type RequestAction = {
@@ -25,6 +26,7 @@ export default function ServicesPage() {
   const [deleting, setDeleting] = useState<ServiceItem | null>(null);
   const [requestAction, setRequestAction] = useState<RequestAction | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [activeView, setActiveView] = useState<"catalog" | "requests">("catalog");
 
   const servicesQuery = useQuery({ queryKey: ["services"], queryFn: () => api.getServices() });
   const requestsQuery = useQuery({ queryKey: ["serviceRequests"], queryFn: api.getServiceRequests });
@@ -57,31 +59,32 @@ export default function ServicesPage() {
   const pendingFulfillment = requests.filter((request) => request.fulfillment_status === "pending" && !["pending", "rejected"].includes(request.approval_status)).length;
   const actionError = approvalMut.error || fulfillmentMut.error || deleteMut.error;
 
-  return <div className="space-y-8">
-    <header className="flex flex-col gap-4 border-b border-linen-300 pb-6 sm:flex-row sm:items-end sm:justify-between">
-      <div><div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-ink-400"><Package className="h-4 w-4" aria-hidden="true" /> Request operations</div><h1 className="font-serif text-3xl tracking-tight text-ink-700 sm:text-4xl">Service catalog</h1><p className="mt-2 max-w-2xl text-sm text-ink-500">Define dependable request paths, approval policy, fulfillment targets, and customer expectations.</p></div>
-      <Button leadingIcon={<Plus className="h-4 w-4" />} onClick={() => { setNotice(null); setShowForm(true); }}>Add service</Button>
-    </header>
+  return <PageFrame width="wide">
+    <PageHeader eyebrow="Request operations" icon={<Package className="h-4 w-4" />} title="Service catalog" description="Define dependable request paths, approval policy, fulfillment targets, and customer expectations." actions={<Button leadingIcon={<Plus className="h-4 w-4" />} onClick={() => { setNotice(null); setShowForm(true); }}>Add service</Button>} />
 
     {notice && <Alert variant="success" title="Catalog updated">{notice}</Alert>}
     {actionError && <Alert variant="danger" title="Action could not be completed">{actionError instanceof Error ? actionError.message : "Please retry the request."}</Alert>}
 
-    <section aria-label="Service catalog summary" className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+    <SummaryStrip label="Service catalog summary" className="grid-cols-2 lg:grid-cols-3 xl:grid-cols-3">
       <Metric label="Active services" value={activeServices.length} featured />
       <Metric label="Categories" value={categories.length} />
-      <Metric label="Total requests" value={requests.length} />
       <Metric label="Awaiting fulfillment" value={pendingFulfillment} attention={pendingFulfillment > 0} />
-    </section>
+    </SummaryStrip>
 
-    <section aria-labelledby="catalog-heading" className="space-y-4">
+    <div className="inline-flex w-full rounded-xl border border-linen-400 bg-linen-50 p-1 sm:w-auto" role="tablist" aria-label="Service workspace view">
+      <button id="service-tab-catalog" type="button" role="tab" aria-selected={activeView === "catalog"} aria-controls="service-panel-catalog" onClick={() => setActiveView("catalog")} className={`min-h-11 flex-1 rounded-lg px-4 text-sm font-semibold transition-colors sm:min-h-10 sm:flex-none ${activeView === "catalog" ? "bg-[var(--color-primary-soft)] text-semantic-primary" : "text-ink-500 hover:bg-linen-200"}`}>Catalog <span className="ml-1 text-xs opacity-70">{activeServices.length}</span></button>
+      <button id="service-tab-requests" type="button" role="tab" aria-selected={activeView === "requests"} aria-controls="service-panel-requests" onClick={() => setActiveView("requests")} className={`min-h-11 flex-1 rounded-lg px-4 text-sm font-semibold transition-colors sm:min-h-10 sm:flex-none ${activeView === "requests" ? "bg-[var(--color-primary-soft)] text-semantic-primary" : "text-ink-500 hover:bg-linen-200"}`}>Requests <span className="ml-1 text-xs opacity-70">{requests.length}</span></button>
+    </div>
+
+    {activeView === "catalog" && <section id="service-panel-catalog" role="tabpanel" aria-labelledby="service-tab-catalog catalog-heading" className="space-y-4">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-end"><div className="min-w-0 flex-1"><h2 id="catalog-heading" className="text-lg font-semibold text-ink-700">Catalog offering</h2><p className="mt-1 text-xs text-ink-400" aria-live="polite">{servicesQuery.isLoading ? "Loading services…" : `${filtered.length} visible service${filtered.length === 1 ? "" : "s"}`}</p></div><label className="relative block lg:w-80"><span className="sr-only">Search services</span><Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-400" aria-hidden="true" /><input type="search" className="input-base input-search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search services…" /></label><label className="lg:w-52"><span className="sr-only">Filter by category</span><select className="input-base" value={category} onChange={(e) => setCategory(e.target.value)}><option value="">All categories</option>{categories.map((value) => <option key={value}>{value}</option>)}</select></label></div>
       {servicesQuery.isLoading ? <RouteSkeleton rows={4} /> : servicesQuery.isError ? <ErrorState title="Could not load the service catalog" description="Catalog data is temporarily unavailable." onRetry={() => servicesQuery.refetch()} retrying={servicesQuery.isFetching} /> : filtered.length === 0 ? <EmptyState icon={<Package className="h-5 w-5" />} title={search || category ? "No services match these filters" : "No active services"} description={search || category ? "Clear the current filters to see more services." : "Publish the first service to give requesters a consistent path."} action={search || category ? <Button variant="secondary" onClick={() => { setSearch(""); setCategory(""); }}>Clear filters</Button> : <Button onClick={() => setShowForm(true)} leadingIcon={<Plus className="h-4 w-4" />}>Add service</Button>} /> : <ServiceResults services={filtered} onEdit={setEditing} onDelete={setDeleting} />}
-    </section>
+    </section>}
 
-    <section aria-labelledby="requests-heading" className="space-y-4">
+    {activeView === "requests" && <section id="service-panel-requests" role="tabpanel" aria-labelledby="service-tab-requests requests-heading" className="space-y-4">
       <div><div className="flex items-center gap-2"><ShoppingCart className="h-4 w-4 text-ink-500" aria-hidden="true" /><h2 id="requests-heading" className="text-lg font-semibold text-ink-700">Request operations</h2></div><p className="mt-1 text-xs text-ink-400">Review approvals and move eligible requests through fulfillment.</p></div>
       {requestsQuery.isLoading ? <RouteSkeleton rows={3} /> : requestsQuery.isError ? <ErrorState title="Could not load service requests" description="No decisions can be made until current request state is available." onRetry={() => requestsQuery.refetch()} retrying={requestsQuery.isFetching} /> : requests.length === 0 ? <EmptyState icon={<ShoppingCart className="h-5 w-5" />} title="No service requests yet" description="Requests will appear here after they are submitted from a ticket workflow." /> : <RequestResults requests={requests} pending={approvalMut.isPending || fulfillmentMut.isPending} onAction={(request, kind) => setRequestAction({ request, kind })} />}
-    </section>
+    </section>}
 
     <ServiceFormDialog open={showForm || Boolean(editing)} service={editing} onClose={() => { if (!createMut.isPending && !updateMut.isPending) { setShowForm(false); setEditing(null); createMut.reset(); updateMut.reset(); } }} onSubmit={(payload) => editing ? updateMut.mutate({ id: editing.id, payload }) : createMut.mutate(payload)} pending={createMut.isPending || updateMut.isPending} error={createMut.error || updateMut.error} />
     <ConfirmDialog open={Boolean(deleting)} onOpenChange={(open) => { if (!open) { setDeleting(null); deleteMut.reset(); } }} title="Deactivate service?" description={<>This removes <strong>{deleting?.name}</strong> from the active catalog. Existing request history remains available.</>} confirmLabel="Deactivate service" destructive pending={deleteMut.isPending} onConfirm={() => { if (deleting) deleteMut.mutate(deleting.id); }} />
@@ -102,7 +105,7 @@ export default function ServicesPage() {
         }
       }}
     />
-  </div>;
+  </PageFrame>;
 }
 
 function Metric({ label, value, featured, attention }: { label: string; value: number; featured?: boolean; attention?: boolean }) { return <div className={`rounded-2xl border p-4 ${attention ? "border-amber-400/40 bg-[var(--color-warning-soft)]" : featured ? "border-clay-200 bg-[var(--color-primary-soft)]" : "border-linen-300 bg-linen-50"}`}><p className="text-xs font-medium text-ink-500">{label}</p><p className="mt-2 font-serif text-3xl tabular-nums text-ink-700">{value}</p></div>; }

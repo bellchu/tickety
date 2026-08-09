@@ -25,6 +25,7 @@ import {
   IconButton,
   Skeleton,
 } from "@/components/ui";
+import { PageFrame, PageHeader, SummaryStrip } from "@/components/layout/PageLayout";
 
 const STATUS_FILTERS = ["", "New", "Under Investigation", "Known Error", "Resolved", "Closed"];
 const PRIORITIES = ["P1", "P2", "P3", "P4"];
@@ -107,30 +108,22 @@ export default function ProblemsPage() {
   };
 
   return (
-    <div className="space-y-6 pb-10">
-      <header className="flex flex-col gap-5 border-b border-linen-400 pb-6 lg:flex-row lg:items-end lg:justify-between">
-        <div className="max-w-2xl">
-          <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-clay-600">Service governance</p>
-          <h1 className="text-3xl font-semibold tracking-[-0.035em] text-ink-800 sm:text-4xl">Problems</h1>
-          <p className="mt-2 text-sm leading-6 text-ink-500">Investigate recurring incidents, document root causes, and connect durable fixes to affected tickets.</p>
-        </div>
-        <Button leadingIcon={<Plus className="h-4 w-4" />} onClick={() => { resetMutationErrors(); setFormProblem(null); }}>New problem</Button>
-      </header>
+    <PageFrame width="wide" className="pb-10">
+      <PageHeader eyebrow="Service governance" icon={<AlertOctagon className="h-4 w-4" />} title="Problems" description="Investigate recurring incidents, document root causes, and connect durable fixes to affected tickets." actions={<Button leadingIcon={<Plus className="h-4 w-4" />} onClick={() => { resetMutationErrors(); setFormProblem(null); }}>New problem</Button>} />
 
-      <section aria-label="Problem overview" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      {(investigating > 0 || knownErrors > 0 || linked > 0) && <SummaryStrip label="Problem overview" className="xl:grid-cols-3">
         {[
-          { label: "Visible records", value: problems.length, note: "In the current status view" },
           { label: "Investigating", value: investigating, note: "Root cause work in progress" },
           { label: "Known errors", value: knownErrors, note: "Workarounds should be documented" },
           { label: "Linked tickets", value: linked, note: "Incident context connected" },
-        ].map((metric) => (
+        ].filter((metric) => metric.value > 0).map((metric) => (
           <div key={metric.label} className="rounded-2xl border border-linen-400 bg-linen-50 p-4 shadow-[var(--shadow-card)]">
             <p className="text-xs font-medium text-ink-500">{metric.label}</p>
             <p className="mt-2 text-2xl font-semibold tabular-nums tracking-tight text-ink-800">{metric.value}</p>
             <p className="mt-1 text-xs text-ink-400">{metric.note}</p>
           </div>
         ))}
-      </section>
+      </SummaryStrip>}
 
       <section className="overflow-hidden rounded-2xl border border-linen-400 bg-linen-50 shadow-[var(--shadow-card)]">
         <div className="flex flex-col gap-3 border-b border-linen-400 p-4 sm:flex-row sm:items-center sm:justify-between">
@@ -180,7 +173,7 @@ export default function ProblemsPage() {
       <ProblemFormDialog open={formProblem !== undefined} problem={formProblem ?? null} users={usersQuery.data ?? []} usersUnavailable={usersQuery.isError} onOpenChange={(open) => { if (!open && !createMutation.isPending && !updateMutation.isPending) setFormProblem(undefined); }} onSubmit={(payload) => formProblem ? updateMutation.mutate({ id: formProblem.id, payload }) : createMutation.mutate(payload)} pending={createMutation.isPending || updateMutation.isPending} error={createMutation.error || updateMutation.error} />
       <ProblemDetailDialog problem={viewing} onOpenChange={(open) => { if (!open) setViewing(null); }} />
       <ConfirmDialog open={Boolean(deleting)} onOpenChange={(open) => { if (!open) setDeleting(null); }} title="Delete problem record?" description={<>This permanently removes <strong>{deleting?.title}</strong>. Linked incident records are not deleted.</>} confirmLabel="Delete problem" destructive pending={deleteMutation.isPending} onConfirm={() => { if (deleting) deleteMutation.mutate(deleting.id); }} />
-    </div>
+    </PageFrame>
   );
 }
 

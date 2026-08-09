@@ -11,6 +11,7 @@ import {
 } from "recharts";
 import { cn } from "@/lib/utils";
 import { Alert, EmptyState, ErrorState, Skeleton } from "@/components/ui";
+import { PageFrame, PageHeader } from "@/components/layout/PageLayout";
 
 const CHART_COLORS = ["#3D5AFE", "#7C8BFF", "#5C5347", "#9B9084", "#6B8E5A", "#D4A24C", "#C44A3F"];
 const PRIORITY_COLORS: Record<string, string> = { P1: "#C44A3F", P2: "#D4A24C", P3: "#3D5AFE", P4: "#9B9084" };
@@ -40,12 +41,8 @@ export default function ReportsPage() {
   const resolutionData = (resolutionTime?.categories || []).map((c, i) => ({ category: c, hours: resolutionTime?.avg_hours?.[i] ?? 0 }));
 
   return (
-    <div className="mx-auto max-w-7xl space-y-6">
-      <header className="border-b border-linen-400 pb-6">
-        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-ink-400">Operational analytics</p>
-        <h1 className="mt-2 text-3xl font-semibold tracking-[-0.04em] text-ink-700">Reports</h1>
-        <p className="mt-2 max-w-2xl text-sm leading-6 text-ink-500">Understand service demand, delivery speed, and SLA performance across the operating model.</p>
-      </header>
+    <PageFrame>
+      <PageHeader eyebrow="Operational analytics" icon={<BarChart3 className="h-4 w-4" />} title="Reports" description="Understand service demand, delivery speed, and SLA performance across the operating model." />
 
       {failed === queries.length && (
         <ErrorState title="Reports could not be loaded" description="The analytics service did not return any report data." onRetry={() => void Promise.all(queries.map((query) => query.refetch()))} retrying={queries.some((query) => query.isFetching)} />
@@ -71,7 +68,7 @@ export default function ReportsPage() {
       <div className="card-surface p-5">
         <h2 className="text-sm font-semibold text-ink-700 mb-4">Ticket Volume (Last 30 Days)</h2>
         {volumeQuery.isLoading ? <ChartSkeleton /> : volumeQuery.isError ? <SectionError onRetry={() => void volumeQuery.refetch()} /> : volumeData.length > 0 ? (
-          <ResponsiveContainer width="100%" height={240}>
+          <><p className="sr-only">Daily ticket volume over the last 30 days. Values range from {Math.min(...volumeData.map((item) => item.count))} to {Math.max(...volumeData.map((item) => item.count))} tickets per day.</p><ResponsiveContainer width="100%" height={240}>
             <AreaChart data={volumeData}>
               <defs>
                 <linearGradient id="volGrad" x1="0" y1="0" x2="0" y2="1">
@@ -85,7 +82,7 @@ export default function ReportsPage() {
               <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #E8E1D6" }} />
               <Area type="monotone" dataKey="count" stroke="#3D5AFE" strokeWidth={2} fill="url(#volGrad)" />
             </AreaChart>
-          </ResponsiveContainer>
+          </ResponsiveContainer></>
         ) : (
           <EmptyChart />
         )}
@@ -174,7 +171,7 @@ export default function ReportsPage() {
         ) : <EmptyChart />}
       </div>
       </>}
-    </div>
+    </PageFrame>
   );
 }
 

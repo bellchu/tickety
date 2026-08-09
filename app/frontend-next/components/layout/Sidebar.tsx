@@ -24,23 +24,48 @@ import {
   GitBranch,
   Laptop,
   MessageSquareHeart,
+  Clock3,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-const navItems = [
-  { href: "/",             label: "Dashboard",    icon: LayoutDashboard },
-  { href: "/tickets",      label: "Tickets",       icon: Inbox },
-  { href: "/agents",       label: "Agents",        icon: Users },
-  { href: "/services",     label: "Services",      icon: Package },
-  { href: "/problems",     label: "Problems",      icon: AlertOctagon },
-  { href: "/changes",      label: "Changes",       icon: GitBranch },
-  { href: "/assets",       label: "Assets",        icon: Laptop },
-  { href: "/knowledge",    label: "Knowledge Base", icon: BookOpen },
-  { href: "/surveys",      label: "Surveys",       icon: MessageSquareHeart },
-  { href: "/reports",      label: "Reports",       icon: BarChart3 },
-  { href: "/leaderboard",  label: "Leaderboard",   icon: TrendingUp },
-  { href: "/intelligence", label: "Intelligence",  icon: Radar },
+const navGroups = [
+  {
+    label: "Overview",
+    items: [{ href: "/", label: "Dashboard", icon: LayoutDashboard }],
+  },
+  {
+    label: "Work",
+    items: [
+      { href: "/tickets", label: "Tickets", icon: Inbox },
+      { href: "/time", label: "My Time", icon: Clock3 },
+    ],
+  },
+  {
+    label: "Service management",
+    items: [
+      { href: "/services", label: "Services", icon: Package },
+      { href: "/problems", label: "Problems", icon: AlertOctagon },
+      { href: "/changes", label: "Changes", icon: GitBranch },
+      { href: "/assets", label: "Assets", icon: Laptop },
+      { href: "/knowledge", label: "Knowledge Base", icon: BookOpen },
+    ],
+  },
+  {
+    label: "People",
+    items: [
+      { href: "/agents", label: "Agents", icon: Users },
+      { href: "/surveys", label: "Surveys", icon: MessageSquareHeart },
+      { href: "/leaderboard", label: "Leaderboard", icon: TrendingUp },
+    ],
+  },
+  {
+    label: "Insights",
+    items: [
+      { href: "/reports", label: "Reports", icon: BarChart3 },
+      { href: "/intelligence", label: "Intelligence", icon: Radar },
+    ],
+  },
 ];
 
 export function Sidebar({
@@ -82,37 +107,43 @@ export function Sidebar({
         </button>
       </div>
 
-      <div className="px-3 pt-6 pb-2">
-        <span className="px-3 text-[10px] font-semibold tracking-[0.16em] text-slate-500">
-          WORKSPACE
-        </span>
-      </div>
-
-      <nav aria-label="Workspace" className="flex-1 space-y-0.5 overflow-y-auto px-3 pb-4">
-        {navItems.filter((item) => (
-          (item.href !== "/intelligence" || canAccessIntelligence) &&
-          (item.href !== "/agents" || canAccessAdmin)
-        )).map((item) => {
-          const Icon = item.icon;
-          const active =
-            pathname === item.href ||
-            (item.href !== "/" && pathname.startsWith(item.href));
+      <nav aria-label="Workspace" className="flex-1 space-y-3 overflow-y-auto px-3 py-4">
+        {navGroups.map((group) => {
+          const visibleItems = group.items.filter((item) => (
+            (item.href !== "/intelligence" || canAccessIntelligence) &&
+            (item.href !== "/agents" || canAccessAdmin)
+          ));
+          if (!visibleItems.length) return null;
+          const groupId = `nav-${group.label.toLowerCase().replaceAll(" ", "-")}`;
           return (
-            <Link
-              key={item.label}
-              href={item.href}
-              aria-current={active ? "page" : undefined}
-              onClick={onClose}
-              className={cn(
-                "group flex min-h-10 items-center gap-3 rounded-md px-3 py-2 text-[13px] transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#3D5AFE]",
-                active
-                  ? "font-medium text-[#F2F5F8]"
-                  : "font-normal text-[#9AA5B3] hover:bg-white/[0.035] hover:text-[#E7EBF0]"
-              )}
-            >
-              <ProductIcon icon={Icon} active={active} />
-              {item.label}
-            </Link>
+            <div key={group.label} role="group" aria-labelledby={groupId}>
+              <div id={groupId} className="px-3 pb-1 text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+                {group.label}
+              </div>
+              <div className="space-y-0.5">
+                {visibleItems.map((item) => {
+                  const Icon = item.icon;
+                  const active = pathname === item.href || (item.href !== "/" && pathname.startsWith(item.href));
+                  return (
+                    <Link
+                      key={item.label}
+                      href={item.href}
+                      aria-current={active ? "page" : undefined}
+                      onClick={onClose}
+                      className={cn(
+                        "group flex min-h-11 items-center gap-3 rounded-md px-3 py-1.5 text-[13px] transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#3D5AFE] lg:min-h-9",
+                        active
+                          ? "bg-white/[0.045] font-medium text-[#F2F5F8]"
+                          : "font-normal text-[#9AA5B3] hover:bg-white/[0.035] hover:text-[#E7EBF0]"
+                      )}
+                    >
+                      <ProductIcon icon={Icon} active={active} />
+                      {item.label}
+                    </Link>
+                  );
+                })}
+              </div>
+            </div>
           );
         })}
       </nav>

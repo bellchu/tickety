@@ -9,6 +9,7 @@ import { Badge, type BadgeVariant } from "@/components/ui/Badge";
 import { Button, IconButton } from "@/components/ui/Button";
 import { ConfirmDialog, Dialog } from "@/components/ui/Dialog";
 import { Alert, EmptyState, ErrorState, Skeleton } from "@/components/ui/Feedback";
+import { PageFrame, PageHeader } from "@/components/layout/PageLayout";
 
 const ASSET_TYPES = ["Hardware", "Software", "License", "Network", "Facility"];
 const ASSET_STATUSES = ["Active", "Inactive", "Retired", "In Repair", "Lost/Stolen"];
@@ -30,7 +31,6 @@ export default function AssetsPage() {
   const [deleting, setDeleting] = useState<Asset | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  const statsQuery = useQuery({ queryKey: ["assetStats"], queryFn: api.getAssetStats });
   const assetsQuery = useQuery({
     queryKey: ["assets", assetType, status, search],
     queryFn: () => api.getAssets(assetType || undefined, status || undefined, search || undefined),
@@ -40,7 +40,6 @@ export default function AssetsPage() {
   const refreshAssets = async () => {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["assets"] }),
-      queryClient.invalidateQueries({ queryKey: ["assetStats"] }),
     ]);
   };
 
@@ -73,38 +72,14 @@ export default function AssetsPage() {
   const hasFilters = Boolean(assetType || status || search);
 
   return (
-    <div className="space-y-6">
-      <header className="flex flex-col gap-4 border-b border-linen-300 pb-6 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-ink-400">
-            <ShieldCheck className="h-4 w-4" aria-hidden="true" /> Configuration management
-          </div>
-          <h1 className="font-serif text-3xl tracking-tight text-ink-700 sm:text-4xl">Assets</h1>
-          <p className="mt-2 max-w-2xl text-sm text-ink-500">Track ownership, lifecycle, location, and warranty exposure across the estate.</p>
-        </div>
-        <Button leadingIcon={<Plus className="h-4 w-4" />} onClick={() => { setNotice(null); setShowForm(true); }}>
-          Add asset
-        </Button>
-      </header>
+    <PageFrame width="wide">
+      <PageHeader eyebrow="Configuration management" icon={<ShieldCheck className="h-4 w-4" />} title="Assets" description="Track ownership, lifecycle, location, and warranty exposure across the estate." actions={<Button leadingIcon={<Plus className="h-4 w-4" />} onClick={() => { setNotice(null); setShowForm(true); }}>Add asset</Button>} />
 
       {notice && <Alert variant="success" title="Inventory updated">{notice}</Alert>}
       {(deleteMut.isError || usersQuery.isError) && (
         <Alert variant="danger" title="Some asset actions are unavailable">
           {deleteMut.error instanceof Error ? deleteMut.error.message : "Could not load owners or complete the requested change. Try again."}
         </Alert>
-      )}
-
-      {statsQuery.isError ? (
-        <ErrorState title="Asset summary unavailable" description="The inventory can still be searched below." onRetry={() => statsQuery.refetch()} retrying={statsQuery.isFetching} />
-      ) : (
-        <section aria-label="Asset inventory summary" className="grid grid-cols-2 gap-3 lg:grid-cols-5">
-          {statsQuery.isLoading ? Array.from({ length: 5 }, (_, i) => <Skeleton key={i} className="h-24" />) : (
-            <>
-              <Metric label="Total assets" value={statsQuery.data?.total ?? 0} featured />
-              {ASSET_TYPES.slice(0, 4).map((type) => <Metric key={type} label={type} value={statsQuery.data?.by_type?.[type] ?? 0} />)}
-            </>
-          )}
-        </section>
       )}
 
       <section aria-labelledby="asset-inventory-heading" className="space-y-4">
@@ -147,12 +122,8 @@ export default function AssetsPage() {
         title="Remove asset?" description={<>This permanently removes <strong>{deleting?.name}</strong> from the configuration inventory. This action cannot be undone.</>}
         confirmLabel="Remove asset" destructive pending={deleteMut.isPending} onConfirm={() => { if (deleting) deleteMut.mutate(deleting.id); }}
       />
-    </div>
+    </PageFrame>
   );
-}
-
-function Metric({ label, value, featured = false }: { label: string; value: number; featured?: boolean }) {
-  return <div className={`rounded-2xl border p-4 ${featured ? "border-clay-200 bg-[var(--color-primary-soft)]" : "border-linen-300 bg-linen-50"}`}><p className="text-xs font-medium text-ink-500">{label}</p><p className="mt-2 font-serif text-3xl tabular-nums text-ink-700">{value}</p></div>;
 }
 
 function AssetSkeleton() { return <div className="card-surface space-y-3 p-4" aria-label="Loading asset inventory">{Array.from({ length: 5 }, (_, i) => <Skeleton key={i} className="h-14" />)}</div>; }

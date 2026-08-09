@@ -10,6 +10,7 @@ import { Badge, type BadgeVariant } from "@/components/ui/Badge";
 import { Button, IconButton } from "@/components/ui/Button";
 import { ConfirmDialog, Dialog } from "@/components/ui/Dialog";
 import { Alert, EmptyState, ErrorState, Skeleton } from "@/components/ui/Feedback";
+import { PageFrame, PageHeader } from "@/components/layout/PageLayout";
 
 const articleVariant = (status: string): BadgeVariant => status === "published" ? "success" : status === "archived" ? "neutral" : "warning";
 
@@ -17,6 +18,7 @@ export default function KnowledgeBasePage() {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState<"" | "published" | "draft" | "archived">("");
   const [selected, setSelected] = useState<KbArticle | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<KbArticle | null>(null);
@@ -45,39 +47,35 @@ export default function KnowledgeBasePage() {
   });
 
   const articles = articlesQuery.data?.articles ?? [];
+  const visibleArticles = statusFilter ? articles.filter((article) => article.status === statusFilter) : articles;
   const articlesTruncated = articlesQuery.data?.hasMore ?? false;
   const categories = categoriesQuery.data?.categories ?? [];
-  const published = articles.filter((article) => article.status === "published");
-  const totalViews = articles.reduce((sum, article) => sum + article.views, 0);
-  const helpfulTotal = articles.reduce((sum, article) => sum + article.helpful, 0);
-  const feedbackTotal = articles.reduce((sum, article) => sum + article.helpful + article.not_helpful, 0);
-  const helpfulRate = feedbackTotal ? Math.round((helpfulTotal / feedbackTotal) * 100) : 0;
-  const hasFilters = Boolean(search || categoryFilter);
+  const hasFilters = Boolean(search || categoryFilter || statusFilter);
   const actionError = deleteMut.error || feedbackMut.error;
   const actionErrorMessage = actionError instanceof Error
     ? actionError.message
     : "Could not load categories or complete the requested action.";
 
-  return <div className="space-y-8">
-    <header className="flex flex-col gap-4 border-b border-linen-300 pb-6 sm:flex-row sm:items-end sm:justify-between"><div><div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-ink-400"><BookOpen className="h-4 w-4" aria-hidden="true" /> Self-service operations</div><h1 className="font-serif text-3xl tracking-tight text-ink-700 sm:text-4xl">Knowledge base</h1><p className="mt-2 max-w-2xl text-sm text-ink-500">Turn proven resolutions into clear, trusted guidance for requesters and support teams.</p></div><Button leadingIcon={<Plus className="h-4 w-4" />} onClick={() => { setNotice(null); setShowForm(true); }}>New article</Button></header>
+  return <PageFrame width="wide">
+    <PageHeader eyebrow="Self-service operations" icon={<BookOpen className="h-4 w-4" />} title="Knowledge base" description="Turn proven resolutions into clear, trusted guidance for requesters and support teams." actions={<Button leadingIcon={<Plus className="h-4 w-4" />} onClick={() => { setNotice(null); setShowForm(true); }}>New article</Button>} />
 
     {notice && <Alert variant="success" title="Knowledge base updated">{notice}</Alert>}
     {(deleteMut.isError || feedbackMut.isError || categoriesQuery.isError) && <Alert variant="danger" title="Some knowledge actions are unavailable">{actionErrorMessage}</Alert>}
 
-    <section aria-label="Knowledge base summary" className="grid grid-cols-2 gap-3 lg:grid-cols-4"><Metric label="Published" value={published.length} featured /><Metric label="Drafts" value={articles.filter((article) => article.status === "draft").length} /><Metric label="Article views" value={totalViews} /><Metric label="Helpful rating" value={`${helpfulRate}%`} /></section>
+    <div className="flex flex-wrap gap-2" aria-label="Article publication status">
+      {([{"value":"","label":"All"},{"value":"published","label":"Published"},{"value":"draft","label":"Drafts"},{"value":"archived","label":"Archived"}] as const).map((view) => <button key={view.value || "all"} type="button" aria-pressed={statusFilter === view.value} onClick={() => setStatusFilter(view.value)} className={`min-h-11 rounded-full border px-3 text-xs font-semibold transition-colors sm:min-h-9 ${statusFilter === view.value ? "border-clay-300 bg-[var(--color-primary-soft)] text-semantic-primary" : "border-linen-400 bg-linen-50 text-ink-500 hover:bg-linen-200"}`}>{view.label} <span className="ml-1 opacity-70">{view.value ? articles.filter((article) => article.status === view.value).length : articles.length}</span></button>)}
+    </div>
 
-    <section aria-labelledby="library-heading" className="space-y-4"><div className="flex flex-col gap-3 lg:flex-row lg:items-end"><div className="min-w-0 flex-1"><h2 id="library-heading" className="text-lg font-semibold text-ink-700">Article library</h2><p className="mt-1 text-xs text-ink-400" aria-live="polite">{articlesQuery.isLoading ? "Loading articles…" : `${articles.length} matching article${articles.length === 1 ? "" : "s"}${articlesTruncated ? " shown" : ""}`}</p></div><label className="relative block min-w-0 flex-1 lg:max-w-md"><span className="sr-only">Search knowledge articles</span><Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-400" aria-hidden="true" /><input type="search" className="input-base input-search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search titles and content…" /></label><label className="lg:w-56"><span className="sr-only">Filter articles by category</span><select className="input-base" value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)}><option value="">All categories</option>{categories.map((category) => <option key={category}>{category}</option>)}</select></label></div>
-      {articlesTruncated && <Alert variant="warning" title="Showing the first 500 articles">Use search or category filters to narrow the library before calculating summary totals.</Alert>}
-      {articlesQuery.isLoading ? <ArticleSkeleton /> : articlesQuery.isError ? <ErrorState title="Could not load knowledge articles" description="Search and article management are temporarily unavailable." onRetry={() => articlesQuery.refetch()} retrying={articlesQuery.isFetching} /> : articles.length === 0 ? <EmptyState icon={<BookOpen className="h-5 w-5" />} title={hasFilters ? "No articles match this search" : "No knowledge articles yet"} description={hasFilters ? "Try a broader search or clear the category filter." : "Capture the first proven resolution so the next requester can self-serve."} action={hasFilters ? <Button variant="secondary" onClick={() => { setSearch(""); setCategoryFilter(""); }}>Clear filters</Button> : <Button leadingIcon={<Plus className="h-4 w-4" />} onClick={() => setShowForm(true)}>New article</Button>} /> : <div className="grid gap-4 lg:grid-cols-2">{articles.map((article) => <ArticleCard key={article.id} article={article} onRead={setSelected} onEdit={setEditing} onDelete={setDeleting} />)}</div>}
+    <section aria-labelledby="library-heading" className="space-y-4"><div className="flex flex-col gap-3 lg:flex-row lg:items-end"><div className="min-w-0 flex-1"><h2 id="library-heading" className="text-lg font-semibold text-ink-700">Article library</h2><p className="mt-1 text-xs text-ink-400" aria-live="polite">{articlesQuery.isLoading ? "Loading articles…" : `${visibleArticles.length} matching article${visibleArticles.length === 1 ? "" : "s"}${articlesTruncated ? " shown" : ""}`}</p></div><label className="relative block min-w-0 flex-1 lg:max-w-md"><span className="sr-only">Search knowledge articles</span><Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-400" aria-hidden="true" /><input type="search" className="input-base input-search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search titles and content…" /></label><label className="lg:w-56"><span className="sr-only">Filter articles by category</span><select className="input-base" value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)}><option value="">All categories</option>{categories.map((category) => <option key={category}>{category}</option>)}</select></label></div>
+      {articlesTruncated && <Alert variant="warning" title="Showing the first 500 articles">Use search or category filters to narrow the library.</Alert>}
+      {articlesQuery.isLoading ? <ArticleSkeleton /> : articlesQuery.isError ? <ErrorState title="Could not load knowledge articles" description="Search and article management are temporarily unavailable." onRetry={() => articlesQuery.refetch()} retrying={articlesQuery.isFetching} /> : visibleArticles.length === 0 ? <EmptyState icon={<BookOpen className="h-5 w-5" />} title={hasFilters ? "No articles match this view" : "No knowledge articles yet"} description={hasFilters ? "Try a broader search or clear the current filters." : "Capture the first proven resolution so the next requester can self-serve."} action={hasFilters ? <Button variant="secondary" onClick={() => { setSearch(""); setCategoryFilter(""); setStatusFilter(""); }}>Clear filters</Button> : <Button leadingIcon={<Plus className="h-4 w-4" />} onClick={() => setShowForm(true)}>New article</Button>} /> : <div className="grid gap-4 lg:grid-cols-2">{visibleArticles.map((article) => <ArticleCard key={article.id} article={article} onRead={setSelected} onEdit={setEditing} onDelete={setDeleting} />)}</div>}
     </section>
 
     <ArticleReaderDialog open={Boolean(selected)} article={selected} onClose={() => { if (!feedbackMut.isPending) { setSelected(null); feedbackMut.reset(); } }} onEdit={(article) => { setSelected(null); setEditing(article); }} onDelete={(article) => { setSelected(null); setDeleting(article); }} onFeedback={(helpful) => selected && feedbackMut.mutate({ id: selected.id, helpful })} pending={feedbackMut.isPending} error={feedbackMut.error} />
     <ArticleFormDialog open={showForm || Boolean(editing)} article={editing} categories={categories} onClose={() => { if (!createMut.isPending && !updateMut.isPending) { setShowForm(false); setEditing(null); createMut.reset(); updateMut.reset(); } }} onSubmit={(payload) => editing ? updateMut.mutate({ id: editing.id, payload }) : createMut.mutate(payload)} pending={createMut.isPending || updateMut.isPending} error={createMut.error || updateMut.error} />
     <ConfirmDialog open={Boolean(deleting)} onOpenChange={(open) => { if (!open) { setDeleting(null); deleteMut.reset(); } }} title="Delete article?" description={<>This permanently removes <strong>{deleting?.title}</strong> and its feedback history. This action cannot be undone.</>} confirmLabel="Delete article" destructive pending={deleteMut.isPending} onConfirm={() => { if (deleting) deleteMut.mutate(deleting.id); }} />
-  </div>;
+  </PageFrame>;
 }
-
-function Metric({ label, value, featured }: { label: string; value: number | string; featured?: boolean }) { return <div className={`rounded-2xl border p-4 ${featured ? "border-clay-200 bg-[var(--color-primary-soft)]" : "border-linen-300 bg-linen-50"}`}><p className="text-xs font-medium text-ink-500">{label}</p><p className="mt-2 font-serif text-3xl tabular-nums text-ink-700">{value}</p></div>; }
 function ArticleSkeleton() { return <div className="grid gap-4 lg:grid-cols-2" aria-label="Loading knowledge articles">{Array.from({ length: 4 }, (_, i) => <div key={i} className="card-surface p-5"><Skeleton className="h-5 w-3/4" /><Skeleton className="mt-4 h-4 w-full" /><Skeleton className="mt-2 h-4 w-2/3" /><Skeleton className="mt-5 h-6 w-1/3" /></div>)}</div>; }
 
 function ArticleCard({ article, onRead, onEdit, onDelete }: { article: KbArticle; onRead: (article: KbArticle) => void; onEdit: (article: KbArticle) => void; onDelete: (article: KbArticle) => void }) {
