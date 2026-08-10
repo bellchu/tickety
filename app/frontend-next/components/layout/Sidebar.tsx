@@ -8,6 +8,7 @@ import { canAccessAdministration, canAccessProtectedIntelligence, isDemoContext 
 import { TicketyLogo } from "@/components/layout/TicketyLogo";
 import { SyncIndicator } from "@/components/layout/SyncIndicator";
 import { LoginLink } from "@/components/layout/LoginLink";
+import { LogoutButton } from "@/components/layout/LogoutButton";
 import { ProductIcon } from "@/components/icons/ProductIcon";
 import {
   LayoutDashboard,
@@ -17,7 +18,6 @@ import {
   BarChart3,
   TrendingUp,
   Settings as SettingsIcon,
-  User,
   Radar,
   Package,
   AlertOctagon,
@@ -25,9 +25,21 @@ import {
   Laptop,
   MessageSquareHeart,
   Clock3,
+  ChevronRight,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+
+function initials(name?: string) {
+  if (!name) return "ME";
+  return name
+    .split(" ")
+    .filter(Boolean)
+    .map((part) => part[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
+}
 
 const navGroups = [
   {
@@ -80,7 +92,9 @@ export function Sidebar({
   const canAccessAdmin = canAccessAdministration(me);
   const canAccessIntelligence = canAccessProtectedIntelligence(me);
   const isDemoWorkspace = isDemoContext(me);
-  const showLogin = me?.auth_kind === "demo_fallback";
+  const isDemoFallback = me?.auth_kind === "demo_fallback";
+  const showLogin = isDemoFallback;
+  const showLogout = me?.auth_kind === "session";
 
   return (
     <aside
@@ -162,28 +176,6 @@ export function Sidebar({
           />
         )}
 
-        <Link
-          href="/profile"
-          onClick={onClose}
-          aria-current={pathname.startsWith("/profile") ? "page" : undefined}
-          className={cn(
-            "group flex min-h-10 items-center gap-3 rounded-md px-3 py-2 text-[13px] transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#3D5AFE]",
-            pathname.startsWith("/profile")
-              ? "font-medium text-[#F2F5F8]"
-              : "font-normal text-[#9AA5B3] hover:bg-white/[0.035] hover:text-[#E7EBF0]"
-          )}
-        >
-          <ProductIcon icon={User} active={pathname.startsWith("/profile")} />
-          <span className="flex-1 truncate">
-            {isDemoWorkspace ? "Demo workspace" : me?.name || "Profile"}
-          </span>
-          {me && (
-            <span className="rounded-full border border-white/15 px-1.5 py-0.5 text-[10px] font-medium text-slate-400">
-              {isDemoWorkspace ? "DEMO" : `T${me.tier}`}
-            </span>
-          )}
-        </Link>
-
         {(canAccessAdmin || isDemoWorkspace) && (
           <Link
             href="/settings"
@@ -203,6 +195,47 @@ export function Sidebar({
             Settings{!canAccessAdmin && <span className="sr-only"> (sign in as a demo administrator to manage settings)</span>}
           </Link>
         )}
+
+        <div className="mt-2 border-t border-white/10 pt-3">
+          <div className="px-3 pb-1.5 text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+            Account
+          </div>
+          <Link
+            href="/profile"
+            onClick={onClose}
+            aria-current={pathname.startsWith("/profile") ? "page" : undefined}
+            className={cn(
+              "group flex min-h-14 items-center gap-3 rounded-lg px-2.5 py-2 text-[13px] transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#3D5AFE]",
+              pathname.startsWith("/profile")
+                ? "bg-white/[0.06] text-[#F2F5F8]"
+                : "text-[#9AA5B3] hover:bg-white/[0.035] hover:text-[#E7EBF0]"
+            )}
+          >
+            <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full border border-white/15 bg-white/[0.08] text-[11px] font-semibold text-white">
+              {initials(isDemoFallback ? "Demo workspace" : me?.name)}
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate font-medium text-[#F2F5F8]">
+                {isDemoFallback ? "Demo workspace" : me?.name || "My profile"}
+              </span>
+              <span className="mt-0.5 block truncate text-[11px] text-slate-500">
+                {isDemoFallback ? "View demo profile" : me?.email || "View my profile"}
+              </span>
+            </span>
+            <ChevronRight className="h-4 w-4 shrink-0 text-slate-600 transition-transform group-hover:translate-x-0.5 group-hover:text-slate-400" aria-hidden="true" />
+            <span className="sr-only">My profile</span>
+          </Link>
+
+          {showLogout && (
+            <LogoutButton
+              onNavigate={onClose}
+              variant="ghost"
+              size="sm"
+              errorClassName="text-red-300"
+              className="mt-1 w-full justify-start border-transparent px-2.5 text-slate-400 hover:bg-white/[0.035] hover:text-white focus-visible:ring-[#3D5AFE] focus-visible:ring-offset-[#101820]"
+            />
+          )}
+        </div>
       </div>
     </aside>
   );
