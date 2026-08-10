@@ -21,6 +21,20 @@ data:
   CORS_ALLOW_ORIGINS: {{ $corsAllowOrigins | quote }}
   COOKIE_SECURE: {{ .Values.config.cookieSecure | quote }}
   COOKIE_SAMESITE: {{ .Values.config.cookieSameSite | quote }}
+  TICKET_RAG_SCOPE_KEY: {{ .Values.config.ragV2.scopeKey | quote }}
+  TICKET_RAG_V2_SCOPE_ALLOWLIST: {{ .Values.config.ragV2.scopeAllowlist | quote }}
+  TICKET_RAG_V2_WRITE_ENABLED: {{ .Values.config.ragV2.writeEnabled | quote }}
+  TICKET_RAG_V2_WORKER_ENABLED: {{ .Values.config.ragV2.workerEnabled | quote }}
+  TICKET_RAG_V2_READ_ENABLED: {{ .Values.config.ragV2.readEnabled | quote }}
+  TICKET_RAG_CHUNK_TARGET_TOKENS: {{ .Values.config.ragV2.chunkTargetTokens | quote }}
+  TICKET_RAG_CHUNK_MAX_TOKENS: {{ .Values.config.ragV2.chunkMaxTokens | quote }}
+  TICKET_RAG_CHUNK_OVERLAP_TOKENS: {{ .Values.config.ragV2.chunkOverlapTokens | quote }}
+  TICKET_RAG_EMBED_BATCH_SIZE: {{ .Values.config.ragV2.embedBatchSize | quote }}
+  TICKET_RAG_EMBED_LEASE_SECONDS: {{ .Values.config.ragV2.embedLeaseSeconds | quote }}
+  TICKET_RAG_WORKER_POLL_SECONDS: {{ .Values.config.ragV2.workerPollSeconds | quote }}
+  TICKET_RAG_QUERY_CACHE_TTL_SECONDS: {{ .Values.config.ragV2.queryCacheTtlSeconds | quote }}
+  TICKET_RAG_QUERY_CACHE_MAX_ROWS: {{ .Values.config.ragV2.queryCacheMaxRows | quote }}
+  TICKET_RAG_SNAPSHOT_TTL_SECONDS: {{ .Values.config.ragV2.snapshotTtlSeconds | quote }}
   {{- range $key, $value := .Values.config.extra }}
   {{ $key }}: {{ $value | quote }}
   {{- end }}

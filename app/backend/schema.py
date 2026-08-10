@@ -272,6 +272,20 @@ class Settings(BaseModel):
     TICKET_EMBEDDING_MAX_CHARS: Optional[str] = None
     TICKET_VECTOR_MIN_SCORE: Optional[str] = None
     TICKET_EMBEDDING_API_BASE: Optional[str] = None
+    TICKET_RAG_SCOPE_KEY: Optional[str] = None
+    TICKET_RAG_V2_SCOPE_ALLOWLIST: Optional[str] = None
+    TICKET_RAG_V2_WRITE_ENABLED: Optional[str] = None
+    TICKET_RAG_V2_WORKER_ENABLED: Optional[str] = None
+    TICKET_RAG_V2_READ_ENABLED: Optional[str] = None
+    TICKET_RAG_CHUNK_TARGET_TOKENS: Optional[str] = None
+    TICKET_RAG_CHUNK_MAX_TOKENS: Optional[str] = None
+    TICKET_RAG_CHUNK_OVERLAP_TOKENS: Optional[str] = None
+    TICKET_RAG_EMBED_BATCH_SIZE: Optional[str] = None
+    TICKET_RAG_EMBED_LEASE_SECONDS: Optional[str] = None
+    TICKET_RAG_WORKER_POLL_SECONDS: Optional[str] = None
+    TICKET_RAG_QUERY_CACHE_TTL_SECONDS: Optional[str] = None
+    TICKET_RAG_QUERY_CACHE_MAX_ROWS: Optional[str] = None
+    TICKET_RAG_SNAPSHOT_TTL_SECONDS: Optional[str] = None
     DATABASE_URL: Optional[str] = None
     ITSM_PROVIDER: Optional[str] = None
     FRESHSERVICE_DOMAIN: Optional[str] = None
@@ -474,6 +488,8 @@ class GroundedAnalysisResult(BaseModel):
 class TicketIntelligenceAnalysisResponse(BaseModel):
     question: str
     match_method: str = "keyword"
+    snapshot_id: Optional[str] = None
+    snapshot_digest: Optional[str] = None
     answer: str = ""
     findings: List[str] = Field(default_factory=list)
     recommended_actions: List[str] = Field(default_factory=list)

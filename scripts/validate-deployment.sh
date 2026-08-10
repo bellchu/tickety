@@ -181,7 +181,11 @@ fi
 
 if [[ -n $yaml_python ]]; then
   echo "Checking Kubernetes YAML resources..."
-  validate_yaml_resources "${manifest_files[@]}" "${rendered_files[@]-}"
+  if ((${#rendered_files[@]})); then
+    validate_yaml_resources "${manifest_files[@]}" "${rendered_files[@]}"
+  else
+    validate_yaml_resources "${manifest_files[@]}"
+  fi
 elif [[ $REQUIRE_YAML == true ]]; then
   echo "Required YAML validator is unavailable: install PyYAML for python3 or python." >&2
   exit 1
@@ -196,10 +200,11 @@ if require_or_skip "$REQUIRE_KUBECTL" kubectl; then
     # cluster. YAML/resource checks above cover offline structure; disabling
     # this lookup keeps the dry-run focused on kubectl resource handling.
     kubectl apply --dry-run=client --validate=false -f "$ROOT_DIR/k8s"
-    for rendered_file in "${rendered_files[@]-}"; do
-      [[ -n $rendered_file ]] || continue
-      kubectl apply --dry-run=client --validate=false -f "$rendered_file"
-    done
+    if ((${#rendered_files[@]})); then
+      for rendered_file in "${rendered_files[@]}"; do
+        kubectl apply --dry-run=client --validate=false -f "$rendered_file"
+      done
+    fi
   elif [[ $REQUIRE_KUBECTL_CLUSTER == true ]]; then
     echo "A reachable Kubernetes API server is required for kubectl client dry-run validation." >&2
     exit 1

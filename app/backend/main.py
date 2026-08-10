@@ -2749,6 +2749,13 @@ def _pack_rag_evidence(
             "authority": authority,
             "metadata": evidence_item["metadata"],
         }
+        # Internal immutable-source identifiers are excluded by the response
+        # schema but retained for the digest-bound v2 context snapshot.
+        for internal_key in (
+            "chunk_id", "content_hash", "parent_hash", "source_revision"
+        ):
+            if source.get(internal_key) is not None:
+                packed_item[internal_key] = str(source[internal_key])
         packed_context.append(packed_item)
         citations[citation_id] = packed_item
 
@@ -2851,6 +2858,31 @@ async def analyze_ticket_intelligence(
         retrieved_context,
         max_chars=min(_RAG_PROMPT_CHAR_LIMIT, prompt_char_limit(llm_mgr)),
     )
+    snapshot = None
+    from .rag.config import read_enabled as rag_v2_read_enabled
+
+    if rag_v2_read_enabled():
+        from .rag.snapshots import create_snapshot
+
+        snapshot = create_snapshot(
+            db,
+            actor_id=str(_user.id),
+            actor_role=str(_user.role),
+            include_private_comments=_can_access_private_ai_context(_user),
+            allowed_assignee_id=allowed_assignee_id,
+            query=payload.question,
+            embedding_identity=ticket_vectors._embedding_identity(),
+            # Persist the exact already-redacted evidence array supplied to
+            # the first agent. The second agent reuses these bytes' canonical
+            # JSON representation; generated output is never appended.
+            packed_evidence=json.loads(prompt)["evidence"],
+            citation_allowlist=allowed_citations,
+            retrieval_results=retrieved_context,
+        )
+        if snapshot is None:
+            raise RuntimeError(
+                "RAG v2 evidence could not be bound to an authorized snapshot"
+            )
     result = await llm_mgr.analyze(
         prompt,
         response_model=TicketIntelligenceAnswer,
@@ -2938,6 +2970,8 @@ async def analyze_ticket_intelligence(
     return {
         "question": payload.question,
         "match_method": retrieval.get("match_method", "keyword"),
+        "snapshot_id": snapshot["snapshot_id"] if snapshot else None,
+        "snapshot_digest": snapshot["snapshot_digest"] if snapshot else None,
         "answer": answer,
         "findings": [item["text"] for item in grounded_findings],
         "recommended_actions": [item["text"] for item in trusted_actions],

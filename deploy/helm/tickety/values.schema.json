@@ -74,7 +74,7 @@
     },
     "config": {
       "type": "object",
-      "required": ["appMode", "deploymentClass", "loginRequired", "cookieSecure", "cookieSameSite", "extra"],
+      "required": ["appMode", "deploymentClass", "loginRequired", "cookieSecure", "cookieSameSite", "ragV2", "extra"],
       "properties": {
         "appMode": { "enum": ["demo", "production"] },
         "deploymentClass": { "enum": ["poc", "production"] },
@@ -84,6 +84,32 @@
         "corsAllowOrigins": { "type": "string" },
         "cookieSecure": { "type": "boolean" },
         "cookieSameSite": { "enum": ["lax", "strict", "none"] },
+        "ragV2": {
+          "type": "object",
+          "required": [
+            "scopeKey", "scopeAllowlist", "writeEnabled", "workerEnabled",
+            "readEnabled", "chunkTargetTokens", "chunkMaxTokens",
+            "chunkOverlapTokens", "embedBatchSize", "embedLeaseSeconds",
+            "workerPollSeconds", "queryCacheTtlSeconds", "queryCacheMaxRows",
+            "snapshotTtlSeconds"
+          ],
+          "properties": {
+            "scopeKey": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$" },
+            "scopeAllowlist": { "type": "string", "minLength": 1 },
+            "writeEnabled": { "type": "boolean" },
+            "workerEnabled": { "type": "boolean" },
+            "readEnabled": { "type": "boolean" },
+            "chunkTargetTokens": { "type": "integer", "minimum": 100, "maximum": 1000 },
+            "chunkMaxTokens": { "type": "integer", "minimum": 100, "maximum": 1500 },
+            "chunkOverlapTokens": { "type": "integer", "minimum": 0, "maximum": 200 },
+            "embedBatchSize": { "type": "integer", "minimum": 1, "maximum": 32 },
+            "embedLeaseSeconds": { "type": "integer", "minimum": 30, "maximum": 900 },
+            "workerPollSeconds": { "type": "integer", "minimum": 1, "maximum": 60 },
+            "queryCacheTtlSeconds": { "type": "integer", "minimum": 60, "maximum": 86400 },
+            "queryCacheMaxRows": { "type": "integer", "minimum": 100, "maximum": 1000000 },
+            "snapshotTtlSeconds": { "type": "integer", "minimum": 60, "maximum": 86400 }
+          }
+        },
         "extra": {
           "type": "object",
           "propertyNames": {

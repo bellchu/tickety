@@ -358,6 +358,9 @@ def purge_private_comment_documents(db: Session) -> int:
         """
     ))
     db.commit()
+    from .rag.store_v2 import purge_ineligible_chunks
+
+    purge_ineligible_chunks(db)
     return int(result.rowcount or 0)
 
 
@@ -376,6 +379,9 @@ def purge_portal_ticket_documents(db: Session) -> int:
         """
     ))
     db.commit()
+    from .rag.store_v2 import purge_ineligible_chunks
+
+    purge_ineligible_chunks(db)
     return int(result.rowcount or 0)
 
 
@@ -401,6 +407,9 @@ def purge_unapproved_kb_documents(db: Session) -> int:
         """
     ))
     db.commit()
+    from .rag.store_v2 import purge_ineligible_chunks
+
+    purge_ineligible_chunks(db)
     return int(result.rowcount or 0)
 
 
@@ -707,14 +716,21 @@ async def upsert_ticket_document(db: Session, ticket: TicketRecord, force: bool 
                 {"ticket_id": str(ticket.id)},
             )
             db.commit()
+        from .rag.store_v2 import delete_ticket_chunks
+
+        delete_ticket_chunks(db, str(ticket.id))
         return False
     payload = _ticket_document_payload(ticket)
-    return await _upsert_document(
+    v1_changed = await _upsert_document(
         db,
         **payload,
         force=force,
         verify_source=True,
     )
+    from .rag.store_v2 import replace_source_chunks
+
+    v2_changed = replace_source_chunks(db, "ticket", str(ticket.id), force=force)
+    return v1_changed or v2_changed
 
 
 async def upsert_comment_document(db: Session, comment: TicketCommentRecord, force: bool = False) -> bool:
@@ -728,13 +744,21 @@ async def upsert_comment_document(db: Session, comment: TicketCommentRecord, for
                 {"source_id": str(comment.id)},
             )
             db.commit()
+        if comment.id is not None:
+            from .rag.store_v2 import delete_source_chunks
+
+            delete_source_chunks(db, "comment", str(comment.id))
         return False
-    return await _upsert_document(
+    v1_changed = await _upsert_document(
         db,
         **_comment_document_payload(comment),
         force=force,
         verify_source=True,
     )
+    from .rag.store_v2 import replace_source_chunks
+
+    v2_changed = replace_source_chunks(db, "comment", str(comment.id), force=force)
+    return v1_changed or v2_changed
 
 
 async def upsert_kb_document(db: Session, article: KbArticleRecord, force: bool = False) -> bool:
@@ -748,13 +772,20 @@ async def upsert_kb_document(db: Session, article: KbArticleRecord, force: bool 
                 {"source_id": article.id},
             )
             db.commit()
+        from .rag.store_v2 import delete_source_chunks
+
+        delete_source_chunks(db, "kb_article", str(article.id))
         return False
-    return await _upsert_document(
+    v1_changed = await _upsert_document(
         db,
         **_kb_document_payload(article),
         force=force,
         verify_source=True,
     )
+    from .rag.store_v2 import replace_source_chunks
+
+    v2_changed = replace_source_chunks(db, "kb_article", str(article.id), force=force)
+    return v1_changed or v2_changed
 
 
 async def refresh_ticket_documents(
@@ -773,6 +804,9 @@ async def refresh_ticket_documents(
                 {"ticket_id": str(ticket.id)},
             )
             db.commit()
+        from .rag.store_v2 import delete_ticket_chunks
+
+        delete_ticket_chunks(db, str(ticket.id))
         return 0
     if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
         raise asyncio.TimeoutError("ticket intelligence refresh deadline exceeded")
@@ -824,42 +858,55 @@ def refresh_ticket_documents_if_indexed(db: Session, ticket: TicketRecord, force
     """Refresh derived documents only when the ticket already has evidence
     indexed. Never indexes an un-promoted external ticket: provider text must
     be reviewed or explicitly promoted before entering shared RAG."""
-    if not _ticket_document_table_exists(db):
+    from .rag.store_v2 import has_ticket_source
+
+    if not _ticket_document_table_exists(db) and not has_ticket_source(db, str(ticket.id)):
         return 0
-    row = db.execute(
-        text(
-            "SELECT 1 FROM ticket_search_documents "
-            "WHERE source_type = 'ticket' AND source_id = :source_id LIMIT 1"
-        ),
-        {"source_id": str(ticket.id)},
-    ).first()
-    if row is None:
+    row = None
+    if _ticket_document_table_exists(db):
+        row = db.execute(
+            text(
+                "SELECT 1 FROM ticket_search_documents "
+                "WHERE source_type = 'ticket' AND source_id = :source_id LIMIT 1"
+            ),
+            {"source_id": str(ticket.id)},
+        ).first()
+    if row is None and not has_ticket_source(db, str(ticket.id)):
         return 0
     return refresh_ticket_documents_background(db, ticket, force=force)
 
 
 def delete_ticket_documents(db: Session, ticket_id: str) -> None:
-    if not ticket_vector_store_ready(db):
-        return
-    db.execute(
-        text("DELETE FROM ticket_search_documents WHERE ticket_id = :ticket_id"),
-        {"ticket_id": ticket_id},
-    )
-    db.commit()
+    if ticket_vector_store_ready(db):
+        db.execute(
+            text("DELETE FROM ticket_search_documents WHERE ticket_id = :ticket_id"),
+            {"ticket_id": ticket_id},
+        )
+        db.commit()
+    from .rag.store_v2 import delete_ticket_chunks
+
+    delete_ticket_chunks(db, ticket_id)
 
 
 def delete_ticket_source_documents(db: Session, ticket_ids: list[str]) -> int:
     """Drop stale ticket metadata without deleting independent comment evidence."""
-    if not ticket_ids or not ticket_vector_store_ready(db):
+    if not ticket_ids:
         return 0
-    result = db.execute(
-        text(
-            "DELETE FROM ticket_search_documents "
-            "WHERE source_type = 'ticket' AND source_id = ANY(:source_ids)"
-        ),
-        {"source_ids": list(dict.fromkeys(ticket_ids))},
-    )
-    return int(result.rowcount or 0)
+    count = 0
+    if ticket_vector_store_ready(db):
+        result = db.execute(
+            text(
+                "DELETE FROM ticket_search_documents "
+                "WHERE source_type = 'ticket' AND source_id = ANY(:source_ids)"
+            ),
+            {"source_ids": list(dict.fromkeys(ticket_ids))},
+        )
+        count += int(result.rowcount or 0)
+    from .rag.store_v2 import delete_ticket_chunks
+
+    for ticket_id in dict.fromkeys(ticket_ids):
+        count += delete_ticket_chunks(db, ticket_id, ticket_only=True)
+    return count
 
 
 def _legacy_ticket_backfill_batch(db: Session, limit: int) -> list[TicketRecord]:
@@ -1095,10 +1142,18 @@ async def backfill_ticket_documents(
     include_comments: bool = True,
     include_kb: bool = True,
     force: bool = False,
-) -> dict[str, int | bool]:
+) -> dict[str, Any]:
     limit = max(1, min(int(limit or 200), 500))
-    result: dict[str, int | bool] = {
-        "vector_store_ready": ticket_vector_store_ready(db),
+    from .rag.store_v2 import (
+        backfill_missing_chunks as backfill_missing_chunks_v2,
+        status as rag_v2_status,
+    )
+
+    v1_ready = ticket_vector_store_ready(db)
+    v2_status = rag_v2_status(db)
+    result: dict[str, Any] = {
+        "vector_store_ready": v1_ready,
+        "rag_v2": v2_status,
         "tickets_seen": 0,
         "comments_seen": 0,
         "kb_seen": 0,
@@ -1106,7 +1161,19 @@ async def backfill_ticket_documents(
         "portal_documents_purged": 0,
         "unapproved_kb_documents_purged": 0,
     }
-    if not result["vector_store_ready"]:
+    if not v1_ready and not v2_status["ready"]:
+        return result
+
+    result["rag_v2_backfill"] = backfill_missing_chunks_v2(
+        db,
+        limit=limit,
+        include_comments=include_comments,
+        include_kb=include_kb,
+        force=force,
+    )
+
+    if not v1_ready:
+        result["rag_v2"] = rag_v2_status(db)
         return result
 
     if not private_comment_indexing_enabled():
@@ -1169,6 +1236,7 @@ async def backfill_ticket_documents(
             if await upsert_kb_document(db, article, force=force):
                 result["documents_changed"] += 1
 
+    result["rag_v2"] = rag_v2_status(db)
     return result
 
 
@@ -1190,6 +1258,9 @@ def ticket_vector_status(db: Session) -> dict[str, Any]:
         "missing_comment_documents": 0,
         "missing_kb_documents": 0,
     }
+    from .rag.store_v2 import status as rag_v2_status
+
+    result["rag_v2"] = rag_v2_status(db)
     if not ready:
         return result
     row = db.execute(
@@ -1580,6 +1651,24 @@ async def retrieve_ticket_context(
 ) -> dict[str, Any]:
     limit = max(1, min(int(limit or 8), 30))
     source_types = source_types or ["ticket", "comment", "kb_article"]
+    from .rag.config import read_enabled as rag_v2_read_enabled
+
+    if rag_v2_read_enabled():
+        from .rag.retrieval_v2 import retrieve_ticket_context_v2
+        from .rag.store_v2 import store_ready as rag_v2_store_ready
+
+        if not rag_v2_store_ready(db):
+            raise RuntimeError("RAG v2 reads are enabled but its store is unavailable")
+        # v2 owns independent short-lived sessions for its parallel lexical,
+        # cache, and vector work. Release the request transaction first.
+        db.rollback()
+        return await retrieve_ticket_context_v2(
+            query,
+            limit=limit,
+            source_types=source_types,
+            include_private_comments=include_private_comments,
+            allowed_assignee_id=allowed_assignee_id,
+        )
     ready = ticket_vector_store_ready(db)
     if not ready:
         return _fallback_from_core_tables(

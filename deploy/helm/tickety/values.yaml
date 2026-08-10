@@ -72,6 +72,21 @@ config:
   corsAllowOrigins: ""
   cookieSecure: false
   cookieSameSite: lax
+  ragV2:
+    scopeKey: default
+    scopeAllowlist: default
+    writeEnabled: false
+    workerEnabled: false
+    readEnabled: false
+    chunkTargetTokens: 450
+    chunkMaxTokens: 600
+    chunkOverlapTokens: 50
+    embedBatchSize: 32
+    embedLeaseSeconds: 120
+    workerPollSeconds: 2
+    queryCacheTtlSeconds: 2700
+    queryCacheMaxRows: 50000
+    snapshotTtlSeconds: 86400
   extra: {}
 
 postgresql:
