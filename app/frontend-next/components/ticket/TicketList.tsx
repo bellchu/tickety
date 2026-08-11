@@ -20,6 +20,7 @@ import {
 import { Alert, Badge, Button, Dialog, EmptyState, ErrorState, IconButton, Skeleton } from "@/components/ui";
 import { DataToolbar, PageFrame, PageHeader } from "@/components/layout/PageLayout";
 import { api } from "@/lib/api";
+import { queryKeys } from "@/lib/query-keys";
 import { canAccessProtectedIntelligence } from "@/lib/auth";
 import type { Ticket, TicketListSort } from "@/lib/types";
 import { cn, formatTimeAgo } from "@/lib/utils";
@@ -182,7 +183,7 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
   });
   const meQuery = useQuery({ queryKey: ["auth-me"], queryFn: api.getAuthMe, retry: false });
   const canBulk = canAccessProtectedIntelligence(meQuery.data);
-  const categoriesQuery = useQuery({ queryKey: ["ticket-categories"], queryFn: api.getCategories, retry: false });
+  const categoriesQuery = useQuery({ queryKey: queryKeys.ticketCategories, queryFn: api.getCategories, retry: false });
   const usersQuery = useQuery({ queryKey: ["users"], queryFn: api.getUsers, enabled: canBulk, retry: false });
 
   const tickets = pageQuery.data?.tickets ?? EMPTY_TICKETS;

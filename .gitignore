@@ -16,6 +16,7 @@ k8s/secrets.yaml
 dist/
 build/
 *.egg-info/
+*.tsbuildinfo
 
 # Docker
 *.tar

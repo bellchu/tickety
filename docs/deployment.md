@@ -183,6 +183,13 @@ postgresql:
   enabled: false
 ```
 
+After the secret manager rotates an `existingSecret`, update the non-secret
+`existingSecretRolloutToken` in the Helm values (for example, with the rotation
+timestamp or secret-manager version) and run `helm upgrade`. Kubernetes does
+not restart Pods solely because an `envFrom` Secret changes; this token changes
+the backend and worker Pod templates without the chart reading or hashing the
+external Secret.
+
 Alternatively, with a chart-managed Secret, set `postgresql.enabled: false`
 and supply `postgresql.externalDatabaseUrl`. The external database must be
 PostgreSQL reachable from backend, worker, and migration pods. If embeddings

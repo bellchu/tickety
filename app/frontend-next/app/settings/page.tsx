@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, APIError } from "@/lib/api";
+import { queryKeys } from "@/lib/query-keys";
 import { canAccessAdministration, isDemoAdministrationContext } from "@/lib/auth";
 import { Settings as SettingsType, LlmCatalog, LlmProvider, TicketCategory, BuildInfo, SyncAgentsOptions } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -1297,7 +1298,7 @@ function MaintenanceButton({ label, description, icon: Icon, mutation, loadingTe
 
 function CategorySection() {
   const queryClient = useQueryClient();
-  const { data: categories, isLoading } = useQuery({ queryKey: ["categories"], queryFn: api.getCategories });
+  const { data: categories, isLoading } = useQuery({ queryKey: queryKeys.ticketCategories, queryFn: api.getCategories });
   const [showForm, setShowForm] = useState(false);
   const [newName, setNewName] = useState("");
   const [newDesc, setNewDesc] = useState("");
@@ -1306,14 +1307,14 @@ function CategorySection() {
   const createMut = useMutation({
     mutationFn: () => api.createCategory(newName, newDesc, newColor),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["categories"] });
+      queryClient.invalidateQueries({ queryKey: queryKeys.ticketCategories });
       setNewName(""); setNewDesc(""); setNewColor("slate"); setShowForm(false);
     },
   });
 
   const deleteMut = useMutation({
-    mutationFn: (id: number) => fetch(`/api/categories/${id}`, { method: "DELETE" }).then(r => r.json()),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["categories"] }),
+    mutationFn: api.deleteCategory,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.ticketCategories }),
   });
 
   return (

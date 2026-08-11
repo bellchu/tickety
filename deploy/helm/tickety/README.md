@@ -48,6 +48,9 @@ Important groups are:
   chart-managed Secret.
 - `existingSecret`: use a secret manager-provisioned Secret instead. It must
   contain `DATABASE_URL` and, for bundled PostgreSQL, `POSTGRES_PASSWORD`.
+- `existingSecretRolloutToken`: a non-secret value to change after an external
+  Secret rotation; it rolls the backend and worker Pods without the chart
+  reading or hashing Secret data.
 - `postgresql`: bundled storage, storage class, or an external database URL.
 - `ingress` and `frontend.service`: choose one public exposure mechanism.
 - `networkPolicy`: public HTTPS egress plus narrowly scoped exceptions for
@@ -60,6 +63,13 @@ When the chart owns the Secret and bundled PostgreSQL, it generates an
 alphanumeric database password on first install and reuses it on upgrades.
 Changing that password later requires a coordinated PostgreSQL role-password
 rotation; changing only the Helm value is intentionally not a rotation method.
+
+Kubernetes does not restart containers when an `envFrom` Secret changes. When
+using `existingSecret`, rotate it through the secret manager, then change
+`existingSecretRolloutToken` in the Helm values (for example, to a rotation
+timestamp or secret-manager version) and run `helm upgrade`. This changes only
+the Pod-template annotation; the chart never reads or hashes the external
+Secret.
 
 When `backup.enabled=true`, the CronJob writes mode-restricted custom-format
 dumps to its backup PVC and validates each archive with `pg_restore --list`

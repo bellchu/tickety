@@ -167,6 +167,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ name, description, color }),
     }),
+  deleteCategory: (id: number) =>
+    fetchAPI<{ status: string }>(`/categories/${id}`, { method: "DELETE" }),
   bulkAction: (ticketIds: string[], action: string, value?: string) =>
     fetchAPI<{ status: string; updated: number }>("/tickets/bulk", {
       method: "POST",

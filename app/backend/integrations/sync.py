@@ -241,14 +241,31 @@ def sync_tickets_from_external(adapter=None, *, binding_id: str = "legacy") -> d
         db.commit()
 
     except Exception as e:
-        sync_state = db.query(SyncStateRecord).filter(
-            SyncStateRecord.binding_id == binding_id,
-            SyncStateRecord.provider == adapter.provider_name
-        ).first()
-        if sync_state:
-            sync_state.last_status = "error"
-            sync_state.last_error = f"sync_failed:{type(e).__name__}"
-            db.commit()
+        # The failed operation may have left the session in SQLAlchemy's
+        # pending-rollback state.  Clear it before looking up the sync state;
+        # otherwise the error-reporting query itself can mask the original
+        # sync failure and leave the binding stuck in "running".
+        try:
+            db.rollback()
+            sync_state = db.query(SyncStateRecord).filter(
+                SyncStateRecord.binding_id == binding_id,
+                SyncStateRecord.provider == adapter.provider_name
+            ).first()
+            if sync_state:
+                sync_state.last_status = "error"
+                sync_state.last_error = f"sync_failed:{type(e).__name__}"
+                db.commit()
+        except Exception as state_exc:
+            # Preserve the initiating failure in logs even when the database
+            # is unavailable for the best-effort status update.
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            print(
+                "[sync] failed to record fatal sync state "
+                f"original={type(e).__name__} state_update={type(state_exc).__name__}"
+            )
         result["errors"] += 1
         print(f"[sync] fatal error kind={type(e).__name__}")
     finally:

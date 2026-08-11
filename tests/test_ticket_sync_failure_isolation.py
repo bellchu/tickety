@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from unittest.mock import patch
 
 from sqlalchemy import create_engine
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -96,6 +97,55 @@ class TicketSyncFailureIsolationTests(unittest.TestCase):
             )
             self.assertEqual(state.last_synced_at, self.initial_cursor)
             self.assertEqual(state.total_synced, 5)
+
+    def test_final_commit_failure_rolls_back_before_recording_sync_state(self):
+        """The outer handler must not query through a failed transaction."""
+        db = self.session_factory()
+        original_commit = db.commit
+        original_query = db.query
+        original_rollback = db.rollback
+        calls = {"commit": 0, "rollback": 0, "requires_rollback": False}
+
+        def commit():
+            calls["commit"] += 1
+            # The first commit marks this sync as running. Fail its final
+            # commit as a database would, then allow the error-state commit.
+            if calls["commit"] == 2:
+                calls["requires_rollback"] = True
+                raise SQLAlchemyError("final sync commit failed")
+            return original_commit()
+
+        def rollback():
+            calls["rollback"] += 1
+            calls["requires_rollback"] = False
+            return original_rollback()
+
+        def query(*args, **kwargs):
+            if calls["requires_rollback"]:
+                raise AssertionError("sync state was queried before rollback")
+            return original_query(*args, **kwargs)
+
+        db.commit = commit
+        db.rollback = rollback
+        db.query = query
+        try:
+            with patch.object(sync, "SessionLocal", return_value=db):
+                result = sync.sync_tickets_from_external(_Adapter([]))
+        finally:
+            # sync_tickets_from_external closes the session, but restore the
+            # instance methods so test cleanup cannot retain instrumentation.
+            db.commit = original_commit
+            db.rollback = original_rollback
+            db.query = original_query
+
+        self.assertEqual(result, {"new": 0, "updated": 0, "errors": 1})
+        self.assertGreaterEqual(calls["rollback"], 1)
+        with self.session_factory() as check_db:
+            state = check_db.query(SyncStateRecord).one()
+            self.assertEqual(state.last_status, "error")
+            self.assertEqual(state.last_error, "sync_failed:SQLAlchemyError")
+            self.assertEqual(state.last_synced_at, self.initial_cursor)
+            self.assertEqual(state.total_synced, 4)
 
 
 if __name__ == "__main__":

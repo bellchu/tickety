@@ -13,6 +13,7 @@
       }
     },
     "existingSecret": { "type": "string" },
+    "existingSecretRolloutToken": { "type": "string" },
     "backend": {
       "type": "object",
       "required": ["replicaCount", "image"],
