@@ -129,7 +129,7 @@ metadata:
 spec:
   ingressClassName: traefik
   rules:
-    - host: tickety.situ.io
+    - host: tickety.imbell.com
       http:
         paths:
           - path: /

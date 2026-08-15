@@ -1,0 +1,64 @@
+{
+  "peer": {
+    "seat": "deepseek",
+    "profile": "deepseek",
+    "provider": "deepseek",
+    "model": "deepseek-v4-flash"
+  },
+  "vote": {
+    "seat": "deepseek",
+    "phase": "proposal",
+    "candidate_version": "v0",
+    "candidate_digest": "sha256:b8716e5eff6d6bac0556b41892705ed6ffc5490dadadb5b5d802ba6db97cebac",
+    "verdict": "PROPOSE",
+    "summary": "Hybrid of policy axes plus three presets is the recommended architecture; flat modes, watchdog-only, query-only, and multi-agent abstractions are rejected; durable orchestration is deferred until MVP proves value.",
+    "requirements_covered": [
+      "Accept/reject user example modes with explicit reasoning",
+      "Capabilities compose via independent policy axes rather than mutually exclusive modes",
+      "Manager oversight and agent in-context analysis are distinct persona experiences",
+      "Realtime language constrained to explicit event path plus measurable freshness SLO",
+      "Human control preserved: ambient observe/recommend allowed, external writes require capability, auth, policy, audit, idempotency, and approval",
+      "Architecture fits observed Tickety and identifies when APScheduler is insufficient",
+      "Credible sequence delivers user value before a general-purpose orchestration engine",
+      "Failure, degraded, rollback, and stop conditions included",
+      "Assumptions and retained unknowns stated; no ServiceNow or external write parity claimed",
+      "Concise and actionable while covering product and architecture decisions"
+    ],
+    "implementation_options": [
+      "Flat mutually exclusive running modes: rejected; conflates trigger, audience, scope, and authority and violates composition",
+      "Independent policy axes with user-facing presets: accepted; core domain model using trigger, audience, scope, and authority",
+      "Durable event-driven orchestration now: deferred to phase 2; APScheduler is adequate for MVP but lacks durable queue state, retries, idempotency, workflow state, and backpressure",
+      "Narrow always-on watchdog service layered over APScheduler: rejected as primary abstraction; retained only as one preset",
+      "Query-only on-demand intelligence snapshots: rejected as complete answer; folded into the Review preset",
+      "Named AI-agent roles or multi-agent framework: rejected as primary abstraction; premature and redundant with existing persona surfaces",
+      "Hybrid: policy axes as domain model, three opinionated presets, incremental executor reusing current APIs then gaining a durable event/job layer: accepted"
+    ],
+    "details_checked": [
+      "APP_MODE, ITSM provider/placement, and PROCESS_ROLE remain orthogonal to operating profiles",
+      "Existing APScheduler worker owns two fixed jobs and is not a durable orchestration engine",
+      "Existing trigger paths: scheduled sync/AI scans, signed webhooks, per-ticket routes, manual sync, bulk routes",
+      "Existing manager intelligence APIs map to Watchdog and Review presets",
+      "Existing agent-facing ticket AI maps to Agent Desk preset",
+      "WebSockets reused for progress and notifications; no false realtime claim",
+      "External/portal AI eligibility and provenance restrictions preserved",
+      "Freshservice guarded write-back and missing reply/note/attachment/service-request parity respected",
+      "No ServiceNow adapter assumed present",
+      "AI leases, budgets, rate/token limits, cache, provenance, idempotency, and backpressure included",
+      "Migration compatibility for AUTO_* toggles, demo/production, api|worker|all, and existing on-demand routes",
+      "Rollback via profile disable, kill switches, stop conditions, stale-data labeling, audit, and RBAC isolation",
+      "Retained unknowns: exact RBAC/tenancy requirements and freshness SLO numbers",
+      "Out-of-scope boundaries respected: no vendor choice, UI mockups, pricing, code changes, or autonomous irreversible actions"
+    ],
+    "coverage_gaps": [],
+    "detail_gaps": [],
+    "blocking_objections": [],
+    "required_changes": [],
+    "proposed_artifact": "Recommendation: adopt Tickety 'operating profiles' as independent policy axes with three opinionated user-facing presets, and evolve execution incrementally from the existing APScheduler worker to a durable event/job layer only after MVP proves value.\n\nConceptual model: keep APP_MODE, ITSM provider/placement, and PROCESS_ROLE as orthogonal deployment/process controls. Add a new operating profile concept composed of four policy axes: trigger (event, continuous/scheduled, on-demand), audience (manager, agent, automation), scope (ticket, queue/team, organization/systemic), and authority (observe, recommend, prepare, act). User-facing presets are named combinations, not mutually exclusive modes.\n\nRecommended presets:\n- Watchdog (continuous manager oversight): trigger is inbound events plus bounded scheduled scans; freshness is near-real-time with an explicit supported-event path and measurable SLO (do not claim realtime until measured); scope is organization/systemic; outputs are alerts, prioritization, SLA status, trends, workload, reporter health, and routing suggestions; side effects are notifications and audited recommendations only; external actions require human approval plus adapter capability; primary persona is supervisor/manager; degraded behavior is fallback to on-demand Review, stale-data labeling, exponential backoff, and a kill switch.\n- Review (on-demand manager analysis): trigger is explicit on-demand request; freshness is current snapshot with AsOf timestamp; scope is queue/team or organization/systemic; outputs are existing manager intelligence APIs and optionally a written briefing; side effects are none; human approval boundary not applicable because read-only; primary persona is manager; degraded behavior is partial results with retry/error and explicit stale-data labeling.\n- Agent Desk (in-context agent analysis): trigger is explicit per-ticket action from the agent UI; freshness is on-demand with current ticket state; scope is ticket/queue context; outputs are triage, summary, suggested resolution/reply, and ticket analysis stream; side effects are AI-generated drafts and notifications only; external write actions remain prohibited for this preset unless a separately approved trust-and-safety design exists; primary persona is agent; degraded behavior is stream failure with retry/timeout, cached artifact fallback, and no silent writes.\n\nReject example modes as modes: 'watchdog' is acceptable only as a preset name; 'on-demand' and 'analytical' are axes, not modes. Do not add a flat exclusive mode list, a standalone query-only mode, a separate always-on watchdog service, or a general multi-agent framework as the primary abstraction.\n\nConcurrency: profiles compose because axes are independent. Policy conflicts resolve by restrictive precedence: observe < recommend < prepare < act; no preset upgrades RBAC role; trigger cadence never grants authority; any act action requires explicit capability, authorization, policy, audit, idempotency, and human approval in MVP; overlapping triggers dedupe by event idempotency keys.\n\nExecution architecture: reuse existing API routes, adapter registry and capability manifests, AI leases/budgets/cache/provenance, signed webhooks, APScheduler worker, and WebSockets. In MVP, the API webhook handler normalizes supported inbound events into a small Postgres-backed event table with idempotency keys; the worker polls that table and evaluates profiles; on-demand routes evaluate directly in API with the same policy logic. APScheduler remains sufficient for fixed MVP scanning but is insufficient for durable orchestration because it lacks durable queue state, retries/idempotency, workflow state, and backpressure; phase 2 replaces it with a durable Postgres outbox/job table and worker loop, not a vendor product.\n\nMinimum new primitives: operating_profile definitions (presets expanding to axes), normalized event table/outbox, policy evaluation function, candidate_action table for recommendations/approval state, and capability assertions from adapter manifests. No ServiceNow adapter or provider parity is invented.\n\nCompatibility/migration: standalone and external-provider selection unchanged; demo/production APP_MODE unchanged; PROCESS_ROLE api|worker|all unchanged; existing AUTO_* toggles remain and map to default profile policies; existing on-demand routes become Review and Agent Desk entrypoints; no unfinished working-tree code is assumed.\n\nObservability/control: run_id and provenance on all profile executions; audit log for recommendations, approvals, and actions; tenant/binding isolation; RBAC manager/agent separation; privacy and AI-eligibility gates unchanged (external/portal tickets require explicit authenticated workflow); per-profile cost budgets, leases, rate/token limits; backpressure via queue depth and lease exhaustion; stale-data/freshness labels; rollback by disabling profile policies (AUTO_* and existing routes return to current behavior); kill switches per profile and globally; stop conditions include budget exhaustion, error threshold, missing capability, and human stop command.\n\nStaged plan: MVP ships Watchdog, Review, and Agent Desk using current APIs and APScheduler, with webhook normalization and idempotency; validation criteria are manager/agent task success, measured freshness from event receipt to notification/analysis, no unauthorized external writes, and rollback drill. Phase 2 adds durable event/job layer, retries, backpressure, and capability-driven action approvals. Phase 3 adds approved external write/bidirectional flows only for adapters that actually support them. Do not build a general orchestration engine, multi-agent framework, autonomous irreversible actions, ServiceNow parity, or exact SLO/cost targets before data.\n\nAssumptions/unknowns: supervisors/managers and agents are distinct personas; exact customer RBAC/tenancy remains to be validated; Freshservice write-back remains guarded by identity/capability gates and no reply/note/attachment/service-request parity is claimed; 'realtime' is interpreted as prompt reaction to supported inbound events, not continuous LLM calls; freshness SLO numbers require load measurement.",
+    "confidence": "medium"
+  },
+  "usage": {
+    "total_tokens": 10547,
+    "prompt_tokens": 2486,
+    "completion_tokens": 8061
+  }
+}

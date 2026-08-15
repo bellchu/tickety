@@ -1,0 +1,71 @@
+{
+  "peer": {
+    "seat": "deepseek",
+    "harness": "pi",
+    "provider": "deepseek",
+    "model": "deepseek-v4-flash"
+  },
+  "vote": {
+    "seat": "deepseek",
+    "phase": "proposal",
+    "candidate_version": "v0",
+    "candidate_digest": "sha256:4062b056b83b0c2ca97d5647218910666efb95595cff96c89f15633153aa6621",
+    "verdict": "PROPOSE",
+    "summary": "Target architecture: PostgreSQL-backed durable ai_jobs queue with scalable async workers (Option B) plus application-level task-aware provider routing, circuit breaking, and approved fallback (Option D). Option A is retained as immediate hardening, Option C is deferred behind measured triggers, and Option E is rejected at this scale. All numerical values are labeled bootstrap assumptions gated by load/failure tests.",
+    "requirements_covered": [
+      "Responsive UX: accepted interactive AI request returns a durable job identity within the target p95 of 1 second; progress/result retrieval survives refresh, reconnect, API restart, and worker restart.",
+      "Durable processing: accepted work survives process termination via ai_jobs, expiring leases with heartbeats, bounded retry backoff, queryable dead-letter state, and stale/duplicate commit rejection.",
+      "Controlled concurrency: global/provider/model/task/tenant/user admission with bounded interactive preference over background work without starvation.",
+      "Provider resilience: retryable transport/rate failures, invalid model output, permanent config/auth failures, and policy/residency blocks are distinguished; circuit breaking and approved fallback do not multiply retries.",
+      "Performance efficiency: exact artifact reuse and prompt/token reduction are retained; semantic final-decision caching is rejected without explicit correctness boundaries.",
+      "Proportionate topology: 2 API replicas and 2-3 workers initially, with explicit measured triggers for broker, more workers, more providers, or self-hosted inference.",
+      "Quantitative verification: bootstrap workload assumptions, SLOs, metrics, alerts, load-test matrix, failure injection, and pass/fail gates are defined.",
+      "Operational safety: phased rollout, additive migration, feature flags, rollback, draining, replay/requeue procedure, and stop conditions are specified.",
+      "Cost/security: cross-replica budgets, observability without raw ticket content or secrets, and fail-closed provider/region boundaries are preserved.",
+      "Complete option ledger: options A-E and relevant hybrids are assessed with retain/defer/reject rationale."
+    ],
+    "implementation_options": [
+      "A: Tune the current APScheduler worker and synchronous API paths; retain as immediate hardening, not the target architecture.",
+      "B: PostgreSQL-backed durable ai_jobs queue with scalable async workers; adopt as the target queue.",
+      "C: Dedicated broker/managed queue such as Redis Streams, RabbitMQ, or managed queue; defer behind measured queue/database thresholds.",
+      "D: Application-level provider/model gateway with task-aware routing, circuit breakers, and approved fallback; adopt as target policy.",
+      "E: Self-host or reserve dedicated model inference; reject now, retain only as a regulatory/residency contingency.",
+      "Hybrid B+D: selected target; PostgreSQL queue plus application-level provider policy.",
+      "Hybrid A then B: Phase 0/1 interim path; immediate observability and tuning followed by durable async migration.",
+      "Hybrid B now, C later: transactional outbox/job schema first; broker introduced only when measured thresholds are crossed.",
+      "Hybrid B + selective C: LISTEN/NOTIFY or managed queue may wake workers, but correctness must not depend on notification delivery.",
+      "Hybrid D+E: rejected until equivalent quality, security, operational readiness, and residency approval are proven."
+    ],
+    "details_checked": [
+      "ai_jobs schema with priority, not_before, status, attempts, lease_id/expiry, heartbeat, idempotency key, input hash, provenance, result_ref, error class, and dead-letter reason.",
+      "Claim via FOR UPDATE SKIP LOCKED ordered by priority; lease heartbeat and stale-claim reclamation.",
+      "At-least-once delivery with idempotent commitment; stale lease, duplicate completion, and ticket version changes are rejected.",
+      "Bounded interactive/background fair scheduling with minimum background slots to prevent starvation.",
+      "Provider error taxonomy and bounded retries; fallback only to an independently approved provider for the same data classification and residency.",
+      "Shared RPM/TPM/daily-token admission, process-local semaphores, and database-backed provider concurrency leases preserved.",
+      "API returns 202 with a durable job id; polling/SSE/WebSocket progress is resumable after refresh, reconnect, API restart, and worker restart.",
+      "Compatibility bridge from legacy ticket queue fields; old APScheduler path remains available for rollback.",
+      "Exact reuse key includes stable source/model/pipeline identity and input; semantic final-decision cache is not assumed safe.",
+      "Additive migration, feature flags, PDB, topology spread, rolling update maxUnavailable=0, drain, replay/requeue, and stop-condition runbooks.",
+      "Load/failure matrix: sustained and burst arrival, worker kill, API restart, provider outage, 429/5xx/timeout/invalid output/policy failures, poison jobs, and stale/duplicate completion injection."
+    ],
+    "coverage_gaps": [],
+    "detail_gaps": [
+      "Measured arrival distribution, prompt/token size distribution, provider quotas/RPM/TPM, and per-model latency are unknown; bootstrap numbers are used and must be replaced with load-test data.",
+      "Exact migration DDL/index definitions and Helm manifest values for HPA/PDB/topology spread are next-step implementation details.",
+      "Approved provider/region set for fallback is contract-dependent and out of scope; the policy framework is specified instead.",
+      "Result artifact storage choice and size ceiling are bounded by the PostgreSQL assumption but still need a storage/load test before production."
+    ],
+    "blocking_objections": [],
+    "required_changes": [],
+    "proposed_artifact": "# Tickety AI/LLM reliability decision (proposal v0)\n\n## Decision\nAdopt B+D: PostgreSQL-backed durable `ai_jobs` queue with scalable async workers plus an application-level task-aware provider policy (routing, circuit breaker, approved fallback). Retain Option A tuning and existing claim/lease/retry/provenance/artifact-reuse safeguards. Defer broker-based queueing (Option C) behind measured triggers. Reject self-hosted inference (Option E) at this scale; keep it only as a regulatory/residency contingency. Do not introduce Redis, RabbitMQ, Kafka, Celery, or a managed queue initially.\n\n## Why it wins\n- Long LLM work is removed from API/WebSocket request paths; accepted requests return durable job ids quickly.\n- Reuses PostgreSQL and existing dedupe/provenance/lease machinery; no new availability dependency is introduced.\n- Worker replicas can scale with bounded async concurrency while cross-process claims prevent duplicate commits.\n- Application-level provider policy provides task-aware routing and circuit breaking without buying a separate gateway.\n- Capacity is explicitly test-driven, so low actual demand does not force over-provisioning.\n\n## Lifecycle\n1. Authorize, contain prompts, hash input, check exact artifact reuse, then insert an `ai_jobs` row with priority, `not_before`, attempts, lease fields, idempotency key, input hash, and provenance. Return 202 with job id.\n2. Workers claim with `FOR UPDATE SKIP LOCKED` ordered by priority and `not_before`; heartbeats extend lease expiry and stale claims are reclaimed.\n3. Admission bounds concurrency across global/provider/model/task/tenant/user dimensions; interactive jobs get bounded preference while background jobs retain minimum slots.\n4. Provider calls use existing `LLMManager` bounds, structured-output validation, per-attempt timeout, overall deadline, semaphores, database provider leases, shared RPM/TPM/daily budgets, and secret redaction.\n5. Classify failures: retryable transport/rate/5xx up to three same-provider attempts with jitter and `Retry-After`; invalid model output, permanent auth/config failures, and policy/residency blocks are terminal categories. Circuit breakers may route to one approved fallback only when trust and residency are equivalent.\n6. Commit idempotently: succeed only if lease and ticket version match; reject stale results, lost leases, and duplicate completions. Successful artifacts carry full provenance and exact reuse keys.\n7. Poison or terminal jobs move to queryable dead-letter state; replay is operator-initiated, preserves history, and does not automatically loop forever.\n8. Clients poll or use SSE/WebSocket against `/ai/jobs/{id}`; refresh, reconnect, API restart, and worker restart do not lose progress.\n\n## Initial bootstrap sizing (label: unmeasured)\n- 400 named users, 80 concurrent interactive sessions peak; 30 AI jobs/minute sustained, 60 jobs/minute burst; 1-3 external LLM calls per full analysis; 20 concurrent provider calls only if contracted quotas and token estimates permit; 1,000-job background backlog.\n- Start with 2 API replicas (PDB minAvailable 1, rolling update maxUnavailable 0) and 2-3 AI worker replicas with process concurrency 4, while enforcing a lower shared provider limit until load tests justify more.\n- Do not autoscale initially; add HPA/queue-based worker scaling only after measured queue depth and database headroom support the trigger.\n\n## SLOs, metrics, alerts, gates\n- Bootstrap SLOs: core API 99.9% monthly; admission p95 < 1s and p99 < 2s; interactive queue wait p95 < 2s; one-artifact completion p95 < 20s; full pipeline p95 < 60s; 99.5% eligible accepted jobs terminal success within 5 minutes; zero silent loss; after a 15-minute provider outage, interactive SLO recovers within 10 minutes and backlog drains within 60 minutes without exceeding approved quotas.\n- Metrics: queued/in-flight/wait times, heartbeat/lease staleness, circuit state, provider error-class rates, admission rejections, dead-letter count, artifact reuse rate, end-to-end job latency, and duplicate/stale commit count; core API health is tracked separately from AI health.\n- Alerts: SLO burn alerts, queue depth and wait breaches, any dead-letter, lease-expiry spikes, open circuit, provider error/limit spikes, budget burn, and migration/flag errors.\n- Test gates: sustained and burst load, worker kill, API restart, provider outage, 429/5xx/timeout/invalid-output/policy-block injection, poison jobs, and stale/duplicate completion injection. Pass means no silent loss, SLOs met, no unapproved trust boundary crossed, and quotas not exceeded.\n\n## Rollout and operational safety\n- Phase 0: instrumentation, configuration, indexes, and feature flags.\n- Phase 1: additive `ai_jobs` migration and write bridge so old and new paths coexist; old scheduler remains available.\n- Phase 2: enable durable jobs for interactive endpoints; drain legacy ticket queue fields; stop old scheduler only after drain.\n- Phase 3: add replicas, PDB, topology spread, and readiness checks.\n- Phase 4: enable task-aware routing, circuit breakers, and canary fallback with quality evaluation.\n- Rollback: feature-flag off, stop workers, requeue unfinished jobs through the runbook, and resume the old scheduler; migration remains additive.\n- Stop conditions: SLO breach, silent loss, stale overwrite, quota overrun, dead-letter flood, security/residency violation, or unapproved cross-provider call; freeze and roll back or remediate.\n\n## Option ledger and cache boundary\n- Retain: exact artifact reuse, claims/leases, retries, quotas, prompt bounds, provenance, secret redaction, and fail-closed behavior.\n- Defer C (broker): until sustained queue depth exceeds worker capacity, claim-wait SLO breaches at max configured workers, database lock/CPU saturation appears, or p95 queue wait exceeds 2s at bootstrap load.\n- Reject E (self-hosted inference): reconsider only for embeddings/residency if contract facts demand it and operational readiness is proven.\n- Do not assume semantic final-decision caching is safe; if added later, require exact keys including full ticket state hash, source/model/pipeline, provider config, authorization, time-bound invalidation, and no cross-tenant leakage.\n\n## Scope guardrails\n- Out of scope: specific provider selection/contract negotiation, autonomous destructive remediation, replacing the ITSM system/frontend/database/all prompts, building a GPU inference platform solely for this user-count statement, and claiming final production capacity without observed telemetry and load tests.\n- Human approval remains required for high-impact actions; this decision covers analysis, suggestions, summaries, routing recommendations, and retrieval only.\n\n## Retained unknowns and measurement plan\n- Actual arrival distribution, prompt/token distribution, provider quotas/RPM/TPM/latency, provider approvals and residency set, model quality baselines, and PostgreSQL/result-storage headroom are unknown. Replace bootstrap numbers with observability plus load/failure tests before treating SLOs or capacities as commitments.",
+    "confidence": "medium"
+  },
+  "usage": {
+    "input": 3934,
+    "output": 14676,
+    "cacheRead": 256,
+    "cacheWrite": 0,
+    "totalTokens": 18866
+  }
+}
