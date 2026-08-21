@@ -43,7 +43,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             for table_name, table in Base.metadata.tables.items():
                 actual_columns = {column["name"] for column in inspector.get_columns(table_name)}
                 self.assertEqual(actual_columns, set(table.columns.keys()), table_name)
-            self.assertEqual(self._current_revision(engine), "0009")
+            self.assertEqual(self._current_revision(engine), "0010")
             self.assertIn("external_users", inspector.get_table_names())
             self.assertNotIn("user_mappings", inspector.get_table_names())
             session_columns = {
@@ -91,7 +91,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertEqual(user["name"], "Legacy User")
             self.assertEqual(user["role"], "agent")
             self.assertTrue(user["is_active"])
-            self.assertEqual(self._current_revision(engine), "0009")
+            self.assertEqual(self._current_revision(engine), "0010")
         finally:
             engine.dispose()
 
@@ -150,6 +150,55 @@ class DatabaseMigrationTests(unittest.TestCase):
             )
             self.assertEqual(rows["human-category"]["category"], "Network")
             self.assertIsNone(rows["human-category"]["ai_suggested_category"])
+        finally:
+            engine.dispose()
+
+    def test_read_only_scope_migration_removes_legacy_write_permissions(self):
+        command.upgrade(self.config, "0009")
+        engine = create_engine(self.url)
+        try:
+            with engine.begin() as connection:
+                connection.execute(text(
+                    "INSERT INTO settings (key, value) VALUES "
+                    "('FRESHSERVICE_OAUTH_SCOPES', "
+                    "'freshservice.tickets.view freshservice.tickets.edit "
+                    "freshservice.agents.manage')"
+                ))
+
+            command.upgrade(self.config, "head")
+
+            with engine.connect() as connection:
+                scopes = connection.execute(text(
+                    "SELECT value FROM settings "
+                    "WHERE key = 'FRESHSERVICE_OAUTH_SCOPES'"
+                )).scalar_one()
+            self.assertEqual(
+                scopes,
+                "freshservice.tickets.view freshservice.agents.manage",
+            )
+            self.assertEqual(self._current_revision(engine), "0010")
+        finally:
+            engine.dispose()
+
+    def test_read_only_scope_migration_fails_closed_for_unknown_scopes(self):
+        command.upgrade(self.config, "0009")
+        engine = create_engine(self.url)
+        try:
+            with engine.begin() as connection:
+                connection.execute(text(
+                    "INSERT INTO settings (key, value) VALUES "
+                    "('FRESHSERVICE_OAUTH_SCOPES', "
+                    "'freshservice.tickets.edit freshservice.assets.view')"
+                ))
+
+            command.upgrade(self.config, "head")
+
+            with engine.connect() as connection:
+                scopes = connection.execute(text(
+                    "SELECT value FROM settings "
+                    "WHERE key = 'FRESHSERVICE_OAUTH_SCOPES'"
+                )).scalar_one()
+            self.assertEqual(scopes, "freshservice.tickets.view")
         finally:
             engine.dispose()
 
