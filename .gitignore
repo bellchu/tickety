@@ -18,6 +18,13 @@ build/
 *.egg-info/
 *.tsbuildinfo
 
+# Freshworks local simulator
+freshworks-app/.fdk/
+freshworks-app/.report.json
+freshworks-app/.usage.json
+freshworks-app/coverage/
+freshworks-app/log/
+
 # Codex-generated debate artifacts
 .codex/debates/
 

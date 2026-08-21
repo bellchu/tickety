@@ -8,18 +8,32 @@ This read-only Freshworks custom app renders in `service_ticket.ticket_sidebar` 
 - An active Freshservice trial binding and synchronized external user directory.
 - A public HTTPS Tickety API hostname.
 - A random `FRESHWORKS_APP_BOOTSTRAP_SECRET` of at least 32 characters. Configure the same value as the app's secure `bootstrap_secret` installation parameter.
-- Freshworks CLI 10.x and its compatible Node.js 24.x runtime.
+- Freshworks CLI 10.1.9 and Node.js 24.11.x.
 
 ## Local validation
 
 From this directory:
 
 ```sh
+npm install
 fdk validate
+fdk unit-test
 fdk run
 ```
 
 During installation, provide the Tickety API hostname without `https://`, the UUID returned by the binding API, and the bootstrap secret. Select the same Freshservice account and workspace represented by the binding.
+
+After exercising both the full-page and ticket-sidebar locations in the local
+simulator, stop `fdk run` and package the app:
+
+```sh
+fdk pack
+```
+
+The installable artifact is written to `dist/freshworks-app.zip`. For a private
+custom-app build that is not being submitted to the public Marketplace,
+`fdk pack --skip-coverage` may be used when a signed-in Freshservice simulation
+tenant is unavailable; `fdk validate` and `fdk unit-test` must still pass.
 
 ## Security state
 
