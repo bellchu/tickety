@@ -21,7 +21,7 @@ import { Alert, Badge, Button, Dialog, EmptyState, ErrorState, IconButton, Skele
 import { DataToolbar, PageFrame, PageHeader } from "@/components/layout/PageLayout";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
-import { canAccessProtectedIntelligence } from "@/lib/auth";
+import { canAccessProtectedIntelligence, isDemoContext } from "@/lib/auth";
 import type { Ticket, TicketListSort } from "@/lib/types";
 import { cn, formatTimeAgo } from "@/lib/utils";
 
@@ -86,7 +86,7 @@ function exportPage(tickets: Ticket[]) {
     ["Status", (ticket) => ticket.status],
     ["Priority", (ticket) => ticket.priority],
     ["Reporter", (ticket) => ticket.reporter],
-    ["Assignee", (ticket) => ticket.assignee_name],
+    ["Assignee", (ticket) => ticket.assignee_name || ticket.external_assignee_name],
     ["Category", (ticket) => ticket.category],
     ["Created", (ticket) => ticket.created_at],
     ["Updated", (ticket) => ticket.updated_at],
@@ -182,7 +182,7 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
     placeholderData: (previous) => previous,
   });
   const meQuery = useQuery({ queryKey: ["auth-me"], queryFn: api.getAuthMe, retry: false });
-  const canBulk = canAccessProtectedIntelligence(meQuery.data);
+  const canBulk = canAccessProtectedIntelligence(meQuery.data) && isDemoContext(meQuery.data);
   const categoriesQuery = useQuery({ queryKey: queryKeys.ticketCategories, queryFn: api.getCategories, retry: false });
   const usersQuery = useQuery({ queryKey: ["users"], queryFn: api.getUsers, enabled: canBulk, retry: false });
 
@@ -299,10 +299,10 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
   return (
     <PageFrame width="wide">
       <PageHeader
-        eyebrow="Support operations"
+        eyebrow="Freshservice sidecar"
         icon={<Inbox className="h-3.5 w-3.5" />}
         title="Tickets"
-        description="Search, prioritize, and move requests through the support workflow."
+        description="Search synchronized Freshservice tickets and open a record for local intelligence. Source workflow fields remain read-only."
         actions={
           <>
           <Button variant="secondary" onClick={() => exportPage(tickets)} disabled={!tickets.length || pageQuery.isLoading || pageTransitioning} leadingIcon={<Download className="h-4 w-4" />}>Export page</Button>
@@ -419,7 +419,7 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
                       <td className="max-w-44 px-4 py-4"><span className="block truncate text-xs text-ink-500">{ticket.reporter || "Unknown"}</span></td>
                       <td className="px-4 py-4"><Badge variant={badgeForPriority(ticket.priority)}>{ticket.priority}</Badge></td>
                       <td className="px-4 py-4"><Badge variant={badgeForStatus(ticket.status)} dot>{ticket.status}</Badge></td>
-                      <td className="px-4 py-4"><span className="inline-flex max-w-40 items-center gap-1.5 truncate text-xs text-ink-500"><UserRound className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />{ticket.assignee_name || "Unassigned"}</span></td>
+                      <td className="px-4 py-4"><span className="inline-flex max-w-40 items-center gap-1.5 truncate text-xs text-ink-500"><UserRound className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />{ticket.assignee_name || ticket.external_assignee_name || "Unassigned"}</span></td>
                       <td className="px-4 py-4 text-right"><span className="inline-flex items-center gap-1.5 whitespace-nowrap text-xs text-ink-400"><Clock3 className="h-3.5 w-3.5" aria-hidden="true" />{formatTimeAgo(ticket.updated_at || ticket.created_at)}</span></td>
                     </tr>
                   ))}
@@ -435,7 +435,7 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
                   {canBulk && <input type="checkbox" checked={selected.has(ticket.id)} onChange={() => toggleTicket(ticket.id)} aria-label={`Select ${ticket.subject}`} className="mt-1 h-4 w-4 shrink-0" />}
                   <div className="min-w-0 flex-1"><div className="flex flex-wrap gap-1.5"><Badge variant={badgeForPriority(ticket.priority)}>{ticket.priority}</Badge><Badge variant={badgeForStatus(ticket.status)} dot>{ticket.status}</Badge></div><Link href={`/tickets/${ticket.id}`} className="mt-3 block text-sm font-semibold leading-5 text-ink-700 hover:text-semantic-primary">{ticket.subject}</Link><p className="mt-1 truncate font-mono text-[11px] text-ink-400">{ticket.id}</p></div>
                 </div>
-                <dl className="mt-4 grid grid-cols-2 gap-3 border-t border-linen-300 pt-3 text-xs"><div><dt className="text-ink-400">Requester</dt><dd className="mt-1 truncate font-medium text-ink-600">{ticket.reporter || "Unknown"}</dd></div><div><dt className="text-ink-400">Assignee</dt><dd className="mt-1 truncate font-medium text-ink-600">{ticket.assignee_name || "Unassigned"}</dd></div></dl>
+                <dl className="mt-4 grid grid-cols-2 gap-3 border-t border-linen-300 pt-3 text-xs"><div><dt className="text-ink-400">Requester</dt><dd className="mt-1 truncate font-medium text-ink-600">{ticket.reporter || "Unknown"}</dd></div><div><dt className="text-ink-400">Assignee</dt><dd className="mt-1 truncate font-medium text-ink-600">{ticket.assignee_name || ticket.external_assignee_name || "Unassigned"}</dd></div></dl>
                 <p className="mt-3 flex items-center gap-1.5 text-[11px] text-ink-400"><Clock3 className="h-3.5 w-3.5" aria-hidden="true" />Updated {formatTimeAgo(ticket.updated_at || ticket.created_at)}</p>
               </article>
             ))}

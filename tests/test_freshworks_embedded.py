@@ -11,9 +11,8 @@ from app.backend.database import (
     IntegrationBindingRecord,
     IntegrationBootstrapRecord,
     IntegrationSessionRecord,
+    ExternalUserRecord,
     TicketRecord,
-    UserMappingRecord,
-    UserRecord,
 )
 from app.backend.integrations import embedded
 
@@ -28,7 +27,6 @@ class FreshworksEmbeddedSessionTests(unittest.TestCase):
         Base.metadata.create_all(self.engine)
         self.session_factory = sessionmaker(bind=self.engine)
         with self.session_factory() as db:
-            db.add(UserRecord(id="agent-1", name="Agent", role="agent", is_active=True))
             db.add(IntegrationBindingRecord(
                 id="11111111-1111-4111-8111-111111111111",
                 provider="freshservice",
@@ -40,11 +38,15 @@ class FreshworksEmbeddedSessionTests(unittest.TestCase):
                 expires_at=datetime.utcnow() + timedelta(days=7),
             ))
             db.flush()
-            db.add(UserMappingRecord(
+            db.add(ExternalUserRecord(
+                id="external-user-99",
                 binding_id="11111111-1111-4111-8111-111111111111",
-                tickety_user_id="agent-1",
-                external_source="freshservice",
-                external_assignee_id="99",
+                provider="freshservice",
+                external_id="99",
+                user_type="agent",
+                name="Provider Agent",
+                active=True,
+                profile_json="{}",
             ))
             db.add(TicketRecord(
                 id="ticket-1",
@@ -52,7 +54,7 @@ class FreshworksEmbeddedSessionTests(unittest.TestCase):
                 external_source="freshservice",
                 external_id="42",
                 external_workspace_id="10",
-                assignee_id="agent-1",
+                external_assignee_id="99",
                 subject="POC ticket",
             ))
             db.commit()
@@ -94,6 +96,7 @@ class FreshworksEmbeddedSessionTests(unittest.TestCase):
                 )
 
             principal = embedded.authenticate_session(db, f"Bearer {token}")
+            self.assertEqual(principal.external_user.external_id, "99")
             embedded.require_ticket_scope(principal, "42")
             with self.assertRaises(embedded.EmbeddedAuthError):
                 embedded.require_ticket_scope(principal, "43")
@@ -110,6 +113,27 @@ class FreshworksEmbeddedSessionTests(unittest.TestCase):
                 ticket_updated_at=None,
                 audience="ticket_sidebar",
             )
+
+    def test_bootstrap_does_not_require_or_issue_a_tickety_user_identity(self):
+        with self.session_factory() as db, patch.dict(
+            "os.environ", {"FRESHWORKS_APP_BOOTSTRAP_SECRET": "s" * 32}
+        ):
+            code, _ = embedded.issue_bootstrap_code(
+                db,
+                binding_id="11111111-1111-4111-8111-111111111111",
+                account_host="trial-acme.freshservice.com",
+                external_user_id="99",
+                workspace_id="10",
+                external_ticket_id="42",
+                ticket_updated_at=None,
+                audience="ticket_sidebar",
+            )
+            _token, session = embedded.redeem_bootstrap_code(
+                db,
+                binding_id="11111111-1111-4111-8111-111111111111",
+                code=code,
+            )
+            self.assertFalse(hasattr(session, "user_id"))
 
     def test_installation_secret_fails_closed(self):
         with patch.dict("os.environ", {"FRESHWORKS_APP_BOOTSTRAP_SECRET": "short"}):

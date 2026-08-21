@@ -155,7 +155,9 @@ secrets: {}
 ```
 
 `config.extra` accepts non-secret settings such as `ITSM_PROVIDER` and
-`SYNC_INTERVAL_SECONDS`; use `secrets` for credentials.
+`SYNC_INTERVAL_SECONDS`; use `secrets` for credentials. Production sidecar
+deployments should set `ITSM_PROVIDER: freshservice`; the integration only
+imports provider data and never sends ticket mutations back.
 
 For a public IP instead of an ingress, set
 `frontend.service.type: LoadBalancer`, set `config.frontendUrl` to the final

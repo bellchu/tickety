@@ -123,8 +123,9 @@ test("protected intelligence allows production admins and supervisors plus demo 
   assert.equal(canAccessProtectedIntelligence(context({ app_mode: "demo" })), true);
 });
 
-test("ticket creation permits authenticated production users and demo admins only", () => {
-  assert.equal(canCreateTickets(context({ role: "agent" })), true);
+test("ticket creation is limited to demo admins", () => {
+  assert.equal(canCreateTickets(context({ role: "agent" })), false);
+  assert.equal(canCreateTickets(context({ role: "admin" })), false);
   assert.equal(canCreateTickets(context({ app_mode: "demo" })), true);
   assert.equal(canCreateTickets(context({ auth_kind: "demo_fallback", app_mode: "demo" })), false);
   assert.equal(canCreateTickets(context({ app_mode: "demo", role: "supervisor" })), false);

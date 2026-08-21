@@ -7,7 +7,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, APIError } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { canAccessAdministration, isDemoAdministrationContext } from "@/lib/auth";
-import { Settings as SettingsType, LlmCatalog, LlmProvider, TicketCategory, BuildInfo, SyncAgentsOptions } from "@/lib/types";
+import { Settings as SettingsType, LlmCatalog, LlmProvider, TicketCategory, BuildInfo } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import {
   Settings as SettingsIcon, Save, RefreshCw, CheckCircle2, AlertCircle,
@@ -19,10 +19,7 @@ import { Alert, Button, ErrorState, Skeleton } from "@/components/ui";
 import { PageFrame, PageHeader } from "@/components/layout/PageLayout";
 
 const PROVIDER_OPTIONS = [
-  { value: "standalone", label: "Standalone", description: "Built-in ticketing" },
-  { value: "freshservice", label: "Freshservice", description: "Freshservice API" },
-  { value: "jira", label: "Jira Service Management", description: "Atlassian Jira API" },
-  { value: "none", label: "None", description: "Disable external sync" },
+  { value: "freshservice", label: "Freshservice", description: "Read-only system of record" },
 ];
 
 const PROVIDER_IDS = ["deepseek", "openai", "openrouter", "azure", "azure_ai", "custom"] as const;
@@ -143,9 +140,7 @@ const PRODUCTION_DEPLOYMENT_KEYS = new Set([
 ]);
 
 type FreshserviceAuthMode = "api" | "oauth";
-type AgentSyncMode = "sync" | "merge";
-
-const FRESHSERVICE_DEFAULT_SCOPES = "freshservice.tickets.view freshservice.tickets.edit freshservice.agents.manage";
+const FRESHSERVICE_DEFAULT_SCOPES = "freshservice.tickets.view freshservice.agents.manage freshservice.requesters.view";
 
 function normalizeDomain(value: string) {
   const trimmed = value.trim().replace(/\/+$/, "");
@@ -156,12 +151,6 @@ function normalizeDomain(value: string) {
   } catch {
     return trimmed.replace(/^https?:\/\//, "");
   }
-}
-
-function ensureHttpsUrl(value: string) {
-  const trimmed = value.trim().replace(/\/+$/, "");
-  if (!trimmed) return "";
-  return trimmed.includes("://") ? trimmed : `https://${trimmed}`;
 }
 
 function isAuthError(error: unknown) {
@@ -237,7 +226,7 @@ export default function SettingsPage() {
     if (data) {
       setForm({
         ...data,
-        ITSM_PROVIDER: data.ITSM_PROVIDER === "external" ? "freshservice" : data.ITSM_PROVIDER,
+        ITSM_PROVIDER: "freshservice",
       });
       const hasOAuthApp = data.FRESHSERVICE_OAUTH_CLIENT_ID__set || data.FRESHSERVICE_OAUTH_CLIENT_SECRET__set;
       if (data.FRESHSERVICE_OAUTH_ACCESS_TOKEN__set || (!data.FRESHSERVICE_API_KEY__set && hasOAuthApp)) {
@@ -303,7 +292,7 @@ export default function SettingsPage() {
   }, [form.DEFAULT_MODEL, catalog]);
 
   const activeProvider: LlmProvider | undefined = catalog ? (catalog[activeProviderId] as LlmProvider) : undefined;
-  const itProvider = form.ITSM_PROVIDER || "standalone";
+  const itProvider = "freshservice";
   const automationValue = (key: string) => {
     const value = form[key as keyof SettingsType] as string | undefined;
     if (value === "true") return true;
@@ -323,16 +312,10 @@ export default function SettingsPage() {
     form.FRESHSERVICE_DOMAIN?.trim() &&
     freshserviceAuthReady
   );
-  const jiraReady = Boolean(
-    form.JIRA_BASE_URL?.trim() &&
-    form.JIRA_EMAIL?.trim() &&
-    form.JIRA_PROJECT_KEY?.trim() &&
-    keyReady("JIRA_API_TOKEN")
-  );
-  const isExternalProvider = itProvider === "freshservice" || itProvider === "jira";
+  const isExternalProvider = true;
   const baselineForm = useMemo(() => data ? {
     ...data,
-    ITSM_PROVIDER: data.ITSM_PROVIDER === "external" ? "freshservice" : data.ITSM_PROVIDER,
+    ITSM_PROVIDER: "freshservice",
   } : null, [data]);
   const isDirty = baselineForm ? JSON.stringify(form) !== JSON.stringify(baselineForm) : false;
 
@@ -354,10 +337,6 @@ export default function SettingsPage() {
           next.FRESHWORKS_ORG_DOMAIN = next.FRESHSERVICE_DOMAIN;
         }
       }
-      if (provider === "jira") {
-        next.SYNC_INTERVAL_SECONDS = next.SYNC_INTERVAL_SECONDS || "60";
-        next.JIRA_ISSUE_TYPE = next.JIRA_ISSUE_TYPE || "Task";
-      }
       return next;
     });
   };
@@ -368,10 +347,6 @@ export default function SettingsPage() {
       const orgDomain = prev.FRESHWORKS_ORG_DOMAIN || domain;
       return { ...prev, FRESHSERVICE_DOMAIN: domain, FRESHWORKS_ORG_DOMAIN: orgDomain };
     });
-  };
-
-  const normalizeJiraUrl = () => {
-    setForm((prev) => ({ ...prev, JIRA_BASE_URL: ensureHttpsUrl(prev.JIRA_BASE_URL || "") }));
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -557,15 +532,12 @@ export default function SettingsPage() {
         </SettingsSection>
 
         {/* ═══ Ticketing Mode ═══ */}
-        <SettingsSection id="settings-ticketing" title="Ticketing Mode" subtitle="Choose whether Tickety uses its own built-in ticketing system or connects to an external ITSM provider">
+        <SettingsSection id="settings-ticketing" title="Freshservice sidecar" subtitle="Tickety imports Freshservice records for local intelligence and never writes back to the system of record">
           <Field label="Provider">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
               {PROVIDER_OPTIONS.map((provider) => {
                 const selected = itProvider === provider.value;
-                const ready =
-                  provider.value === "freshservice" ? freshserviceReady :
-                  provider.value === "jira" ? jiraReady :
-                  true;
+                  const ready = freshserviceReady;
                 return (
                   <button
                     key={provider.value}
@@ -592,7 +564,7 @@ export default function SettingsPage() {
           {itProvider === "freshservice" && (
             <ConnectionPanel
               title="Connect Freshservice"
-              description="Use a Freshservice domain plus one authentication method. Tickety fills sync defaults for you."
+              description="Use a Freshservice domain plus one authentication method. Only ticket and agent reads are implemented."
               ready={freshserviceReady}
               steps={[
                 { label: "Provider", done: true },
@@ -668,59 +640,6 @@ export default function SettingsPage() {
             </ConnectionPanel>
           )}
 
-          {itProvider === "jira" && (
-            <ConnectionPanel
-              title="Connect Jira Service Management"
-              description="Add your Atlassian site, service project, and API token. Defaults cover the rest."
-              ready={jiraReady}
-              steps={[
-                { label: "Site", done: Boolean(form.JIRA_BASE_URL?.trim()) },
-                { label: "Account", done: Boolean(form.JIRA_EMAIL?.trim()) },
-                { label: "Project", done: Boolean(form.JIRA_PROJECT_KEY?.trim()) },
-                { label: "Token", done: keyReady("JIRA_API_TOKEN") },
-              ]}
-            >
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <Field label="Jira Site URL" ready={Boolean(form.JIRA_BASE_URL?.trim())}>
-                  <input type="text" value={form.JIRA_BASE_URL || ""} onChange={(e) => handleChange("JIRA_BASE_URL", e.target.value)} onBlur={normalizeJiraUrl} placeholder="https://acme.atlassian.net" className="input-base" />
-                </Field>
-                <Field label="Project Key" ready={Boolean(form.JIRA_PROJECT_KEY?.trim())}>
-                  <input type="text" value={form.JIRA_PROJECT_KEY || ""} onChange={(e) => handleChange("JIRA_PROJECT_KEY", e.target.value.toUpperCase())} placeholder="ITSM" className="input-base" />
-                </Field>
-                <Field label="Atlassian Email" ready={Boolean(form.JIRA_EMAIL?.trim())}>
-                  <input type="email" value={form.JIRA_EMAIL || ""} onChange={(e) => handleChange("JIRA_EMAIL", e.target.value)} placeholder="you@example.com" className="input-base" />
-                </Field>
-                <Field label={<DeploymentManagedLabel label="Atlassian API Token" managed={productionSettingsReadOnly} />} ready={keyReady("JIRA_API_TOKEN")}>
-                  <SecretInput value={form.JIRA_API_TOKEN || ""} onChange={(v) => handleChange("JIRA_API_TOKEN", v)} placeholder="Paste API token" disabled={productionSettingsReadOnly} />
-                </Field>
-              </div>
-
-              <AdvancedPanel title="Advanced Jira Sync">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <Field label="Issue Type" ready={Boolean(form.JIRA_ISSUE_TYPE?.trim())}>
-                    <input type="text" value={form.JIRA_ISSUE_TYPE || ""} onChange={(e) => handleChange("JIRA_ISSUE_TYPE", e.target.value)} placeholder="Task" className="input-base" />
-                  </Field>
-                  <Field label="Sync Interval" ready={Boolean(form.SYNC_INTERVAL_SECONDS?.trim())}>
-                    <input type="number" min={10} value={form.SYNC_INTERVAL_SECONDS || ""} onChange={(e) => handleChange("SYNC_INTERVAL_SECONDS", e.target.value)} placeholder="60" className="input-base" />
-                  </Field>
-                </div>
-              </AdvancedPanel>
-            </ConnectionPanel>
-          )}
-
-          {itProvider === "standalone" && (
-            <div className="text-sm text-ink-500 bg-linen-200 rounded p-4 border border-linen-300">
-              <p className="font-medium text-ink-600 mb-1">Standalone Mode</p>
-              Tickety manages tickets entirely on its own — no external ITSM needed. The AI pipeline, SLA tracking, categories, comments, and all intelligence features work out of the box.
-            </div>
-          )}
-
-          {itProvider === "none" && (
-            <div className="text-sm text-ink-500 bg-linen-200 rounded p-4 border border-linen-300">
-              <p className="font-medium text-ink-600 mb-1">Disabled</p>
-              External sync is disabled. You can still create tickets manually.
-            </div>
-          )}
         </SettingsSection>
 
         {/* ═══ SLA Targets ═══ */}
@@ -1140,7 +1059,8 @@ function FreshserviceOAuthSetup({
       </div>
 
       <Field label="OAuth Scopes" ready={Boolean(form.FRESHSERVICE_OAUTH_SCOPES?.trim())}>
-        <input type="text" value={form.FRESHSERVICE_OAUTH_SCOPES || ""} onChange={(e) => onChange("FRESHSERVICE_OAUTH_SCOPES", e.target.value)} placeholder={FRESHSERVICE_DEFAULT_SCOPES} className="input-base" />
+        <input type="text" value={form.FRESHSERVICE_OAUTH_SCOPES || FRESHSERVICE_DEFAULT_SCOPES} readOnly aria-readonly="true" className="input-base bg-linen-100" />
+        <span className="block text-xs leading-5 text-ink-400">Scopes are fixed to the read-only allowlist. Agent and requester scopes only populate the separate external directory; use a view-only Freshservice integration role as an additional guard.</span>
       </Field>
 
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between rounded border border-linen-400 bg-linen-50 px-3 py-2">
@@ -1398,184 +1318,93 @@ function InfoTile({ label, value, mono }: { label: string; value: string; mono?:
 
 function AgentSection() {
   const queryClient = useQueryClient();
-  const [syncMode, setSyncMode] = useState<AgentSyncMode>("sync");
-  const [createMissing, setCreateMissing] = useState(true);
-  const [updateProfiles, setUpdateProfiles] = useState(true);
-  const [matchByName, setMatchByName] = useState(false);
-  const [reassignTickets, setReassignTickets] = useState(true);
-  const { data: agentList, isLoading } = useQuery({ queryKey: ["agents"], queryFn: api.getAgents });
-  const syncOptions: SyncAgentsOptions = {
-    mode: syncMode,
-    create_missing: createMissing,
-    merge_existing: syncMode === "merge",
-    update_profiles: updateProfiles,
-    match_by_name: syncMode === "merge" && matchByName,
-    reassign_tickets: reassignTickets,
-  };
+  const { data: directory, isLoading } = useQuery({
+    queryKey: ["external-users"],
+    queryFn: api.getExternalUsers,
+  });
   const syncMut = useMutation({
-    mutationFn: api.syncAgents,
+    mutationFn: api.syncExternalUsers,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["agents"] });
-      queryClient.invalidateQueries({ queryKey: ["me"] });
-      queryClient.invalidateQueries({ queryKey: ["leaderboard"] });
+      void queryClient.invalidateQueries({ queryKey: ["external-users"] });
     },
   });
-  const agents = agentList?.agents ?? [];
-  const syncResult = syncMut.data?.result;
-  const syncHadErrors = (syncResult?.errors ?? 0) > 0;
-  const syncNeedsReview = Boolean(syncResult && ((syncResult.conflicts ?? 0) > 0 || (syncResult.missing ?? 0) > 0));
-  const syncChangedCount = syncResult
-    ? syncResult.created + syncResult.updated + syncResult.merged + syncResult.remapped + syncResult.tickets_reassigned
-    : 0;
-  const syncFailed = Boolean(syncResult && syncHadErrors && syncResult.total === 0 && syncChangedCount === 0);
-  const syncSummary = syncResult
+  const users = directory?.users ?? [];
+  const result = syncMut.data?.result;
+  const summary = result
     ? [
-        `${syncResult.total.toLocaleString()} fetched`,
-        `${syncResult.created.toLocaleString()} created`,
-        syncResult.merged > 0 ? `${syncResult.merged.toLocaleString()} merged` : null,
-        syncResult.updated > 0 ? `${syncResult.updated.toLocaleString()} updated` : null,
-        syncResult.remapped > 0 ? `${syncResult.remapped.toLocaleString()} remapped` : null,
-        syncResult.missing > 0 ? `${syncResult.missing.toLocaleString()} missing` : null,
-        syncResult.conflicts > 0 ? `${syncResult.conflicts.toLocaleString()} conflicts` : null,
-        syncResult.skipped_inactive > 0 ? `${syncResult.skipped_inactive.toLocaleString()} inactive skipped` : null,
-        syncResult.tickets_reassigned > 0 ? `${syncResult.tickets_reassigned.toLocaleString()} tickets reassigned` : null,
-        syncResult.errors > 0 ? `${syncResult.errors.toLocaleString()} ${syncResult.errors === 1 ? "error" : "errors"}` : null,
-      ].filter(Boolean)
-    : [];
+        `${result.total.toLocaleString()} fetched`,
+        `${result.created.toLocaleString()} new`,
+        `${result.updated.toLocaleString()} updated`,
+        `${result.unchanged.toLocaleString()} unchanged`,
+        result.deactivated > 0 ? `${result.deactivated.toLocaleString()} deactivated` : null,
+        result.errors > 0 ? `${result.errors.toLocaleString()} errors` : null,
+      ].filter(Boolean).join(", ")
+    : null;
 
   return (
-    <SettingsSection title="Agent Accounts" subtitle="Sync agents from your external ITSM provider to create Tickety accounts for point tracking">
-      <div className="grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-3 items-start">
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-          <button
-            type="button"
-            onClick={() => setSyncMode("sync")}
-            className={cn(
-              "min-h-[58px] rounded border px-3 py-2 text-left transition-colors",
-              syncMode === "sync" ? "border-clay-500 bg-clay-50 text-clay-700" : "border-linen-400 bg-linen-50 text-ink-600 hover:bg-linen-200"
-            )}
-          >
-            <span className="flex items-center gap-2 text-sm font-semibold"><Download className="h-4 w-4" /> Sync missing</span>
-            <span className="block text-xs text-ink-400 mt-0.5">Create unmapped provider agents</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setSyncMode("merge")}
-            className={cn(
-              "min-h-[58px] rounded border px-3 py-2 text-left transition-colors",
-              syncMode === "merge" ? "border-clay-500 bg-clay-50 text-clay-700" : "border-linen-400 bg-linen-50 text-ink-600 hover:bg-linen-200"
-            )}
-          >
-            <span className="flex items-center gap-2 text-sm font-semibold"><Link2 className="h-4 w-4" /> Merge & reconcile</span>
-            <span className="block text-xs text-ink-400 mt-0.5">Link provider agents to existing accounts</span>
-          </button>
+    <SettingsSection
+      title="External ITSM directory"
+      subtitle="Read provider-owned agent and requester profiles without creating, linking, or updating Tickety accounts"
+    >
+      <div className="flex flex-col gap-3 rounded border border-linen-400 bg-linen-50 p-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <p className="text-sm font-medium text-ink-700">Separate identity domain</p>
+          <p className="mt-1 max-w-3xl text-xs leading-5 text-ink-500">
+            This directory is a read-only snapshot for ticket context. Tickety sign-in, roles, passwords, profiles, and local assignments remain controlled only from the local user roster.
+          </p>
         </div>
-        <button type="button" onClick={() => syncMut.mutate(syncOptions)} disabled={syncMut.isPending} className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-clay-500 text-linen-50 text-sm font-medium hover:bg-clay-600 disabled:opacity-50">
-          {syncMut.isPending ? <><RefreshCw className="w-4 h-4 animate-spin" /> Syncing…</> : <><Download className="w-4 h-4" /> {syncMode === "merge" ? "Merge Agents" : "Sync Agents"}</>}
-        </button>
+        <Button
+          onClick={() => syncMut.mutate()}
+          disabled={syncMut.isPending}
+          leadingIcon={<Download className={cn("h-4 w-4", syncMut.isPending && "animate-pulse")} />}
+        >
+          {syncMut.isPending ? "Refreshing…" : "Refresh directory"}
+        </Button>
       </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
-        <label className="flex items-start gap-2 rounded border border-linen-400 bg-linen-50 px-3 py-2 text-sm text-ink-600">
-          <input type="checkbox" checked={createMissing} onChange={(e) => setCreateMissing(e.target.checked)} className="mt-0.5" />
-          <span><span className="block font-medium">Create missing</span><span className="text-xs text-ink-400">Add accounts when no match exists</span></span>
-        </label>
-        <label className="flex items-start gap-2 rounded border border-linen-400 bg-linen-50 px-3 py-2 text-sm text-ink-600">
-          <input type="checkbox" checked={updateProfiles} onChange={(e) => setUpdateProfiles(e.target.checked)} className="mt-0.5" />
-          <span><span className="block font-medium">Refresh profiles</span><span className="text-xs text-ink-400">Update name, email, and title</span></span>
-        </label>
-        <label className={cn("flex items-start gap-2 rounded border border-linen-400 bg-linen-50 px-3 py-2 text-sm text-ink-600", syncMode !== "merge" && "opacity-60")}>
-          <input type="checkbox" checked={matchByName} disabled={syncMode !== "merge"} onChange={(e) => setMatchByName(e.target.checked)} className="mt-0.5" />
-          <span><span className="block font-medium">Match unique names</span><span className="text-xs text-ink-400">Use only when email is absent</span></span>
-        </label>
-        <label className="flex items-start gap-2 rounded border border-linen-400 bg-linen-50 px-3 py-2 text-sm text-ink-600">
-          <input type="checkbox" checked={reassignTickets} onChange={(e) => setReassignTickets(e.target.checked)} className="mt-0.5" />
-          <span><span className="block font-medium">Reassign tickets</span><span className="text-xs text-ink-400">Apply mapped assignees to tickets</span></span>
-        </label>
-      </div>
+
       {syncMut.isError && (
-        <div className="rounded border border-rust-400 bg-linen-100 p-3 text-sm text-ink-600">
-          <div className="flex items-start gap-2">
-            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-rust-500" />
-            <div>
-              <p className="font-medium text-rust-600">Sync failed</p>
-              <p className="mt-0.5 text-ink-500">{syncMut.error instanceof Error ? syncMut.error.message : "The agent sync request could not be completed."}</p>
-            </div>
-          </div>
-        </div>
+        <Alert variant="danger" title="Directory refresh failed">
+          {syncMut.error instanceof Error ? syncMut.error.message : "The provider directory could not be refreshed."}
+        </Alert>
       )}
-      {syncMut.isSuccess && syncResult && (
-        <div className={cn(
-          "rounded border bg-linen-100 p-3 text-sm",
-          syncFailed ? "border-rust-400" : syncHadErrors || syncNeedsReview ? "border-amber-400" : "border-moss-400"
-        )}>
-          <div className="flex items-start gap-2">
-            {syncFailed || syncHadErrors || syncNeedsReview ? (
-              <AlertCircle className={cn("mt-0.5 h-4 w-4 shrink-0", syncFailed ? "text-rust-500" : "text-amber-600")} />
-            ) : (
-              <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-moss-600" />
-            )}
-            <div className="min-w-0">
-              <p className={cn("font-medium", syncFailed ? "text-rust-600" : syncHadErrors || syncNeedsReview ? "text-ink-600" : "text-moss-600")}>
-                {syncFailed ? "Sync failed" : syncHadErrors ? "Sync completed with errors" : syncNeedsReview ? "Sync needs review" : "Sync complete"}
-              </p>
-              <p className="mt-0.5 text-ink-500">{syncSummary.join(", ")}</p>
-              {syncFailed && agents.length > 0 && (
-                <p className="mt-1 text-xs text-ink-400">Existing accounts below are from earlier successful syncs.</p>
-              )}
-              {(syncResult.conflict_details?.length ?? 0) > 0 && (
-                <ul className="mt-2 space-y-1 text-xs text-amber-700">
-                  {syncResult.conflict_details.slice(0, 3).map((detail, index) => (
-                    <li key={`${detail}-${index}`}>{detail}</li>
-                  ))}
-                </ul>
-              )}
-              {(syncResult.missing_details?.length ?? 0) > 0 && (
-                <ul className="mt-2 space-y-1 text-xs text-ink-500">
-                  {syncResult.missing_details.slice(0, 3).map((detail, index) => (
-                    <li key={`${detail}-${index}`}>{detail}</li>
-                  ))}
-                </ul>
-              )}
-              {(syncResult.error_details?.length ?? 0) > 0 && (
-                <ul className="mt-2 space-y-1 text-xs text-rust-500">
-                  {syncResult.error_details.slice(0, 3).map((detail, index) => (
-                    <li key={`${detail}-${index}`}>{detail}</li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          </div>
-        </div>
+      {result && (
+        <Alert variant={result.errors > 0 ? "warning" : "success"} title={result.errors > 0 ? "Refresh completed with errors" : "Directory refreshed"}>
+          {summary}
+          {result.error_details.length > 0 && <span className="mt-1 block text-xs">{result.error_details.slice(0, 3).join(", ")}</span>}
+        </Alert>
       )}
+
       {isLoading ? (
-        <div className="space-y-2">{[1, 2, 3].map(i => <div key={i} className="skeleton h-10 w-full" />)}</div>
-      ) : agents.length > 0 ? (
-        <div className="overflow-hidden rounded border border-linen-400">
-          <table className="w-full text-sm">
+        <div className="space-y-2">{[1, 2, 3].map((item) => <Skeleton key={item} className="h-10 w-full" />)}</div>
+      ) : users.length > 0 ? (
+        <div className="overflow-x-auto rounded border border-linen-400">
+          <table className="w-full min-w-[760px] text-sm">
             <thead>
               <tr className="border-b border-linen-400 bg-linen-200">
-                <th className="px-4 py-2.5 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">Name</th>
-                <th className="px-4 py-2.5 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">Email</th>
-                <th className="px-4 py-2.5 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">Title</th>
-                <th className="px-4 py-2.5 text-right text-xs font-semibold text-ink-500 uppercase tracking-wider">Points</th>
-                <th className="px-4 py-2.5 text-center text-xs font-semibold text-ink-500 uppercase tracking-wider">Tier</th>
+                <th className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wider text-ink-500">Type</th>
+                <th className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wider text-ink-500">Provider user</th>
+                <th className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wider text-ink-500">Email</th>
+                <th className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wider text-ink-500">Title</th>
+                <th className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wider text-ink-500">External ID</th>
+                <th className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wider text-ink-500">Provider</th>
               </tr>
             </thead>
             <tbody>
-              {agents.map((a) => (
-                <tr key={a.id} className="border-b border-linen-300 last:border-0 hover:bg-linen-200">
-                  <td className="px-4 py-2.5 font-medium text-ink-700">{a.name}</td>
-                  <td className="px-4 py-2.5 text-ink-500">{a.email || "—"}</td>
-                  <td className="px-4 py-2.5 text-ink-500">{a.title || "—"}</td>
-                  <td className="px-4 py-2.5 text-right tabular-nums font-medium text-ink-600">{a.impact_points.toLocaleString()}</td>
-                  <td className="px-4 py-2.5 text-center"><span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold border border-linen-400 text-ink-600">T{a.tier}</span></td>
+              {users.map((externalUser) => (
+                <tr key={externalUser.id} className="border-b border-linen-300 last:border-0 hover:bg-linen-200">
+                  <td className="px-4 py-2.5"><span className="rounded border border-linen-400 px-2 py-0.5 text-[11px] font-semibold capitalize text-ink-600">{externalUser.user_type}</span></td>
+                  <td className="px-4 py-2.5 font-medium text-ink-700">{externalUser.name}</td>
+                  <td className="px-4 py-2.5 text-ink-500">{externalUser.email || "—"}</td>
+                  <td className="px-4 py-2.5 text-ink-500">{externalUser.title || "—"}</td>
+                  <td className="px-4 py-2.5 font-mono text-xs text-ink-500">{externalUser.external_id}</td>
+                  <td className="px-4 py-2.5 capitalize text-ink-500">{externalUser.provider}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       ) : (
-        <p className="text-sm text-ink-400 py-2">Click &ldquo;Fetch Agents&rdquo; to sync agent accounts from your external provider.</p>
+        <p className="py-2 text-sm text-ink-400">Refresh the directory to retrieve provider-owned agents and requesters.</p>
       )}
     </SettingsSection>
   );

@@ -46,6 +46,7 @@ export interface Ticket {
   external_url: string | null;
   external_status: string | null;
   external_assignee_id: string | null;
+  external_assignee_name: string | null;
   external_workspace_id: string | null;
   external_updated_at: string | null;
   external_created_at: string | null;
@@ -451,47 +452,35 @@ export interface FetchTicketsResult {
   overwrite: boolean;
 }
 
-// ── Agent sync ────────────────────────────────────────────────
+// ── External ITSM user directory ─────────────────────────────
 
-export interface AgentRecord {
+export interface ExternalUserRecord {
   id: string;
+  binding_id: string;
+  provider: string;
+  external_id: string;
+  user_type: "agent" | "requester";
   name: string;
   email: string | null;
   title: string | null;
-  tier: number;
-  impact_points: number;
-  external_source: string | null;
-  external_assignee_id: string | null;
+  active: boolean;
+  profile: Record<string, unknown>;
+  source_updated_at: string | null;
+  fetched_at: string;
 }
 
-export interface AgentListResponse {
-  agents: AgentRecord[];
+export interface ExternalUserListResponse {
+  users: ExternalUserRecord[];
 }
 
-export interface SyncAgentsOptions {
-  mode?: "sync" | "merge";
-  create_missing: boolean;
-  merge_existing: boolean;
-  update_profiles: boolean;
-  match_by_name: boolean;
-  reassign_tickets: boolean;
-}
-
-export interface SyncAgentsResult {
+export interface ExternalUserSyncResult {
   created: number;
   updated: number;
-  merged: number;
-  remapped: number;
-  missing: number;
-  conflicts: number;
+  unchanged: number;
+  deactivated: number;
   errors: number;
   error_details: string[];
-  conflict_details: string[];
-  missing_details: string[];
   total: number;
-  skipped_inactive: number;
-  tickets_reassigned: number;
-  options?: SyncAgentsOptions;
 }
 
 // ── Systemic Issues ───────────────────────────────────────────

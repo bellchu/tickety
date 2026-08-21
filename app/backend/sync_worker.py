@@ -9,7 +9,7 @@ from sqlalchemy import or_
 
 from .database import SessionLocal, SyncStateRecord, TicketRecord
 from .integrations.sync import sync_tickets_from_external
-from .integrations.registry import get_adapter
+from .integrations.registry import configured_provider, get_adapter
 from .integrations.bindings import expire_due_bindings, get_active_binding
 from . import settings as settings_module
 
@@ -279,9 +279,7 @@ def _auto_triage_job():
 
 
 def _sync_job():
-    provider = os.getenv("ITSM_PROVIDER", "standalone")
-    if provider == "external":
-        provider = "freshservice"
+    provider = configured_provider()
     if provider in ("standalone", "none", ""):
         # An activated binding is authoritative over the legacy provider env.
         db = SessionLocal()
@@ -377,9 +375,7 @@ def get_sync_status() -> dict:
     try:
         expire_due_bindings(db)
         active_binding = get_active_binding(db)
-        current_provider = os.getenv("ITSM_PROVIDER", "standalone")
-        if current_provider == "external":
-            current_provider = "freshservice"
+        current_provider = configured_provider()
         binding_id = "legacy"
         if active_binding:
             current_provider = active_binding.provider

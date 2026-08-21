@@ -544,6 +544,10 @@ def update_settings(payload: dict) -> dict:
                 r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", new_val
             ):
                 raise ValueError("Custom provider type contains unsupported characters")
+            if key == "FRESHSERVICE_OAUTH_SCOPES" and new_val:
+                from .integrations.freshservice import FreshserviceAdapter
+
+                new_val = FreshserviceAdapter._validate_oauth_scopes(new_val)
             updates[key] = new_val
 
         if updates:

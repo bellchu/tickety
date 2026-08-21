@@ -11,8 +11,7 @@
       "requests": {
         "ticketyBootstrap": {},
         "ticketyRedeem": {},
-        "ticketyTicketContext": {},
-        "ticketyTicketWriteback": {}
+        "ticketyTicketContext": {}
       }
     },
     "service_ticket": {

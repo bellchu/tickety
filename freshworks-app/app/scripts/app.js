@@ -4,7 +4,6 @@
   var client;
   var sessionToken;
   var externalTicketId;
-  var expectedUpdatedAt;
 
   function show(id) { document.getElementById(id).hidden = false; }
   function hide(id) { document.getElementById(id).hidden = true; }
@@ -62,20 +61,6 @@
     return parseTemplateResponse(redeemResult);
   }
 
-  function option(value, label) {
-    var item = document.createElement("option");
-    item.value = value;
-    item.textContent = label || value;
-    return item;
-  }
-
-  function populateSelect(id, values, selected) {
-    var select = document.getElementById(id);
-    select.replaceChildren();
-    values.forEach(function (value) { select.appendChild(option(value)); });
-    select.value = selected;
-  }
-
   function renderResolution(value) {
     var root = document.getElementById("resolution");
     root.replaceChildren();
@@ -103,21 +88,12 @@
   function renderTicket(context) {
     var ticket = context.ticket;
     externalTicketId = String(ticket.external_id);
-    expectedUpdatedAt = ticket.updated_at;
     document.getElementById("environment").textContent = context.binding.environment;
     document.getElementById("subject").textContent = ticket.subject;
     document.getElementById("summary").textContent = ticket.summary || "No summary is available yet.";
-    populateSelect("status", ["Open", "Pending", "Resolved", "Closed", "Escalated"], ticket.status);
-    populateSelect("priority", ["P1", "P2", "P3", "P4"], ticket.priority);
+    document.getElementById("status").textContent = ticket.status;
+    document.getElementById("priority").textContent = ticket.priority;
     renderResolution(ticket.recommended_solution);
-    var writeSupported =
-      context.capabilities["ticket.update"] !== "unsupported" &&
-      context.capabilities["freshworks.trusted_agent_identity"] === "supported";
-    document.getElementById("save").disabled = !writeSupported;
-    if (!writeSupported) {
-      document.getElementById("write-status").textContent =
-        "Write-back remains locked until agent identity and ticket updates are verified for this binding.";
-    }
     hide("loading");
     show("ticket-panel");
   }
@@ -128,34 +104,6 @@
       cache: false
     });
     renderTicket(parseTemplateResponse(result));
-  }
-
-  async function saveTicket() {
-    var button = document.getElementById("save");
-    var statusNode = document.getElementById("write-status");
-    button.disabled = true;
-    statusNode.textContent = "Checking Freshservice version and writing changes…";
-    try {
-      var result = await client.request.invokeTemplate("ticketyTicketWriteback", {
-        context: {
-          external_ticket_id: externalTicketId,
-          session_token: sessionToken,
-          idempotency_key: crypto.randomUUID()
-        },
-        body: JSON.stringify({
-          status: document.getElementById("status").value,
-          priority: document.getElementById("priority").value,
-          expected_updated_at: expectedUpdatedAt
-        })
-      });
-      var response = parseTemplateResponse(result);
-      expectedUpdatedAt = response.ticket.updated_at;
-      statusNode.textContent = "Freshservice updated successfully.";
-    } catch (error) {
-      statusNode.textContent = error && error.message ? error.message : "Write-back failed. Refresh the ticket before retrying.";
-    } finally {
-      button.disabled = false;
-    }
   }
 
   async function initialize() {
@@ -187,7 +135,6 @@
       sessionToken = session.access_token;
       if (ticket) {
         externalTicketId = String(ticket.id);
-        expectedUpdatedAt = ticket.updated_at;
         await loadTicket();
       } else {
         hide("loading");
@@ -205,6 +152,5 @@
     } catch (error) { fail(error); }
   }
 
-  document.getElementById("save").addEventListener("click", saveTicket);
   window.addEventListener("load", initialize);
 }());

@@ -112,7 +112,6 @@ def main() -> int:
 
         binding_id = str(binding["id"])
         capability_statuses: dict[str, str] = {}
-        legacy_provider = "unchanged"
         ready = binding.get("state") == "active"
         if not ready:
             validation = _request(
@@ -132,19 +131,6 @@ def main() -> int:
                     "POST",
                     f"/admin/integrations/bindings/{binding_id}/activate",
                 ).json()
-            elif (os.getenv("POC_DISABLE_LEGACY_ON_FAILURE") or "true").lower() in {
-                "1",
-                "true",
-                "yes",
-                "on",
-            }:
-                _request(
-                    client,
-                    "PUT",
-                    "/admin/settings",
-                    json={"ITSM_PROVIDER": "standalone"},
-                )
-                legacy_provider = "standalone"
 
         print(
             json.dumps(
@@ -153,7 +139,6 @@ def main() -> int:
                     "environment": binding.get("environment"),
                     "state": binding.get("state"),
                     "ready_for_activation": ready,
-                    "legacy_provider": legacy_provider,
                     "capabilities": capability_statuses,
                 },
                 sort_keys=True,

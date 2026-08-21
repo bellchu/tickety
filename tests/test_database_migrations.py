@@ -43,7 +43,14 @@ class DatabaseMigrationTests(unittest.TestCase):
             for table_name, table in Base.metadata.tables.items():
                 actual_columns = {column["name"] for column in inspector.get_columns(table_name)}
                 self.assertEqual(actual_columns, set(table.columns.keys()), table_name)
-            self.assertEqual(self._current_revision(engine), "0008")
+            self.assertEqual(self._current_revision(engine), "0009")
+            self.assertIn("external_users", inspector.get_table_names())
+            self.assertNotIn("user_mappings", inspector.get_table_names())
+            session_columns = {
+                column["name"]
+                for column in inspector.get_columns("integration_sessions")
+            }
+            self.assertNotIn("user_id", session_columns)
             command.check(self.config)
         finally:
             engine.dispose()
@@ -84,7 +91,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertEqual(user["name"], "Legacy User")
             self.assertEqual(user["role"], "agent")
             self.assertTrue(user["is_active"])
-            self.assertEqual(self._current_revision(engine), "0008")
+            self.assertEqual(self._current_revision(engine), "0009")
         finally:
             engine.dispose()
 

@@ -203,19 +203,37 @@ class RecognitionRecord(Base):
     __table_args__ = (UniqueConstraint("user_id", "recognition_key", name="uix_user_recognition"),)
 
 
-class UserMappingRecord(Base):
-    __tablename__ = "user_mappings"
+class ExternalUserRecord(Base):
+    """Read-only projection of a user owned by an external ITSM provider.
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    This table intentionally has no foreign key or mapping to ``users``.
+    Tickety accounts and provider identities are separate security domains.
+    """
+    __tablename__ = "external_users"
+
+    id = Column(String(36), primary_key=True)
     binding_id = Column(String(36), nullable=False, default="legacy", index=True)
-    tickety_user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
-    external_source = Column(String, nullable=False)
-    external_assignee_id = Column(String, nullable=False)
+    provider = Column(String(64), nullable=False, index=True)
+    external_id = Column(String(255), nullable=False)
+    user_type = Column(String(32), nullable=False, default="agent", index=True)
+    name = Column(String(255), nullable=False)
+    email = Column(String(320), nullable=True)
+    title = Column(String(255), nullable=True)
+    active = Column(Boolean, nullable=False, default=True, index=True)
+    profile_json = Column(Text, nullable=False, default="{}")
+    source_updated_at = Column(DateTime, nullable=True)
+    fetched_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     __table_args__ = (
         UniqueConstraint(
-            "binding_id", "external_source", "external_assignee_id",
-            name="uix_binding_external_assignee",
+            "binding_id", "provider", "user_type", "external_id",
+            name="uix_external_user_identity",
+        ),
+        Index(
+            "ix_external_users_lookup",
+            "binding_id", "provider", "external_id",
         ),
     )
 
@@ -316,7 +334,6 @@ class IntegrationSessionRecord(Base):
     binding_id = Column(
         String(36), ForeignKey("integration_bindings.id"), nullable=False, index=True
     )
-    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
     external_user_id = Column(String(255), nullable=False)
     workspace_id = Column(String(255), nullable=True)
     external_ticket_id = Column(String(255), nullable=True)

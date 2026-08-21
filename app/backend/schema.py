@@ -40,6 +40,7 @@ class Ticket(BaseModel):
     external_url: Optional[str] = None
     external_status: Optional[str] = None
     external_assignee_id: Optional[str] = None
+    external_assignee_name: Optional[str] = None
     external_workspace_id: Optional[str] = None
     external_updated_at: Optional[datetime] = None
     external_created_at: Optional[datetime] = None
@@ -158,6 +159,31 @@ class SyncStatus(BaseModel):
     total_synced: int = 0
 
 
+class ExternalUser(BaseModel):
+    id: str
+    binding_id: str
+    provider: str
+    external_id: str
+    user_type: Literal["agent", "requester"]
+    name: str
+    email: Optional[str] = None
+    title: Optional[str] = None
+    active: bool = True
+    profile: dict = Field(default_factory=dict)
+    source_updated_at: Optional[datetime] = None
+    fetched_at: datetime
+
+
+class ExternalUserSyncResult(BaseModel):
+    created: int = 0
+    updated: int = 0
+    unchanged: int = 0
+    deactivated: int = 0
+    errors: int = 0
+    total: int = 0
+    error_details: List[str] = Field(default_factory=list)
+
+
 class IntegrationBindingCreate(BaseModel):
     provider: Literal["freshservice"] = "freshservice"
     environment: Literal["trial", "sandbox", "production"]
@@ -186,12 +212,6 @@ class FreshworksBootstrapRequest(BaseModel):
 class FreshworksBootstrapRedeem(BaseModel):
     binding_id: str = Field(..., min_length=36, max_length=36)
     code: str = Field(..., min_length=32, max_length=255)
-
-
-class FreshworksTicketWriteback(BaseModel):
-    status: Optional[Literal["Open", "Pending", "Resolved", "Closed", "Escalated"]] = None
-    priority: Optional[Literal["P1", "P2", "P3", "P4"]] = None
-    expected_updated_at: datetime
 
 
 class TicketCreate(BaseModel):

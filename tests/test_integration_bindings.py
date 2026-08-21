@@ -114,8 +114,9 @@ class IntegrationBindingTests(unittest.IsolatedAsyncioTestCase):
             binding = self._create(db)
             adapter = AsyncMock()
             adapter.probe_capabilities.return_value = {
+                "integration.mode": {"status": "supported", "mode": "read_only"},
                 "ticket.read": {"status": "supported", "http_status": 200},
-                "ticket.create": {"status": "unknown"},
+                "ticket.create": {"status": "unsupported", "reason": "read_only_sidecar"},
                 "freshworks.full_page_app": {"status": "unknown"},
             }
             with (
@@ -133,7 +134,8 @@ class IntegrationBindingTests(unittest.IsolatedAsyncioTestCase):
                 for row in db.query(IntegrationCapabilityRecord).all()
             }
             self.assertEqual(capabilities["ticket.read"], "supported")
-            self.assertEqual(capabilities["ticket.create"], "unknown")
+            self.assertEqual(capabilities["integration.mode"], "supported")
+            self.assertEqual(capabilities["ticket.create"], "unsupported")
 
     async def test_activation_fails_closed_without_ticket_read(self):
         with self.session_factory() as db:

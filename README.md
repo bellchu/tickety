@@ -6,7 +6,7 @@
 
 ---
 
-Tickety — ITSM platform with built-in AI. Runs standalone or connects to an external provider.
+Tickety — a read-only AI sidekick for an existing ITSM system. Freshservice is the current system of record; Tickety imports tickets and agent data, stores intelligence locally, and never writes back.
 
 ## Screenshots
 
@@ -214,6 +214,10 @@ environment/Secret and roll out the affected workloads.
 
 For an isolated Freshservice proof of concept, see the [Freshservice trial POC guide](docs/freshservice-trial-poc.md). Trial bindings use a dedicated POC deployment and are never promoted into production.
 
+Production Tickety is a one-way Freshservice sidecar. The provider adapter exposes only reads, the capability manifest permanently marks provider mutations unsupported, and the Freshworks package contains no write template. Manual ticket creation, ticket field updates, bulk lifecycle changes, deletion, and requester-portal submission are demo-only; make authoritative changes in Freshservice. AI summaries, retrieval indexes, recommendations, and other derived artifacts remain local to Tickety.
+
+Identity is also one-way and non-federated: Tickety owns its own users, passwords, sessions, and roles. Freshservice agents and requesters are copied into a separate read-only external directory for ticket context only. Provider sync never creates or updates Tickety users, matches accounts by email/name, grants a Tickety role/session, assigns a local owner, or routes points to a local user.
+
 Tickety ships in **demo mode** for evaluation with anonymous read access and an
 explicitly authenticated administrator feature path. Production remains the
 required mode for private deployments and deployment-managed security controls.
@@ -268,7 +272,7 @@ to an `api` process. Sync intervals are bounded and controlled with
 
 | Module | Key features |
 |---|---|
-| Incidents | CRUD, comments (public/private), audit log, bulk ops, tags, custom statuses &mdash; fully triaged by AI pipeline |
+| Incidents | Read-only Freshservice ticket projections with local AI triage, summaries, recommendations, and audit evidence; demo mode retains sample CRUD |
 | Problems | Root cause tracking, link/unlink incidents, workaround/resolution documentation |
 | Changes | CAB approvals (approve/reject), risk assessment (Low/Medium/High), rollback and test plans |
 | Service Catalog | Requestable items with category grouping, approval routing, fulfilment tracking |
@@ -289,12 +293,12 @@ to an `api` process. Sync intervals are bounded and controlled with
 | Endpoint | Description |
 |---|---|
 | `GET /tickets` | List all tickets (filter by status, priority, assignee, category) |
-| `POST /tickets` | Create ticket (auto-triaged by AI) |
-| `PATCH /tickets/:id` | Update ticket status, assignee, priority etc. |
+| `POST /tickets` | Demo only: create a local sample ticket |
+| `PATCH /tickets/:id` | Demo only: update a local sample ticket |
 | `GET /tickets/:id/comments` | List comments (public and private) |
-| `POST /tickets/:id/comments` | Add comment |
+| `POST /tickets/:id/comments` | Add a Tickety-local annotation; never sent to Freshservice |
 | `GET /tickets/:id/audit` | Audit log for a ticket |
-| `POST /tickets/bulk` | Bulk assign/close/set priority/ set category |
+| `POST /tickets/bulk` | Demo only: bulk-update local sample tickets |
 | `GET /ticket-intelligence/search?q=...` | Retrieve the most relevant ticket/comment/KB snippets for a question |
 | `POST /ticket-intelligence/analyze` | Ask an LLM a question using only retrieved ticket context |
 | `POST /ticket-intelligence/backfill` | Admin: index existing tickets/comments/KB articles |
@@ -334,7 +338,7 @@ to an `api` process. Sync intervals are bounded and controlled with
 | Section | What you configure |
 |---|---|
 | LLM | Provider (DeepSeek/OpenAI/OpenRouter/Azure/Custom), default model, API keys, live model fetching |
-| Ticketing mode | Standalone (built-in) or external ITSM provider |
+| Freshservice sidecar | Read-only Freshservice domain, workspace, ticket includes, agent filter, sync interval, and credentials |
 | SLA targets | Resolution-time targets per priority (P1/P2/P3 hours) |
 | Agents | Create and manage accounts, assign admin/supervisor/agent roles |
 | Categories | Ticket classification categories with colour coding |
@@ -364,10 +368,10 @@ app/
 │   ├── seed.py              Demo data (users, tickets, KB, config)
 │   └── integrations/
 │       ├── base.py           Abstract ITSM adapter interface
-│       ├── freshservice.py   External provider adapter (REST + OAuth)
-│       ├── jira.py           Jira Cloud adapter (REST + API token)
+│       ├── freshservice.py   Read-only Freshservice adapter (REST + OAuth)
+│       ├── jira.py           Legacy read-only Jira import adapter
 │       ├── registry.py       Adapter factory
-│       └── sync.py           Ticket & agent sync logic
+│       └── sync.py           Ticket sync and external user directory refresh
 └── frontend-next/
     ├── app/
     │   ├── page.tsx           Dashboard

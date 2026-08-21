@@ -10,7 +10,6 @@ from sqlalchemy.pool import StaticPool
 from app.backend.database import (
     SyncStateRecord,
     TicketRecord,
-    UserMappingRecord,
     UserRecord,
 )
 from app.backend.integrations import sync
@@ -35,7 +34,6 @@ class TicketSyncFailureIsolationTests(unittest.TestCase):
             poolclass=StaticPool,
         )
         UserRecord.__table__.create(self.engine)
-        UserMappingRecord.__table__.create(self.engine)
         TicketRecord.__table__.create(self.engine)
         SyncStateRecord.__table__.create(self.engine)
         self.session_factory = sessionmaker(bind=self.engine)

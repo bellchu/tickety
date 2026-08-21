@@ -779,7 +779,7 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(processed_ids, ["portal-approved"])
         self.assertTrue(process.await_args.kwargs["force"])
 
-    async def test_manual_ticket_auto_processing_reserves_user_budget_first(self):
+    async def test_production_manual_ticket_creation_is_blocked_before_ai_dispatch(self):
         payload = SimpleNamespace(
             subject="Manual ticket",
             description="Needs analysis",
@@ -792,7 +792,7 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
             asset_id=None,
         )
         user = UserRecord(id="agent-1", name="Agent", role="agent", is_active=True)
-        reserve = MagicMock(side_effect=HTTPException(status_code=429, detail="limited"))
+        reserve = MagicMock()
         process = AsyncMock()
         with (
             self.session_factory() as db,
@@ -803,12 +803,8 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertRaises(HTTPException) as raised,
         ):
             await main.create_ticket(payload, db, user)
-        self.assertEqual(raised.exception.status_code, 429)
-        reserve.assert_called_once_with(
-            unittest.mock.ANY,
-            "agent-1",
-            "ticket_create_auto_processing",
-        )
+        self.assertEqual(raised.exception.status_code, 409)
+        reserve.assert_not_called()
         process.assert_not_awaited()
         with self.session_factory() as db:
             self.assertEqual(db.query(TicketRecord).count(), 1)

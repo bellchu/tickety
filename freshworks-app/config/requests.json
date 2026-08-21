@@ -31,17 +31,5 @@
         "Content-Type": "application/json"
       }
     }
-  },
-  "ticketyTicketWriteback": {
-    "schema": {
-      "method": "PATCH",
-      "host": "<%= iparam.tickety_host %>",
-      "path": "/integrations/freshworks/tickets/<%= context.external_ticket_id %>",
-      "headers": {
-        "Authorization": "Bearer <%= context.session_token %>",
-        "Idempotency-Key": "<%= context.idempotency_key %>",
-        "Content-Type": "application/json"
-      }
-    }
   }
 }

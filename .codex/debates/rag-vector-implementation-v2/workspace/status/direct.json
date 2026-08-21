@@ -1,1 +1,0 @@
-{"blockers":[],"candidate_digest":"sha256:f223e18c32b4fcc4ff6c731a00589bee59320dc0170dc46c368c5af87b55227e","candidate_version":"v0","expected_voters":["chatgpt","deepseek"],"protocol_version":2,"scope":"direct","status":"APPROVED","voters":{"chatgpt":{"eligible":true,"verdict":"APPROVE"},"deepseek":{"eligible":true,"verdict":"APPROVE"}}}

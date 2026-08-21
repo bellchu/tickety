@@ -22,17 +22,6 @@ FRESHSERVICE_PRIORITY_MAP = {
     4: "P1",  # Urgent
 }
 
-TICKETY_PRIORITY_TO_FRESHSERVICE = {
-    "P4": 1,
-    "LOW": 1,
-    "P3": 2,
-    "MEDIUM": 2,
-    "P2": 3,
-    "HIGH": 3,
-    "P1": 4,
-    "URGENT": 4,
-}
-
 FRESHSERVICE_STATUS_MAP = {
     2: "Open",
     3: "Pending",
@@ -41,18 +30,12 @@ FRESHSERVICE_STATUS_MAP = {
     6: "Escalated",
 }
 
-TICKETY_STATUS_TO_FRESHSERVICE = {
-    "NEW": 2,
-    "OPEN": 2,
-    "AWAITING REVIEW": 3,
-    "PENDING": 3,
-    "RESOLVED": 4,
-    "CLOSED": 5,
-    "ESCALATED": 6,
-}
-
 DEFAULT_FRESHSERVICE_OAUTH_SCOPES = (
-    "freshservice.tickets.view freshservice.tickets.edit freshservice.agents.manage"
+    "freshservice.tickets.view freshservice.agents.manage "
+    "freshservice.requesters.view"
+)
+ALLOWED_FRESHSERVICE_OAUTH_SCOPES = frozenset(
+    DEFAULT_FRESHSERVICE_OAUTH_SCOPES.split()
 )
 DEFAULT_TICKET_LIST_INCLUDES = "stats,requester"
 SUPPORTED_TICKET_LIST_INCLUDES = {
@@ -101,8 +84,10 @@ class FreshserviceAdapter(BaseITSMAdapter):
         self.oauth_client_id = configured("FRESHSERVICE_OAUTH_CLIENT_ID")
         self.oauth_client_secret = configured("FRESHSERVICE_OAUTH_CLIENT_SECRET")
         self.oauth_redirect_uri = configured("FRESHSERVICE_OAUTH_REDIRECT_URI")
-        self.oauth_scopes = configured(
-            "FRESHSERVICE_OAUTH_SCOPES", DEFAULT_FRESHSERVICE_OAUTH_SCOPES
+        self.oauth_scopes = self._validate_oauth_scopes(
+            configured(
+                "FRESHSERVICE_OAUTH_SCOPES", DEFAULT_FRESHSERVICE_OAUTH_SCOPES
+            )
         )
         self.oauth_access_token = configured("FRESHSERVICE_OAUTH_ACCESS_TOKEN")
         self.oauth_refresh_token = configured("FRESHSERVICE_OAUTH_REFRESH_TOKEN")
@@ -112,6 +97,19 @@ class FreshserviceAdapter(BaseITSMAdapter):
         value = (value or "").strip().rstrip("/")
         parsed = urllib.parse.urlparse(value if "://" in value else f"https://{value}")
         return parsed.netloc or parsed.path
+
+    @staticmethod
+    def _validate_oauth_scopes(value: str) -> str:
+        scopes = [scope for scope in str(value or "").split() if scope]
+        unknown = sorted(set(scopes) - ALLOWED_FRESHSERVICE_OAUTH_SCOPES)
+        if unknown:
+            raise ValueError(
+                "Freshservice OAuth scopes exceed Tickety's read-only allowlist: "
+                + ", ".join(unknown)
+            )
+        if "freshservice.tickets.view" not in scopes:
+            raise ValueError("Freshservice OAuth requires freshservice.tickets.view")
+        return " ".join(dict.fromkeys(scopes))
 
     def _auth(self):
         """Return Basic‑auth tuple (apikey, X) unless OAuth is configured, in
@@ -235,14 +233,6 @@ class FreshserviceAdapter(BaseITSMAdapter):
             if isinstance(external_status, str):
                 return external_status
             return "Open"
-
-    def to_freshservice_priority(self, tickety_priority) -> int:
-        key = str(tickety_priority or "P3").strip().upper()
-        return TICKETY_PRIORITY_TO_FRESHSERVICE.get(key, 2)
-
-    def to_freshservice_status(self, tickety_status) -> int:
-        key = str(tickety_status or "Open").strip().upper()
-        return TICKETY_STATUS_TO_FRESHSERVICE.get(key, 2)
 
     def build_ticket_url(self, external_id: str) -> str:
         return f"{self.base_url}/support/tickets/{external_id}"
@@ -372,43 +362,6 @@ class FreshserviceAdapter(BaseITSMAdapter):
             resp = await client.get(url, auth=self._auth(), headers=self._headers(), params=params)
         return resp
 
-    async def _rate_limited_post(self, client: httpx.AsyncClient, url: str, payload: dict) -> httpx.Response:
-        """POST with rate-limit pacing + 429 retry. Returns the Response."""
-        elapsed = time.monotonic() - getattr(self, "_last_post_ts", 0.0)
-        if elapsed < self._MIN_INTERVAL_S:
-            await asyncio.sleep(self._MIN_INTERVAL_S - elapsed)
-
-        resp = await client.post(url, auth=self._auth(), headers=self._headers(), json=payload)
-        self._last_post_ts = time.monotonic()
-
-        if resp.status_code == 429:
-            retry_after = float(resp.headers.get("Retry-After", "5") or "5")
-            print(f"[External] rate limited; sleeping {retry_after}s")
-            await asyncio.sleep(retry_after + 0.5)
-            self._last_post_ts = time.monotonic()
-            resp = await client.post(url, auth=self._auth(), headers=self._headers(), json=payload)
-        if resp.status_code == 401 and await self._refresh_oauth_access_token():
-            self._last_post_ts = time.monotonic()
-            resp = await client.post(url, auth=self._auth(), headers=self._headers(), json=payload)
-        return resp
-
-    async def _rate_limited_put(self, client: httpx.AsyncClient, url: str, payload: dict) -> httpx.Response:
-        """PUT with the same bounded retry and OAuth refresh behavior as POST."""
-        elapsed = time.monotonic() - getattr(self, "_last_put_ts", 0.0)
-        if elapsed < self._MIN_INTERVAL_S:
-            await asyncio.sleep(self._MIN_INTERVAL_S - elapsed)
-        resp = await client.put(url, auth=self._auth(), headers=self._headers(), json=payload)
-        self._last_put_ts = time.monotonic()
-        if resp.status_code == 429:
-            retry_after = float(resp.headers.get("Retry-After", "5") or "5")
-            await asyncio.sleep(retry_after + 0.5)
-            self._last_put_ts = time.monotonic()
-            resp = await client.put(url, auth=self._auth(), headers=self._headers(), json=payload)
-        if resp.status_code == 401 and await self._refresh_oauth_access_token():
-            self._last_put_ts = time.monotonic()
-            resp = await client.put(url, auth=self._auth(), headers=self._headers(), json=payload)
-        return resp
-
     @staticmethod
     def _parse_link_next(link_header: Optional[str], base_url: str) -> Optional[str]:
         """Extract the rel=\"next\" URL from a Link header."""
@@ -503,18 +456,45 @@ class FreshserviceAdapter(BaseITSMAdapter):
                 page += 1
         return out
 
-    async def create_ticket(self, payload: dict) -> dict:
-        """Create a ticket in Freshservice and return the raw provider ticket."""
+    async def fetch_requesters(self, max_pages: Optional[int] = None) -> List[dict]:
+        """Fetch requester/contact profiles through the documented read API."""
         self._ensure_provider_configured()
-        url = f"{self.base_url}/api/v2/tickets"
+        cap = max_pages if max_pages is not None else self._MAX_PAGES
+        out: List[dict] = []
+        page = 1
+        url = f"{self.base_url}/api/v2/requesters"
+        params: dict = {"per_page": 100}
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await self._rate_limited_post(client, url, payload)
-            resp.raise_for_status()
-            data = resp.json()
-            return data.get("ticket", data)
+            while page <= cap:
+                params["page"] = page
+                resp = await self._rate_limited_get(client, url, params)
+                if resp.status_code == 429:
+                    raise RuntimeError(
+                        f"Freshservice still rate-limited on requester page {page}"
+                    )
+                resp.raise_for_status()
+                data = resp.json()
+                if not isinstance(data, dict) or not isinstance(data.get("requesters", []), list):
+                    raise RuntimeError("Freshservice requester response is invalid")
+                requesters = data.get("requesters", [])
+                out.extend(requesters)
+                if not self._parse_link_next(resp.headers.get("link"), self.base_url):
+                    break
+                if len(requesters) < 100:
+                    break
+                page += 1
+        return out
+
+    async def fetch_external_users(self, max_pages: Optional[int] = None) -> List[dict]:
+        agents = await self.fetch_agents(max_pages=max_pages)
+        requesters = await self.fetch_requesters(max_pages=max_pages)
+        return [
+            *({**agent, "user_type": "agent"} for agent in agents),
+            *({**requester, "user_type": "requester"} for requester in requesters),
+        ]
 
     async def fetch_ticket_raw(self, external_id: str) -> dict:
-        """Fetch one ticket for optimistic-concurrency validation."""
+        """Fetch one authoritative Freshservice ticket snapshot."""
         self._ensure_provider_configured()
         if not str(external_id).isdigit():
             raise ValueError("Freshservice ticket ID must be numeric")
@@ -528,48 +508,21 @@ class FreshserviceAdapter(BaseITSMAdapter):
             raise RuntimeError("Freshservice ticket response is invalid")
         return ticket
 
-    async def update_ticket_raw(self, external_id: str, payload: dict) -> dict:
-        """Apply a bounded Freshservice ticket update and return its snapshot."""
-        self._ensure_provider_configured()
-        if not str(external_id).isdigit():
-            raise ValueError("Freshservice ticket ID must be numeric")
-        allowed = {key: payload[key] for key in ("status", "priority") if key in payload}
-        if not allowed:
-            raise ValueError("No supported Freshservice update fields were supplied")
-        url = f"{self.base_url}/api/v2/tickets/{external_id}"
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await self._rate_limited_put(client, url, allowed)
-            resp.raise_for_status()
-            data = resp.json()
-        ticket = data.get("ticket") if isinstance(data, dict) else None
-        if not isinstance(ticket, dict):
-            raise RuntimeError("Freshservice update response is invalid")
-        return ticket
-
     def capability_manifest(self) -> dict[str, dict[str, Any]]:
         return {
+            "integration.mode": {"status": "supported", "mode": "read_only"},
             "ticket.read": {"status": "supported", "scope": "freshservice.tickets.view"},
             "agent.read": {"status": "supported", "scope": "freshservice.agents.manage"},
-            "ticket.create": {
-                "status": "unknown",
-                "scope": "freshservice.tickets.edit",
-                "implementation": "available",
-                "verification": "write_probe_not_run",
-            },
-            "ticket.update": {
-                "status": "unknown",
-                "scope": "freshservice.tickets.edit",
-                "implementation": "status_priority",
-                "verification": "write_probe_not_run",
-            },
-            "ticket.reply": {"status": "unsupported"},
-            "ticket.note": {"status": "unsupported"},
-            "ticket.attachment": {"status": "unsupported"},
-            "service_request.create": {"status": "unsupported"},
+            "requester.read": {"status": "supported", "scope": "freshservice.requesters.view"},
+            "ticket.create": {"status": "unsupported", "reason": "read_only_sidecar"},
+            "ticket.update": {"status": "unsupported", "reason": "read_only_sidecar"},
+            "ticket.reply": {"status": "unsupported", "reason": "read_only_sidecar"},
+            "ticket.note": {"status": "unsupported", "reason": "read_only_sidecar"},
+            "ticket.attachment": {"status": "unsupported", "reason": "read_only_sidecar"},
+            "service_request.create": {"status": "unsupported", "reason": "read_only_sidecar"},
             "webhook.ingest": {"status": "supported"},
             "freshworks.full_page_app": {"status": "unknown"},
             "freshworks.ticket_sidebar": {"status": "unknown"},
-            "freshworks.trusted_agent_identity": {"status": "unknown"},
         }
 
     async def probe_capabilities(self) -> dict[str, dict[str, Any]]:
@@ -579,7 +532,7 @@ class FreshserviceAdapter(BaseITSMAdapter):
             self._ensure_provider_configured()
         except Exception as exc:
             detail = type(exc).__name__
-            for key in ("ticket.read", "agent.read", "ticket.create"):
+            for key in ("ticket.read", "agent.read", "requester.read"):
                 manifest[key] = {**manifest[key], "status": "degraded", "detail": detail}
             return manifest
 
@@ -587,6 +540,7 @@ class FreshserviceAdapter(BaseITSMAdapter):
             probes = {
                 "ticket.read": (f"{self.base_url}/api/v2/tickets", {"per_page": 1}),
                 "agent.read": (f"{self.base_url}/api/v2/agents", {"per_page": 1, "active": "true"}),
+                "requester.read": (f"{self.base_url}/api/v2/requesters", {"per_page": 1}),
             }
             for capability, (url, params) in probes.items():
                 try:
@@ -610,12 +564,6 @@ class FreshserviceAdapter(BaseITSMAdapter):
                         "status": "degraded",
                         "detail": type(exc).__name__,
                     }
-        if manifest["ticket.read"]["status"] != "supported":
-            manifest["ticket.create"] = {
-                **manifest["ticket.create"],
-                "status": "unknown",
-                "detail": "write_not_probed_without_ticket_read",
-            }
         return manifest
 
     def parse_webhook(
