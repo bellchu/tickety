@@ -151,7 +151,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <button
             type="button"
             aria-label="Close navigation"
-            className="fixed inset-0 z-40 bg-[#07111d]/60 backdrop-blur-sm lg:hidden"
+            className="fixed inset-0 z-40 bg-[#010D1B]/60 backdrop-blur-sm lg:hidden"
             onClick={() => {
               setNavigationOpen(false);
               menuButtonRef.current?.focus();
