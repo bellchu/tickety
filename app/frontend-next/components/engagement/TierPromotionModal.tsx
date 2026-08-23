@@ -19,7 +19,7 @@ export function TierPromotionModal({ notification, onClose }: Props) {
       footer={<Button onClick={onClose}>Continue</Button>}
     >
       <div className="py-3 text-center">
-        <div className="mx-auto grid h-20 w-20 place-items-center rounded-2xl bg-[#010D1B] text-white shadow-lg" aria-hidden="true">
+        <div className="mx-auto grid h-20 w-20 place-items-center rounded-2xl bg-[#0A0D12] text-white shadow-lg" aria-hidden="true">
           <Star className="h-10 w-10 fill-current" />
         </div>
         <p className="mt-5 text-xs font-semibold uppercase tracking-[0.16em] text-semantic-primary">Tier promotion</p>
