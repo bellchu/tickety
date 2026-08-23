@@ -4,23 +4,21 @@ import { useState, useEffect, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { canAccessProtectedIntelligence } from "@/lib/auth";
-import type { RouteRecommendation, ResolutionPlan, Ticket, TicketAnalysisResult, TicketAuditEntry, TicketComment, UserOut } from "@/lib/types";
+import type { ResolutionPlan, Ticket, TicketAnalysisResult, TicketAuditEntry, TicketComment, UserOut } from "@/lib/types";
 import { useParams } from "next/navigation";
 import { AIThinkingStream } from "@/components/ticket/AIThinkingStream";
-import { SentimentTag } from "@/components/engagement/SentimentTag";
 import {
-  ShieldCheck, AlertTriangle,
   ArrowLeft, ArrowUpRight, User, Tag, Flag, MessageSquare,
-  CheckCircle2, Gauge, FileText, Users, Wrench, Inbox,
+  Gauge, Wrench, Inbox,
 } from "lucide-react";
-import { ReasoningLog } from "@/components/engagement/ReasoningLog";
 import Link from "next/link";
 import {
-  priorityColor, statusColor, sentimentColor, complexityDots,
+  priorityColor, statusColor,
   formatTimeAgo, cn, safeExternalUrl,
 } from "@/lib/utils";
 import { Alert, Button, EmptyState, ErrorState, Skeleton } from "@/components/ui";
 import { PageFrame } from "@/components/layout/PageLayout";
+import { analysisLifecycleLabel, relatedStrength, routingLabel, sourceKindLabel } from "@/lib/ticket-intelligence";
 
 export default function TicketDetailPage() {
   const params = useParams();
@@ -69,8 +67,6 @@ export default function TicketDetailPage() {
     );
   }
 
-  const dots = complexityDots(ticket.complexity);
-
   return (
     <PageFrame width="wide" className="max-w-[1280px] space-y-4 pb-8 sm:space-y-5">
       <Link
@@ -84,8 +80,8 @@ export default function TicketDetailPage() {
       <section className="overflow-hidden rounded-2xl border border-linen-400 bg-linen-50 shadow-sm" aria-labelledby="ticket-title">
         <div className="bg-gradient-to-r from-linen-100 to-white px-5 py-5 sm:px-6">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-2 text-xs text-ink-400">
-            <span className="font-mono font-semibold">{ticket.id}</span>
-            {ticket.ticket_type && <span className="capitalize">· {ticket.ticket_type}</span>}
+            <span className="font-mono font-semibold">#{ticket.external_id || ticket.id}</span>
+            <span>· {sourceKindLabel(ticket)}</span>
             <span>· Created {formatTimeAgo(ticket.created_at)}</span>
             <span className={cn("badge ml-1", priorityColor(ticket.priority))}>
               {ticket.priority}
@@ -93,84 +89,31 @@ export default function TicketDetailPage() {
             <span className={cn("badge", statusColor(ticket.status))}>
               {ticket.status}
             </span>
-            <span className="inline-flex items-center gap-1.5 text-[11px] text-ink-400" aria-label={`Complexity ${dots.filled} of 5`}>
-              <span>Complexity</span>
-              <span className="flex items-center gap-1" aria-hidden="true">
-                {Array.from({ length: dots.filled }).map((_, i) => (
-                  <span key={i} className="h-1 w-1 rounded-full bg-linen-500" />
-                ))}
-                {Array.from({ length: dots.empty }).map((_, i) => (
-                  <span key={`e-${i}`} className="h-1 w-1 rounded-full bg-linen-400" />
-                ))}
-              </span>
-            </span>
           </div>
-          <h1 id="ticket-title" className="mt-3 max-w-4xl text-2xl font-semibold tracking-[-0.025em] text-ink-700 sm:text-3xl">
+          <h1 id="ticket-title" title={ticket.subject} className="mt-3 max-w-5xl truncate text-2xl font-semibold tracking-[-0.025em] text-ink-700 sm:text-3xl">
             {ticket.subject}
           </h1>
         </div>
-
-        <div className="border-t border-linen-300 px-5 py-4 sm:px-6">
-          <p className="max-w-5xl whitespace-pre-wrap text-sm leading-6 text-ink-600">
-            {ticket.description || "No description was provided for this ticket."}
-          </p>
-
-          <div className="mt-4 grid grid-cols-2 gap-x-6 gap-y-4 border-t border-linen-300 pt-4 lg:grid-cols-5">
-            <InfoItem className="col-span-2" icon={<User className="h-3.5 w-3.5" />} label="Reporter">
-              <span className="break-all">{ticket.reporter || "—"}</span>
-            </InfoItem>
-            <InfoItem icon={<Tag className="h-3.5 w-3.5" />} label="Category">
-              {ticket.category || "—"}
-            </InfoItem>
-            <InfoItem icon={<Flag className="h-3.5 w-3.5" />} label="Sentiment">
-              {ticket.sentiment ? (
-                <span className={cn(
-                  "inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium",
-                  sentimentColor(ticket.sentiment)
-                )}>
-                  {ticket.sentiment}
-                </span>
-              ) : (
-                "—"
-              )}
-            </InfoItem>
-            <InfoItem icon={<MessageSquare className="h-3.5 w-3.5" />} label="Customer mood">
-              {ticket.mood ? <SentimentTag mood={ticket.mood} size="md" /> : "—"}
-            </InfoItem>
-            {ticket.points_awarded > 0 && (
-              <InfoItem icon={<CheckCircle2 className="h-3.5 w-3.5 text-semantic-success" />} label="Impact">
-                <span><strong className="text-ink-700">+{ticket.points_awarded}</strong>{ticket.resolved_at ? ` · Resolved ${formatTimeAgo(ticket.resolved_at)}` : ""}</span>
-              </InfoItem>
-            )}
-          </div>
-        </div>
       </section>
+
+      <TicketBriefPanel
+        ticket={ticket}
+        latestAnalysis={latestAnalysis}
+        analysisControl={
+          <AIThinkingStream
+            compact
+            ticketId={ticket.id}
+            hasExisting={Boolean(ticket.ai_reasoning || ticket.ai_status || ticket.ai_generated_at)}
+            onComplete={setLatestAnalysis}
+          />
+        }
+      />
 
       {ticket.external_source === "freshservice" ? (
         <FreshserviceSourcePanel ticket={ticket} />
       ) : (
         <AgentActionPanel ticket={ticket} />
       )}
-
-      <AIThinkingStream
-        ticketId={ticket.id}
-        hasExisting={Boolean(ticket.ai_reasoning || ticket.ai_status || ticket.ai_generated_at)}
-        onComplete={setLatestAnalysis}
-      />
-
-      <IntelligencePanel
-        ticketId={ticket.id}
-        escalationRisk={ticket.escalation_risk ?? 0}
-        summary={ticket.summary ?? null}
-        latestAnalysis={latestAnalysis}
-        aiStatus={ticket.ai_status}
-        aiModel={ticket.ai_model}
-        aiGeneratedAt={ticket.ai_generated_at}
-        aiSynthetic={ticket.ai_synthetic}
-        aiSuggestedPriority={ticket.ai_suggested_priority}
-      />
-
-      {ticket.ai_reasoning && <ReasoningLog text={ticket.ai_reasoning} />}
 
     </PageFrame>
   );
@@ -179,7 +122,8 @@ export default function TicketDetailPage() {
 function FreshserviceSourcePanel({ ticket }: { ticket: Ticket }) {
   const sourceUrl = safeExternalUrl(ticket.external_url);
   return (
-    <section className="rounded-2xl border border-linen-400 bg-linen-50 p-4 shadow-sm sm:p-5" aria-labelledby="source-record-title">
+    <details className="rounded-2xl border border-linen-400 bg-linen-50 p-4 shadow-sm sm:p-5">
+      <summary className="cursor-pointer list-none" aria-labelledby="source-record-title">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
@@ -190,18 +134,23 @@ function FreshserviceSourcePanel({ ticket }: { ticket: Ticket }) {
             Replies, notes, attachments, and source fields are managed in Freshservice.
           </p>
         </div>
-        {sourceUrl && (
-          <a href={sourceUrl} target="_blank" rel="noopener noreferrer" className="inline-flex min-h-9 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-linen-400 bg-white px-3 text-xs font-semibold text-ink-700 hover:bg-linen-200">
-            Open in Freshservice <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" />
-          </a>
-        )}
       </div>
-      <dl className="mt-3 grid divide-y divide-linen-300 overflow-hidden rounded-xl border border-linen-300 bg-linen-100 sm:grid-cols-3 sm:divide-x sm:divide-y-0">
+      </summary>
+      <div className="mt-4 border-t border-linen-300 pt-4">
+        {sourceUrl && <div className="mb-4 flex justify-end"><a href={sourceUrl} target="_blank" rel="noopener noreferrer" className="inline-flex min-h-9 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-linen-400 bg-white px-3 text-xs font-semibold text-ink-700 hover:bg-linen-200">Open in Freshservice <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" /></a></div>}
+        <p className="max-w-5xl whitespace-pre-wrap text-sm leading-6 text-ink-600">{ticket.description || "No description was provided for this ticket."}</p>
+        <div className="mt-4 grid gap-4 text-sm sm:grid-cols-3">
+          <InfoItem icon={<User className="h-3.5 w-3.5" />} label="Reporter"><span className="break-all">{ticket.reporter || "—"}</span></InfoItem>
+          <InfoItem icon={<Tag className="h-3.5 w-3.5" />} label="Source category">{ticket.category || "—"}</InfoItem>
+          <InfoItem icon={<Flag className="h-3.5 w-3.5" />} label="Source status">{ticket.external_status || ticket.status}</InfoItem>
+        </div>
+      </div>
+      <dl className="mt-4 grid divide-y divide-linen-300 overflow-hidden rounded-xl border border-linen-300 bg-linen-100 sm:grid-cols-3 sm:divide-x sm:divide-y-0">
         <div className="px-3 py-2.5"><dt className="text-[10px] font-semibold uppercase tracking-wide text-ink-400">Freshservice ID</dt><dd className="mt-0.5 font-mono text-sm font-medium text-ink-700">{ticket.external_id || "—"}</dd></div>
         <div className="px-3 py-2.5"><dt className="text-[10px] font-semibold uppercase tracking-wide text-ink-400">Tickety owner</dt><dd className="mt-0.5 text-sm font-medium text-ink-700">{ticket.assignee_name || "Unassigned"}</dd></div>
         <div className="px-3 py-2.5"><dt className="text-[10px] font-semibold uppercase tracking-wide text-ink-400">ITSM assignee</dt><dd className="mt-0.5 text-sm font-medium text-ink-700">{ticket.external_assignee_name || ticket.external_assignee_id || "Unassigned"}</dd></div>
       </dl>
-    </section>
+    </details>
   );
 }
 
@@ -436,236 +385,167 @@ function InfoItem({
 
 /* ── Intelligence panel ── */
 
-function IntelligencePanel({
-  ticketId, escalationRisk, summary, latestAnalysis, aiStatus, aiModel, aiGeneratedAt, aiSynthetic, aiSuggestedPriority,
+function parseResolutionPlan(value: string | null): ResolutionPlan | null {
+  if (!value) return null;
+  try {
+    const candidate = JSON.parse(value) as Partial<ResolutionPlan>;
+    if (!candidate || typeof candidate !== "object" || !Array.isArray(candidate.resolution_steps)) return null;
+    return {
+      root_cause_hypothesis: typeof candidate.root_cause_hypothesis === "string" ? candidate.root_cause_hypothesis : "",
+      resolution_steps: candidate.resolution_steps.filter((step): step is string => typeof step === "string"),
+      confidence: ["high", "medium", "low"].includes(candidate.confidence || "") ? candidate.confidence as ResolutionPlan["confidence"] : "medium",
+      estimated_effort: ["high", "medium", "low"].includes(candidate.estimated_effort || "") ? candidate.estimated_effort as ResolutionPlan["estimated_effort"] : "medium",
+      escalation_advice: typeof candidate.escalation_advice === "string" ? candidate.escalation_advice : "",
+      preventive_note: typeof candidate.preventive_note === "string" ? candidate.preventive_note : "",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function TicketBriefPanel({
+  ticket,
+  latestAnalysis,
+  analysisControl,
 }: {
-  ticketId: string;
-  escalationRisk: number;
-  summary: string | null;
+  ticket: Ticket;
   latestAnalysis: TicketAnalysisResult | null;
-  aiStatus: string | null;
-  aiModel: string | null;
-  aiGeneratedAt: string | null;
-  aiSynthetic: boolean;
-  aiSuggestedPriority: string | null;
+  analysisControl: ReactNode;
 }) {
   const queryClient = useQueryClient();
-  const [summaryText, setSummaryText] = useState<string | null>(summary);
-  const [route, setRoute] = useState<RouteRecommendation | null>(null);
-  const [plan, setPlan] = useState<ResolutionPlan | null>(null);
+  const [summaryExpanded, setSummaryExpanded] = useState(false);
+  const [plan, setPlan] = useState<ResolutionPlan | null>(() => parseResolutionPlan(ticket.recommended_solution));
+  const relatedQuery = useQuery({
+    queryKey: ["ticket-related", ticket.id],
+    queryFn: () => api.getRelatedTickets(ticket.id, 5),
+    retry: false,
+  });
 
   useEffect(() => {
-    setSummaryText(summary);
-  }, [summary, ticketId]);
+    setPlan(parseResolutionPlan(ticket.recommended_solution));
+  }, [ticket.id, ticket.recommended_solution]);
 
   useEffect(() => {
-    if (!latestAnalysis || latestAnalysis.ticket_id !== ticketId) return;
-    setSummaryText(latestAnalysis.summary);
-    setRoute(latestAnalysis.route);
-    setPlan(latestAnalysis.recommended_solution?.plan ?? null);
-  }, [latestAnalysis, ticketId]);
+    if (latestAnalysis?.ticket_id === ticket.id) {
+      setPlan(latestAnalysis.recommended_solution?.plan ?? null);
+      void queryClient.invalidateQueries({ queryKey: ["ticket-related", ticket.id] });
+    }
+  }, [latestAnalysis, queryClient, ticket.id]);
 
-  const summaryMut = useMutation({
-    mutationFn: () => api.generateTicketSummary(ticketId, !!summaryText),
-    onSuccess: (res) => {
-      setSummaryText(res.summary);
-      queryClient.invalidateQueries({ queryKey: ["ticket", ticketId] });
-    },
-  });
-  const routeMut = useMutation({
-    mutationFn: () => api.getIntelRoute(ticketId),
-    onSuccess: (res) => setRoute(res),
-  });
   const resolveMut = useMutation({
-    mutationFn: (force: boolean) => api.getRecommendedSolution(ticketId, force),
-    onSuccess: (res) => {
-      setPlan(res.plan);
-      queryClient.invalidateQueries({ queryKey: ["ticket", ticketId] });
+    mutationFn: () => api.getRecommendedSolution(ticket.id, Boolean(plan)),
+    onSuccess: (result) => {
+      setPlan(result.plan);
+      void queryClient.invalidateQueries({ queryKey: ["ticket", ticket.id] });
     },
   });
 
-  const riskTone = escalationRisk >= 70 ? "bg-rust-400" : escalationRisk >= 40 ? "bg-amber-400" : "bg-linen-500";
-  const riskLabel = escalationRisk >= 70 ? "High" : escalationRisk >= 40 ? "Medium" : "Low";
-  const riskPercent = Math.min(100, Math.max(0, escalationRisk));
+  const summary = latestAnalysis?.ticket_id === ticket.id
+    ? latestAnalysis.summary || ticket.summary
+    : ticket.summary;
+  const issueType = latestAnalysis?.ticket_id === ticket.id
+    ? latestAnalysis.triage.category
+    : ticket.ai_suggested_category;
+  const suggestedPriority = latestAnalysis?.ticket_id === ticket.id
+    ? latestAnalysis.triage.priority
+    : ticket.ai_suggested_priority;
+  const risk = Math.min(100, Math.max(0, ticket.escalation_risk || 0));
+  const riskLabel = risk >= 70 ? "High" : risk >= 40 ? "Medium" : "Low";
+  const lifecycle = analysisLifecycleLabel(ticket);
+  const detailOpen = ["partial", "failed", "dead_letter"].includes(ticket.ai_status || "");
 
   return (
-    <section className="space-y-4 rounded-2xl border border-linen-400 bg-linen-50 p-4 shadow-sm sm:p-5" aria-labelledby="ticket-intelligence-title">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-        <div className="flex min-w-0 items-start gap-3">
-          <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-[var(--color-primary-soft)] text-semantic-primary"><Gauge className="h-[18px] w-[18px]" aria-hidden="true" /></div>
-          <div className="min-w-0">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-semantic-primary">Decision support</p>
-            <h2 id="ticket-intelligence-title" className="mt-0.5 text-lg font-semibold text-ink-700">Ticket intelligence</h2>
-            <p className="mt-0.5 text-xs leading-5 text-ink-500">Review generated guidance before applying it.</p>
-            {(aiStatus || aiModel || aiGeneratedAt || aiSynthetic || aiSuggestedPriority) && (
-              <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-ink-400">
-                {aiStatus && <span className="capitalize">Status: {aiStatus.replaceAll("_", " ")}</span>}
-                {aiModel && <span className="max-w-72 truncate" title={aiModel}>Model: {aiModel}</span>}
-                {aiSynthetic && <span>Synthetic demo result</span>}
-                {aiSuggestedPriority && <span>Suggested priority: {aiSuggestedPriority}</span>}
-                {aiGeneratedAt && <span>Generated {formatTimeAgo(aiGeneratedAt)}</span>}
-              </div>
-            )}
-          </div>
-        </div>
-        <div className="rounded-xl border border-linen-300 bg-linen-100 px-3 py-2.5 lg:w-80">
-          <div className="mb-1.5 flex items-center justify-between text-xs">
-            <span className="font-medium text-ink-500">Escalation risk</span>
-            <span className="font-semibold text-ink-700">{riskPercent}/100 · {riskLabel}</span>
-          </div>
-          <div
-            className="h-1.5 overflow-hidden rounded-full bg-linen-300"
-            role="progressbar"
-            aria-label="Escalation risk"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={riskPercent}
-          >
-            <div className={`h-full rounded-full ${riskTone}`} style={{ width: `${riskPercent}%` }} />
-          </div>
+    <section className="space-y-4 rounded-2xl border border-linen-400 bg-linen-50 p-4 shadow-sm sm:p-5" aria-labelledby="ticket-brief-title">
+      <div className="flex items-start gap-3">
+        <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-[var(--color-primary-soft)] text-semantic-primary"><Gauge className="h-[18px] w-[18px]" aria-hidden="true" /></div>
+        <div className="min-w-0">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-semantic-primary">Decision support</p>
+          <h2 id="ticket-brief-title" className="mt-0.5 text-lg font-semibold text-ink-700">AI ticket brief</h2>
+          <p className="mt-0.5 text-xs text-ink-500">Review generated guidance before applying it.</p>
         </div>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        {/* Summarization */}
-        <Section
-          label="Summarization"
-          onClick={() => summaryMut.mutate()}
-          loading={summaryMut.isPending}
-          actionLabel={summaryText ? "Regenerate" : "Summarize"}
-          icon={FileText}
-          error={summaryMut.error}
-        >
-          {summaryText ? (
-            <p className="rounded border border-linen-300 bg-linen-200 p-3 text-sm text-ink-600">{summaryText}</p>
-          ) : (
-            <p className="text-xs text-ink-400">No summary yet.</p>
-          )}
-        </Section>
-
-        {/* Routing */}
-        <Section
-          label="Routing"
-          onClick={() => routeMut.mutate()}
-          loading={routeMut.isPending}
-          actionLabel="Recommend engineer"
-          icon={Users}
-          error={routeMut.error}
-        >
-          {route ? (
-            <div className="space-y-1.5">
-              {route.recommended_name ? (
-                <p className="text-sm text-ink-600">
-                  Recommended: <span className="font-semibold">{route.recommended_name}</span>
-                  {route.reasoning && <span className="text-ink-500"> — {route.reasoning}</span>}
-                </p>
-              ) : <p className="text-xs text-ink-400">No engineers available.</p>}
-              {route.candidate_pool_truncated && <Alert variant="warning" title="Candidate pool is sampled" className="text-xs">Compared {route.analyzed_users.toLocaleString()} of {route.total_users.toLocaleString()} user profiles; the recommendation is not global.</Alert>}
-              <div className="flex flex-wrap gap-1.5">
-                {route.candidates.map((c) => (
-                  <span key={c.user_id} className="rounded border border-linen-400 px-2 py-1 text-xs text-ink-600">
-                    {c.name} · T{c.tier} · {c.score}
-                  </span>
-                ))}
-              </div>
-            </div>
-          ) : null}
-        </Section>
-
-        {/* Resolution */}
-        <Section
-          className="lg:col-span-2"
-          label="Recommended solution"
-          onClick={() => resolveMut.mutate(!!plan)}
-          loading={resolveMut.isPending}
-          actionLabel={plan ? "Regenerate" : "Resolve"}
-          icon={Wrench}
-          error={resolveMut.error}
-        >
-          {plan ? (
-            <div className="space-y-3">
-              <div className="flex items-center gap-2 text-xs">
-                <span className="rounded border border-linen-400 px-2 py-0.5 text-ink-600">
-                  confidence: <span className="font-semibold capitalize">{plan.confidence}</span>
-                </span>
-                <span className="rounded border border-linen-400 px-2 py-0.5 text-ink-600">
-                  effort: <span className="font-semibold capitalize">{plan.estimated_effort}</span>
-                </span>
-              </div>
-              {plan.root_cause_hypothesis && (
-                <div className="rounded border border-linen-300 bg-linen-200 p-3 text-sm text-ink-600">
-                  <span className="text-[11px] font-semibold uppercase tracking-wide text-ink-400">Root cause hypothesis</span>
-                  <p className="mt-1">{plan.root_cause_hypothesis}</p>
-                </div>
-              )}
-              {plan.resolution_steps.length > 0 && (
-                <div className="rounded border border-linen-300 bg-linen-200 p-3">
-                  <span className="text-[11px] font-semibold uppercase tracking-wide text-ink-400">Resolution steps</span>
-                  <ol className="mt-1 space-y-1.5">
-                    {plan.resolution_steps.map((s, i) => (
-                      <li key={i} className="flex gap-2 text-sm text-ink-600">
-                        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-linen-400 text-xs font-bold text-ink-600">{i + 1}</span>
-                        <span>{s}</span>
-                      </li>
-                    ))}
-                  </ol>
-                </div>
-              )}
-              {plan.escalation_advice && (
-                <div className="flex items-start gap-2 rounded border border-linen-400 bg-linen-200 p-3 text-sm text-ink-600">
-                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rust-500" />
-                  <div>
-                    <span className="text-[11px] font-semibold uppercase tracking-wide text-ink-500">If unresolved, escalate</span>
-                    <p className="mt-0.5">{plan.escalation_advice}</p>
-                  </div>
-                </div>
-              )}
-              {plan.preventive_note && (
-                <div className="flex items-start gap-2 rounded border border-linen-400 bg-linen-50 p-3 text-sm text-ink-600">
-                  <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-ink-500" />
-                  <div>
-                    <span className="text-[11px] font-semibold uppercase tracking-wide text-ink-400">Prevent recurrence</span>
-                    <p className="mt-0.5">{plan.preventive_note}</p>
-                  </div>
-                </div>
-              )}
-            </div>
-          ) : null}
-        </Section>
+      <div className="rounded-xl border border-linen-300 bg-linen-100 p-4">
+        <p className={cn("whitespace-pre-wrap text-sm leading-6 text-ink-600", !summaryExpanded && "line-clamp-3")}>
+          {summary || "No generated summary is available yet."}
+        </p>
+        {summary && summary.length > 220 && (
+          <button type="button" className="mt-2 text-xs font-semibold text-semantic-primary hover:underline" onClick={() => setSummaryExpanded((expanded) => !expanded)} aria-expanded={summaryExpanded}>
+            {summaryExpanded ? "Show less" : "Expand summary"}
+          </button>
+        )}
       </div>
+
+      <dl className="grid overflow-hidden rounded-xl border border-linen-300 bg-white sm:grid-cols-2 xl:grid-cols-5">
+        <DecisionItem label="Issue" value={issueType || "Not available"} />
+        <DecisionItem label="Suggested priority" value={suggestedPriority || "Not available"} />
+        <DecisionItem label="Routing" value={routingLabel(ticket)} />
+        <DecisionItem label="Escalation risk" value={`${risk}/100 · ${riskLabel}`} />
+        <DecisionItem label="Analysis" value={ticket.ai_generated_at ? `${lifecycle} · ${formatTimeAgo(ticket.ai_generated_at)}` : lifecycle} />
+      </dl>
+
+      {analysisControl}
+
+      <div className="border-t border-linen-300 pt-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-semibold text-ink-700">Related tickets</h3>
+            <p className="mt-0.5 text-xs text-ink-500">Advisory similarity only; source records remain authoritative.</p>
+          </div>
+          {relatedQuery.isError && <Button size="sm" variant="secondary" onClick={() => void relatedQuery.refetch()} pending={relatedQuery.isFetching}>Retry</Button>}
+        </div>
+        {relatedQuery.isLoading ? (
+          <div className="mt-3 grid gap-2 sm:grid-cols-2"><Skeleton className="h-14" /><Skeleton className="h-14" /></div>
+        ) : relatedQuery.isError ? (
+          <p className="mt-3 text-xs text-ink-400">Related tickets are unavailable right now.</p>
+        ) : !relatedQuery.data?.items.length ? (
+          <p className="mt-3 text-xs text-ink-400">No related tickets found.</p>
+        ) : (
+          <div className="mt-3 grid gap-2 sm:grid-cols-2">
+            {relatedQuery.data.items.map((related) => (
+              <Link key={related.ticket_id} href={`/tickets/${related.ticket_id}`} className="min-w-0 rounded-lg border border-linen-300 bg-white px-3 py-2.5 transition-colors hover:border-linen-500 hover:bg-linen-100">
+                <div className="flex min-w-0 items-center justify-between gap-2">
+                  <span className="truncate text-xs font-semibold text-ink-700">{related.subject}</span>
+                  <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-ink-400">{relatedStrength(related.score, related.match_method)}</span>
+                </div>
+                <p className="mt-1 truncate text-[11px] text-ink-400">{related.priority} · {related.status}{related.category ? ` · ${related.category}` : ""}</p>
+              </Link>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <details key={`${ticket.id}-${detailOpen}`} open={detailOpen || undefined} className="border-t border-linen-300 pt-4">
+        <summary className="cursor-pointer text-sm font-semibold text-ink-700">Technical details</summary>
+        <div className="mt-3 space-y-4 text-xs text-ink-500">
+          <dl className="grid gap-3 sm:grid-cols-3">
+            <div><dt className="text-ink-400">Model</dt><dd className="mt-1 break-all font-medium text-ink-600">{ticket.ai_model || "Not available"}</dd></div>
+            <div><dt className="text-ink-400">Lifecycle</dt><dd className="mt-1 font-medium text-ink-600">{lifecycle}</dd></div>
+            <div><dt className="text-ink-400">Generated</dt><dd className="mt-1 font-medium text-ink-600">{ticket.ai_generated_at ? formatTimeAgo(ticket.ai_generated_at) : "Not available"}</dd></div>
+          </dl>
+          {ticket.ai_reasoning && <div><p className="font-semibold text-ink-600">Reasoning</p><p className="mt-1 whitespace-pre-wrap leading-5">{ticket.ai_reasoning}</p></div>}
+          <div>
+            <div className="flex items-center justify-between gap-3"><p className="font-semibold text-ink-600">Recommended solution</p><Button size="sm" variant="secondary" onClick={() => resolveMut.mutate()} pending={resolveMut.isPending} pendingLabel="Generating…" leadingIcon={<Wrench className="h-3.5 w-3.5" />}>{plan ? "Regenerate" : "Generate"}</Button></div>
+            {resolveMut.isError && <Alert className="mt-2" variant="danger" title="Solution generation failed">{resolveMut.error.message}</Alert>}
+            {plan ? <ResolutionDetails plan={plan} /> : <p className="mt-2 text-ink-400">No generated solution is available.</p>}
+          </div>
+        </div>
+      </details>
     </section>
   );
 }
 
-function Section({
-  label, onClick, loading, actionLabel, icon: Icon, error, children, className,
-}: {
-  label: string;
-  onClick: () => void;
-  loading: boolean;
-  actionLabel: string;
-  icon: React.ComponentType<{ className?: string }>;
-  error?: Error | null;
-  children: React.ReactNode;
-  className?: string;
-}) {
+function DecisionItem({ label, value }: { label: string; value: string }) {
+  return <div className="min-w-0 border-b border-linen-300 px-3 py-3 last:border-b-0 sm:[&:nth-last-child(-n+1)]:border-b-0 sm:border-r sm:[&:nth-child(2n)]:border-r-0 xl:border-b-0 xl:[&:nth-child(2n)]:border-r xl:last:border-r-0"><dt className="text-[10px] font-semibold uppercase tracking-wide text-ink-400">{label}</dt><dd className="mt-1 break-words text-xs font-semibold leading-4 text-ink-700">{value}</dd></div>;
+}
+
+function ResolutionDetails({ plan }: { plan: ResolutionPlan }) {
   return (
-    <div className={cn("space-y-3 rounded-xl border border-linen-300 bg-white p-4", className)}>
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <span className="text-sm font-semibold text-ink-700">{label}</span>
-        <Button
-          variant="secondary"
-          size="sm"
-          onClick={onClick}
-          pending={loading}
-          pendingLabel="Generating…"
-          leadingIcon={<Icon className="h-3.5 w-3.5" />}
-        >
-          {actionLabel}
-        </Button>
-      </div>
-      {error && <Alert variant="danger" title={`${label} failed`}>{error.message || "The AI request could not be completed."}</Alert>}
-      {children}
+    <div className="mt-3 space-y-3 rounded-lg border border-linen-300 bg-linen-100 p-3">
+      {plan.root_cause_hypothesis && <p><span className="font-semibold text-ink-600">Root cause: </span>{plan.root_cause_hypothesis}</p>}
+      {plan.resolution_steps.length > 0 && <ol className="list-decimal space-y-1 pl-4">{plan.resolution_steps.map((step, index) => <li key={index}>{step}</li>)}</ol>}
+      {plan.escalation_advice && <p><span className="font-semibold text-ink-600">Escalation: </span>{plan.escalation_advice}</p>}
+      {plan.preventive_note && <p><span className="font-semibold text-ink-600">Prevention: </span>{plan.preventive_note}</p>}
     </div>
   );
 }

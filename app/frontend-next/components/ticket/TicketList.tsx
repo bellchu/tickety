@@ -14,7 +14,6 @@ import {
   Plus,
   Search,
   Trash2,
-  UserRound,
   X,
 } from "lucide-react";
 import { Alert, Badge, Button, Dialog, EmptyState, ErrorState, IconButton, Skeleton } from "@/components/ui";
@@ -23,6 +22,7 @@ import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { canAccessProtectedIntelligence, isDemoContext } from "@/lib/auth";
 import type { Ticket, TicketListSort } from "@/lib/types";
+import { analysisLifecycleLabel, routingLabel, sourceKindLabel } from "@/lib/ticket-intelligence";
 import { cn, formatTimeAgo } from "@/lib/utils";
 
 const SAVED_VIEWS_KEY = "tickety.ticket-queue.views.v1";
@@ -403,23 +403,22 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
         <>
           <div className="hidden overflow-hidden rounded-2xl border border-linen-400 bg-linen-50 shadow-sm md:block">
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[900px] text-left">
+              <table className="w-full min-w-[880px] table-fixed text-left">
                 <caption className="sr-only">Tickets in the current server-filtered page</caption>
                 <thead className="border-b border-linen-300 bg-linen-100 text-[11px] font-semibold uppercase tracking-[0.09em] text-ink-400">
                   <tr>
                     {canBulk && <th scope="col" className="w-12 px-4 py-3"><input ref={selectAllRef} type="checkbox" checked={allOnPageSelected} onChange={togglePage} aria-label="Select all tickets on this page" className="h-4 w-4" /></th>}
-                    <th scope="col" className="px-4 py-3">Ticket</th><th scope="col" className="px-4 py-3">Requester</th><th scope="col" className="px-4 py-3">Priority</th><th scope="col" className="px-4 py-3">Status</th><th scope="col" className="px-4 py-3">Assignee</th><th scope="col" className="px-4 py-3 text-right">Updated</th>
+                    <th scope="col" className="w-[36%] px-4 py-3">Ticket</th><th scope="col" className="w-[12%] px-4 py-3">Priority</th><th scope="col" className="w-[25%] px-4 py-3">Routing</th><th scope="col" className="w-[14%] px-4 py-3">Status</th><th scope="col" className="w-[13%] px-4 py-3 text-right">Updated</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-linen-300">
                   {tickets.map((ticket) => (
                     <tr key={ticket.id} className={cn("transition-colors hover:bg-linen-100", selected.has(ticket.id) && "bg-[var(--color-primary-soft)]/60")}>
                       {canBulk && <td className="px-4 py-4"><input type="checkbox" checked={selected.has(ticket.id)} onChange={() => toggleTicket(ticket.id)} aria-label={`Select ${ticket.subject}`} className="h-4 w-4" /></td>}
-                      <td className="max-w-[28rem] px-4 py-4"><Link href={`/tickets/${ticket.id}`} className="block truncate text-sm font-semibold text-ink-700 hover:text-semantic-primary hover:underline">{ticket.subject}</Link><div className="mt-1 flex items-center gap-2"><span className="font-mono text-[11px] text-ink-400">{ticket.id}</span>{ticket.category && <span className="truncate text-[11px] text-ink-400">· {ticket.category}</span>}</div></td>
-                      <td className="max-w-44 px-4 py-4"><span className="block truncate text-xs text-ink-500">{ticket.reporter || "Unknown"}</span></td>
-                      <td className="px-4 py-4"><Badge variant={badgeForPriority(ticket.priority)}>{ticket.priority}</Badge></td>
+                      <td className="min-w-0 px-4 py-4"><div className="flex min-w-0 items-baseline gap-2"><Link href={`/tickets/${ticket.id}`} title={ticket.subject} className="min-w-0 flex-1 truncate text-sm font-semibold text-ink-700 hover:text-semantic-primary hover:underline">{ticket.subject}</Link><span className="shrink-0 whitespace-nowrap font-mono text-[11px] text-ink-400">#{ticket.external_id || ticket.id}</span></div><div className="mt-1 flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap text-[11px] text-ink-400"><span>{sourceKindLabel(ticket)}</span>{ticket.ai_suggested_category && <span className="truncate">· AI issue: {ticket.ai_suggested_category}</span>}<span className="shrink-0">· {analysisLifecycleLabel(ticket)}</span></div></td>
+                      <td className="px-4 py-4"><Badge variant={badgeForPriority(ticket.priority)}>{ticket.priority}</Badge>{ticket.ai_suggested_priority && ticket.ai_suggested_priority !== ticket.priority && <span className="mt-1 block whitespace-nowrap text-[10px] font-medium text-ink-400">AI suggests {ticket.ai_suggested_priority}</span>}</td>
+                      <td className="min-w-0 px-4 py-4"><span className="block truncate text-xs font-semibold text-ink-600">{routingLabel(ticket)}</span><span className="mt-1 block truncate text-[11px] text-ink-400">{ticket.external_assignee_name || ticket.assignee_name || "Unassigned"}</span></td>
                       <td className="px-4 py-4"><Badge variant={badgeForStatus(ticket.status)} dot>{ticket.status}</Badge></td>
-                      <td className="px-4 py-4"><span className="inline-flex max-w-40 items-center gap-1.5 truncate text-xs text-ink-500"><UserRound className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />{ticket.assignee_name || ticket.external_assignee_name || "Unassigned"}</span></td>
                       <td className="px-4 py-4 text-right"><span className="inline-flex items-center gap-1.5 whitespace-nowrap text-xs text-ink-400"><Clock3 className="h-3.5 w-3.5" aria-hidden="true" />{formatTimeAgo(ticket.updated_at || ticket.created_at)}</span></td>
                     </tr>
                   ))}
@@ -430,12 +429,13 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
 
           <div className="grid gap-3 md:hidden">
             {tickets.map((ticket) => (
-              <article key={ticket.id} className={cn("rounded-2xl border border-linen-400 bg-linen-50 p-4 shadow-sm", selected.has(ticket.id) && "border-clay-300 bg-[var(--color-primary-soft)]/50")}>
+              <article key={ticket.id} className={cn("min-w-0 rounded-2xl border border-linen-400 bg-linen-50 p-4 shadow-sm", selected.has(ticket.id) && "border-clay-300 bg-[var(--color-primary-soft)]/50")}>
                 <div className="flex items-start gap-3">
                   {canBulk && <input type="checkbox" checked={selected.has(ticket.id)} onChange={() => toggleTicket(ticket.id)} aria-label={`Select ${ticket.subject}`} className="mt-1 h-4 w-4 shrink-0" />}
-                  <div className="min-w-0 flex-1"><div className="flex flex-wrap gap-1.5"><Badge variant={badgeForPriority(ticket.priority)}>{ticket.priority}</Badge><Badge variant={badgeForStatus(ticket.status)} dot>{ticket.status}</Badge></div><Link href={`/tickets/${ticket.id}`} className="mt-3 block text-sm font-semibold leading-5 text-ink-700 hover:text-semantic-primary">{ticket.subject}</Link><p className="mt-1 truncate font-mono text-[11px] text-ink-400">{ticket.id}</p></div>
+                  <div className="min-w-0 flex-1"><div className="flex flex-wrap gap-1.5"><Badge variant={badgeForPriority(ticket.priority)}>{ticket.priority}</Badge>{ticket.ai_suggested_priority && ticket.ai_suggested_priority !== ticket.priority && <span className="self-center text-[10px] font-medium text-ink-400">AI suggests {ticket.ai_suggested_priority}</span>}</div><Link href={`/tickets/${ticket.id}`} className="mt-3 block truncate text-sm font-semibold leading-5 text-ink-700 hover:text-semantic-primary">{ticket.subject}</Link><p className="mt-1 truncate font-mono text-[11px] text-ink-400">#{ticket.external_id || ticket.id}</p></div>
                 </div>
-                <dl className="mt-4 grid grid-cols-2 gap-3 border-t border-linen-300 pt-3 text-xs"><div><dt className="text-ink-400">Requester</dt><dd className="mt-1 truncate font-medium text-ink-600">{ticket.reporter || "Unknown"}</dd></div><div><dt className="text-ink-400">Assignee</dt><dd className="mt-1 truncate font-medium text-ink-600">{ticket.assignee_name || ticket.external_assignee_name || "Unassigned"}</dd></div></dl>
+                <div className="mt-3 flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap text-[11px] text-ink-400"><span>{sourceKindLabel(ticket)}</span>{ticket.ai_suggested_category && <span className="truncate">· AI issue: {ticket.ai_suggested_category}</span>}<span className="shrink-0">· {analysisLifecycleLabel(ticket)}</span></div>
+                <dl className="mt-4 space-y-3 border-t border-linen-300 pt-3 text-xs"><div><dt className="text-ink-400">Routing</dt><dd className="mt-1 truncate font-semibold text-ink-600">{routingLabel(ticket)}</dd><dd className="mt-0.5 truncate text-ink-400">{ticket.external_assignee_name || ticket.assignee_name || "Unassigned"}</dd></div><div><dt className="text-ink-400">Status</dt><dd className="mt-1"><Badge variant={badgeForStatus(ticket.status)} dot>{ticket.status}</Badge></dd></div></dl>
                 <p className="mt-3 flex items-center gap-1.5 text-[11px] text-ink-400"><Clock3 className="h-3.5 w-3.5" aria-hidden="true" />Updated {formatTimeAgo(ticket.updated_at || ticket.created_at)}</p>
               </article>
             ))}

@@ -17,9 +17,10 @@ interface Props {
   ticketId: string;
   hasExisting?: boolean;
   onComplete?: (result: TicketAnalysisResult) => void;
+  compact?: boolean;
 }
 
-export function AIThinkingStream({ ticketId, hasExisting, onComplete }: Props) {
+export function AIThinkingStream({ ticketId, hasExisting, onComplete, compact = false }: Props) {
   const [steps, setSteps] = useState<TriageStep[]>([]);
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<TicketAnalysisResult | null>(null);
@@ -110,14 +111,14 @@ export function AIThinkingStream({ ticketId, hasExisting, onComplete }: Props) {
   };
 
   return (
-    <section className="rounded-2xl border border-linen-400 bg-linen-50 p-4 shadow-sm sm:px-5" aria-labelledby="ai-analysis-title" aria-busy={running}>
+    <section className={compact ? "border-t border-linen-300 pt-4" : "rounded-2xl border border-linen-400 bg-linen-50 p-4 shadow-sm sm:px-5"} aria-labelledby="ai-analysis-title" aria-busy={running}>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex min-w-0 items-center gap-3">
           <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-linen-200 text-ink-600">
             <ListChecks className="h-4 w-4" aria-hidden="true" />
           </div>
           <div className="min-w-0">
-            <h2 id="ai-analysis-title" className="text-sm font-semibold text-ink-700">AI analysis</h2>
+            <h3 id="ai-analysis-title" className="text-sm font-semibold text-ink-700">AI analysis</h3>
             <p className="mt-0.5 text-xs text-ink-500">
               {running
                 ? "Analyzing the ticket and refreshing decision support…"

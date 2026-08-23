@@ -26,6 +26,8 @@ export interface Ticket {
   ai_synthetic: boolean;
   ai_suggested_priority: string | null;
   ai_suggested_category: string | null;
+  recommended_team: string;
+  recommended_team_basis: "ai_category" | "fallback";
   ticket_type: string;
   impact: string | null;
   urgency: string | null;
@@ -93,6 +95,23 @@ export interface TicketPage {
   limit: number;
   offset: number;
   hasMore: boolean;
+}
+
+export interface RelatedTicketItem {
+  ticket_id: string;
+  subject: string;
+  status: string;
+  priority: string;
+  category: string | null;
+  score: number;
+  match_method: string;
+}
+
+export interface RelatedTicketsResponse {
+  ticket_id: string;
+  available: boolean;
+  match_method: string;
+  items: RelatedTicketItem[];
 }
 
 export interface User {

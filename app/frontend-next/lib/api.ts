@@ -85,6 +85,8 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   getTicket: (id: string) => fetchAPI<import("./types").Ticket>(`/tickets/${id}`),
+  getRelatedTickets: (id: string, limit = 5) =>
+    fetchAPI<import("./types").RelatedTicketsResponse>(`/tickets/${id}/related?limit=${limit}`),
   triggerTriage: (id: string) =>
     fetchAPI<import("./types").TriageResult>(`/tickets/${id}/triage`, { method: "POST" }),
   runTicketAnalysis: (id: string) =>

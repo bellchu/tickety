@@ -51,6 +51,7 @@ from .schema import (
     TicketCategory, TicketCategoryCreate, TicketAuditEntry, BulkAction,
     TicketIntelligenceAnalysisRequest, TicketIntelligenceAnalysisResponse,
     TicketIntelligenceBackfillRequest, TicketIntelligenceSearchResponse,
+    RelatedTicketsResponse,
     LoginRequest, UserCreate, UserUpdate, AuthResponse, AuthContext, UserOut,
     KbArticle, KbArticleCreate, KbArticleUpdate, KbFeedbackCreate,
     TicketStatusConfig, TicketStatusConfigCreate,
@@ -743,7 +744,18 @@ _PUBLIC_DEMO_AI_FIELDS = {
     "ai_synthetic": False,
     "ai_suggested_priority": None,
     "ai_suggested_category": None,
+    "recommended_team": "Service Desk",
+    "recommended_team_basis": "fallback",
 }
+
+
+def _enrich_ticket_team(ticket: TicketRecord) -> None:
+    team, basis = intel.recommended_team(
+        ticket.ai_suggested_category,
+        ticket.ai_status,
+    )
+    ticket.__dict__["recommended_team"] = team
+    ticket.__dict__["recommended_team_basis"] = basis
 
 
 def _ticket_for_request(request: Request, ticket: TicketRecord) -> Ticket | TicketRecord:
@@ -868,6 +880,7 @@ async def list_tickets(
         ticket.__dict__["external_assignee_name"] = external_names.get(
             (ticket.binding_id, ticket.external_source, ticket.external_assignee_id)
         )
+        _enrich_ticket_team(ticket)
     return [_ticket_for_request(request, ticket) for ticket in tickets]
 
 
@@ -896,7 +909,95 @@ async def get_ticket(
         ticket.__dict__["external_assignee_name"] = (
             external_user.name if external_user else None
         )
+    _enrich_ticket_team(ticket)
     return _ticket_for_request(request, ticket)
+
+
+@app.get("/tickets/{ticket_id}/related", response_model=RelatedTicketsResponse)
+async def get_related_tickets(
+    ticket_id: str,
+    limit: int = Query(5, ge=1, le=5),
+    user: UserRecord = Depends(get_protected_ai_user),
+    db: Session = Depends(get_db),
+):
+    ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    _authorize_ticket_analysis(user, ticket)
+    allowed_assignee_id = _ticket_scope_assignee_id(user)
+    _reserve_ai_request(db, user.id, "related_tickets")
+    query = " ".join(
+        value.strip() for value in (ticket.subject or "", ticket.description or "")
+        if value and value.strip()
+    )[:1000]
+    if not query:
+        query = ticket.id[:1000]
+    try:
+        retrieval = await ticket_vectors.retrieve_ticket_context(
+            db,
+            query,
+            limit=min(15, limit * 3),
+            source_types=["ticket"],
+            include_private_comments=False,
+            allowed_assignee_id=allowed_assignee_id,
+        )
+    except Exception as exc:
+        db.rollback()
+        print(f"[related-tickets] retrieval failed kind={type(exc).__name__}")
+        raise HTTPException(
+            status_code=503,
+            detail="related_tickets_unavailable",
+        ) from exc
+
+    ranked: list[dict[str, Any]] = []
+    seen_ids = {ticket_id}
+    for result in retrieval.get("results", []):
+        related_id = str(result.get("ticket_id") or "")
+        if (
+            result.get("source_type") != "ticket"
+            or not related_id
+            or related_id in seen_ids
+        ):
+            continue
+        seen_ids.add(related_id)
+        ranked.append({"ticket_id": related_id, "result": result})
+
+    records_by_id: dict[str, TicketRecord] = {}
+    if ranked:
+        related_ids = [item["ticket_id"] for item in ranked]
+        related_query = db.query(TicketRecord).filter(
+            TicketRecord.id.in_(related_ids),
+            func.lower(func.coalesce(TicketRecord.external_source, "")) != "portal",
+        )
+        if allowed_assignee_id is not None:
+            related_query = related_query.filter(
+                TicketRecord.assignee_id == allowed_assignee_id
+            )
+        records_by_id = {record.id: record for record in related_query.all()}
+
+    items = []
+    for ranked_item in ranked:
+        if len(items) >= limit:
+            break
+        record = records_by_id.get(ranked_item["ticket_id"])
+        if not record:
+            continue
+        result = ranked_item["result"]
+        items.append({
+            "ticket_id": record.id,
+            "subject": record.subject,
+            "status": record.status,
+            "priority": record.priority,
+            "category": record.category,
+            "score": float(result.get("score") or 0.0),
+            "match_method": str(result.get("match_method") or "keyword"),
+        })
+    return {
+        "ticket_id": ticket.id,
+        "available": True,
+        "match_method": str(retrieval.get("match_method") or "keyword"),
+        "items": items,
+    }
 
 
 def _normalize_portal_reporter(reporter: str) -> str:

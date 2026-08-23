@@ -8,6 +8,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.backend.database import (
+    AIArtifactRecord,
     SyncStateRecord,
     TicketRecord,
     UserRecord,
@@ -43,6 +44,7 @@ class TicketSyncFailureIsolationTests(unittest.TestCase):
         UserRecord.__table__.create(self.engine)
         TicketRecord.__table__.create(self.engine)
         SyncStateRecord.__table__.create(self.engine)
+        AIArtifactRecord.__table__.create(self.engine)
         self.session_factory = sessionmaker(bind=self.engine)
 
         self.initial_cursor = datetime(2026, 7, 1, 12, 0, 0)
@@ -208,11 +210,141 @@ class TicketSyncFailureIsolationTests(unittest.TestCase):
             self.assertEqual(ticket.subject, "Keep local subject")
             self.assertEqual(ticket.description, "Keep local description")
             self.assertEqual(ticket.priority, "P3")
+            self.assertIsNone(ticket.ai_status)
+            self.assertIsNone(ticket.ai_requested_artifacts)
             state = db.query(SyncStateRecord).filter(
                 SyncStateRecord.provider == "freshservice"
             ).one()
             self.assertEqual(state.last_status, "success")
             self.assertEqual(state.total_synced, 1)
+
+    def test_new_freshservice_ticket_queues_all_enabled_artifacts(self):
+        with self.session_factory() as db, patch.object(
+            sync.settings_module,
+            "automation_enabled",
+            side_effect=lambda key, *_args: key in {
+                "AUTO_TRIAGE_ENABLED",
+                "AUTO_SUMMARIZE_ENABLED",
+                "AUTO_ROUTE_ENABLED",
+                "AUTO_RESOLVE_ENABLED",
+            },
+        ):
+            action, ticket = sync._upsert_ticket(
+                db,
+                self._ticket("fs-new", "Freshservice arrival", self.initial_cursor),
+                "freshservice",
+                overwrite=True,
+            )
+
+            self.assertEqual(action, "new")
+            self.assertEqual(ticket.ai_status, "queued")
+            self.assertEqual(
+                ticket.ai_requested_artifacts,
+                "resolution,route,summary,triage",
+            )
+
+    def test_freshservice_content_change_invalidates_and_requeues(self):
+        with self.session_factory() as db:
+            db.add(TicketRecord(
+                id="fs-existing",
+                subject="Old subject",
+                description="Old description",
+                reporter="reporter@example.com",
+                priority="P3",
+                status="Open",
+                external_source="freshservice",
+                external_id="fs-existing",
+                ai_status="completed",
+                ai_reasoning="old reasoning",
+                summary="old summary",
+            ))
+            db.commit()
+
+            updated = ExternalTicket(
+                external_id="fs-existing",
+                subject="New subject",
+                description="New description",
+                reporter="reporter@example.com",
+                priority="P3",
+                status="Open",
+                updated_at=self.initial_cursor,
+            )
+            with (
+                patch.object(sync, "refresh_ticket_documents_if_indexed"),
+                patch.object(
+                    sync.settings_module,
+                    "automation_enabled",
+                    side_effect=lambda key, *_args: key in {
+                        "AUTO_TRIAGE_ENABLED",
+                        "AUTO_SUMMARIZE_ENABLED",
+                    },
+                ),
+            ):
+                action, ticket = sync._upsert_ticket(
+                    db,
+                    updated,
+                    "freshservice",
+                    overwrite=True,
+                )
+
+            self.assertEqual(action, "updated")
+            self.assertEqual(ticket.ai_status, "queued")
+            self.assertEqual(ticket.ai_requested_artifacts, "summary,triage")
+            self.assertIsNone(ticket.ai_reasoning)
+            self.assertIsNone(ticket.summary)
+
+    def test_freshservice_priority_change_queues_only_downstream_artifacts(self):
+        with self.session_factory() as db:
+            db.add(TicketRecord(
+                id="fs-priority",
+                subject="Same subject",
+                description="Same description",
+                reporter="reporter@example.com",
+                priority="P3",
+                status="Open",
+                external_source="freshservice",
+                external_id="fs-priority",
+                ai_status="completed",
+                ai_reasoning="still valid",
+                summary="still valid",
+                ai_suggested_category="Software",
+            ))
+            db.commit()
+
+            updated = ExternalTicket(
+                external_id="fs-priority",
+                subject="Same subject",
+                description="Same description",
+                reporter="reporter@example.com",
+                priority="P1",
+                status="Open",
+                updated_at=self.initial_cursor,
+            )
+            with (
+                patch.object(sync, "refresh_ticket_documents_if_indexed"),
+                patch.object(
+                    sync.settings_module,
+                    "automation_enabled",
+                    side_effect=lambda key, *_args: key in {
+                        "AUTO_TRIAGE_ENABLED",
+                        "AUTO_SUMMARIZE_ENABLED",
+                        "AUTO_ROUTE_ENABLED",
+                        "AUTO_RESOLVE_ENABLED",
+                    },
+                ),
+            ):
+                action, ticket = sync._upsert_ticket(
+                    db,
+                    updated,
+                    "freshservice",
+                    overwrite=True,
+                )
+
+            self.assertEqual(action, "updated")
+            self.assertEqual(ticket.ai_status, "queued")
+            self.assertEqual(ticket.ai_requested_artifacts, "resolution,route")
+            self.assertEqual(ticket.ai_reasoning, "still valid")
+            self.assertEqual(ticket.summary, "still valid")
 
 
 if __name__ == "__main__":

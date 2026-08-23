@@ -1,6 +1,6 @@
 import unittest
 from datetime import datetime, timedelta
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event
@@ -51,6 +51,8 @@ class TicketListApiTests(unittest.TestCase):
             target.category = "Database"
             target.assignee_id = "agent-b"
             target.external_id = "INC_100%"
+            target.ai_suggested_category = "Network"
+            target.ai_status = "completed"
             # This value would also match INC_100% if SQL wildcard characters
             # from user input were not escaped.
             tickets[101].external_id = "INCX100A"
@@ -66,6 +68,9 @@ class TicketListApiTests(unittest.TestCase):
 
         main.app.dependency_overrides[get_db] = override_db
         main.app.dependency_overrides[main.get_current_user] = lambda: UserRecord(
+            id="test-admin", name="Test Admin", role="admin", is_active=True
+        )
+        main.app.dependency_overrides[main.get_protected_ai_user] = lambda: UserRecord(
             id="test-admin", name="Test Admin", role="admin", is_active=True
         )
         self.auth_middleware_patch = patch.object(
@@ -116,6 +121,68 @@ class TicketListApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual([ticket["id"] for ticket in response.json()], ["ticket-100"])
         self.assertEqual(response.json()[0]["assignee_name"], "Bob Agent")
+        self.assertEqual(response.json()[0]["recommended_team"], "Network Operations")
+        self.assertEqual(response.json()[0]["recommended_team_basis"], "ai_category")
+
+    def test_team_falls_back_when_ai_category_is_missing_or_stale(self):
+        ready = self.client.get("/tickets/ticket-100").json()
+        fallback = self.client.get("/tickets/ticket-099").json()
+
+        self.assertEqual(ready["recommended_team"], "Network Operations")
+        self.assertEqual(fallback["recommended_team"], "Service Desk")
+        self.assertEqual(fallback["recommended_team_basis"], "fallback")
+
+    def test_team_mapping_uses_only_valid_ai_issue_type(self):
+        expected = {
+            "Network": "Network Operations",
+            "Access Request": "Identity and Access",
+            "Hardware": "Workplace Technology",
+            "Software": "Application Support",
+        }
+        for issue_type, team in expected.items():
+            with self.subTest(issue_type=issue_type):
+                self.assertEqual(main.intel.recommended_team(issue_type, "completed"), (team, "ai_category"))
+        self.assertEqual(main.intel.recommended_team("Other", "completed"), ("Service Desk", "fallback"))
+        self.assertEqual(main.intel.recommended_team("Network", "stale"), ("Service Desk", "fallback"))
+
+    def test_related_tickets_are_bounded_deduplicated_and_authoritative(self):
+        retrieval = {
+            "match_method": "vector",
+            "results": [
+                {"source_type": "ticket", "ticket_id": "ticket-100", "score": 0.99, "match_method": "vector"},
+                {"source_type": "ticket", "ticket_id": "ticket-099", "score": 0.91, "match_method": "vector"},
+                {"source_type": "ticket", "ticket_id": "ticket-099", "score": 0.90, "match_method": "vector"},
+                {"source_type": "comment", "ticket_id": "ticket-098", "score": 0.89, "match_method": "vector"},
+            ],
+        }
+        with patch.object(
+            main.ticket_vectors,
+            "retrieve_ticket_context",
+            new=AsyncMock(return_value=retrieval),
+        ) as retrieve:
+            response = self.client.get("/tickets/ticket-100/related", params={"limit": 5})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["match_method"], "vector")
+        self.assertEqual([item["ticket_id"] for item in payload["items"]], ["ticket-099"])
+        self.assertEqual(payload["items"][0]["subject"], "Ticket 99")
+        kwargs = retrieve.await_args.kwargs
+        self.assertEqual(kwargs["limit"], 15)
+        self.assertEqual(kwargs["source_types"], ["ticket"])
+        self.assertFalse(kwargs["include_private_comments"])
+
+    def test_related_tickets_failure_is_sanitized(self):
+        with patch.object(
+            main.ticket_vectors,
+            "retrieve_ticket_context",
+            new=AsyncMock(side_effect=RuntimeError("provider secret")),
+        ):
+            response = self.client.get("/tickets/ticket-100/related")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["detail"], "related_tickets_unavailable")
+        self.assertNotIn("provider secret", response.text)
 
     def test_searches_text_and_identifiers_with_literal_wildcards(self):
         description_match = self.client.get(

@@ -199,6 +199,29 @@ CATEGORY_DIFFICULTY = {
 # Priority adds urgency that raises the required skill band.
 _PRIORITY_TIER_BUMP = {"P1": 1, "P2": 0, "P3": 0}
 
+# Team routing is intentionally derived only from validated AI issue type.
+# The canonical/source category remains authoritative and is never repurposed
+# as an AI recommendation.
+AI_CATEGORY_TEAMS = {
+    "Network": "Network Operations",
+    "Access Request": "Identity and Access",
+    "Hardware": "Workplace Technology",
+    "Software": "Application Support",
+}
+_INVALID_AI_PROVENANCE_STATUSES = {"legacy_stale", "provenance_unknown", "stale"}
+
+
+def recommended_team(
+    ai_suggested_category: Optional[str], ai_status: Optional[str]
+) -> tuple[str, str]:
+    """Return a trustworthy team label and its explicit derivation basis."""
+    if ai_status in _INVALID_AI_PROVENANCE_STATUSES:
+        return "Service Desk", "fallback"
+    team = AI_CATEGORY_TEAMS.get(ai_suggested_category or "")
+    if not team:
+        return "Service Desk", "fallback"
+    return team, "ai_category"
+
 
 def tier_needed_for(ticket: TicketRecord) -> int:
     cat = (ticket.category or "other").lower()

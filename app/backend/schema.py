@@ -74,6 +74,8 @@ class Ticket(BaseModel):
     ai_synthetic: bool = False
     ai_suggested_priority: Optional[str] = None
     ai_suggested_category: Optional[str] = None
+    recommended_team: str = "Service Desk"
+    recommended_team_basis: Literal["ai_category", "fallback"] = "fallback"
 
 
 class AIAnalysis(BaseModel):
@@ -472,6 +474,23 @@ class TicketIntelligenceSearchResponse(BaseModel):
     query: str
     match_method: str = "keyword"
     results: List[TicketIntelligenceSearchResult] = Field(default_factory=list)
+
+
+class RelatedTicketItem(BaseModel):
+    ticket_id: str
+    subject: str
+    status: str
+    priority: str
+    category: Optional[str] = None
+    score: float = 0.0
+    match_method: str = "keyword"
+
+
+class RelatedTicketsResponse(BaseModel):
+    ticket_id: str
+    available: bool = True
+    match_method: str = "keyword"
+    items: List[RelatedTicketItem] = Field(default_factory=list)
 
 
 class TicketIntelligenceAnalysisRequest(BaseModel):

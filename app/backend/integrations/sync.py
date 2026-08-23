@@ -18,7 +18,32 @@ from ..ticket_vectors import (
     refresh_ticket_documents_if_indexed,
 )
 from ..ai_state import invalidate_ticket_ai, invalidate_ticket_resolution
+from .. import settings as settings_module
 from .registry import get_adapter
+
+
+def _enabled_analysis_artifacts(*, downstream_only: bool = False) -> set[str]:
+    """Resolve the existing automation flags into explicit worker artifacts."""
+    artifacts: set[str] = set()
+    if not downstream_only:
+        if settings_module.automation_enabled("AUTO_TRIAGE_ENABLED", "AUTO_TRIAGE"):
+            artifacts.add("triage")
+        if settings_module.automation_enabled("AUTO_SUMMARIZE_ENABLED"):
+            artifacts.add("summary")
+    if settings_module.automation_enabled("AUTO_ROUTE_ENABLED"):
+        artifacts.add("route")
+    if settings_module.automation_enabled("AUTO_RESOLVE_ENABLED"):
+        artifacts.add("resolution")
+    return artifacts
+
+
+def _queue_analysis(ticket: TicketRecord, artifacts: set[str]) -> None:
+    if not artifacts:
+        return
+    ticket.ai_status = "queued"
+    ticket.ai_requested_artifacts = ",".join(sorted(artifacts))
+    ticket.ai_next_attempt_at = None
+    ticket.ai_error = None
 
 
 def _project_source_status(source_status: str) -> tuple[str, str, str]:
@@ -106,6 +131,14 @@ def _upsert_ticket(
             invalidate_ticket_ai(existing)
         if resolution_input_changed:
             invalidate_ticket_resolution(existing)
+        if provider.strip().lower() == "freshservice":
+            if analysis_input_changed:
+                _queue_analysis(existing, _enabled_analysis_artifacts())
+            elif resolution_input_changed:
+                _queue_analysis(
+                    existing,
+                    _enabled_analysis_artifacts(downstream_only=True),
+                )
         existing.reporter = ext.reporter
         existing.priority = ext.priority
         existing.external_status = external_status
@@ -163,6 +196,8 @@ def _upsert_ticket(
         created_at=ext.created_at or datetime.utcnow(),
         resolved_at=ext.resolved_at if ext.status.lower() in ("closed", "resolved") else None,
     )
+    if provider.strip().lower() == "freshservice":
+        _queue_analysis(new_ticket, _enabled_analysis_artifacts())
     db.add(new_ticket)
     db.commit()
     db.refresh(new_ticket)
@@ -400,12 +435,6 @@ def fetch_tickets_by_days(
             sync_state.last_error = None
         sync_state.total_synced += result["new"] + result["updated"]
         db.commit()
-
-        # NOTE: newly imported external tickets are deliberately NOT queued or
-        # auto-processed here. Provider-authenticated sync proves transport
-        # integrity, not that requester-controlled ticket text is safe AI
-        # input; tickets must be explicitly promoted by an authenticated
-        # workflow (see sync_worker._auto_triage_job for the same policy).
 
     except Exception as e:
         try:
