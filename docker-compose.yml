@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: ${POSTGRES_IMAGE:-pgvector/pgvector:pg16}
+    image: ${POSTGRES_IMAGE:-pgvector/pgvector:0.8.6-pg16}
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-tickety}
@@ -49,6 +49,7 @@ services:
       FRESHWORKS_APP_BOOTSTRAP_SECRET: ${FRESHWORKS_APP_BOOTSTRAP_SECRET:-}
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://tickety:tickety@postgres:5432/tickety}
       TICKETY_PROCESS_ROLE: api
+      TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED: ${TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED:-false}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -73,6 +74,7 @@ services:
       TICKETY_DEPLOYMENT_CLASS: ${TICKETY_DEPLOYMENT_CLASS:-production}
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://tickety:tickety@postgres:5432/tickety}
       TICKETY_PROCESS_ROLE: worker
+      TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED: ${TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED:-false}
     depends_on:
       migrate:
         condition: service_completed_successfully

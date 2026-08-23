@@ -115,6 +115,13 @@ export default function PortalPage() {
   const [lookupInputError, setLookupInputError] = useState("");
   const [createdTicket, setCreatedTicket] = useState<PortalTicketCreated | null>(null);
   const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
+  const runtime = useQuery({
+    queryKey: ["runtimeHealth"],
+    queryFn: api.getHealth,
+    staleTime: 60_000,
+    retry: false,
+  });
+  const isDemoPortal = runtime.data?.mode === "demo";
 
   const lookup = useQuery({
     queryKey: ["portalTicket", lookupToken],
@@ -200,7 +207,7 @@ export default function PortalPage() {
           <div className="flex items-center gap-3">
             <div className="hidden items-center gap-2 text-xs font-medium text-ink-500 sm:flex">
               <ShieldCheck className="h-4 w-4 text-semantic-success" aria-hidden="true" />
-              Secure requester portal
+              {isDemoPortal ? "Secure requester portal" : "Read-only Freshservice sidecar"}
             </div>
             <LoginLink
               label="Agent sign in"
@@ -218,10 +225,14 @@ export default function PortalPage() {
             <div>
               <Badge variant="info" icon={<Sparkles className="h-3 w-3" />}>Support that keeps you moving</Badge>
               <h1 className="mt-5 max-w-2xl font-serif text-4xl leading-[1.05] tracking-[-0.035em] text-ink-700 sm:text-5xl lg:text-[3.5rem]">
-                Tell us what is getting in your way.
+                {isDemoPortal
+                  ? "Tell us what is getting in your way."
+                  : "Keep Freshservice as your system of record."}
               </h1>
               <p className="mt-5 max-w-xl text-base leading-7 text-ink-500 sm:text-lg">
-                Submit a support request in a few minutes. You will receive a private tracking link to follow its progress—no account required.
+                {isDemoPortal
+                  ? "Submit a support request in a few minutes. You will receive a private tracking link to follow its progress—no account required."
+                  : "Create and update requests in your organization’s Freshservice portal. Tickety only imports provider data for local analysis and never writes ticket changes back."}
               </p>
               <div className="mt-7 flex flex-wrap gap-x-6 gap-y-3 text-sm text-ink-500">
                 <span className="inline-flex items-center gap-2"><Check className="h-4 w-4 text-semantic-success" aria-hidden="true" />Clear request updates</span>
@@ -290,6 +301,7 @@ export default function PortalPage() {
             </div>
           )}
 
+          {isDemoPortal ? (
           <div className="grid gap-8 lg:grid-cols-[0.72fr_1.28fr] lg:gap-12">
             <aside className="lg:pt-4">
               <div className="grid h-11 w-11 place-items-center rounded-xl bg-ink-700 text-linen-50" aria-hidden="true"><LifeBuoy className="h-5 w-5" /></div>
@@ -340,6 +352,15 @@ export default function PortalPage() {
               </div>
             </form>
           </div>
+          ) : (
+            <section className="rounded-2xl border border-linen-400 bg-linen-50 p-6 shadow-sm sm:p-8" aria-labelledby="freshservice-authority-title">
+              <Badge variant="info" icon={<ShieldCheck className="h-3 w-3" />}>Freshservice is authoritative</Badge>
+              <h2 id="freshservice-authority-title" className="mt-4 font-serif text-3xl tracking-[-0.025em] text-ink-700">Submit requests in Freshservice</h2>
+              <p className="mt-3 max-w-2xl text-sm leading-6 text-ink-500">
+                This production Tickety deployment is intentionally read-only. Use your organization’s Freshservice portal to create, edit, reply to, or close a ticket.
+              </p>
+            </section>
+          )}
         </div>
       </main>
 

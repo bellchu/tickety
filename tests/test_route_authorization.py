@@ -65,9 +65,16 @@ class RouteAuthorizationTests(unittest.TestCase):
             return_value=None,
         )
         self.middleware_roles_patch.start()
+        self.demo_ticketing_patch = patch.object(
+            main.settings_module,
+            "is_production_mode",
+            return_value=False,
+        )
+        self.demo_ticketing_patch.start()
         self.client = TestClient(main.app)
 
     def tearDown(self):
+        self.demo_ticketing_patch.stop()
         self.middleware_roles_patch.stop()
         self.auth_middleware_patch.stop()
         main.app.dependency_overrides.clear()

@@ -9,7 +9,7 @@ from sqlalchemy import or_
 
 from .database import SessionLocal, SyncStateRecord, TicketRecord
 from .integrations.sync import sync_tickets_from_external
-from .integrations.registry import get_adapter
+from .integrations.registry import configured_provider, get_adapter
 from .integrations.bindings import expire_due_bindings, get_active_binding
 from . import settings as settings_module
 
@@ -19,6 +19,14 @@ _lock = threading.Lock()
 _PROCESS_ROLE_ENV = "TICKETY_PROCESS_ROLE"
 _SCHEDULER_ENABLED_ENV = "TICKETY_SCHEDULER_ENABLED"
 _VALID_PROCESS_ROLES = {"api", "worker", "all"}
+
+
+def _refresh_admin_settings() -> None:
+    """Pick up portal-approved settings without restarting the worker pod."""
+    try:
+        settings_module.refresh_settings_from_db()
+    except Exception as exc:
+        print(f"[settings] worker refresh error kind={type(exc).__name__}")
 
 
 def process_role() -> str:
@@ -71,6 +79,7 @@ def _auto_triage_job():
     """Background scanner: pick up tickets with missing AI data and fill
     the gaps — triage first, then summary, then resolution. Processes up
     to 10 tickets per 30‑second sweep."""
+    _refresh_admin_settings()
     try:
         db = SessionLocal()
         auto_triage = settings_module.automation_enabled("AUTO_TRIAGE_ENABLED", "AUTO_TRIAGE")
@@ -279,9 +288,8 @@ def _auto_triage_job():
 
 
 def _sync_job():
-    provider = os.getenv("ITSM_PROVIDER", "standalone")
-    if provider == "external":
-        provider = "freshservice"
+    _refresh_admin_settings()
+    provider = configured_provider()
     if provider in ("standalone", "none", ""):
         # An activated binding is authoritative over the legacy provider env.
         db = SessionLocal()
@@ -377,9 +385,7 @@ def get_sync_status() -> dict:
     try:
         expire_due_bindings(db)
         active_binding = get_active_binding(db)
-        current_provider = os.getenv("ITSM_PROVIDER", "standalone")
-        if current_provider == "external":
-            current_provider = "freshservice"
+        current_provider = configured_provider()
         binding_id = "legacy"
         if active_binding:
             current_provider = active_binding.provider

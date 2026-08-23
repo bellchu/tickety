@@ -23,7 +23,7 @@ from sqlalchemy.exc import IntegrityError
 from .database import (
     init_db, get_db, SessionLocal,
     TicketRecord, UserRecord, RecognitionRecord,
-    UserMappingRecord, SyncStateRecord,
+    ExternalUserRecord, SyncStateRecord,
     TicketCommentRecord, TicketCategoryRecord, TicketAuditLogRecord,
     SessionRecord, KbArticleRecord, TicketLinkRecord,
     TicketStatusConfigRecord, TicketPriorityConfigRecord, NotificationConfigRecord,
@@ -40,11 +40,10 @@ from .database import (
     SettingsRecord,
     IntegrationBindingRecord,
     IntegrationCapabilityRecord,
-    ProviderOperationRecord,
-    ProviderConflictRecord,
 )
 from .schema import (
     Ticket, User, UserSummary, Recognition, SyncStatus,
+    ExternalUser, ExternalUserSyncResult,
     TriageResult, PointsAwardedNotification, TicketCreate,
     ResolutionPlan, RecommendedSolution,
     TicketUpdate, TicketComment, TicketCommentCreate,
@@ -68,7 +67,6 @@ from .schema import (
     PortalTicketCreate, PortalTicketOut, PortalTicketCreated,
     IntegrationBindingCreate, IntegrationBindingSuspend,
     FreshworksBootstrapRequest, FreshworksBootstrapRedeem,
-    FreshworksTicketWriteback,
 )
 from .llm_manager import (
     LLMAnalysisError,
@@ -77,6 +75,7 @@ from .llm_manager import (
     LLMManager,
     get_llm_metrics,
     get_llm_catalog,
+    refresh_live_models_if_stale,
 )
 from .ai_contracts import (
     ResolutionAnalysis,
@@ -101,7 +100,12 @@ from .prompts import (
     MOMENTUM_BONUS_CAP, MOMENTUM_RESET_HOURS,
 )
 from .integrations.registry import get_adapter
-from .integrations.sync import sync_tickets_from_external, handle_webhook_event, fetch_tickets_by_days, async_sync_agents_from_external
+from .integrations.sync import (
+    async_sync_external_users,
+    fetch_tickets_by_days,
+    handle_webhook_event,
+    sync_tickets_from_external,
+)
 from .integrations.freshservice import FreshserviceAdapter
 from .integrations.bindings import (
     BindingValidationError,
@@ -842,6 +846,26 @@ async def list_tickets(
         )
     for ticket in tickets:
         ticket.__dict__["assignee_name"] = assignee_names.get(ticket.assignee_id)
+    external_keys = {
+        (ticket.binding_id, ticket.external_source, ticket.external_assignee_id)
+        for ticket in tickets
+        if ticket.external_source and ticket.external_assignee_id
+    }
+    external_names = {}
+    if external_keys:
+        rows = db.query(ExternalUserRecord).filter(
+            ExternalUserRecord.binding_id.in_({key[0] for key in external_keys}),
+            ExternalUserRecord.provider.in_({key[1] for key in external_keys}),
+            ExternalUserRecord.external_id.in_({key[2] for key in external_keys}),
+            ExternalUserRecord.user_type == "agent",
+        ).all()
+        external_names = {
+            (row.binding_id, row.provider, row.external_id): row.name for row in rows
+        }
+    for ticket in tickets:
+        ticket.__dict__["external_assignee_name"] = external_names.get(
+            (ticket.binding_id, ticket.external_source, ticket.external_assignee_id)
+        )
     return [_ticket_for_request(request, ticket) for ticket in tickets]
 
 
@@ -860,6 +884,16 @@ async def get_ticket(
     if ticket.assignee_id:
         user = db.query(UserRecord).filter(UserRecord.id == ticket.assignee_id).first()
         ticket.__dict__["assignee_name"] = user.name if user else None
+    if ticket.external_source and ticket.external_assignee_id:
+        external_user = db.query(ExternalUserRecord).filter(
+            ExternalUserRecord.binding_id == ticket.binding_id,
+            ExternalUserRecord.provider == ticket.external_source,
+            ExternalUserRecord.external_id == ticket.external_assignee_id,
+            ExternalUserRecord.user_type == "agent",
+        ).first()
+        ticket.__dict__["external_assignee_name"] = (
+            external_user.name if external_user else None
+        )
     return _ticket_for_request(request, ticket)
 
 
@@ -1259,6 +1293,23 @@ def _is_terminal_status(db: Session, status: Optional[str]) -> bool:
     return bool(status and status.lower() in _terminal_status_names(db))
 
 
+def _require_demo_ticketing() -> None:
+    """Keep production Tickety on the read-only sidecar boundary.
+
+    Demo mode retains local ticket CRUD for the bundled showcase data. In a
+    real deployment, Freshservice owns ticket lifecycle and Tickety stores
+    only synchronized projections plus local intelligence.
+    """
+    if settings_module.is_production_mode():
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Freshservice is the authoritative ticket system; "
+                "Tickety production ticket lifecycle is read-only"
+            ),
+        )
+
+
 @app.patch("/tickets/{ticket_id}", response_model=Ticket)
 async def update_ticket(
     ticket_id: str,
@@ -1268,6 +1319,7 @@ async def update_ticket(
 ):
     """Update a ticket — status, priority, assignee, category, tags, etc.
     Records every change in the audit log."""
+    _require_demo_ticketing()
     ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
@@ -1362,6 +1414,7 @@ async def delete_ticket(
     db: Session = Depends(get_db),
     _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
+    _require_demo_ticketing()
     ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
@@ -1499,6 +1552,7 @@ async def bulk_action(
 ):
     """Apply an action to multiple tickets at once.
     Actions: assign, close, set_priority, set_category."""
+    _require_demo_ticketing()
     ticket_ids = list(dict.fromkeys(payload.ticket_ids))
     tickets = db.query(TicketRecord).filter(TicketRecord.id.in_(ticket_ids)).all()
     if len(tickets) != len(ticket_ids):
@@ -1598,6 +1652,7 @@ async def create_ticket(
     user: UserRecord = Depends(get_protected_ai_user),
 ):
     """Create a ticket by hand (no ITSM sync). Auto-triaged if enabled."""
+    _require_demo_ticketing()
     import uuid as _uuid
     _reserve_index_write_request(db, user.id)
     if _automation_enabled("AUTO_TRIAGE_ENABLED", "AUTO_TRIAGE"):
@@ -3783,7 +3838,6 @@ def _embedded_ticket_context(
     ).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket has not been synchronized to Tickety")
-    _authorize_ticket_analysis(principal.user, ticket)
     return principal, ticket
 
 
@@ -3822,9 +3876,10 @@ def freshworks_ticket_context(
             "expires_at": principal.binding.expires_at,
         },
         "actor": {
-            "id": principal.user.id,
-            "name": principal.user.name,
-            "role": principal.user.role,
+            "id": principal.external_user.external_id,
+            "name": principal.external_user.name,
+            "user_type": principal.external_user.user_type,
+            "identity_domain": "external_itsm",
         },
         "ticket": {
             "id": ticket.id,
@@ -3834,174 +3889,12 @@ def freshworks_ticket_context(
             "status": ticket.status,
             "priority": ticket.priority,
             "assignee_id": ticket.assignee_id,
+            "external_assignee_id": ticket.external_assignee_id,
             "updated_at": ticket.external_updated_at or ticket.updated_at,
             "recommended_solution": _stored_json(ticket.recommended_solution),
         },
         "capabilities": capabilities,
     }
-
-
-@app.patch("/integrations/freshworks/tickets/{external_ticket_id}")
-async def freshworks_ticket_writeback(
-    external_ticket_id: str,
-    payload: FreshworksTicketWriteback,
-    response: Response,
-    authorization: Optional[str] = Header(None),
-    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
-    db: Session = Depends(get_db),
-):
-    response.headers["Cache-Control"] = "no-store"
-    if not external_ticket_id.isdigit():
-        raise HTTPException(status_code=404, detail="Ticket not found")
-    if not idempotency_key or not re.fullmatch(r"[A-Za-z0-9._:-]{16,128}", idempotency_key):
-        raise HTTPException(status_code=400, detail="A valid Idempotency-Key is required")
-    changes = payload.model_dump(exclude_unset=True, exclude={"expected_updated_at"})
-    changes = {key: value for key, value in changes.items() if value is not None}
-    if not changes:
-        raise HTTPException(status_code=400, detail="No supported write-back fields supplied")
-
-    principal, ticket = _embedded_ticket_context(db, authorization, external_ticket_id)
-    identity_capability = db.query(IntegrationCapabilityRecord).filter(
-        IntegrationCapabilityRecord.binding_id == principal.binding.id,
-        IntegrationCapabilityRecord.capability == "freshworks.trusted_agent_identity",
-        IntegrationCapabilityRecord.status == "supported",
-    ).first()
-    if not identity_capability:
-        raise HTTPException(
-            status_code=409,
-            detail="Write-back requires verified Freshworks agent identity",
-        )
-    _authorize_ticket_mutation(principal.user, ticket, changed_fields=set(changes))
-    digest_payload = payload.model_dump(mode="json")
-    request_digest = hashlib.sha256(json.dumps(
-        digest_payload, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")).hexdigest()
-    existing = db.query(ProviderOperationRecord).filter(
-        ProviderOperationRecord.binding_id == principal.binding.id,
-        ProviderOperationRecord.idempotency_key == idempotency_key,
-    ).first()
-    if existing:
-        if existing.request_digest != request_digest:
-            raise HTTPException(status_code=409, detail="Idempotency key was used for another request")
-        if existing.status == "succeeded" and existing.response_reference:
-            return json.loads(existing.response_reference)
-        raise HTTPException(status_code=409, detail=f"Write-back operation is {existing.status}")
-
-    operation = ProviderOperationRecord(
-        id=secrets.token_hex(16),
-        binding_id=principal.binding.id,
-        ticket_id=ticket.id,
-        operation="ticket.update",
-        idempotency_key=idempotency_key,
-        expected_external_version=payload.expected_updated_at.isoformat(),
-        status="pending",
-        request_digest=request_digest,
-        created_by=principal.user.id,
-    )
-    db.add(operation)
-    try:
-        db.commit()
-    except IntegrityError as exc:
-        db.rollback()
-        raise HTTPException(status_code=409, detail="Duplicate write-back operation") from exc
-
-    adapter = get_adapter(binding=principal.binding)
-    try:
-        provider_before = await adapter.fetch_ticket_raw(external_ticket_id)
-        observed_version = adapter._parse_datetime(provider_before.get("updated_at"))
-        expected_version = payload.expected_updated_at
-        if expected_version.tzinfo is not None:
-            expected_version = expected_version.astimezone(timezone.utc).replace(tzinfo=None)
-        if (
-            observed_version is None
-            or observed_version.replace(microsecond=0)
-            != expected_version.replace(microsecond=0)
-        ):
-            operation.status = "conflict"
-            operation.error_code = "external_version_mismatch"
-            db.add(ProviderConflictRecord(
-                id=secrets.token_hex(16),
-                operation_id=operation.id,
-                binding_id=principal.binding.id,
-                ticket_id=ticket.id,
-                field="updated_at",
-                provider_snapshot=json.dumps({
-                    "updated_at": provider_before.get("updated_at"),
-                    "status": provider_before.get("status"),
-                    "priority": provider_before.get("priority"),
-                }, sort_keys=True, separators=(",", ":")),
-                tickety_snapshot=json.dumps({
-                    "expected_updated_at": payload.expected_updated_at.isoformat(),
-                    **changes,
-                }, sort_keys=True, separators=(",", ":")),
-            ))
-            db.commit()
-            raise HTTPException(status_code=409, detail="Freshservice ticket changed; refresh before writing")
-
-        provider_payload = {}
-        if "status" in changes:
-            provider_payload["status"] = adapter.to_freshservice_status(changes["status"])
-        if "priority" in changes:
-            provider_payload["priority"] = adapter.to_freshservice_priority(changes["priority"])
-        provider_after = await adapter.update_ticket_raw(external_ticket_id, provider_payload)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        operation.status = "failed"
-        operation.error_code = type(exc).__name__[:96]
-        db.commit()
-        raise HTTPException(status_code=502, detail="Freshservice write-back failed") from exc
-
-    for field, value in changes.items():
-        old_value = getattr(ticket, field)
-        if old_value != value:
-            db.add(TicketAuditLogRecord(
-                ticket_id=ticket.id,
-                field=field,
-                old_value=str(old_value) if old_value is not None else None,
-                new_value=str(value),
-                changed_by=principal.user.name,
-            ))
-            setattr(ticket, field, value)
-    ticket.external_status = adapter.map_status(provider_after.get("status"))
-    ticket.external_updated_at = adapter._parse_datetime(provider_after.get("updated_at"))
-    operation.status = "succeeded"
-    response = {
-        "operation_id": operation.id,
-        "status": "succeeded",
-        "ticket": {
-            "external_id": ticket.external_id,
-            "status": ticket.status,
-            "priority": ticket.priority,
-            "updated_at": ticket.external_updated_at.isoformat()
-            if ticket.external_updated_at else None,
-        },
-    }
-    operation.response_reference = json.dumps(
-        response, default=str, sort_keys=True, separators=(",", ":")
-    )
-    capability = db.query(IntegrationCapabilityRecord).filter(
-        IntegrationCapabilityRecord.binding_id == principal.binding.id,
-        IntegrationCapabilityRecord.capability == "ticket.update",
-    ).first()
-    if capability:
-        capability.status = "supported"
-        capability.details = json.dumps({
-            "status": "supported", "verified_by": "successful_writeback"
-        }, sort_keys=True, separators=(",", ":"))
-        capability.checked_at = datetime.utcnow()
-    else:
-        db.add(IntegrationCapabilityRecord(
-            binding_id=principal.binding.id,
-            capability="ticket.update",
-            status="supported",
-            details=json.dumps({
-                "status": "supported", "verified_by": "successful_writeback"
-            }, sort_keys=True, separators=(",", ":")),
-            checked_at=datetime.utcnow(),
-        ))
-    db.commit()
-    return response
 
 
 # ── Sync / Admin ─────────────────────────────────────────────
@@ -4023,7 +3916,10 @@ def _sync_adapter_for_binding(
         if binding.expires_at and binding.expires_at <= datetime.utcnow():
             raise HTTPException(status_code=409, detail="Integration binding has expired")
         return get_adapter(binding=binding), binding.id
-    return get_adapter(), "legacy"
+    try:
+        return get_adapter(), "legacy"
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/admin/integrations/bindings", status_code=201)
@@ -4144,7 +4040,7 @@ def trigger_sync(
 @app.post("/admin/sync/fetch")
 def fetch_sync(
     days: int = Query(7, ge=1, le=365, description="Fetch tickets updated in the last N days"),
-    overwrite: bool = Query(False, description="Overwrite already-imported tickets from the source"),
+    overwrite: bool = Query(False, description="Refresh all provider fields on already-imported tickets"),
     binding_id: Optional[str] = Query(None, max_length=36),
     db: Session = Depends(get_db),
     user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
@@ -4152,10 +4048,9 @@ def fetch_sync(
     """Manual "fetch by days" pull from the ITSM provider.
 
     Walks every page of tickets updated in the last `days` days while
-    respecting the provider's rate limits. By default tickets that are
-    already imported (matched by external_source + external_id) are skipped
-    so re-running an overlapping window won't clobber local AI triage / status
-    changes; pass overwrite=true to force-refresh them from the source.
+    respecting the provider's rate limits. Source status is always reconciled
+    for already-imported tickets. Other local fields remain unchanged unless
+    overwrite=true requests a full provider refresh.
     """
     _reserve_ai_request(db, user.id, "itsm_fetch")
     adapter, effective_binding_id = _sync_adapter_for_binding(db, binding_id)
@@ -4185,67 +4080,88 @@ async def sync_status(
 
 # ── Settings ─────────────────────────────────────────────────
 
-@app.post("/admin/sync/agents")
-async def sync_agents(
+@app.post("/admin/sync/agents", deprecated=True)
+@app.post("/admin/sync/external-users")
+async def sync_external_user_directory(
     binding_id: Optional[str] = Query(None, max_length=36),
-    payload: dict = Body(default_factory=dict),
-    db: Session = Depends(get_db),
-    user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
-):
-    """Fetch agents from the ITSM provider and create Tickety user accounts.
-
-    Pulls every agent from GET /api/v2/agents (with rate‑limit pacing),
-    then creates or updates a matching Tickety UserRecord + UserMappingRecord.
-    Returns {created, updated, errors, total}."""
-    _reserve_ai_request(db, user.id, "itsm_agent_sync")
-    adapter, effective_binding_id = _sync_adapter_for_binding(db, binding_id)
-    result = await async_sync_agents_from_external(
-        adapter, options=payload, binding_id=effective_binding_id
-    )
-    changed = (
-        result.get("created", 0)
-        + result.get("updated", 0)
-        + result.get("merged", 0)
-        + result.get("remapped", 0)
-        + result.get("tickets_reassigned", 0)
-    )
-    if result.get("errors", 0) and result.get("total", 0) == 0 and changed == 0:
-        status = "failed"
-    elif result.get("errors", 0):
-        status = "completed_with_errors"
-    elif result.get("conflicts", 0):
-        status = "completed_with_conflicts"
-    elif result.get("missing", 0):
-        status = "completed_with_missing"
-    else:
-        status = "completed"
-    return {"status": status, "result": result}
-
-
-@app.get("/admin/agents")
-async def list_agents(
     db: Session = Depends(get_db),
     _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
-    """Return every user that has an external mapping (i.e. is an agent account)."""
-    mappings = db.query(UserMappingRecord).all()
-    mapped_ids = {m.tickety_user_id for m in mappings}
-    users = db.query(UserRecord).filter(UserRecord.id.in_(mapped_ids)).all()
-    out = []
-    for u in users:
-        m = next((x for x in mappings if x.tickety_user_id == u.id), None)
-        out.append({
-            "id": u.id,
-            "name": u.name,
-            "email": u.email,
-            "title": u.title,
-            "tier": u.tier,
-            "impact_points": u.impact_points,
-            "external_source": m.external_source if m else None,
-            "external_assignee_id": m.external_assignee_id if m else None,
-            "binding_id": m.binding_id if m else None,
-        })
-    return {"agents": out}
+    """Refresh provider-owned profiles without changing Tickety accounts."""
+    adapter, effective_binding_id = _sync_adapter_for_binding(db, binding_id)
+    result = await async_sync_external_users(
+        adapter, binding_id=effective_binding_id
+    )
+    changed = result.get("created", 0) + result.get("updated", 0) + result.get("deactivated", 0)
+    if result.get("errors", 0) and result.get("total", 0) == 0 and not changed:
+        status = "failed"
+    elif result.get("errors", 0):
+        status = "completed_with_errors"
+    else:
+        status = "completed"
+    return {
+        "status": status,
+        "result": ExternalUserSyncResult(**result).model_dump(mode="json"),
+    }
+
+
+def _external_user_payload(record: ExternalUserRecord) -> dict:
+    try:
+        profile = json.loads(record.profile_json or "{}")
+    except (TypeError, ValueError):
+        profile = {}
+    if not isinstance(profile, dict):
+        profile = {}
+    return ExternalUser(
+        id=record.id,
+        binding_id=record.binding_id,
+        provider=record.provider,
+        external_id=record.external_id,
+        user_type=record.user_type,
+        name=record.name,
+        email=record.email,
+        title=record.title,
+        active=record.active,
+        profile=profile,
+        source_updated_at=record.source_updated_at,
+        fetched_at=record.fetched_at,
+    ).model_dump(mode="json")
+
+
+@app.get("/admin/external-users")
+async def list_external_users(
+    binding_id: Optional[str] = Query(None, max_length=36),
+    provider: Optional[str] = Query(None, max_length=64),
+    user_type: Optional[str] = Query(None, pattern="^(agent|requester)$"),
+    active: Optional[bool] = Query(True),
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
+):
+    query = db.query(ExternalUserRecord)
+    if binding_id:
+        query = query.filter(ExternalUserRecord.binding_id == binding_id)
+    if provider:
+        query = query.filter(ExternalUserRecord.provider == provider)
+    if user_type:
+        query = query.filter(ExternalUserRecord.user_type == user_type)
+    if active is not None:
+        query = query.filter(ExternalUserRecord.active.is_(active))
+    records = query.order_by(
+        ExternalUserRecord.user_type, ExternalUserRecord.name, ExternalUserRecord.external_id
+    ).all()
+    return {"users": [_external_user_payload(record) for record in records]}
+
+
+@app.get("/admin/agents", deprecated=True)
+async def list_external_agents(
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
+):
+    records = db.query(ExternalUserRecord).filter(
+        ExternalUserRecord.user_type == "agent",
+        ExternalUserRecord.active.is_(True),
+    ).order_by(ExternalUserRecord.name).all()
+    return {"agents": [_external_user_payload(record) for record in records]}
 
 
 # ── OAuth 2.0 ──────────────────────────────────────────────────
@@ -4337,10 +4253,13 @@ async def oauth_callback(
 
     # Persist tokens in the database so the adapter picks them up on restart.
     try:
-        settings_module.update_settings({
-            "FRESHSERVICE_OAUTH_ACCESS_TOKEN": access_token,
-            "FRESHSERVICE_OAUTH_REFRESH_TOKEN": refresh_token,
-        })
+        settings_module.update_settings(
+            {
+                "FRESHSERVICE_OAUTH_ACCESS_TOKEN": access_token,
+                "FRESHSERVICE_OAUTH_REFRESH_TOKEN": refresh_token,
+            },
+            actor_id=user.id,
+        )
     except Exception as exc:
         print(f"[oauth] token persistence failed kind={type(exc).__name__}")
         raise HTTPException(503, "OAuth token persistence failed") from None
@@ -4374,10 +4293,13 @@ async def oauth_refresh(
     access_token = tokens.get("access_token", "")
     refresh_token = tokens.get("refresh_token", "")
     try:
-        settings_module.update_settings({
-            "FRESHSERVICE_OAUTH_ACCESS_TOKEN": access_token,
-            "FRESHSERVICE_OAUTH_REFRESH_TOKEN": refresh_token,
-        })
+        settings_module.update_settings(
+            {
+                "FRESHSERVICE_OAUTH_ACCESS_TOKEN": access_token,
+                "FRESHSERVICE_OAUTH_REFRESH_TOKEN": refresh_token,
+            },
+            actor_id=user.id,
+        )
     except Exception as exc:
         print(f"[oauth] token persistence failed kind={type(exc).__name__}")
         raise HTTPException(503, "OAuth token persistence failed") from None
@@ -4483,10 +4405,10 @@ async def get_settings(_user: UserRecord = Depends(require_protected_ai_role("ad
 @app.put("/admin/settings")
 async def update_settings(
     payload: dict,
-    _user: UserRecord = Depends(require_protected_ai_role("admin")),
+    user: UserRecord = Depends(require_protected_ai_role("admin")),
 ):
     try:
-        return settings_module.update_settings(payload)
+        return settings_module.update_settings(payload, actor_id=user.id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
@@ -4496,9 +4418,8 @@ async def update_settings(
 
 @app.get("/admin/llm/catalog")
 async def llm_catalog(_user: UserRecord = Depends(require_protected_ai_role("admin"))):
-    """Provider catalog for the settings UI: list of supported providers,
-    their preset models, which env vars they need, and which of those are
-    already configured. Never returns secret values."""
+    """Return the Foundry catalog, refreshing deployments when stale."""
+    await refresh_live_models_if_stale()
     return get_llm_catalog()
 
 
@@ -4533,12 +4454,7 @@ async def refresh_models(
     db: Session = Depends(get_db),
     user: UserRecord = Depends(require_protected_ai_role("admin")),
 ):
-    """Fetch the latest available models from each configured LLM provider.
-
-    Queries DeepSeek, OpenAI, and OpenRouter for their current model lists.
-    Only providers with a valid API key configured are queried; others are
-    left with their preset defaults. Results are persisted so the catalog
-    picks them up on restart."""
+    """Immediately refresh Foundry and Custom AI API model catalogs."""
     _reserve_ai_request(db, user.id, "refresh_model_catalog")
     from .llm_manager import fetch_live_models
     results = await fetch_live_models()
@@ -4983,18 +4899,11 @@ async def _check_resolution_and_award(ticket: TicketRecord, db: Optional[Session
             db.close()
         return
     try:
-        # Find assignee mapping
-        if not ticket.external_assignee_id:
+        # Only an explicitly assigned Tickety account can receive local points.
+        # Provider identities are deliberately not mapped into this user domain.
+        if not ticket.assignee_id:
             return
-        mapping = db.query(UserMappingRecord).filter(
-            UserMappingRecord.binding_id == ticket.binding_id,
-            UserMappingRecord.external_source == ticket.external_source,
-            UserMappingRecord.external_assignee_id == ticket.external_assignee_id,
-        ).first()
-        if not mapping:
-            return
-
-        user = db.query(UserRecord).filter(UserRecord.id == mapping.tickety_user_id).first()
+        user = db.query(UserRecord).filter(UserRecord.id == ticket.assignee_id).first()
         if not user:
             return
 
@@ -5912,6 +5821,7 @@ async def portal_create_ticket(
     response: Response,
     db: Session = Depends(get_db),
 ):
+    _require_demo_ticketing()
     import uuid as _uuid
     reporter = _normalize_portal_reporter(payload.reporter)
     _reserve_portal_ticket_request(db, reporter)

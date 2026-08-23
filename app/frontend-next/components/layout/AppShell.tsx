@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { Menu } from "lucide-react";
 import { AppExperience } from "@/components/layout/AppExperience";
@@ -9,6 +10,7 @@ import { LoginLink } from "@/components/layout/LoginLink";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { TicketyLogo } from "@/components/layout/TicketyLogo";
 import { api, APIError, queryClient } from "@/lib/api";
+import { getCurrentNavigationItem } from "@/lib/navigation";
 import type { AuthContext } from "@/lib/types";
 
 const PUBLIC_ROUTES = ["/login", "/portal"];
@@ -36,6 +38,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [authState, setAuthState] = useState<"checking" | "authenticated">("checking");
   const [authContext, setAuthContext] = useState<AuthContext | null>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const currentNavigationItem = getCurrentNavigationItem(pathname);
 
   useEffect(() => {
     setNavigationOpen(false);
@@ -94,7 +97,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     const focusable = navigation?.querySelectorAll<HTMLElement>(
       'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])'
     );
-    focusable?.[0]?.focus();
+    const closeButton = navigation?.querySelector<HTMLElement>(
+      'button[aria-label="Close navigation"]'
+    );
+    (closeButton || focusable?.[0])?.focus();
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -159,9 +165,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           />
         )}
 
-        <div className="flex min-h-screen flex-col lg:pl-64">
-          <header className="sticky top-0 z-30 flex h-16 items-center justify-between border-b border-linen-300 bg-linen-50/95 px-4 backdrop-blur-md lg:hidden">
-            <TicketyLogo size="md" />
+        <div className="flex min-h-screen w-full min-w-0 flex-col lg:pl-[17rem]">
+          <header className="sticky top-0 z-30 flex h-16 items-center justify-between border-b border-linen-300 bg-linen-50/95 px-4 shadow-[0_1px_0_rgba(1,13,27,0.02)] backdrop-blur-md lg:hidden">
+            <Link
+              href="/"
+              className="min-w-0 rounded-md focus:outline-none focus:ring-2 focus:ring-clay-400"
+            >
+              <TicketyLogo size="sm" />
+              <span className="mt-1 block max-w-[8.5rem] truncate text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-400">
+                {currentNavigationItem?.label || "Workspace"}
+              </span>
+            </Link>
             <div className="flex items-center gap-2">
               {authContext?.auth_kind === "demo_fallback" && (
                 <LoginLink className="border-linen-400 bg-white text-ink-700 shadow-sm hover:bg-linen-200" />
@@ -173,14 +187,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 aria-controls="app-navigation"
                 aria-expanded={navigationOpen}
                 onClick={() => setNavigationOpen(true)}
-                className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-linen-400 bg-white text-ink-600 shadow-sm transition-colors hover:bg-linen-200 focus:outline-none focus:ring-2 focus:ring-clay-400 focus:ring-offset-2"
+                className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-linen-400 bg-white px-3 text-ink-600 shadow-sm transition-colors hover:bg-linen-200 focus:outline-none focus:ring-2 focus:ring-clay-400 focus:ring-offset-2"
               >
                 <Menu className="h-5 w-5" aria-hidden="true" />
+                <span className="text-sm font-semibold">Menu</span>
               </button>
             </div>
           </header>
 
-          <main id="main-content" tabIndex={-1} className="flex-1 outline-none">
+          <main id="main-content" tabIndex={-1} className="min-w-0 flex-1 outline-none">
             <div className="mx-auto w-full max-w-[1440px] px-4 py-5 sm:px-6 sm:py-6 lg:px-8 lg:py-8">
               {children}
             </div>

@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from .database import (
     SessionLocal, TicketRecord, UserRecord, RecognitionRecord,
-    UserMappingRecord, SyncStateRecord, TicketCategoryRecord,
+    ExternalUserRecord, SyncStateRecord, TicketCategoryRecord,
     KbArticleRecord, TicketStatusConfigRecord, TicketPriorityConfigRecord,
     NotificationConfigRecord,
     ProjectRecord, ServiceItemRecord, ServiceRequestRecord,
@@ -59,10 +59,10 @@ USERS = [
     },
 ]
 
-USER_MAPPINGS = [
-    {"tickety_user_id": "u-alice", "external_assignee_id": "1001"},
-    {"tickety_user_id": "u-bob", "external_assignee_id": "1002"},
-    {"tickety_user_id": "u-carol", "external_assignee_id": "1003"},
+EXTERNAL_USERS = [
+    {"id": "ext-demo-1001", "external_id": "1001", "name": "Morgan Lee", "email": "morgan@provider.example"},
+    {"id": "ext-demo-1002", "external_id": "1002", "name": "Riley Patel", "email": "riley@provider.example"},
+    {"id": "ext-demo-1003", "external_id": "1003", "name": "Jordan Kim", "email": "jordan@provider.example"},
 ]
 
 SEED_NOW = datetime.utcnow()
@@ -366,7 +366,7 @@ def run_seed():
         # Clean partial data
         db.query(RecognitionRecord).delete()
         db.query(TicketRecord).delete()
-        db.query(UserMappingRecord).delete()
+        db.query(ExternalUserRecord).delete()
         db.query(UserRecord).delete()
         db.query(SyncStateRecord).delete()
         db.commit()
@@ -382,12 +382,19 @@ def run_seed():
             ))
         db.flush()
 
-        # User mappings
-        for m in USER_MAPPINGS:
-            db.add(UserMappingRecord(
-                tickety_user_id=m["tickety_user_id"],
-                external_source="standalone",
-                external_assignee_id=m["external_assignee_id"],
+        # Provider-owned demo directory. These records intentionally have no
+        # relationship to the Tickety users above.
+        for external_user in EXTERNAL_USERS:
+            db.add(ExternalUserRecord(
+                id=external_user["id"],
+                binding_id="legacy",
+                provider="standalone",
+                external_id=external_user["external_id"],
+                user_type="agent",
+                name=external_user["name"],
+                email=external_user["email"],
+                active=True,
+                profile_json="{}",
             ))
         db.flush()
 

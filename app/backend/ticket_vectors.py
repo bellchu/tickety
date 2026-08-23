@@ -16,7 +16,7 @@ from .privacy import configured_secret_values, redact_text
 
 
 _TRUE_VALUES = {"1", "true", "yes", "on", "enabled"}
-_DEFAULT_EMBEDDING_MODEL = "openai/text-embedding-3-small"
+_DEFAULT_EMBEDDING_MODEL = "foundry/text-embedding-3-small"
 _WORD_RE = re.compile(r"[a-z0-9][a-z0-9._-]{1,}", re.IGNORECASE)
 _PORTAL_SOURCE = "portal"
 _AUTHORITY_PRIORITY = {
@@ -174,31 +174,9 @@ def _minimum_vector_score() -> float:
 
 def _embedding_kwargs() -> dict[str, Any]:
     model = embedding_model()
-    kwargs: dict[str, Any] = {"model": model}
-    if model.startswith("openai/"):
-        kwargs["api_key"] = os.getenv("OPENAI_API_KEY")
-        api_base = os.getenv("TICKET_EMBEDDING_API_BASE") or os.getenv("OPENAI_API_BASE")
-        if api_base:
-            kwargs["api_base"] = api_base
-    elif model.startswith("custom/"):
-        kwargs["model"] = model[7:]
-        api_key = os.getenv("CUSTOM_API_KEY")
-        if not api_key:
-            return kwargs
-        kwargs["api_key"] = api_key
-        kwargs["custom_llm_provider"] = os.getenv("CUSTOM_PROVIDER_TYPE") or "openai"
-        api_base = os.getenv("TICKET_EMBEDDING_API_BASE") or os.getenv("CUSTOM_API_BASE")
-        if not api_base:
-            raise ValueError(
-                "TICKET_EMBEDDING_API_BASE or CUSTOM_API_BASE is required for "
-                "custom embeddings"
-            )
-        kwargs["api_base"] = api_base
-    if kwargs.get("api_base"):
-        from .settings import _validate_llm_base_url
+    from .llm_manager import provider_kwargs_for_model
 
-        kwargs["api_base"] = _validate_llm_base_url(kwargs["api_base"])
-    return {k: v for k, v in kwargs.items() if v}
+    return provider_kwargs_for_model(model)
 
 
 def _embedding_timeout() -> float:

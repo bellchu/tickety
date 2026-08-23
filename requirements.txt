@@ -2,6 +2,7 @@ fastapi
 uvicorn[standard]
 pydantic
 litellm
+azure-identity
 requests
 python-dotenv
 sqlalchemy

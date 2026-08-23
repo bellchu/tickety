@@ -10,9 +10,14 @@ Run the POC as a dedicated Tickety deployment with:
 APP_MODE=production
 TICKETY_DEPLOYMENT_CLASS=poc
 FRESHSERVICE_API_KEY=replace-with-a-trial-only-key
+FRESHSERVICE_OAUTH_SCOPES="freshservice.tickets.view freshservice.agents.manage freshservice.requesters.view"
 ```
 
-The POC must use a separate database, cache, secrets, hostname, and encryption keys. Do not reuse a production Freshservice API key or Tickety data store. The credential is referenced as `env://freshservice`; it is never accepted or returned by the binding API.
+The POC must use a separate database, cache, secrets, hostname, and encryption keys. Do not reuse a production Freshservice API key or Tickety data store. The credential is referenced as `env://freshservice`; it is never accepted or returned by the binding API. Use a dedicated Freshservice integration agent whose role can view the required records but cannot create, edit, reply, add notes, attach files, or delete. Freshservice uses the `freshservice.agents.manage` OAuth scope for the agent-list read endpoint and `freshservice.requesters.view` for requester/contact profiles, so the provider role is the required second layer of least privilege.
+
+Tickety users and Freshservice users are separate identity domains. Directory refresh stores provider agents and requesters in `external_users` for read-only ticket context; it never creates, matches, merges, updates, authenticates, authorizes, or awards points to a Tickety account. Manage Tickety login credentials and roles only through the local user roster.
+
+Use `POST /admin/sync/external-users` to refresh the provider snapshot and `GET /admin/external-users` to read it. Both routes require an authenticated Tickety administrator or supervisor session; provider identities cannot call these administrative APIs.
 
 ## Binding lifecycle
 
@@ -29,18 +34,18 @@ Only one Freshservice binding may be active in a Tickety deployment. Trial bindi
 
 ## Isolation guarantees in this phase
 
-Synced tickets, agent mappings, sync cursors, webhook delivery digests, and adapter caches are scoped by `binding_id`. The active binding selects its own canonical host and workspace configuration. Existing installations continue to use the `legacy` scope until a binding is activated.
+Synced tickets, external user directory records, sync cursors, webhook delivery digests, and adapter caches are scoped by `binding_id`. External users have no foreign key or account mapping to Tickety users. The active binding selects its own canonical host and workspace configuration. Existing installations continue to use the `legacy` scope until a binding is activated.
 
-The capability probe verifies ticket and agent reads and publishes explicit unsupported or unknown states for unverified features. A Freshworks custom-app package now provides sidebar/full-page placement and hashed, short-lived session bootstrap. Status/priority write-back is implemented with idempotency and conflict records but remains locked until agent identity is cryptographically verified. Replies, notes, attachments, and service-request parity are not yet claimed.
+The capability probe performs only ticket, agent, and requester reads. Its manifest declares `integration.mode=read_only`; ticket creation, updates, replies, notes, attachments, and service-request creation are permanently unsupported. The Freshworks custom app provides sidebar/full-page placement and hashed, short-lived external sessions, then reads the synchronized Tickety projection. Those sessions never become Tickety user sessions and the package contains no mutation request template or write controls.
 
 ## Suggested 14-day sequence
 
 - Days 1–2: deploy the isolated POC, create the binding, run validation, and confirm the capability evidence.
 - Days 3–5: activate read-only synchronization and verify tenant/workspace isolation.
 - Days 6–9: test webhook ingestion, retries, duplicate delivery handling, and expiry behavior.
-- Days 10–12: validate the Freshworks app/session flow and complete agent-level OAuth before enabling guarded write-back.
+- Days 10–12: validate the Freshworks app/session flow, read-only OAuth allowlist, and provider-role permissions.
 - Days 13–14: export evidence, suspend the trial binding, and decide whether to perform a clean production validation.
 
 ## Remaining implementation phases
 
-The in-product app, one-time session bootstrap, and the first guarded status/priority operation are scaffolded. The next security gate is agent-level OAuth proof, followed by replies, private notes, attachments, and service-request parity. See `freshworks-app/README.md` for installation and validation details.
+The in-product app and one-time session bootstrap are implemented. Future provider adapters must preserve the same one-way contract: import authoritative ITSM data and keep all Tickety intelligence local. See `freshworks-app/README.md` for installation and validation details.

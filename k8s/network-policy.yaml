@@ -87,7 +87,7 @@ spec:
             matchExpressions:
               - key: app.kubernetes.io/component
                 operator: In
-                values: [backend, backend-worker, migrate]
+                values: [backend, backend-worker, migration, migrate]
       ports:
         - protocol: TCP
           port: 5432

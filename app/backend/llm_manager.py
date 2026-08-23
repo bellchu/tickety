@@ -22,36 +22,19 @@ load_dotenv()
 # ──────────────────────────────────────────────────────────────────────────
 # Provider catalog
 #
-# Tickety uses LiteLLM as a universal router. A "model" is just a LiteLLM
-# model string; the *prefix* of that string selects the provider, which in
-# turn decides which env vars (API key / base URL / api version) to use.
-#
-#   deepseek-v4-flash              -> DeepSeek (OpenAI-compatible surface)
-#   openai/gpt-4o                  -> OpenAI
-#   openrouter/anthropic/claude... -> OpenRouter (any vendor it aggregates)
-#   azure/<deployment-name>        -> Azure OpenAI (AI Foundry)
-#   azure_ai/<model>               -> Azure AI Foundry "models as a service"
-#                                     (Llama, Mistral, etc. via Foundry)
-#   custom/<model>                  -> Any OpenAI-compatible endpoint
-#                                     (vLLM, Ollama, Groq, Together, etc.)
-#
-# Adding a new provider = add an entry to PROVIDERS + register its env keys in
-# settings.py / schema.py. No other code changes required.
+# Tickety exposes two deliberately small routing surfaces: Microsoft Foundry's
+# OpenAI-compatible v1 endpoint and one generic OpenAI-compatible custom API.
+# Named direct vendor and aggregator providers are not accepted.
 # ──────────────────────────────────────────────────────────────────────────
 
-DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEEPSEEK_MODELS = {"deepseek-v4-flash", "deepseek-v4-pro"}
-DEFAULT_MODEL = "deepseek-v4-flash"
+DEFAULT_MODEL = "foundry/DeepSeek-V4-Flash"
+FOUNDRY_ENTRA_SCOPE = "https://ai.azure.com/.default"
 
-_TRUSTED_PROVIDER_BASES = {
-    DEEPSEEK_BASE_URL,
-    "https://openrouter.ai/api/v1",
-    "https://api.openai.com/v1",
-}
-_DEFAULT_PROVIDER_BASES = {
-    "openai": "https://api.openai.com/v1",
-}
+_TRUSTED_PROVIDER_BASES: set[str] = set()
+_DEFAULT_PROVIDER_BASES: dict[str, str] = {}
 _CACHE_IDENTITY_VERSION = "llm-provider-v1"
+_FOUNDRY_CREDENTIAL_LOCK = threading.Lock()
+_FOUNDRY_TOKEN_PROVIDER = None
 
 # A provider entry:
 #   label            : human label for the UI
@@ -59,134 +42,63 @@ _CACHE_IDENTITY_VERSION = "llm-provider-v1"
 #   env_keys         : list of {key,label,secret,placeholder} the UI renders
 #   build            : callable(self, model) -> kwargs dict for litellm.acomplete
 #   models           : list of {id,label} preset choices (empty = free text)
-#   free_text_model  : when True, the UI shows a text input instead of a list
+#   free_text_model  : when True, the UI accepts model ids not in the fetched list
 PROVIDERS = {
-    "deepseek": {
-        "label": "DeepSeek",
+    "foundry": {
+        "label": "Microsoft Foundry",
         "models": [
-            {"id": "deepseek-v4-flash", "label": "V4 Flash (fast, default)"},
-            {"id": "deepseek-v4-pro", "label": "V4 Pro (reasoning)"},
-        ],
-        "free_text_model": False,
-        "env_keys": [
-            {"key": "DEEPSEEK_API_KEY", "label": "DeepSeek API Key", "secret": True, "placeholder": "sk-…"},
-        ],
-        "match": lambda m: m in DEEPSEEK_MODELS or m.startswith("deepseek-"),
-        "build": lambda self, model: {
-            "model": model,
-            "api_key": os.getenv("DEEPSEEK_API_KEY"),
-            "custom_llm_provider": "openai",
-            "api_base": DEEPSEEK_BASE_URL,
-            # V4 defaults to thinking=enabled; disable for fast structured output.
-            "extra_body": {"thinking": {"type": "disabled"}},
-        },
-    },
-    "openai": {
-        "label": "OpenAI",
-        "models": [
-            {"id": "openai/gpt-4o", "label": "GPT-4o"},
-            {"id": "openai/gpt-4o-mini", "label": "GPT-4o mini"},
-            {"id": "openai/gpt-4.1", "label": "GPT-4.1"},
-            {"id": "openai/gpt-4.1-mini", "label": "GPT-4.1 mini"},
-        ],
-        "free_text_model": False,
-        "env_keys": [
-            {"key": "OPENAI_API_KEY", "label": "OpenAI API Key", "secret": True, "placeholder": "sk-…"},
-            {"key": "OPENAI_API_BASE", "label": "OpenAI-compatible Base URL (optional)", "secret": False, "placeholder": "https://api.openai.com/v1"},
-        ],
-        "match": lambda m: m.startswith("openai/"),
-        "build": lambda self, model: _filter_none({
-            "model": model,
-            "api_key": os.getenv("OPENAI_API_KEY"),
-            "api_base": os.getenv("OPENAI_API_BASE") or None,
-        }),
-    },
-    "openrouter": {
-        "label": "OpenRouter",
-        "models": [
-            {"id": "openrouter/anthropic/claude-3.5-sonnet", "label": "Claude 3.5 Sonnet"},
-            {"id": "openrouter/google/gemini-2.0-flash", "label": "Gemini 2.0 Flash"},
-            {"id": "openrouter/meta-llama/llama-3.3-70b-instruct", "label": "Llama 3.3 70B"},
-            {"id": "openrouter/mistralai/mistral-large", "label": "Mistral Large"},
-            {"id": "openrouter/deepseek/deepseek-chat", "label": "DeepSeek Chat (via OpenRouter)"},
+            {"id": DEFAULT_MODEL, "label": "DeepSeek V4 Flash"},
         ],
         "free_text_model": True,
+        "model_hint": "foundry/<deployment-name>",
         "env_keys": [
-            {"key": "OPENROUTER_API_KEY", "label": "OpenRouter API Key", "secret": True, "placeholder": "sk-or-…"},
+            {
+                "key": "FOUNDRY_API_BASE",
+                "label": "Foundry OpenAI v1 Endpoint",
+                "secret": False,
+                "placeholder": "https://<resource>.services.ai.azure.com/openai/v1",
+            },
+            {
+                "key": "FOUNDRY_AUTH_METHOD",
+                "label": "Authentication Method",
+                "secret": False,
+                "placeholder": "api_key or entra (optional; default: api_key)",
+            },
+            {
+                "key": "FOUNDRY_API_KEY",
+                "label": "Foundry API Key",
+                "secret": True,
+                "placeholder": "Optional when FOUNDRY_AUTH_METHOD=entra",
+            },
         ],
-        "match": lambda m: m.startswith("openrouter/"),
-        "build": lambda self, model: {
-            "model": model,
-            "api_key": os.getenv("OPENROUTER_API_KEY"),
-            "api_base": os.getenv("OPENROUTER_API_BASE") or "https://openrouter.ai/api/v1",
-        },
-    },
-    "azure": {
-        "label": "Azure AI Foundry (Azure OpenAI)",
-        "models": [],
-        "free_text_model": True,
-        "model_hint": "azure/<your-deployment-name>",
-        "env_keys": [
-            {"key": "AZURE_API_KEY", "label": "Azure API Key", "secret": True, "placeholder": "Azure resource key"},
-            {"key": "AZURE_API_BASE", "label": "Azure Endpoint URL", "secret": False, "placeholder": "https://<resource>.openai.azure.com/"},
-            {"key": "AZURE_API_VERSION", "label": "API Version", "secret": False, "placeholder": "2024-10-21"},
-        ],
-        "match": lambda m: m.startswith("azure/"),
-        "build": lambda self, model: {
-            "model": model,
-            "api_key": os.getenv("AZURE_API_KEY"),
-            "api_base": os.getenv("AZURE_API_BASE"),
-            "api_version": os.getenv("AZURE_API_VERSION") or "2024-10-21",
-        },
-    },
-    "azure_ai": {
-        "label": "Azure AI Foundry (Models as a Service)",
-        "models": [
-            {"id": "azure_ai/Mistral-Large-2411", "label": "Mistral Large 2411"},
-            {"id": "azure_ai/Meta-Llama-3.3-70B-Instruct", "label": "Llama 3.3 70B Instruct"},
-            {"id": "azure_ai/Phi-4", "label": "Phi-4"},
-        ],
-        "free_text_model": True,
-        "model_hint": "azure_ai/<model-id-from-Foundry>",
-        "env_keys": [
-            {"key": "AZURE_AI_API_KEY", "label": "Azure AI API Key", "secret": True, "placeholder": "Foundry endpoint key"},
-            {"key": "AZURE_AI_API_BASE", "label": "Azure AI Endpoint URL", "secret": False, "placeholder": "https://<resource>.services.ai.azure.com/models/"},
-        ],
-        "match": lambda m: m.startswith("azure_ai/"),
-        "build": lambda self, model: {
-            "model": model,
-            "api_key": os.getenv("AZURE_AI_API_KEY"),
-            "api_base": os.getenv("AZURE_AI_API_BASE"),
-        },
+        "match": lambda m: m.startswith("foundry/") and bool(m.split("/", 1)[1]),
+        "build": lambda self, model: foundry_provider_kwargs(model),
     },
     "custom": {
-        "label": "Custom (OpenAI-compatible)",
+        "label": "Custom AI API",
         "models": [],
         "free_text_model": True,
-        "model_hint": "Enter model name (e.g., gpt-4o, llama-3-70b, qwen-plus)",
+        "model_hint": "custom/<model-id>",
         "env_keys": [
-            {"key": "CUSTOM_API_KEY", "label": "Custom API Key", "secret": True, "placeholder": "sk-…"},
-            {"key": "CUSTOM_API_BASE", "label": "Custom API Base URL", "secret": False, "placeholder": "https://api.example.com/v1"},
-            {"key": "CUSTOM_PROVIDER_TYPE", "label": "LiteLLM Provider Type", "secret": False, "placeholder": "openai (default) | anthropic | gemini | groq | together_ai | …"},
-            {"key": "CUSTOM_API_VERSION", "label": "API Version (optional)", "secret": False, "placeholder": "2024-10-21"},
-            {"key": "CUSTOM_TEMPERATURE", "label": "Temperature (optional, 0–2)", "secret": False, "placeholder": "0.7"},
-            {"key": "CUSTOM_MAX_TOKENS", "label": "Max Tokens (optional)", "secret": False, "placeholder": "4096"},
+            {
+                "key": "CUSTOM_API_BASE",
+                "label": "OpenAI-compatible Endpoint",
+                "secret": False,
+                "placeholder": "https://api.example.com/v1",
+            },
+            {
+                "key": "CUSTOM_API_KEY",
+                "label": "API Key",
+                "secret": True,
+                "placeholder": "API key",
+            },
         ],
-        "match": lambda m: m.startswith("custom/"),
-        "build": lambda self, model: _filter_none({
-            "model": model[7:],
-            "api_key": os.getenv("CUSTOM_API_KEY"),
-            "custom_llm_provider": os.getenv("CUSTOM_PROVIDER_TYPE") or "openai",
-            "api_base": os.getenv("CUSTOM_API_BASE") or None,
-            "api_version": os.getenv("CUSTOM_API_VERSION") or None,
-            "temperature": _parse_float(os.getenv("CUSTOM_TEMPERATURE")),
-            "max_tokens": _parse_int(os.getenv("CUSTOM_MAX_TOKENS")),
-        }),
+        "match": lambda m: m.startswith("custom/") and bool(m.split("/", 1)[1]),
+        "build": lambda self, model: custom_provider_kwargs(model),
     },
 }
 
-# Order in which prefix resolution is attempted. Most specific first.
-_PROVIDER_ORDER = ["openrouter", "azure_ai", "azure", "openai", "deepseek", "custom"]
+_PROVIDER_ORDER = ["foundry", "custom"]
 
 _PLACEHOLDER_VALUES = {"", None, "sk-your-key-here", "your-key-here"}
 
@@ -563,26 +475,100 @@ def _release_provider_lease(provider: str, lease: str | None) -> None:
         db.close()
 
 
-def _filter_none(d: dict) -> dict:
-    return {k: v for k, v in d.items() if v is not None}
+def foundry_auth_method() -> str:
+    method = (os.getenv("FOUNDRY_AUTH_METHOD") or "api_key").strip().lower()
+    if method not in {"api_key", "entra"}:
+        raise ValueError("FOUNDRY_AUTH_METHOD must be 'api_key' or 'entra'")
+    return method
 
 
-def _parse_float(raw: str | None) -> float | None:
-    if not raw:
-        return None
+def _foundry_api_key() -> str | None:
+    """Return an API key or a freshly acquired Entra bearer token."""
+    if foundry_auth_method() == "api_key":
+        return os.getenv("FOUNDRY_API_KEY")
+
+    global _FOUNDRY_TOKEN_PROVIDER
+    with _FOUNDRY_CREDENTIAL_LOCK:
+        if _FOUNDRY_TOKEN_PROVIDER is None:
+            try:
+                from azure.identity import (
+                    DefaultAzureCredential,
+                    get_bearer_token_provider,
+                )
+            except ImportError as exc:
+                raise LLMUnavailableError(
+                    "Microsoft Entra authentication support is unavailable"
+                ) from exc
+            _FOUNDRY_TOKEN_PROVIDER = get_bearer_token_provider(
+                DefaultAzureCredential(), FOUNDRY_ENTRA_SCOPE
+            )
+        token_provider = _FOUNDRY_TOKEN_PROVIDER
     try:
-        return float(raw.strip())
-    except (TypeError, ValueError):
-        return None
+        return token_provider()
+    except Exception as exc:
+        raise LLMUnavailableError(
+            "Microsoft Entra authentication could not acquire a Foundry token"
+        ) from exc
 
 
-def _parse_int(raw: str | None) -> int | None:
-    if not raw:
-        return None
-    try:
-        return int(raw.strip())
-    except (TypeError, ValueError):
-        return None
+def foundry_provider_kwargs(model_name: str) -> dict:
+    """Build dispatch arguments for a Foundry deployment only."""
+    if resolve_provider(model_name) != "foundry":
+        raise ValueError("Foundry models must use the foundry/ prefix")
+    deployment_name = model_name.split("/", 1)[1]
+    api_base = (os.getenv("FOUNDRY_API_BASE") or "").strip()
+    auth_method = foundry_auth_method()
+    configured = auth_method == "entra" or (
+        os.getenv("FOUNDRY_API_KEY") not in _PLACEHOLDER_VALUES
+    )
+    if configured and not api_base:
+        raise ValueError(
+            "FOUNDRY_API_BASE is required when Microsoft Foundry is configured"
+        )
+    if api_base:
+        from .settings import _validate_foundry_base_url
+
+        api_base = _validate_foundry_base_url(api_base)
+    return {
+        key: value
+        for key, value in {
+            "model": deployment_name,
+            "api_key": _foundry_api_key() if configured else None,
+            "custom_llm_provider": "openai",
+            "api_base": api_base or None,
+        }.items()
+        if value is not None
+    }
+
+
+def custom_provider_kwargs(model_name: str) -> dict:
+    """Build the minimal OpenAI-compatible custom API dispatch arguments."""
+    if resolve_provider(model_name) != "custom":
+        raise ValueError("Custom API models must use the custom/ prefix")
+    api_key = os.getenv("CUSTOM_API_KEY")
+    api_base = (os.getenv("CUSTOM_API_BASE") or "").strip()
+    configured = api_key not in _PLACEHOLDER_VALUES
+    if configured and not api_base:
+        raise ValueError("CUSTOM_API_BASE is required when Custom AI API is configured")
+    if api_base:
+        from .settings import _validate_llm_base_url
+
+        api_base = _validate_llm_base_url(api_base)
+    return {
+        key: value
+        for key, value in {
+            "model": model_name.split("/", 1)[1],
+            "api_key": api_key if configured else None,
+            "custom_llm_provider": "openai",
+            "api_base": api_base or None,
+        }.items()
+        if value is not None
+    }
+
+
+def provider_kwargs_for_model(model_name: str) -> dict:
+    provider = resolve_provider(model_name)
+    return PROVIDERS[provider]["build"](None, model_name)
 
 
 def _validated_provider_kwargs(kwargs: dict) -> dict:
@@ -732,8 +718,16 @@ def get_llm_catalog() -> dict:
 _FETCHED_MODELS_CACHE: dict = {}
 _MAX_MODEL_RESPONSE_BYTES = 2_000_000
 _MAX_MODELS_PER_PROVIDER = 1_000
+_MODEL_AUTO_REFRESH_SECONDS = 300
+_MODEL_AUTO_REFRESH_LOCK = asyncio.Lock()
+_MODEL_AUTO_REFRESHED_AT = 0.0
 
 _PLACEHOLDER_KEYS = {"", None, "sk-your-key-here", "your-key-here"}
+
+
+def invalidate_model_catalog_refresh() -> None:
+    global _MODEL_AUTO_REFRESHED_AT
+    _MODEL_AUTO_REFRESHED_AT = 0.0
 
 
 def _bounded_model_entry(model_id, label, *, prefix: str | None = None) -> dict | None:
@@ -764,11 +758,13 @@ async def _get_json_limited(client: httpx.AsyncClient, url: str, headers: dict) 
     return payload
 
 
-def _sanitize_fetched_models(data: dict) -> dict:
+def _sanitize_fetched_models(
+    data: dict, extra_secrets: tuple[str, ...] = ()
+) -> dict:
     sanitized = {}
     if not isinstance(data, dict):
         return sanitized
-    exact_secrets = _configured_secret_values()
+    exact_secrets = (*_configured_secret_values(), *extra_secrets)
     for provider, models in data.items():
         if provider not in PROVIDERS or not isinstance(models, list):
             continue
@@ -835,17 +831,20 @@ def _save_fetched_models(data: dict):
         print(f"[llm] failed to save fetched models kind={type(e).__name__}")
 
 
-async def _fetch_openai_models(
+async def _fetch_openai_compatible_models(
     api_key: str,
-    base: str | None,
+    base: str,
     *,
-    prefix: str | None = None,
     provider: str,
 ) -> list[dict]:
-    """Fetch GPT-family models from an OpenAI-compatible endpoint."""
-    from .settings import _validate_llm_base_url
+    """Fetch model ids from one of the two supported API surfaces."""
+    from .settings import _validate_foundry_base_url, _validate_llm_base_url
 
-    validated_base = _validate_llm_base_url(base or "https://api.openai.com/v1")
+    validated_base = (
+        _validate_foundry_base_url(base)
+        if provider == "foundry"
+        else _validate_llm_base_url(base)
+    )
     url = f"{validated_base}/models"
     headers = {"Authorization": f"Bearer {api_key}"}
     async with httpx.AsyncClient(timeout=15, follow_redirects=False) as cli:
@@ -861,122 +860,101 @@ async def _fetch_openai_models(
         mid = m.get("id", "")
         if not isinstance(mid, str):
             continue
-        # Filter to relevant chat/instruction models
-        if any(p in mid.lower() for p in ("gpt-", "o1", "o3", "o4", "claude", "gemini", "deepseek-")):
-            entry = _bounded_model_entry(mid, mid, prefix=prefix)
-            if entry:
-                models.append(entry)
+        entry = _bounded_model_entry(mid, mid, prefix=provider)
+        if entry:
+            models.append(entry)
     return sorted(models, key=lambda x: x["id"])
 
 
 async def fetch_live_models() -> dict:
-    """Query each configured provider for its currently available models.
-    Returns {provider_id: [{id, label}, …], …}.  Only providers with a valid
-    API key are queried; the rest are left with their preset defaults."""
+    """Query configured Foundry and Custom AI API model endpoints."""
+    global _MODEL_AUTO_REFRESHED_AT
     results: dict = {}
-
-    # ── DeepSeek (OpenAI-compatible surface) ──
-    ds_key = os.getenv("DEEPSEEK_API_KEY")
-    if ds_key and ds_key not in _PLACEHOLDER_KEYS:
+    ephemeral_secrets: list[str] = []
+    foundry_base = (os.getenv("FOUNDRY_API_BASE") or "").strip()
+    api_key_configured = os.getenv("FOUNDRY_API_KEY") not in _PLACEHOLDER_KEYS
+    if foundry_base and (foundry_auth_method() == "entra" or api_key_configured):
         try:
-            results["deepseek"] = await _fetch_openai_models(
-                ds_key, "https://api.deepseek.com/v1", provider="deepseek"
-            )
-        except Exception as e:
-            print(f"[llm] fetch deepseek models error kind={type(e).__name__}")
-
-    # ── OpenAI ──
-    oai_key = os.getenv("OPENAI_API_KEY")
-    if oai_key and oai_key not in _PLACEHOLDER_KEYS:
-        try:
-            results["openai"] = await _fetch_openai_models(
-                oai_key,
-                os.getenv("OPENAI_API_BASE") or None,
-                prefix="openai",
-                provider="openai",
-            )
-        except Exception as e:
-            print(f"[llm] fetch openai models error kind={type(e).__name__}")
-
-    # ── OpenRouter ──
-    or_key = os.getenv("OPENROUTER_API_KEY")
-    if or_key and or_key not in _PLACEHOLDER_KEYS:
-        try:
-            async with httpx.AsyncClient(timeout=20, follow_redirects=False) as cli:
-                _reserve_provider_capacity("openrouter", 1)
-                data = await _get_json_limited(
-                    cli,
-                    "https://openrouter.ai/api/v1/models",
-                    {"Authorization": f"Bearer {or_key}"},
+            api_key = _foundry_api_key()
+            if api_key:
+                ephemeral_secrets.append(api_key)
+                results["foundry"] = await _fetch_openai_compatible_models(
+                    api_key, foundry_base, provider="foundry"
                 )
-            or_models = []
-            raw_models = data.get("data", [])
-            if not isinstance(raw_models, list):
-                raise ValueError("provider model catalog data must be a list")
-            for m in raw_models[:_MAX_MODELS_PER_PROVIDER]:
-                if not isinstance(m, dict):
-                    continue
-                mid = m.get("id", "")
-                label = m.get("name", mid)
-                entry = _bounded_model_entry(mid, label, prefix="openrouter")
-                if entry:
-                    or_models.append(entry)
-            results["openrouter"] = sorted(or_models, key=lambda x: x["label"].lower())
         except Exception as e:
-            print(f"[llm] fetch openrouter models error kind={type(e).__name__}")
+            print(f"[llm] fetch Foundry models error kind={type(e).__name__}")
 
-    # ── Custom (OpenAI-compatible) ──
     custom_key = os.getenv("CUSTOM_API_KEY")
-    custom_base = os.getenv("CUSTOM_API_BASE")
-    if custom_key and custom_key not in _PLACEHOLDER_KEYS and custom_base:
+    custom_base = (os.getenv("CUSTOM_API_BASE") or "").strip()
+    if custom_base and custom_key not in _PLACEHOLDER_KEYS:
         try:
-            results["custom"] = await _fetch_openai_models(
-                custom_key,
-                custom_base,
-                prefix="custom",
-                provider="custom",
+            results["custom"] = await _fetch_openai_compatible_models(
+                custom_key, custom_base, provider="custom"
             )
         except Exception as e:
-            print(f"[llm] fetch custom models error kind={type(e).__name__}")
+            print(f"[llm] fetch Custom AI API models error kind={type(e).__name__}")
 
     # Provider-controlled model labels are persisted and returned, so apply the
     # same configured-secret boundary used for analysis output first.
-    results = _sanitize_fetched_models(results)
+    results = _sanitize_fetched_models(results, tuple(ephemeral_secrets))
     if results:
         _save_fetched_models(results)
+    # Manual refreshes also satisfy the automatic refresh window, preventing
+    # the catalog GET that follows a manual refresh from issuing a duplicate.
+    _MODEL_AUTO_REFRESHED_AT = time.monotonic()
     return results
 
 
-class LLMManager:
-    """Thin wrapper around litellm that routes to any configured provider.
+async def refresh_live_models_if_stale() -> None:
+    """Refresh configured model catalogs at most once every five minutes."""
+    global _MODEL_AUTO_REFRESHED_AT
+    if time.monotonic() - _MODEL_AUTO_REFRESHED_AT < _MODEL_AUTO_REFRESH_SECONDS:
+        return
+    async with _MODEL_AUTO_REFRESH_LOCK:
+        if time.monotonic() - _MODEL_AUTO_REFRESHED_AT < _MODEL_AUTO_REFRESH_SECONDS:
+            return
+        try:
+            await fetch_live_models()
+        finally:
+            _MODEL_AUTO_REFRESHED_AT = time.monotonic()
 
-    The provider is determined by the *model string's prefix* (or, for
-    DeepSeek, by a known model-id set). Each provider entry in PROVIDERS
-    knows which env vars to read and how to assemble the litellm kwargs.
-    """
+
+class LLMManager:
+    """Thin LiteLLM wrapper for Foundry and one custom API surface."""
 
     def __init__(self, model_name: str = None):
         raw = (model_name or os.getenv("DEFAULT_MODEL") or DEFAULT_MODEL).strip()
-        # Tolerate legacy "deepseek/<model>" litellm-prefix values from settings.
-        if raw.startswith("deepseek/"):
-            raw = raw.split("/", 1)[-1]
         self.model_name = raw
         self.provider = resolve_provider(raw)
         self.provider_cfg = PROVIDERS[self.provider]
 
-        # is_mock = primary key for the resolved provider is missing.
-        primary_key = self.provider_cfg["env_keys"][0]["key"]
-        self.api_key = os.getenv(primary_key)
-        self.is_mock = self.api_key in _PLACEHOLDER_VALUES
-        if self.provider == "custom" and not self.is_mock:
-            custom_base = (os.getenv("CUSTOM_API_BASE") or "").strip()
-            if not custom_base:
-                raise ValueError(
-                    "CUSTOM_API_BASE is required when CUSTOM_API_KEY is configured"
-                )
-            from .settings import _validate_llm_base_url
+        if self.provider == "foundry":
+            auth_method = foundry_auth_method()
+            self.api_key = os.getenv("FOUNDRY_API_KEY")
+            self.is_mock = (
+                auth_method == "api_key" and self.api_key in _PLACEHOLDER_VALUES
+            )
+            if not self.is_mock:
+                foundry_base = (os.getenv("FOUNDRY_API_BASE") or "").strip()
+                if not foundry_base:
+                    raise ValueError(
+                        "FOUNDRY_API_BASE is required when Microsoft Foundry is configured"
+                    )
+                from .settings import _validate_foundry_base_url
 
-            _validate_llm_base_url(custom_base)
+                _validate_foundry_base_url(foundry_base)
+        else:
+            self.api_key = os.getenv("CUSTOM_API_KEY")
+            self.is_mock = self.api_key in _PLACEHOLDER_VALUES
+            if not self.is_mock:
+                custom_base = (os.getenv("CUSTOM_API_BASE") or "").strip()
+                if not custom_base:
+                    raise ValueError(
+                        "CUSTOM_API_BASE is required when Custom AI API is configured"
+                    )
+                from .settings import _validate_llm_base_url
+
+                _validate_llm_base_url(custom_base)
         self.allow_synthetic = (
             _enabled(os.getenv("LLM_ALLOW_SYNTHETIC"))
             and (os.getenv("APP_MODE") or "production").strip().lower() != "production"
@@ -1242,8 +1220,8 @@ class LLMManager:
     ) -> dict:
         task_max_tokens = max(64, min(int(max_tokens), 4096))
         kwargs = {"model": self.model_name, "messages": messages}
-        # Provider-specific routing (api_key / api_base / custom provider /
-        # thinking-disabled etc.) comes from the catalog's build() lambda.
+        # Provider-specific routing (API credentials, base URL, and LiteLLM
+        # compatibility provider) comes from the catalog's build() lambda.
         provider_kwargs = _validated_provider_kwargs(
             self.provider_cfg["build"](self, self.model_name)
         )
@@ -1256,16 +1234,7 @@ class LLMManager:
         kwargs.update(provider_kwargs)
         kwargs["max_tokens"] = max(64, min(task_max_tokens, 4096))
         kwargs["timeout"] = self.request_timeout
-        if response_model is not None and self.provider in {"openai", "azure"}:
-            kwargs["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": response_model.__name__,
-                    "strict": True,
-                    "schema": response_model.model_json_schema(),
-                },
-            }
-        elif json_mode:
+        if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
         return kwargs
 

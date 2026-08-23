@@ -6,7 +6,12 @@ import unittest
 from contextlib import redirect_stdout
 from unittest.mock import MagicMock, patch
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
 from app.backend import main, settings, ticket_vectors, worker
+from app.backend.database import Base, SettingsRecord
 
 
 class SettingsSecurityTests(unittest.TestCase):
@@ -31,14 +36,14 @@ class SettingsSecurityTests(unittest.TestCase):
 
     def test_sensitive_settings_never_disclose_a_secret_prefix(self):
         with patch.dict(os.environ, {
-            "OPENAI_API_KEY": "sk-live-secret",
+            "CUSTOM_API_KEY": "sk-live-secret",
             "DATABASE_URL": "postgresql://tickety:database-password@db/tickety",
         }, clear=False):
             result = settings.get_settings()
 
-        self.assertEqual(result["OPENAI_API_KEY"], "****")
-        self.assertTrue(result["OPENAI_API_KEY__set"])
-        self.assertNotIn("sk-live", result["OPENAI_API_KEY"])
+        self.assertEqual(result["CUSTOM_API_KEY"], "****")
+        self.assertTrue(result["CUSTOM_API_KEY__set"])
+        self.assertNotIn("sk-live", result["CUSTOM_API_KEY"])
         self.assertEqual(result["DATABASE_URL"], "****")
         self.assertTrue(result["DATABASE_URL__set"])
         self.assertNotIn("database-password", result["DATABASE_URL"])
@@ -132,6 +137,26 @@ class SettingsSecurityTests(unittest.TestCase):
                 "https://provider.example/v1",
             )
 
+    def test_foundry_endpoint_requires_microsoft_host_and_openai_v1_path(self):
+        with patch.dict(os.environ, {
+            "APP_MODE": "demo",
+            "LLM_ALLOW_PRIVATE_ENDPOINTS": "true",
+        }, clear=False):
+            self.assertEqual(
+                settings._validate_foundry_base_url(
+                    "https://resource.services.ai.azure.com/openai/v1/"
+                ),
+                "https://resource.services.ai.azure.com/openai/v1",
+            )
+            with self.assertRaisesRegex(ValueError, "Microsoft Azure hostname"):
+                settings._validate_foundry_base_url(
+                    "https://provider.example/openai/v1"
+                )
+            with self.assertRaisesRegex(ValueError, "/openai/v1"):
+                settings._validate_foundry_base_url(
+                    "https://resource.services.ai.azure.com/models"
+                )
+
     def test_invalid_default_model_is_rejected_before_it_is_persisted(self):
         with (
             patch.object(settings, "_write_db_overrides") as write_overrides,
@@ -143,30 +168,26 @@ class SettingsSecurityTests(unittest.TestCase):
     def test_changing_provider_origin_requires_credential_reentry(self):
         with (
             patch.dict(os.environ, {
-                "OPENAI_API_BASE": "https://api.openai.com/v1",
-                "OPENAI_API_KEY": "existing-secret",
+                "CUSTOM_API_BASE": "https://api.example.com/v1",
+                "CUSTOM_API_KEY": "existing-secret",
             }, clear=False),
             patch.object(settings, "_write_db_overrides") as write_overrides,
             patch.object(settings, "_reset_runtime"),
-            self.assertRaisesRegex(ValueError, "requires re-entering OPENAI_API_KEY"),
+            self.assertRaisesRegex(ValueError, "requires re-entering CUSTOM_API_KEY"),
         ):
             settings.update_settings({
-                "OPENAI_API_BASE": "https://provider.example/v1",
+                "CUSTOM_API_BASE": "https://provider.example/v1",
             })
         write_overrides.assert_not_called()
 
-    def test_custom_sampling_controls_reject_unbounded_values(self):
-        for payload in (
-            {"CUSTOM_MAX_TOKENS": "4097"},
-            {"CUSTOM_MAX_TOKENS": "not-an-int"},
-            {"CUSTOM_TEMPERATURE": "nan"},
-            {"CUSTOM_TEMPERATURE": "2.1"},
-        ):
-            with self.subTest(payload=payload), patch.object(
-                settings, "_write_db_overrides"
-            ) as write_overrides, self.assertRaises(ValueError):
-                settings.update_settings(payload)
-            write_overrides.assert_not_called()
+    def test_removed_custom_sampling_controls_are_not_persisted(self):
+        with patch.object(settings, "_write_db_overrides") as write_overrides:
+            settings.update_settings({
+                "CUSTOM_MAX_TOKENS": "4097",
+                "CUSTOM_TEMPERATURE": "2.1",
+                "CUSTOM_PROVIDER_TYPE": "anthropic",
+            })
+        write_overrides.assert_not_called()
 
     def test_invalid_settings_batch_does_not_partially_mutate_process_environment(self):
         with patch.dict(os.environ, {"CUSTOM_API_KEY": "existing-key"}, clear=False):
@@ -174,7 +195,7 @@ class SettingsSecurityTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     settings.update_settings({
                         "CUSTOM_API_KEY": "replacement-key",
-                        "CUSTOM_TEMPERATURE": "nan",
+                        "FOUNDRY_AUTH_METHOD": "invalid",
                     })
                 self.assertEqual(os.environ["CUSTOM_API_KEY"], "existing-key")
                 write_overrides.assert_not_called()
@@ -192,13 +213,12 @@ class SettingsSecurityTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 settings.load_settings_into_env()
 
-    def test_startup_revalidates_process_environment_embedding_url(self):
+    def test_startup_rejects_non_microsoft_foundry_endpoint(self):
         with (
             patch.object(settings, "_read_db_overrides", return_value={}),
             patch.dict(os.environ, {
-                "TICKET_EMBEDDING_API_BASE": "http://127.0.0.1/v1",
-                "LLM_ALLOW_PRIVATE_ENDPOINTS": "false",
-                "LLM_ALLOW_INSECURE_ENDPOINTS": "false",
+                "FOUNDRY_API_BASE": "https://provider.example/openai/v1",
+                "LLM_ALLOW_PRIVATE_ENDPOINTS": "true",
             }, clear=False),
         ):
             with self.assertRaises(ValueError):
@@ -239,9 +259,8 @@ class SettingsSecurityTests(unittest.TestCase):
         with (
             patch.dict(os.environ, {
                 "APP_MODE": "production",
-                "OPENAI_API_KEY": "reviewed-deployment-key",
+                "CUSTOM_API_KEY": "reviewed-deployment-key",
                 "CORS_ALLOW_ORIGINS": "https://tickety.example",
-                "OPENAI_API_BASE": "",
                 "AUTO_TRIAGE_ENABLED": "false",
                 "LLM_DAILY_TOKEN_BUDGET": "500000",
                 "LLM_MAX_CONCURRENCY": "4",
@@ -251,14 +270,11 @@ class SettingsSecurityTests(unittest.TestCase):
                 "FRESHSERVICE_DOMAIN": "support.example.com",
                 "JIRA_BASE_URL": "https://jira.example.com",
                 "SYNC_INTERVAL_SECONDS": "60",
-                "OPENROUTER_API_BASE": "",
-                "AZURE_API_BASE": "",
-                "AZURE_AI_API_BASE": "",
+                "FOUNDRY_API_BASE": "",
                 "CUSTOM_API_BASE": "",
-                "TICKET_EMBEDDING_API_BASE": "",
             }, clear=False),
             patch.object(settings, "_read_db_overrides", return_value={
-                "OPENAI_API_KEY": "stale-database-key",
+                "CUSTOM_API_KEY": "stale-database-key",
                 "CORS_ALLOW_ORIGINS": "*",
                 "AUTO_TRIAGE_ENABLED": "true",
                 "LLM_DAILY_TOKEN_BUDGET": "100000000",
@@ -272,7 +288,7 @@ class SettingsSecurityTests(unittest.TestCase):
             }),
         ):
             settings.load_settings_into_env()
-            self.assertEqual(os.environ["OPENAI_API_KEY"], "reviewed-deployment-key")
+            self.assertEqual(os.environ["CUSTOM_API_KEY"], "reviewed-deployment-key")
             self.assertEqual(os.environ["CORS_ALLOW_ORIGINS"], "https://tickety.example")
             self.assertEqual(os.environ["AUTO_TRIAGE_ENABLED"], "false")
             self.assertEqual(os.environ["LLM_DAILY_TOKEN_BUDGET"], "500000")
@@ -288,7 +304,7 @@ class SettingsSecurityTests(unittest.TestCase):
         with (
             patch.dict(os.environ, {
                 "APP_MODE": "production",
-                "OPENAI_API_KEY": "reviewed-deployment-key",
+                "CUSTOM_API_KEY": "reviewed-deployment-key",
                 "AUTO_TRIAGE_ENABLED": "false",
                 "LLM_DAILY_TOKEN_BUDGET": "500000",
                 "ANALYTICS_USER_REQUESTS_PER_MINUTE": "60",
@@ -298,20 +314,154 @@ class SettingsSecurityTests(unittest.TestCase):
             patch.object(settings, "_write_db_overrides") as write_overrides,
         ):
             settings.update_settings({
-                "OPENAI_API_KEY": "runtime-attacker-key",
+                "CUSTOM_API_KEY": "runtime-attacker-key",
                 "AUTO_TRIAGE_ENABLED": "true",
                 "LLM_DAILY_TOKEN_BUDGET": "100000000",
                 "ANALYTICS_USER_REQUESTS_PER_MINUTE": "600",
                 "ITSM_PROVIDER": "freshservice",
                 "FRESHSERVICE_DOMAIN": "attacker.example",
             })
-            self.assertEqual(os.environ["OPENAI_API_KEY"], "reviewed-deployment-key")
+            self.assertEqual(os.environ["CUSTOM_API_KEY"], "reviewed-deployment-key")
             self.assertEqual(os.environ["AUTO_TRIAGE_ENABLED"], "false")
             self.assertEqual(os.environ["LLM_DAILY_TOKEN_BUDGET"], "500000")
             self.assertEqual(os.environ["ANALYTICS_USER_REQUESTS_PER_MINUTE"], "60")
             self.assertEqual(os.environ["ITSM_PROVIDER"], "")
             self.assertEqual(os.environ["FRESHSERVICE_DOMAIN"], "support.example.com")
             write_overrides.assert_not_called()
+
+    def test_production_admin_can_save_portal_enabled_provider_secret(self):
+        with (
+            patch.dict(os.environ, {
+                "APP_MODE": "production",
+                "TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED": "true",
+                "CUSTOM_API_KEY": "reviewed-deployment-key",
+            }, clear=False),
+            patch.object(settings, "_write_db_overrides") as write_overrides,
+            patch.object(settings, "_reset_runtime"),
+        ):
+            result = settings.update_settings(
+                {"CUSTOM_API_KEY": "admin-portal-key"},
+                actor_id="global-admin",
+            )
+
+            self.assertEqual(os.environ["CUSTOM_API_KEY"], "admin-portal-key")
+            self.assertTrue(result["CUSTOM_API_KEY__set"])
+            write_overrides.assert_called_once_with(
+                {"CUSTOM_API_KEY": "admin-portal-key"},
+                actor_id="global-admin",
+                approved_keys={"CUSTOM_API_KEY"},
+            )
+
+    def test_portal_approval_marker_is_persisted_without_secret_material(self):
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine)
+        try:
+            with patch.object(settings, "SessionLocal", session_factory):
+                settings._write_db_overrides(
+                    {"CUSTOM_API_KEY": "secret-value"},
+                    actor_id="global-admin",
+                    approved_keys={"CUSTOM_API_KEY"},
+                )
+                self.assertEqual(
+                    settings._read_portal_approved_keys(),
+                    {"CUSTOM_API_KEY"},
+                )
+                with session_factory() as db:
+                    marker = db.get(
+                        SettingsRecord,
+                        f"{settings._ADMIN_PORTAL_APPROVAL_PREFIX}CUSTOM_API_KEY",
+                    )
+                    self.assertIsNotNone(marker)
+                    self.assertEqual(marker.value, "global-admin")
+                    self.assertNotIn("secret-value", marker.value)
+        finally:
+            engine.dispose()
+
+    def test_production_portal_override_requires_authenticated_admin_actor(self):
+        with (
+            patch.dict(os.environ, {
+                "APP_MODE": "production",
+                "TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED": "true",
+                "CUSTOM_API_KEY": "reviewed-deployment-key",
+            }, clear=False),
+            patch.object(settings, "_write_db_overrides") as write_overrides,
+        ):
+            settings.update_settings({"CUSTOM_API_KEY": "untrusted-key"})
+
+            self.assertEqual(os.environ["CUSTOM_API_KEY"], "reviewed-deployment-key")
+            write_overrides.assert_not_called()
+
+    def test_production_infrastructure_boundaries_remain_deployment_owned(self):
+        with (
+            patch.dict(os.environ, {
+                "APP_MODE": "production",
+                "TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED": "true",
+                "CORS_ALLOW_ORIGINS": "https://tickety.example",
+                "SSO_DISCOVERY_URL": "https://identity.example/.well-known/openid-configuration",
+            }, clear=False),
+            patch.object(settings, "_write_db_overrides") as write_overrides,
+        ):
+            settings.update_settings(
+                {
+                    "CORS_ALLOW_ORIGINS": "*",
+                    "SSO_DISCOVERY_URL": "http://127.0.0.1/metadata",
+                },
+                actor_id="global-admin",
+            )
+
+            self.assertEqual(os.environ["CORS_ALLOW_ORIGINS"], "https://tickety.example")
+            self.assertEqual(
+                os.environ["SSO_DISCOVERY_URL"],
+                "https://identity.example/.well-known/openid-configuration",
+            )
+            write_overrides.assert_not_called()
+
+    def test_production_loads_only_admin_approved_portal_overrides(self):
+        deployment_key = "reviewed-deployment-key"
+        with (
+            patch.dict(os.environ, {
+                "APP_MODE": "production",
+                "TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED": "true",
+                "CUSTOM_API_KEY": deployment_key,
+                "FOUNDRY_API_BASE": "",
+                "CUSTOM_API_BASE": "",
+            }, clear=False),
+            patch.object(
+                settings,
+                "_read_db_overrides",
+                return_value={"CUSTOM_API_KEY": "stale-unapproved-key"},
+            ),
+            patch.object(settings, "_read_portal_approved_keys", return_value=set()),
+        ):
+            settings.load_settings_into_env()
+            self.assertEqual(os.environ["CUSTOM_API_KEY"], deployment_key)
+
+        with (
+            patch.dict(os.environ, {
+                "APP_MODE": "production",
+                "TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED": "true",
+                "CUSTOM_API_KEY": deployment_key,
+                "FOUNDRY_API_BASE": "",
+                "CUSTOM_API_BASE": "",
+            }, clear=False),
+            patch.object(
+                settings,
+                "_read_db_overrides",
+                return_value={"CUSTOM_API_KEY": "approved-admin-key"},
+            ),
+            patch.object(
+                settings,
+                "_read_portal_approved_keys",
+                return_value={"CUSTOM_API_KEY"},
+            ),
+        ):
+            settings.load_settings_into_env()
+            self.assertEqual(os.environ["CUSTOM_API_KEY"], "approved-admin-key")
 
     def test_unknown_database_rows_never_become_environment_variables(self):
         os.environ.pop("TICKET_INDEX_PRIVATE_COMMENTS", None)
@@ -321,12 +471,8 @@ class SettingsSecurityTests(unittest.TestCase):
             }),
             patch.dict(os.environ, {
                 "APP_MODE": "production",
-                "OPENAI_API_BASE": "",
-                "OPENROUTER_API_BASE": "",
-                "AZURE_API_BASE": "",
-                "AZURE_AI_API_BASE": "",
+                "FOUNDRY_API_BASE": "",
                 "CUSTOM_API_BASE": "",
-                "TICKET_EMBEDDING_API_BASE": "",
             }, clear=False),
         ):
             settings.load_settings_into_env()

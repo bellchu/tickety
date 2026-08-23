@@ -41,7 +41,7 @@ export function canAccessProtectedIntelligence(context?: AuthContext | null) {
 }
 
 export function canCreateTickets(context?: AuthContext | null) {
-  return hasProtectedProductionSession(context) || hasDemoAdministratorSession(context);
+  return hasDemoAdministratorSession(context);
 }
 
 export function isDemoContext(context?: AuthContext | null) {

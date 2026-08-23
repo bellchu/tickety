@@ -37,7 +37,7 @@ function isTriageStep(value: unknown): value is TriageStep {
   if (!isRecord(value)) return false;
   return typeof value.step === "string"
     && typeof value.label === "string"
-    && (value.status === "pending" || value.status === "active" || value.status === "done");
+    && (value.status === "pending" || value.status === "active" || value.status === "done" || value.status === "error");
 }
 
 function isTriageResult(value: unknown): value is TriageResult {

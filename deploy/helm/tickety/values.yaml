@@ -57,6 +57,10 @@ ingress:
 # Use an existing Secret instead of having the chart manage one. It must contain
 # DATABASE_URL and, when postgresql.enabled=true, POSTGRES_PASSWORD.
 existingSecret: ""
+# For a Secret managed outside Helm, change this non-secret token after each
+# credential rotation to roll backend and worker Pods. The chart never reads or
+# hashes the external Secret.
+existingSecretRolloutToken: ""
 
 # Sensitive application settings are written to the chart-managed Secret.
 # A stable, alphanumeric PostgreSQL password is generated on first install when

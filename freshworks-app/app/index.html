@@ -16,7 +16,7 @@
       <section id="error" class="card error" hidden></section>
       <section id="full-page" class="card" hidden>
         <h1>Connected</h1>
-        <p>The embedded session is active. Open a Freshservice ticket and select Tickety in the ticket sidebar for ticket intelligence and guarded write-back.</p>
+        <p>The embedded session is active. Open a Freshservice ticket and select Tickety in the ticket sidebar for read-only intelligence.</p>
         <dl id="connection-details"></dl>
       </section>
       <section id="ticket-panel" hidden>
@@ -24,12 +24,11 @@
           <span id="environment" class="pill"></span>
           <h1 id="subject"></h1>
           <p id="summary" class="muted"></p>
-          <div class="grid">
-            <label>Status<select id="status"></select></label>
-            <label>Priority<select id="priority"></select></label>
+          <div class="grid" aria-label="Freshservice properties">
+            <p><strong>Status</strong><span id="status" class="property-value"></span></p>
+            <p><strong>Priority</strong><span id="priority" class="property-value"></span></p>
           </div>
-          <button id="save" type="button">Write back to Freshservice</button>
-          <p id="write-status" class="muted" role="status"></p>
+          <p class="muted">Freshservice is authoritative. Tickety never changes tickets, replies, notes, or attachments in Freshservice.</p>
         </article>
         <article class="card">
           <h2>Recommended resolution</h2>

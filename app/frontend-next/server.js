@@ -13,7 +13,7 @@
  */
 const http = require("http");
 const next = require("next");
-const httpProxy = require("http-proxy");
+const httpProxy = require("http-proxy-3");
 const {
   createWebSocketUpgradeHandler,
   webSocketProxyErrorKind,

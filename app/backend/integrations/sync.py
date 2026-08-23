@@ -1,13 +1,12 @@
+import json
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional
 
-from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 
 from ..database import (
-    SessionLocal, TicketRecord, UserMappingRecord, SyncStateRecord,
-    UserRecord,
+    ExternalUserRecord, SessionLocal, TicketRecord, SyncStateRecord,
 )
 from ..schema import ExternalTicket, WebhookEvent
 # Kept as a module attribute for compatibility with integrations/tests that
@@ -22,6 +21,16 @@ from ..ai_state import invalidate_ticket_ai, invalidate_ticket_resolution
 from .registry import get_adapter
 
 
+def _project_source_status(source_status: str) -> tuple[str, str, str]:
+    """Project one provider status into external, workflow, and display state."""
+    workflow_status = (
+        "Closed"
+        if source_status.lower() in ("closed", "resolved")
+        else source_status
+    )
+    return source_status, workflow_status, workflow_status
+
+
 def _upsert_ticket(
     db: Session,
     ext: ExternalTicket,
@@ -30,22 +39,43 @@ def _upsert_ticket(
     binding_id: str = "legacy",
 ) -> tuple[str, Optional[TicketRecord]]:
     """Upsert an external ticket. Returns (action, ticket) where action is
-    one of "new" / "updated" / "skipped". When `overwrite` is False and the
-    ticket already exists locally, it is left untouched and ("skipped", None)
-    is returned so callers can avoid re-fetching already-imported tickets."""
+    one of "new" / "updated" / "skipped". Source status is authoritative and
+    is always reconciled. When `overwrite` is False, other fields on an
+    existing local ticket remain untouched."""
     existing = db.query(TicketRecord).filter(
         TicketRecord.binding_id == binding_id,
         TicketRecord.external_source == provider,
         TicketRecord.external_id == ext.external_id,
     ).first()
 
-    if existing and not overwrite:
-        return "skipped", None
-
-    assignee_id = _resolve_assignee_id(db, provider, ext.assignee_id, binding_id)
-    workflow_status = "Closed" if ext.status.lower() in ("closed", "resolved") else ext.status
+    authoritative_status = _project_source_status(ext.status)
+    external_status, workflow_status, display_status = authoritative_status
 
     if existing:
+        source_status_changed = (
+            existing.external_status,
+            existing.workflow_status,
+            existing.status,
+        ) != authoritative_status
+        if not overwrite:
+            if not source_status_changed:
+                return "skipped", None
+            existing.external_status = external_status
+            existing.workflow_status = workflow_status
+            existing.status = display_status
+            if ext.updated_at is not None:
+                existing.external_updated_at = ext.updated_at
+            existing.external_resolved_at = ext.resolved_at
+            existing.updated_at = datetime.utcnow()
+            if ext.status.lower() in ("closed", "resolved"):
+                existing.resolved_at = (
+                    ext.resolved_at or existing.resolved_at or datetime.utcnow()
+                )
+            db.commit()
+            db.refresh(existing)
+            refresh_ticket_documents_if_indexed(db, existing)
+            return "updated", existing
+
         analysis_input_changed = (
             existing.subject != ext.subject or existing.description != ext.description
         )
@@ -55,7 +85,7 @@ def _upsert_ticket(
             or existing.description != ext.description
             or existing.reporter != ext.reporter
             or existing.priority != ext.priority
-            or existing.external_status != ext.status
+            or source_status_changed
             or existing.external_assignee_id != ext.assignee_id
             or existing.external_workspace_id != ext.external_workspace_id
             or existing.external_updated_at != ext.updated_at
@@ -63,7 +93,6 @@ def _upsert_ticket(
             or existing.external_resolved_at != ext.resolved_at
             or existing.external_due_by != ext.due_by
             or existing.external_fr_due_by != ext.fr_due_by
-            or existing.assignee_id != assignee_id
             or existing.ticket_type != (ext.ticket_type or existing.ticket_type or "incident").lower()
             or (ext.url and existing.external_url != ext.url)
         )
@@ -79,7 +108,7 @@ def _upsert_ticket(
             invalidate_ticket_resolution(existing)
         existing.reporter = ext.reporter
         existing.priority = ext.priority
-        existing.external_status = ext.status
+        existing.external_status = external_status
         existing.external_assignee_id = ext.assignee_id
         existing.external_workspace_id = ext.external_workspace_id
         existing.external_updated_at = ext.updated_at
@@ -88,7 +117,6 @@ def _upsert_ticket(
         existing.external_due_by = ext.due_by
         existing.external_fr_due_by = ext.fr_due_by
         existing.external_url = ext.url or existing.external_url
-        existing.assignee_id = assignee_id
         existing.workflow_status = workflow_status
         existing.ticket_type = (ext.ticket_type or existing.ticket_type or "incident").lower()
         existing.due_by = ext.due_by or existing.due_by
@@ -96,10 +124,10 @@ def _upsert_ticket(
         existing.response_due_at = ext.fr_due_by or existing.response_due_at
         existing.updated_at = datetime.utcnow()
         if ext.status.lower() in ("closed", "resolved"):
-            existing.status = "Closed"
+            existing.status = display_status
             existing.resolved_at = ext.resolved_at or existing.resolved_at or datetime.utcnow()
         else:
-            existing.status = existing.workflow_status or ext.status
+            existing.status = display_status
         db.commit()
         db.refresh(existing)
         # Keep already-promoted evidence current for every provider update.
@@ -117,7 +145,6 @@ def _upsert_ticket(
         workflow_status=workflow_status,
         priority=ext.priority,
         ticket_type=(ext.ticket_type or "incident").lower(),
-        assignee_id=assignee_id,
         due_by=ext.due_by,
         response_due_at=ext.fr_due_by,
         resolution_due_at=ext.due_by,
@@ -142,31 +169,28 @@ def _upsert_ticket(
     return "new", new_ticket
 
 
-def _resolve_assignee_id(
+def _existing_external_ticket_states(
     db: Session,
     provider: str,
-    external_assignee_id: Optional[str],
     binding_id: str = "legacy",
-) -> Optional[str]:
-    if not external_assignee_id:
-        return None
-    mapping = db.query(UserMappingRecord).filter(
-        UserMappingRecord.binding_id == binding_id,
-        UserMappingRecord.external_source == provider,
-        UserMappingRecord.external_assignee_id == str(external_assignee_id),
-    ).first()
-    return mapping.tickety_user_id if mapping else None
+) -> dict[str, tuple[Optional[str], Optional[str], Optional[str]]]:
+    """Return existing source/local status state keyed by external ID.
 
-
-def _existing_external_ids(db: Session, provider: str, binding_id: str = "legacy") -> set:
-    """Return the set of external_ids already imported for `provider`.
-    Used to pre-filter so we don't issue a DB query per fetched ticket."""
-    rows = db.query(TicketRecord.external_id).filter(
+    Manual fetch uses this to skip unchanged existing tickets without issuing
+    a database query for every fetched ticket, while still reconciling any
+    source status change even when full overwrite is disabled.
+    """
+    rows = db.query(
+        TicketRecord.external_id,
+        TicketRecord.external_status,
+        TicketRecord.workflow_status,
+        TicketRecord.status,
+    ).filter(
         TicketRecord.binding_id == binding_id,
         TicketRecord.external_source == provider,
         TicketRecord.external_id.isnot(None),
     ).all()
-    return {r[0] for r in rows}
+    return {row[0]: (row[1], row[2], row[3]) for row in rows}
 
 
 def sync_tickets_from_external(adapter=None, *, binding_id: str = "legacy") -> dict:
@@ -241,14 +265,31 @@ def sync_tickets_from_external(adapter=None, *, binding_id: str = "legacy") -> d
         db.commit()
 
     except Exception as e:
-        sync_state = db.query(SyncStateRecord).filter(
-            SyncStateRecord.binding_id == binding_id,
-            SyncStateRecord.provider == adapter.provider_name
-        ).first()
-        if sync_state:
-            sync_state.last_status = "error"
-            sync_state.last_error = f"sync_failed:{type(e).__name__}"
-            db.commit()
+        # The failed operation may have left the session in SQLAlchemy's
+        # pending-rollback state.  Clear it before looking up the sync state;
+        # otherwise the error-reporting query itself can mask the original
+        # sync failure and leave the binding stuck in "running".
+        try:
+            db.rollback()
+            sync_state = db.query(SyncStateRecord).filter(
+                SyncStateRecord.binding_id == binding_id,
+                SyncStateRecord.provider == adapter.provider_name
+            ).first()
+            if sync_state:
+                sync_state.last_status = "error"
+                sync_state.last_error = f"sync_failed:{type(e).__name__}"
+                db.commit()
+        except Exception as state_exc:
+            # Preserve the initiating failure in logs even when the database
+            # is unavailable for the best-effort status update.
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            print(
+                "[sync] failed to record fatal sync state "
+                f"original={type(e).__name__} state_update={type(state_exc).__name__}"
+            )
         result["errors"] += 1
         print(f"[sync] fatal error kind={type(e).__name__}")
     finally:
@@ -267,10 +308,10 @@ def fetch_tickets_by_days(
     """Manually fetch all tickets updated in the last `days` days from the
     external ITSM provider, walking every page while respecting rate limits.
 
-    Skip-vs-overwrite: by default tickets already imported (matched by
-    external_source + external_id) are *not* re-written, so re-running a fetch
-    for an overlapping window won't clobber local AI triage / status changes.
-    Pass overwrite=True to force-refresh existing records from the source.
+    Source status is always reconciled for tickets already imported (matched
+    by external_source + external_id). With overwrite=False, all other local
+    fields are preserved. Pass overwrite=True to force-refresh every provider
+    field on existing records.
     """
     days = max(1, min(int(days), 365))
     adapter = adapter or get_adapter()
@@ -286,15 +327,21 @@ def fetch_tickets_by_days(
         tickets: List[ExternalTicket] = asyncio.run(adapter.fetch_tickets_since(since))
         result["fetched"] = len(tickets)
 
-        # Pre-load existing external ids once to avoid N queries.
-        existing_ids = _existing_external_ids(db, adapter.provider_name, binding_id)
+        # Pre-load status state once so unchanged existing tickets avoid an
+        # extra DB query while changed source statuses still reach the upsert.
+        existing_states = _existing_external_ticket_states(
+            db, adapter.provider_name, binding_id
+        )
 
         max_persisted_updated_at = None
         for ext in tickets:
             try:
-                if ext.external_id in existing_ids and not overwrite:
-                    result["skipped"] += 1
-                    continue
+                existing_state = existing_states.get(ext.external_id)
+                if existing_state is not None and not overwrite:
+                    authoritative_state = _project_source_status(ext.status)
+                    if existing_state == authoritative_state:
+                        result["skipped"] += 1
+                        continue
                 action, ticket = _upsert_ticket(
                     db,
                     ext,
@@ -303,7 +350,6 @@ def fetch_tickets_by_days(
                     binding_id=binding_id,
                 )
                 if action == "new":
-                    existing_ids.add(ext.external_id)
                     result["new"] += 1
                 elif action == "updated":
                     result["updated"] += 1
@@ -311,6 +357,12 @@ def fetch_tickets_by_days(
                     result["skipped"] += 1
                 if ticket and ext.updated_at:
                     max_persisted_updated_at = max(max_persisted_updated_at or ext.updated_at, ext.updated_at)
+                if ticket:
+                    existing_states[ext.external_id] = (
+                        ticket.external_status,
+                        ticket.workflow_status,
+                        ticket.status,
+                    )
             except Exception as e:
                 print(f"[fetch] ticket upsert failed kind={type(e).__name__}")
                 # Roll back the aborted transaction so a single poison ticket
@@ -327,7 +379,9 @@ def fetch_tickets_by_days(
         ).first()
         if not sync_state:
             sync_state = SyncStateRecord(
-                binding_id=binding_id, provider=adapter.provider_name
+                binding_id=binding_id,
+                provider=adapter.provider_name,
+                total_synced=0,
             )
             db.add(sync_state)
         # Only advance the cursor when the manual fetch window starts at or
@@ -420,9 +474,9 @@ def handle_webhook_event(
         db.close()
 
 
-def _external_agent_value(agent: dict, *keys: str) -> str:
+def _external_user_value(user: dict, *keys: str) -> str:
     for key in keys:
-        value = agent.get(key)
+        value = user.get(key)
         if value is None:
             continue
         text = str(value).strip()
@@ -431,145 +485,91 @@ def _external_agent_value(agent: dict, *keys: str) -> str:
     return ""
 
 
-def _external_agent_active(agent: dict) -> bool:
-    value = agent.get("active")
+def _external_user_active(user: dict) -> bool:
+    value = user.get("active")
     if isinstance(value, str):
         return value.strip().lower() not in {"false", "0", "no", "inactive"}
     return value is not False
 
 
-def _normalize_external_agent(agent: dict) -> dict[str, Any]:
-    ext_id = _external_agent_value(
-        agent,
-        "id",
-        "accountId",
-        "account_id",
-        "user_id",
+def _external_user_type(user: dict) -> str:
+    explicit = _external_user_value(user, "user_type", "type").lower()
+    if explicit in {"agent", "requester"}:
+        return explicit
+    if user.get("is_agent") is False:
+        return "requester"
+    return "agent"
+
+
+def _external_profile(user: dict) -> dict[str, Any]:
+    """Keep a bounded, non-authentication subset of provider profile data."""
+    allowed = (
+        "belongs_to_workspace_ids",
+        "department_ids",
+        "language",
+        "location_id",
+        "occasional",
+        "role_ids",
+        "roles",
+        "time_zone",
     )
-    first = _external_agent_value(agent, "first_name", "firstName")
-    last = _external_agent_value(agent, "last_name", "lastName")
-    full_name = _external_agent_value(
-        agent,
-        "name",
-        "display_name",
-        "displayName",
-        "full_name",
-        "fullName",
+    return {key: user[key] for key in allowed if user.get(key) is not None}
+
+
+def _external_source_updated_at(user: dict) -> Optional[datetime]:
+    value = user.get("updated_at") or user.get("updatedAt")
+    if isinstance(value, datetime):
+        return (
+            value.astimezone(timezone.utc).replace(tzinfo=None)
+            if value.tzinfo
+            else value
+        )
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+    except ValueError:
+        return None
+
+
+def _normalize_external_user(user: dict) -> dict[str, Any]:
+    ext_id = _external_user_value(user, "id", "accountId", "account_id", "user_id")
+    first = _external_user_value(user, "first_name", "firstName")
+    last = _external_user_value(user, "last_name", "lastName")
+    full_name = _external_user_value(
+        user, "name", "display_name", "displayName", "full_name", "fullName"
     )
     name = full_name or f"{first} {last}".strip()
-    email = _external_agent_value(agent, "email", "emailAddress", "mail").lower()
-    title = _external_agent_value(agent, "job_title", "jobTitle", "title", "accountType")
+    email = _external_user_value(
+        user, "email", "primary_email", "emailAddress", "mail"
+    ).lower()
+    title = _external_user_value(user, "job_title", "jobTitle", "title", "accountType")
     return {
         "id": ext_id,
-        "name": name or email or (f"Agent {ext_id}" if ext_id else "Agent"),
+        "user_type": _external_user_type(user),
+        "name": name or email or (f"External user {ext_id}" if ext_id else "External user"),
         "email": email,
         "title": title,
-        "active": _external_agent_active(agent),
+        "active": _external_user_active(user),
+        "profile_json": json.dumps(
+            _external_profile(user), sort_keys=True, separators=(",", ":")
+        ),
+        "source_updated_at": _external_source_updated_at(user),
     }
 
 
-def _find_users_by_email(db: Session, email: str) -> list[UserRecord]:
-    if not email:
-        return []
-    return db.query(UserRecord).filter(func.lower(UserRecord.email) == email).all()
-
-
-def _find_user_by_email(db: Session, email: str) -> Optional[UserRecord]:
-    users = _find_users_by_email(db, email)
-    return users[0] if len(users) == 1 else None
-
-
-def _find_users_by_name(db: Session, name: str) -> list[UserRecord]:
-    if not name:
-        return []
-    return db.query(UserRecord).filter(func.lower(UserRecord.name) == name.lower()).all()
-
-
-def _find_unique_user_by_name(db: Session, name: str) -> Optional[UserRecord]:
-    users = _find_users_by_name(db, name)
-    return users[0] if len(users) == 1 else None
-
-
-def _apply_external_agent_profile(user: UserRecord, agent: dict[str, Any]) -> bool:
-    changed = False
-    if agent["name"] and user.name != agent["name"]:
-        user.name = agent["name"]
-        changed = True
-    if agent["email"] and (user.email or "").strip().lower() != agent["email"]:
-        user.email = agent["email"]
-        changed = True
-    if agent["title"] and user.title != agent["title"]:
-        user.title = agent["title"]
-        changed = True
-    return changed
-
-
-def _create_external_agent_user(db: Session, agent: dict[str, Any]) -> UserRecord:
-    user = UserRecord(
-        id=str(uuid.uuid4()),
-        name=agent["name"],
-        email=agent["email"],
-        title=agent["title"],
-    )
-    db.add(user)
-    db.flush()
-    return user
-
-
-def _reconcile_ticket_assignees(
-    db: Session, provider: str, binding_id: str = "legacy"
-) -> int:
-    rows = db.query(TicketRecord, UserMappingRecord.tickety_user_id).join(
-        UserMappingRecord,
-        and_(
-            TicketRecord.binding_id == UserMappingRecord.binding_id,
-            TicketRecord.external_source == UserMappingRecord.external_source,
-            TicketRecord.external_assignee_id == UserMappingRecord.external_assignee_id,
-        ),
-    ).filter(
-        TicketRecord.binding_id == binding_id,
-        TicketRecord.external_source == provider,
-        TicketRecord.external_assignee_id.isnot(None),
-    ).all()
-    updated = 0
-    for ticket, tickety_user_id in rows:
-        if ticket.assignee_id != tickety_user_id:
-            ticket.assignee_id = tickety_user_id
-            ticket.updated_at = datetime.utcnow()
-            updated += 1
-    if updated:
-        db.commit()
-    return updated
-
-
-def _empty_agent_sync_result() -> dict:
+def _empty_external_user_sync_result() -> dict:
     return {
         "created": 0,
         "updated": 0,
-        "merged": 0,
-        "remapped": 0,
-        "missing": 0,
-        "conflicts": 0,
+        "unchanged": 0,
+        "deactivated": 0,
         "errors": 0,
         "error_details": [],
-        "conflict_details": [],
-        "missing_details": [],
         "total": 0,
-        "skipped_inactive": 0,
-        "tickets_reassigned": 0,
-    }
-
-
-def _agent_sync_options(options: Optional[dict[str, Any]]) -> dict[str, bool]:
-    options = options or {}
-    mode = str(options.get("mode") or "sync").strip().lower()
-    merge_mode = mode in {"merge", "merge_reconcile", "reconcile"}
-    return {
-        "create_missing": bool(options.get("create_missing", True)),
-        "merge_existing": bool(options.get("merge_existing", merge_mode)),
-        "update_profiles": bool(options.get("update_profiles", True)),
-        "match_by_name": bool(options.get("match_by_name", merge_mode)),
-        "reassign_tickets": bool(options.get("reassign_tickets", True)),
     }
 
 
@@ -578,227 +578,133 @@ def _limited_append(items: list[str], detail: str, limit: int = 12) -> None:
         items.append(detail)
 
 
-def _find_agent_match(
-    db: Session,
-    agent: dict[str, Any],
-    *,
-    match_by_name: bool,
-) -> tuple[Optional[UserRecord], Optional[str], Optional[str]]:
-    email_matches = _find_users_by_email(db, agent["email"])
-    if len(email_matches) == 1:
-        return email_matches[0], "email", None
-    if len(email_matches) > 1:
-        return None, None, (
-            f"{agent['name']} matches {len(email_matches)} Tickety users with email {agent['email']}; "
-            "merge skipped"
-        )
-
-    if match_by_name and not agent["email"]:
-        name_matches = _find_users_by_name(db, agent["name"])
-        if len(name_matches) == 1:
-            return name_matches[0], "name", None
-        if len(name_matches) > 1:
-            return None, None, (
-                f"{agent['name']} matches {len(name_matches)} Tickety users by name; merge skipped"
-            )
-
-    return None, None, None
-
-
-def _import_external_agents(
+def _import_external_users(
     adapter,
-    raw_agents: list[dict[str, Any]],
-    options: Optional[dict[str, Any]] = None,
+    raw_users: list[dict[str, Any]],
     *,
     binding_id: str = "legacy",
 ) -> dict:
-    sync_options = _agent_sync_options(options)
+    """Store provider users only in the external directory security domain."""
     db: Session = SessionLocal()
-    result = _empty_agent_sync_result()
-    result["options"] = sync_options
+    result = _empty_external_user_sync_result()
+    seen: set[tuple[str, str]] = set()
     try:
-        result["total"] = len(raw_agents)
-
-        for raw_agent in raw_agents:
+        result["total"] = len(raw_users)
+        for raw_user in raw_users:
             try:
-                agent = _normalize_external_agent(raw_agent)
-                ext_id = agent["id"]
+                user = _normalize_external_user(raw_user)
+                ext_id = user["id"]
                 if not ext_id:
-                    continue
-
-                # Per API docs: active is a boolean; false means the agent has
-                # been deactivated and should not receive new tickets / points.
-                if not agent["active"]:
-                    result["skipped_inactive"] += 1
-                    continue
-
-                mapping = db.query(UserMappingRecord).filter(
-                    UserMappingRecord.binding_id == binding_id,
-                    UserMappingRecord.external_source == adapter.provider_name,
-                    UserMappingRecord.external_assignee_id == ext_id,
+                    raise ValueError("external user has no provider id")
+                identity = (user["user_type"], ext_id)
+                seen.add(identity)
+                record = db.query(ExternalUserRecord).filter(
+                    ExternalUserRecord.binding_id == binding_id,
+                    ExternalUserRecord.provider == adapter.provider_name,
+                    ExternalUserRecord.user_type == user["user_type"],
+                    ExternalUserRecord.external_id == ext_id,
                 ).first()
-
-                matched_user, match_reason, conflict = _find_agent_match(
-                    db,
-                    agent,
-                    match_by_name=sync_options["match_by_name"],
-                )
-                if conflict:
-                    result["conflicts"] += 1
-                    _limited_append(result["conflict_details"], conflict)
-                    continue
-
-                user = None
-                created_user = False
-                merged_user = False
-                remapped = False
-
-                if mapping:
-                    mapped_user = db.query(UserRecord).filter(
-                        UserRecord.id == mapping.tickety_user_id
-                    ).first()
-
-                    mapped_email = (mapped_user.email or "").strip().lower() if mapped_user else ""
-                    if matched_user and matched_user.id != mapping.tickety_user_id and (
-                        (agent["email"] and mapped_email != agent["email"])
-                        or (not agent["email"] and not mapped_user)
-                    ):
-                        if sync_options["merge_existing"]:
-                            user = matched_user
-                            mapping.tickety_user_id = user.id
-                            remapped = True
-                        else:
-                            result["conflicts"] += 1
-                            _limited_append(
-                                result["conflict_details"],
-                                f"{agent['name']} is mapped to one Tickety user but matches another by {match_reason}; enable merge to reconcile",
-                            )
-                            continue
-                    else:
-                        user = mapped_user
-
-                    if not user:
-                        if matched_user and sync_options["merge_existing"]:
-                            user = matched_user
-                            merged_user = True
-                        elif matched_user:
-                            result["conflicts"] += 1
-                            _limited_append(
-                                result["conflict_details"],
-                                f"{agent['name']} matches an existing Tickety user by {match_reason}; enable merge to link the accounts",
-                            )
-                            continue
-                        elif sync_options["create_missing"]:
-                            user = _create_external_agent_user(db, agent)
-                            created_user = True
-                        else:
-                            result["missing"] += 1
-                            _limited_append(result["missing_details"], f"{agent['name']} has no Tickety account")
-                            continue
-                        if mapping.tickety_user_id != user.id:
-                            mapping.tickety_user_id = user.id
-                            remapped = True
-                else:
-                    if matched_user and sync_options["merge_existing"]:
-                        user = matched_user
-                        merged_user = True
-                    elif matched_user:
-                        result["conflicts"] += 1
-                        _limited_append(
-                            result["conflict_details"],
-                            f"{agent['name']} matches an existing Tickety user by {match_reason}; enable merge to link the accounts",
-                        )
-                        continue
-                    elif sync_options["create_missing"]:
-                        user = _create_external_agent_user(db, agent)
-                        created_user = True
-                    else:
-                        result["missing"] += 1
-                        _limited_append(result["missing_details"], f"{agent['name']} has no Tickety account")
-                        continue
-                    db.add(UserMappingRecord(
+                now = datetime.utcnow()
+                if record is None:
+                    record = ExternalUserRecord(
+                        id=str(uuid.uuid4()),
                         binding_id=binding_id,
-                        tickety_user_id=user.id,
-                        external_source=adapter.provider_name,
-                        external_assignee_id=ext_id,
-                    ))
-
-                profile_changed = _apply_external_agent_profile(user, agent) if sync_options["update_profiles"] else False
-                db.commit()
-
-                if created_user:
+                        provider=adapter.provider_name,
+                        external_id=ext_id,
+                        user_type=user["user_type"],
+                        name=user["name"],
+                        email=user["email"] or None,
+                        title=user["title"] or None,
+                        active=user["active"],
+                        profile_json=user["profile_json"],
+                        source_updated_at=user["source_updated_at"],
+                        fetched_at=now,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    db.add(record)
                     result["created"] += 1
-                if merged_user:
-                    result["merged"] += 1
-                elif remapped:
-                    result["remapped"] += 1
-                elif profile_changed:
-                    result["updated"] += 1
-
-            except Exception as e:
-                agent_id = (
-                    raw_agent.get("id") or raw_agent.get("accountId")
-                    if isinstance(raw_agent, dict)
-                    else "unknown"
-                )
-                detail = f"agent_processing_failed:{type(e).__name__}"
-                print(f"[agents] processing failed kind={type(e).__name__}")
+                else:
+                    values = {
+                        "name": user["name"],
+                        "email": user["email"] or None,
+                        "title": user["title"] or None,
+                        "active": user["active"],
+                        "profile_json": user["profile_json"],
+                        "source_updated_at": user["source_updated_at"],
+                    }
+                    changed = any(
+                        getattr(record, key) != value for key, value in values.items()
+                    )
+                    for key, value in values.items():
+                        setattr(record, key, value)
+                    record.fetched_at = now
+                    if changed:
+                        record.updated_at = now
+                        result["updated"] += 1
+                    else:
+                        result["unchanged"] += 1
+                db.commit()
+            except Exception as exc:
+                print(f"[external-users] processing failed kind={type(exc).__name__}")
                 db.rollback()
                 result["errors"] += 1
-                result["error_details"].append(detail)
+                _limited_append(
+                    result["error_details"],
+                    f"external_user_processing_failed:{type(exc).__name__}",
+                )
 
-        if sync_options["reassign_tickets"]:
-            result["tickets_reassigned"] = _reconcile_ticket_assignees(
-                db, adapter.provider_name, binding_id
-            )
-
-    except Exception as e:
-        print(f"[agents] fatal error kind={type(e).__name__}")
+        # Only a complete, error-free directory read can prove that a formerly
+        # active provider identity disappeared.
+        if not result["errors"]:
+            existing = db.query(ExternalUserRecord).filter(
+                ExternalUserRecord.binding_id == binding_id,
+                ExternalUserRecord.provider == adapter.provider_name,
+                ExternalUserRecord.active.is_(True),
+            ).all()
+            now = datetime.utcnow()
+            for record in existing:
+                if (record.user_type, record.external_id) not in seen:
+                    record.active = False
+                    record.fetched_at = now
+                    record.updated_at = now
+                    result["deactivated"] += 1
+            db.commit()
+    except Exception as exc:
+        print(f"[external-users] fatal error kind={type(exc).__name__}")
+        db.rollback()
         result["errors"] += 1
-        result["error_details"].append(f"agent_sync_failed:{type(e).__name__}")
+        _limited_append(
+            result["error_details"],
+            f"external_user_sync_failed:{type(exc).__name__}",
+        )
     finally:
         db.close()
     return result
 
 
-async def async_sync_agents_from_external(
+async def async_sync_external_users(
     adapter=None,
-    options: Optional[dict[str, Any]] = None,
     *,
     binding_id: str = "legacy",
 ) -> dict:
-    """Fetch agents from the external ITSM provider and create / update
-    Tickety user accounts.
-
-    Agents have fields: id, first_name, last_name, email, job_title,
-    active, occasional, roles, department_ids, …
-      • The "List All Agents" endpoint is paginated (per_page up to 100) and
-        returns {"agents": […]}.  Sort is created_at desc by default.
-      • Rate‑limit sub‑limit: 40–140/min depending on plan.
-
-    This function only imports agents where `active` is True (deactivated
-    agents are skipped).  The `occasional` flag is preserved on the Tickety
-    UserRecord so the leaderboard can distinguish full‑time from part‑time
-    agents later if desired.  Duplicates (same external_source +
-    external_assignee_id) are updated in‑place instead of being re‑created.
-    """
+    """Refresh external profiles without creating or updating Tickety users."""
     adapter = adapter or get_adapter()
     try:
-        raw_agents = await adapter.fetch_agents()
-    except Exception as e:
-        print(f"[agents] fatal error kind={type(e).__name__}")
-        result = _empty_agent_sync_result()
+        raw_users = await adapter.fetch_external_users()
+    except Exception as exc:
+        print(f"[external-users] fetch failed kind={type(exc).__name__}")
+        result = _empty_external_user_sync_result()
         result["errors"] += 1
-        result["error_details"].append(f"agent_fetch_failed:{type(e).__name__}")
+        result["error_details"].append(
+            f"external_user_fetch_failed:{type(exc).__name__}"
+        )
         return result
-    return _import_external_agents(
-        adapter, raw_agents, options=options, binding_id=binding_id
-    )
+    return _import_external_users(adapter, raw_users, binding_id=binding_id)
 
 
-def sync_agents_from_external(
+def sync_external_users(
     adapter=None,
-    options: Optional[dict[str, Any]] = None,
     *,
     binding_id: str = "legacy",
 ) -> dict:
@@ -809,12 +715,10 @@ def sync_agents_from_external(
         asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(
-            async_sync_agents_from_external(
-                adapter, options=options, binding_id=binding_id
-            )
+            async_sync_external_users(adapter, binding_id=binding_id)
         )
 
     raise RuntimeError(
-        "sync_agents_from_external cannot run inside an active event loop; "
-        "use async_sync_agents_from_external instead"
+        "sync_external_users cannot run inside an active event loop; "
+        "use async_sync_external_users instead"
     )

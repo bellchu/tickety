@@ -58,6 +58,7 @@ async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  getHealth: () => fetchAPI<{ status: string; mode: "demo" | "production" }>("/health"),
   getTickets: () => fetchAPI<import("./types").Ticket[]>("/tickets"),
   getTicketsPage: async (options: import("./types").TicketListParams = {}) => {
     const params = new URLSearchParams();
@@ -100,11 +101,12 @@ export const api = {
       `/admin/sync/fetch?days=${days}&overwrite=${overwrite ? 1 : 0}`,
       { method: "POST" }
     ),
-  syncAgents: (payload: import("./types").SyncAgentsOptions) =>
-    fetchAPI<{ status: string; result: import("./types").SyncAgentsResult }>(
-      "/admin/sync/agents", { method: "POST", body: JSON.stringify(payload) }
+  syncExternalUsers: () =>
+    fetchAPI<{ status: string; result: import("./types").ExternalUserSyncResult }>(
+      "/admin/sync/external-users", { method: "POST" }
     ),
-  getAgents: () => fetchAPI<import("./types").AgentListResponse>("/admin/agents"),
+  getExternalUsers: () =>
+    fetchAPI<import("./types").ExternalUserListResponse>("/admin/external-users"),
   // OAuth 2.0
   getOAuthStatus: () => fetchAPI<{ configured: boolean; connected: boolean; domain: string }>("/oauth/status"),
   getOAuthAuthorizeUrl: () => fetchAPI<{ url: string }>("/oauth/authorize"),
@@ -167,6 +169,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ name, description, color }),
     }),
+  deleteCategory: (id: number) =>
+    fetchAPI<{ status: string }>(`/categories/${id}`, { method: "DELETE" }),
   bulkAction: (ticketIds: string[], action: string, value?: string) =>
     fetchAPI<{ status: string; updated: number }>("/tickets/bulk", {
       method: "POST",

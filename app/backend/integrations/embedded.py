@@ -21,9 +21,8 @@ from ..database import (
     IntegrationBindingRecord,
     IntegrationBootstrapRecord,
     IntegrationSessionRecord,
+    ExternalUserRecord,
     TicketRecord,
-    UserMappingRecord,
-    UserRecord,
 )
 from .bindings import normalize_freshservice_host
 
@@ -40,7 +39,7 @@ class EmbeddedAuthError(ValueError):
 class EmbeddedPrincipal:
     session: IntegrationSessionRecord
     binding: IntegrationBindingRecord
-    user: UserRecord
+    external_user: ExternalUserRecord
 
 
 def _digest(value: str) -> str:
@@ -106,19 +105,15 @@ def issue_bootstrap_code(
     if audience == "ticket_sidebar" and not external_ticket_id:
         raise EmbeddedAuthError("Ticket sidebar bootstrap requires a ticket")
 
-    mapping = db.query(UserMappingRecord).filter(
-        UserMappingRecord.binding_id == binding.id,
-        UserMappingRecord.external_source == "freshservice",
-        UserMappingRecord.external_assignee_id == external_user_id,
+    external_user = db.query(ExternalUserRecord).filter(
+        ExternalUserRecord.binding_id == binding.id,
+        ExternalUserRecord.provider == "freshservice",
+        ExternalUserRecord.user_type == "agent",
+        ExternalUserRecord.external_id == external_user_id,
+        ExternalUserRecord.active.is_(True),
     ).first()
-    if not mapping:
-        raise EmbeddedAuthError("Freshworks agent is not mapped to an active Tickety user")
-    user = db.query(UserRecord).filter(
-        UserRecord.id == mapping.tickety_user_id,
-        UserRecord.is_active.is_(True),
-    ).first()
-    if not user:
-        raise EmbeddedAuthError("Freshworks agent is not mapped to an active Tickety user")
+    if not external_user:
+        raise EmbeddedAuthError("Freshworks agent is not present in the external directory")
 
     if external_ticket_id:
         ticket = db.query(TicketRecord).filter(
@@ -138,7 +133,6 @@ def issue_bootstrap_code(
     code = secrets.token_urlsafe(32)
     expires_at = now + timedelta(seconds=BOOTSTRAP_TTL_SECONDS)
     context = {
-        "user_id": user.id,
         "external_user_id": external_user_id,
         "workspace_id": normalized_workspace,
         "external_ticket_id": external_ticket_id,
@@ -154,7 +148,7 @@ def issue_bootstrap_code(
         context_json=json.dumps(context, sort_keys=True, separators=(",", ":")),
         expires_at=expires_at,
     ))
-    _audit(db, binding.id, "embedded.bootstrap_issued", user.id)
+    _audit(db, binding.id, "embedded.bootstrap_issued", None)
     db.query(IntegrationBootstrapRecord).filter(
         IntegrationBootstrapRecord.expires_at < now - timedelta(minutes=10)
     ).delete(synchronize_session=False)
@@ -185,18 +179,20 @@ def redeem_bootstrap_code(
         context = json.loads(bootstrap.context_json or "{}")
     except (TypeError, ValueError) as exc:
         raise EmbeddedAuthError("Bootstrap context is invalid") from exc
-    user = db.query(UserRecord).filter(
-        UserRecord.id == context.get("user_id"),
-        UserRecord.is_active.is_(True),
+    external_user = db.query(ExternalUserRecord).filter(
+        ExternalUserRecord.binding_id == binding.id,
+        ExternalUserRecord.provider == "freshservice",
+        ExternalUserRecord.user_type == "agent",
+        ExternalUserRecord.external_id == str(context.get("external_user_id") or ""),
+        ExternalUserRecord.active.is_(True),
     ).first()
-    if not user:
-        raise EmbeddedAuthError("Mapped Tickety user is unavailable")
+    if not external_user:
+        raise EmbeddedAuthError("Freshworks agent is unavailable")
 
     token = secrets.token_urlsafe(32)
     session = IntegrationSessionRecord(
         token_hash=_digest(token),
         binding_id=binding.id,
-        user_id=user.id,
         external_user_id=str(context.get("external_user_id") or ""),
         workspace_id=context.get("workspace_id"),
         external_ticket_id=context.get("external_ticket_id"),
@@ -205,7 +201,7 @@ def redeem_bootstrap_code(
     )
     bootstrap.redeemed_at = now
     db.add(session)
-    _audit(db, binding.id, "embedded.session_issued", user.id)
+    _audit(db, binding.id, "embedded.session_issued", None)
     db.commit()
     db.refresh(session)
     return token, session
@@ -229,15 +225,20 @@ def authenticate_session(db: Session, authorization: Optional[str]) -> EmbeddedP
         IntegrationBindingRecord.id == session.binding_id,
         IntegrationBindingRecord.state == "active",
     ).first()
-    user = db.query(UserRecord).filter(
-        UserRecord.id == session.user_id,
-        UserRecord.is_active.is_(True),
+    external_user = db.query(ExternalUserRecord).filter(
+        ExternalUserRecord.binding_id == session.binding_id,
+        ExternalUserRecord.provider == "freshservice",
+        ExternalUserRecord.user_type == "agent",
+        ExternalUserRecord.external_id == session.external_user_id,
+        ExternalUserRecord.active.is_(True),
     ).first()
-    if not binding or not user or (binding.expires_at and binding.expires_at <= now):
+    if not binding or not external_user or (binding.expires_at and binding.expires_at <= now):
         raise EmbeddedAuthError("Embedded session context is unavailable")
     session.last_seen_at = now
     db.commit()
-    return EmbeddedPrincipal(session=session, binding=binding, user=user)
+    return EmbeddedPrincipal(
+        session=session, binding=binding, external_user=external_user
+    )
 
 
 def require_ticket_scope(principal: EmbeddedPrincipal, external_ticket_id: str) -> None:

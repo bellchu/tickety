@@ -155,7 +155,9 @@ secrets: {}
 ```
 
 `config.extra` accepts non-secret settings such as `ITSM_PROVIDER` and
-`SYNC_INTERVAL_SECONDS`; use `secrets` for credentials.
+`SYNC_INTERVAL_SECONDS`; use `secrets` for credentials. Production sidecar
+deployments should set `ITSM_PROVIDER: freshservice`; the integration only
+imports provider data and never sends ticket mutations back.
 
 For a public IP instead of an ingress, set
 `frontend.service.type: LoadBalancer`, set `config.frontendUrl` to the final
@@ -172,7 +174,10 @@ It can contain provider and integration credentials too. For example:
 ```sh
 kubectl -n tickety create secret generic tickety-production \
   --from-literal=DATABASE_URL='postgresql+psycopg2://tickety:<url-encoded-password>@db.example.net:5432/tickety' \
-  --from-literal=OPENAI_API_KEY='<provider-key>'
+  --from-literal=FOUNDRY_API_KEY='<foundry-key>' \
+  --from-literal=FOUNDRY_API_BASE='https://<resource>.services.ai.azure.com/openai/v1' \
+  --from-literal=DEFAULT_MODEL='foundry/<deployment-name>' \
+  --from-literal=LLM_ALLOWED_PROVIDER_HOSTS='<resource>.services.ai.azure.com'
 ```
 
 Use it with an external PostgreSQL service:
@@ -182,6 +187,13 @@ existingSecret: tickety-production
 postgresql:
   enabled: false
 ```
+
+After the secret manager rotates an `existingSecret`, update the non-secret
+`existingSecretRolloutToken` in the Helm values (for example, with the rotation
+timestamp or secret-manager version) and run `helm upgrade`. Kubernetes does
+not restart Pods solely because an `envFrom` Secret changes; this token changes
+the backend and worker Pod templates without the chart reading or hashing the
+external Secret.
 
 Alternatively, with a chart-managed Secret, set `postgresql.enabled: false`
 and supply `postgresql.externalDatabaseUrl`. The external database must be

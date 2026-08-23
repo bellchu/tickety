@@ -23,6 +23,7 @@ from app.backend import llm_manager, main, ticket_vectors, worker
 from app.backend.database import (
     AIRequestBucketRecord,
     Base,
+    ExternalUserRecord,
     KbArticleRecord,
     ProblemRecord,
     ProblemTicketLinkRecord,
@@ -226,7 +227,7 @@ class ProtectedAIRouteTests(unittest.TestCase):
                 "/admin/settings",
                 "/admin/llm/catalog",
                 "/admin/sync/status",
-                "/admin/agents",
+                "/admin/external-users",
                 "/oauth/status",
                 "/oauth/authorize",
                 "/oauth/callback?code=invalid&state=invalid",
@@ -278,7 +279,9 @@ class ProtectedAIRouteTests(unittest.TestCase):
         self.assertEqual(read.status_code, 200, read.text)
         self.assertEqual(write.status_code, 200, write.text)
         get_settings.assert_called_once()
-        update_settings.assert_called_once_with({"LLM_PROVIDER": "malicious"})
+        update_settings.assert_called_once_with(
+            {"LLM_PROVIDER": "malicious"}, actor_id="real-admin"
+        )
 
     def test_auth_context_distinguishes_demo_fallback_from_real_session(self):
         with (
@@ -976,7 +979,8 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
             patch.object(main, "_reserve_ai_request") as reserve,
             patch.object(main, "sync_tickets_from_external", return_value={}),
             patch.object(main, "fetch_tickets_by_days", return_value={}),
-            patch.object(main, "async_sync_agents_from_external", new=AsyncMock(return_value={})),
+            patch.object(main, "async_sync_external_users", new=AsyncMock(return_value={})),
+            patch.object(main, "get_adapter", return_value=adapter),
             patch("app.backend.integrations.registry.get_adapter", return_value=adapter),
             patch.object(main.settings_module, "update_settings"),
             patch("app.backend.llm_manager.fetch_live_models", new=AsyncMock(return_value={})),
@@ -984,7 +988,6 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
             requests = (
                 ("/admin/sync/trigger", "itsm_sync"),
                 ("/admin/sync/fetch", "itsm_fetch"),
-                ("/admin/sync/agents", "itsm_agent_sync"),
                 ("/oauth/refresh", "itsm_oauth_refresh"),
                 ("/admin/sync/triage-all", "triage_all"),
                 ("/admin/sync/repair", "repair_ai_gaps"),
@@ -996,6 +999,65 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
                     response = self.client.post(path, headers=headers, json={})
                     self.assertEqual(response.status_code, 200, response.text)
                     reserve.assert_called_once_with(ANY, "prod-admin", task)
+
+    def test_external_user_refresh_uses_no_ai_quota_or_local_user_mutation(self):
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
+        with self.session_factory() as db:
+            before = db.query(UserRecord).count()
+        result = {
+            "created": 1,
+            "updated": 0,
+            "unchanged": 0,
+            "deactivated": 0,
+            "errors": 0,
+            "total": 1,
+            "error_details": [],
+        }
+        with (
+            patch.object(main, "_reserve_ai_request") as reserve,
+            patch.object(main, "get_adapter", return_value=MagicMock()),
+            patch.object(
+                main,
+                "async_sync_external_users",
+                new=AsyncMock(return_value=result),
+            ),
+        ):
+            response = self.client.post(
+                "/admin/sync/external-users",
+                headers={"Origin": "https://tickety.example"},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["result"], result)
+        reserve.assert_not_called()
+        with self.session_factory() as db:
+            self.assertEqual(db.query(UserRecord).count(), before)
+
+    def test_external_directory_api_returns_provider_profile_not_tickety_role(self):
+        with self.session_factory() as db:
+            db.add(ExternalUserRecord(
+                id="external-requester-1",
+                binding_id="legacy",
+                provider="freshservice",
+                external_id="9001",
+                user_type="requester",
+                name="Remote Requester",
+                email="requester@example.com",
+                active=True,
+                profile_json='{"language":"en"}',
+            ))
+            db.commit()
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
+
+        response = self.client.get("/admin/external-users")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        external_user = response.json()["users"][0]
+        self.assertEqual(external_user["external_id"], "9001")
+        self.assertEqual(external_user["user_type"], "requester")
+        self.assertEqual(external_user["profile"], {"language": "en"})
+        self.assertNotIn("role", external_user)
+        self.assertNotIn("password_hash", external_user)
 
     def test_maintenance_batches_are_bounded_and_never_revive_dead_letters(self):
         with self.session_factory() as db:
@@ -1444,7 +1506,7 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         reserve.assert_not_called()
 
-    def test_noop_ticket_update_does_not_consume_embedding_quota(self):
+    def test_production_ticket_update_is_blocked_without_embedding_work(self):
         self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
         refresh = AsyncMock(return_value=0)
         with (
@@ -1459,7 +1521,7 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
                 json={},
             )
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 409)
         reserve.assert_not_called()
         refresh.assert_not_awaited()
 
@@ -1488,7 +1550,7 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         reserve.assert_not_called()
 
-    def test_ticket_creation_without_ai_work_does_not_consume_ai_quota(self):
+    def test_production_ticket_creation_is_blocked_without_ai_work(self):
         self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
         with (
             patch.object(ticket_vectors, "embedding_enabled", return_value=False),
@@ -1510,10 +1572,10 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
                 },
             )
 
-        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.status_code, 409)
         reserve.assert_not_called()
 
-    def test_ticket_edit_that_requeues_automation_reserves_caller_quota(self):
+    def test_production_ticket_edit_cannot_requeue_automation(self):
         self.client.cookies.set(main.SESSION_COOKIE, "prod-agent-session")
         refresh = AsyncMock(return_value=0)
         with (
@@ -1528,14 +1590,11 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
                 json={"description": "A changed source that invalidates AI artifacts"},
             )
 
-        self.assertEqual(response.status_code, 200, response.text)
-        reserve.assert_called_once_with(
-            ANY,
-            "prod-agent",
-            "ticket_update_auto_processing",
-        )
+        self.assertEqual(response.status_code, 409, response.text)
+        reserve.assert_not_called()
+        refresh.assert_not_awaited()
 
-    def test_bulk_resolution_invalidation_reserves_admin_quota(self):
+    def test_production_bulk_lifecycle_change_is_blocked_before_ai_work(self):
         self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
         with (
             patch.object(main, "_automation_enabled", return_value=True),
@@ -1551,12 +1610,8 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
                 },
             )
 
-        self.assertEqual(response.status_code, 200, response.text)
-        reserve.assert_called_once_with(
-            ANY,
-            "prod-admin",
-            "ticket_bulk_auto_processing",
-        )
+        self.assertEqual(response.status_code, 409, response.text)
+        reserve.assert_not_called()
 
     def test_notification_websocket_rejects_cross_origin_session(self):
         self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
@@ -1704,17 +1759,33 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
 
 
 class LLMInterfaceContractTests(unittest.TestCase):
+    def test_provider_catalog_contains_only_foundry_and_custom_api(self):
+        self.assertEqual(set(llm_manager.PROVIDERS), {"foundry", "custom"})
+
+    def test_model_catalog_auto_refresh_is_throttled(self):
+        refresh = AsyncMock(return_value={})
+        with (
+            patch.object(llm_manager, "fetch_live_models", new=refresh),
+            patch.object(llm_manager, "_MODEL_AUTO_REFRESHED_AT", 0.0),
+            patch.object(llm_manager.time, "monotonic", return_value=500.0),
+        ):
+            asyncio.run(llm_manager.refresh_live_models_if_stale())
+            asyncio.run(llm_manager.refresh_live_models_if_stale())
+
+        refresh.assert_awaited_once()
+
     def test_model_catalog_dispatch_reserves_provider_capacity(self):
         payload = {"data": [{"id": "gpt-4.1"}]}
         with (
             patch.dict(os.environ, {
                 "APP_MODE": "production",
-                "OPENAI_API_KEY": "catalog-test-key",
+                "CUSTOM_API_KEY": "catalog-test-key",
+                "CUSTOM_API_BASE": "https://provider.example/v1",
             }, clear=True),
             patch.object(llm_manager, "_reserve_provider_capacity") as reserve,
             patch(
                 "app.backend.settings._validate_llm_base_url",
-                return_value="https://api.openai.com/v1",
+                return_value="https://provider.example/v1",
             ),
             patch.object(
                 llm_manager,
@@ -1725,16 +1796,17 @@ class LLMInterfaceContractTests(unittest.TestCase):
         ):
             result = asyncio.run(llm_manager.fetch_live_models())
 
-        reserve.assert_called_once_with("openai", 1)
+        reserve.assert_called_once_with("custom", 1)
         fetch.assert_awaited_once()
-        self.assertIn("openai", result)
+        self.assertIn("custom", result)
 
     def test_model_catalog_capacity_failure_prevents_provider_http(self):
         fetch = AsyncMock(return_value={"data": []})
         with (
             patch.dict(os.environ, {
                 "APP_MODE": "production",
-                "OPENAI_API_KEY": "catalog-test-key",
+                "CUSTOM_API_KEY": "catalog-test-key",
+                "CUSTOM_API_BASE": "https://provider.example/v1",
             }, clear=True),
             patch.object(
                 llm_manager,
@@ -1743,7 +1815,7 @@ class LLMInterfaceContractTests(unittest.TestCase):
             ),
             patch(
                 "app.backend.settings._validate_llm_base_url",
-                return_value="https://api.openai.com/v1",
+                return_value="https://provider.example/v1",
             ),
             patch.object(llm_manager, "_get_json_limited", new=fetch),
             patch.object(llm_manager, "_save_fetched_models"),
@@ -1770,10 +1842,10 @@ class LLMInterfaceContractTests(unittest.TestCase):
             self.assertEqual(main._cors_allow_origins(), [])
             self.assertTrue(main._cookie_secure())
 
-    def test_custom_max_tokens_cannot_raise_task_limit_or_exceed_global_cap(self):
+    def test_removed_custom_token_control_cannot_change_task_limit(self):
         cases = (
             ("4096", 300, 300),
-            ("200", 300, 200),
+            ("200", 300, 300),
             ("999999", 999999, 4096),
         )
         for configured, task_limit, expected in cases:
@@ -1812,9 +1884,8 @@ class LLMInterfaceContractTests(unittest.TestCase):
             "TICKET_EMBEDDING_MODEL": "custom/private-embedding",
             "CUSTOM_API_KEY": "configured-key",
             "CUSTOM_API_BASE": "",
-            "TICKET_EMBEDDING_API_BASE": "",
         }, clear=True):
-            with self.assertRaisesRegex(ValueError, "required for custom embeddings"):
+            with self.assertRaisesRegex(ValueError, "CUSTOM_API_BASE is required"):
                 ticket_vectors._embedding_kwargs()
 
     def test_duplicate_json_keys_are_rejected(self):
@@ -2039,11 +2110,13 @@ class RetrievalEvidenceContractTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.dict(os.environ, {
                 "TICKET_EMBEDDING_ENABLED": "true",
-                "TICKET_EMBEDDING_MODEL": "openai/test-embedding",
+                "TICKET_EMBEDDING_MODEL": "custom/test-embedding",
                 "TICKET_EMBEDDING_DIMENSIONS": "2",
-                "OPENAI_API_KEY": "configured-test-key",
+                "CUSTOM_API_KEY": "configured-test-key",
+                "CUSTOM_API_BASE": "https://provider.example/v1",
                 "WEBHOOK_SECRET": "opaqueWebhookValue7Kite",
-                "OPENAI_API_BASE": "",
+                "LLM_ALLOWED_PROVIDER_HOSTS": "provider.example",
+                "LLM_ALLOW_PRIVATE_ENDPOINTS": "true",
                 "LLM_ENFORCE_PROVIDER_LIMITS": "false",
                 "APP_MODE": "production",
             }, clear=False),
@@ -2076,7 +2149,6 @@ class RetrievalEvidenceContractTests(unittest.IsolatedAsyncioTestCase):
             "TICKET_EMBEDDING_DIMENSIONS": "2",
             "CUSTOM_API_KEY": "first-opaque-key",
             "CUSTOM_API_BASE": "https://provider-a.example/v1",
-            "CUSTOM_PROVIDER_TYPE": "openai",
             "LLM_ALLOW_PRIVATE_ENDPOINTS": "true",
             "LLM_ALLOWED_PROVIDER_HOSTS": "provider-a.example,provider-b.example",
         }
@@ -2098,8 +2170,10 @@ class RetrievalEvidenceContractTests(unittest.IsolatedAsyncioTestCase):
             patch.dict(os.environ, {
                 "APP_MODE": "demo",
                 "TICKET_EMBEDDING_ENABLED": "true",
-                "TICKET_EMBEDDING_MODEL": "openai/test-embedding",
-                "OPENAI_API_KEY": "configured-test-key",
+                "TICKET_EMBEDDING_MODEL": "custom/test-embedding",
+                "CUSTOM_API_KEY": "configured-test-key",
+                "CUSTOM_API_BASE": "https://provider.example/v1",
+                "LLM_ALLOW_PRIVATE_ENDPOINTS": "true",
             }, clear=False),
             patch("litellm.aembedding", new=provider),
         ):
@@ -2118,9 +2192,11 @@ class RetrievalEvidenceContractTests(unittest.IsolatedAsyncioTestCase):
                 "APP_MODE": "demo",
                 "LOGIN_REQUIRED": "true",
                 "TICKET_EMBEDDING_ENABLED": "true",
-                "TICKET_EMBEDDING_MODEL": "openai/test-embedding",
+                "TICKET_EMBEDDING_MODEL": "custom/test-embedding",
                 "TICKET_EMBEDDING_DIMENSIONS": "2",
-                "OPENAI_API_KEY": "configured-test-key",
+                "CUSTOM_API_KEY": "configured-test-key",
+                "CUSTOM_API_BASE": "https://provider.example/v1",
+                "LLM_ALLOW_PRIVATE_ENDPOINTS": "true",
                 "LLM_ENFORCE_PROVIDER_LIMITS": "false",
             }, clear=False),
             patch("litellm.aembedding", new=provider),

@@ -46,6 +46,7 @@ export interface Ticket {
   external_url: string | null;
   external_status: string | null;
   external_assignee_id: string | null;
+  external_assignee_name: string | null;
   external_workspace_id: string | null;
   external_updated_at: string | null;
   external_created_at: string | null;
@@ -166,31 +167,21 @@ export interface PointsNotification {
 export interface TriageStep {
   step: string;
   label: string;
-  status: "pending" | "active" | "done";
+  status: "pending" | "active" | "done" | "error";
 }
 
 export interface Settings {
   APP_MODE: string;
+  TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED: string;
   SEED_DEMO_DATA: string;
   CORS_ALLOW_ORIGINS: string;
   COOKIE_SECURE: string;
   COOKIE_SAMESITE: string;
-  DEEPSEEK_API_KEY: string;
-  OPENAI_API_KEY: string;
-  OPENAI_API_BASE: string;
-  OPENROUTER_API_KEY: string;
-  OPENROUTER_API_BASE: string;
-  AZURE_API_KEY: string;
-  AZURE_API_BASE: string;
-  AZURE_API_VERSION: string;
-  AZURE_AI_API_KEY: string;
-  AZURE_AI_API_BASE: string;
+  FOUNDRY_API_KEY: string;
+  FOUNDRY_API_BASE: string;
+  FOUNDRY_AUTH_METHOD: string;
   CUSTOM_API_KEY: string;
   CUSTOM_API_BASE: string;
-  CUSTOM_PROVIDER_TYPE: string;
-  CUSTOM_API_VERSION: string;
-  CUSTOM_TEMPERATURE: string;
-  CUSTOM_MAX_TOKENS: string;
   DEFAULT_MODEL: string;
   TICKET_RAG_SCOPE_KEY: string;
   TICKET_RAG_V2_SCOPE_ALLOWLIST: string;
@@ -451,47 +442,35 @@ export interface FetchTicketsResult {
   overwrite: boolean;
 }
 
-// ── Agent sync ────────────────────────────────────────────────
+// ── External ITSM user directory ─────────────────────────────
 
-export interface AgentRecord {
+export interface ExternalUserRecord {
   id: string;
+  binding_id: string;
+  provider: string;
+  external_id: string;
+  user_type: "agent" | "requester";
   name: string;
   email: string | null;
   title: string | null;
-  tier: number;
-  impact_points: number;
-  external_source: string | null;
-  external_assignee_id: string | null;
+  active: boolean;
+  profile: Record<string, unknown>;
+  source_updated_at: string | null;
+  fetched_at: string;
 }
 
-export interface AgentListResponse {
-  agents: AgentRecord[];
+export interface ExternalUserListResponse {
+  users: ExternalUserRecord[];
 }
 
-export interface SyncAgentsOptions {
-  mode?: "sync" | "merge";
-  create_missing: boolean;
-  merge_existing: boolean;
-  update_profiles: boolean;
-  match_by_name: boolean;
-  reassign_tickets: boolean;
-}
-
-export interface SyncAgentsResult {
+export interface ExternalUserSyncResult {
   created: number;
   updated: number;
-  merged: number;
-  remapped: number;
-  missing: number;
-  conflicts: number;
+  unchanged: number;
+  deactivated: number;
   errors: number;
   error_details: string[];
-  conflict_details: string[];
-  missing_details: string[];
   total: number;
-  skipped_inactive: number;
-  tickets_reassigned: number;
-  options?: SyncAgentsOptions;
 }
 
 // ── Systemic Issues ───────────────────────────────────────────

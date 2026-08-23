@@ -70,7 +70,7 @@ function exportTickets(tickets: Ticket[]) {
     ["Status", (ticket) => ticket.status],
     ["Priority", (ticket) => ticket.priority],
     ["Reporter", (ticket) => ticket.reporter],
-    ["Assignee", (ticket) => ticket.assignee_name],
+    ["Assignee", (ticket) => ticket.assignee_name || ticket.external_assignee_name],
     ["Category", (ticket) => ticket.category],
     ["Created", (ticket) => ticket.created_at],
     ["Updated", (ticket) => ticket.updated_at],
@@ -224,7 +224,7 @@ export default function DashboardPage() {
   const slaHealth = slaItems.length ? Math.round((onTrack / slaItems.length) * 100) : null;
   const p1Count = activeTickets.filter((ticket) => ticket.priority.trim().toUpperCase() === "P1").length;
   const escalatedCount = activeTickets.filter((ticket) => ticket.status.trim().toLowerCase() === "escalated").length;
-  const unassignedCount = activeTickets.filter((ticket) => !ticket.assignee_id && !ticket.assignee_name).length;
+  const unassignedCount = activeTickets.filter((ticket) => !ticket.assignee_id && !ticket.assignee_name && !ticket.external_assignee_name).length;
   const inactiveCount = tickets.length - activeTickets.length;
   const attentionCount = breached + atRisk;
   const activeServices = (servicesQuery.data ?? []).filter((service) => service.is_active).length;
@@ -412,7 +412,7 @@ export default function DashboardPage() {
                       </div>
                       <Link href={`/tickets/${ticket.id}`} className="mt-3 block break-words text-sm font-semibold leading-5 text-ink-700 [overflow-wrap:anywhere] hover:text-semantic-primary hover:underline">{ticket.subject}</Link>
                       <p className="mt-1 text-xs leading-5 text-ink-500">{ranked ? intelligenceQueueReason(ranked) : deterministicQueueReason(ticket)}</p>
-                      <p className="mt-3 flex min-w-0 items-center gap-1.5 text-xs text-ink-500"><UserRound className="h-3.5 w-3.5 shrink-0" aria-hidden="true" /><span className="truncate">{ticket.assignee_name || "Unassigned"}</span></p>
+                      <p className="mt-3 flex min-w-0 items-center gap-1.5 text-xs text-ink-500"><UserRound className="h-3.5 w-3.5 shrink-0" aria-hidden="true" /><span className="truncate">{ticket.assignee_name || ticket.external_assignee_name || "Unassigned"}</span></p>
                     </article>
                   );
                 })}
@@ -449,7 +449,7 @@ export default function DashboardPage() {
                             </div>
                             <p className="mt-1 truncate text-xs text-ink-500">{ranked ? intelligenceQueueReason(ranked) : deterministicQueueReason(ticket)}</p>
                           </td>
-                          <td className="min-w-0 px-3 py-4"><span className="flex min-w-0 items-center gap-1.5 text-xs text-ink-500"><UserRound className="h-3.5 w-3.5 shrink-0" aria-hidden="true" /><span className="truncate">{ticket.assignee_name || "Unassigned"}</span></span></td>
+                          <td className="min-w-0 px-3 py-4"><span className="flex min-w-0 items-center gap-1.5 text-xs text-ink-500"><UserRound className="h-3.5 w-3.5 shrink-0" aria-hidden="true" /><span className="truncate">{ticket.assignee_name || ticket.external_assignee_name || "Unassigned"}</span></span></td>
                           <td className="px-3 py-4"><TicketStatusBadge status={ticket.status} /></td>
                           {usesIntelligenceQueue ? (
                             <td className="px-3 py-4 text-right">{ranked ? <><span className="text-sm font-semibold tabular-nums text-ink-700">{Math.round(ranked.score)}</span><span className="ml-1 text-[10px] uppercase text-ink-500">score</span></> : "—"}</td>
@@ -501,7 +501,7 @@ export default function DashboardPage() {
                 <div className="min-w-0 rounded-xl border border-linen-400 bg-linen-100 p-3"><dt className="text-[11px] font-medium text-ink-500">Priority</dt><dd className="mt-1 truncate text-base font-semibold text-ink-700" title={topTicket.priority}>{topTicket.priority}</dd></div>
                 <div className="rounded-xl border border-linen-400 bg-linen-100 p-3"><dt className="text-[11px] font-medium text-ink-500">Age</dt><dd className="mt-1 text-base font-semibold text-ink-700">{formatQueueAge(topTicket.created_at)}</dd></div>
                 <div className="min-w-0 rounded-xl border border-linen-400 bg-linen-100 p-3"><dt className="text-[11px] font-medium text-ink-500">Status</dt><dd className="mt-1 truncate text-sm font-semibold text-ink-700">{topTicket.status}</dd></div>
-                <div className="min-w-0 rounded-xl border border-linen-400 bg-linen-100 p-3"><dt className="text-[11px] font-medium text-ink-500">Owner</dt><dd className="mt-1 truncate text-sm font-semibold text-ink-700">{topTicket.assignee_name || "Unassigned"}</dd></div>
+                <div className="min-w-0 rounded-xl border border-linen-400 bg-linen-100 p-3"><dt className="text-[11px] font-medium text-ink-500">Owner</dt><dd className="mt-1 truncate text-sm font-semibold text-ink-700">{topTicket.assignee_name || topTicket.external_assignee_name || "Unassigned"}</dd></div>
               </dl>
             </>
           )}

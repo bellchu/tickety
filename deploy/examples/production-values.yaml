@@ -9,6 +9,9 @@ config:
   corsAllowOrigins: https://support.example.com
   cookieSecure: true
   cookieSameSite: lax
+  extra:
+    ITSM_PROVIDER: freshservice
+    FRESHSERVICE_OAUTH_SCOPES: "freshservice.tickets.view freshservice.agents.manage freshservice.requesters.view"
 
 frontend:
   service:

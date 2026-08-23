@@ -52,7 +52,7 @@ export function FetchTicketsModal({ open, onClose }: Props) {
         <div className="space-y-4">
           <p className="text-sm text-ink-500">
             Pull tickets updated in the last N days from your ITSM provider.
-            Already-imported tickets are skipped unless overwrite is selected.
+            Source status changes are always synchronized for existing tickets.
             Pagination and rate limits are handled automatically.
           </p>
 
@@ -97,7 +97,7 @@ export function FetchTicketsModal({ open, onClose }: Props) {
             <span className="text-sm text-ink-600">
               <span className="font-medium">Overwrite existing tickets</span>
               <span className="block text-xs text-ink-500 mt-0.5">
-                Re-fetch and refresh tickets already imported from the source.
+                Refresh all provider fields; status changes sync either way.
               </span>
             </span>
           </label>

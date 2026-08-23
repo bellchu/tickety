@@ -18,7 +18,6 @@ class FreshworksAppPackageTests(unittest.TestCase):
                 "ticketyBootstrap",
                 "ticketyRedeem",
                 "ticketyTicketContext",
-                "ticketyTicketWriteback",
             },
         )
 
@@ -34,15 +33,14 @@ class FreshworksAppPackageTests(unittest.TestCase):
                 "<%= iparam.bootstrap_secret %>",
             )
 
-    def test_writeback_template_is_ticket_scoped_and_idempotent(self):
+    def test_package_has_no_provider_mutation_template_or_browser_action(self):
         requests = json.loads((ROOT / "config" / "requests.json").read_text())
-        schema = requests["ticketyTicketWriteback"]["schema"]
-        self.assertEqual(schema["method"], "PATCH")
-        self.assertIn("<%= context.external_ticket_id %>", schema["path"])
-        self.assertEqual(
-            schema["headers"]["Idempotency-Key"],
-            "<%= context.idempotency_key %>",
-        )
+        browser = (ROOT / "app" / "scripts" / "app.js").read_text()
+        markup = (ROOT / "app" / "index.html").read_text()
+        self.assertEqual(requests["ticketyTicketContext"]["schema"]["method"], "GET")
+        self.assertNotIn("ticketyTicketWriteback", requests)
+        self.assertNotIn("ticketyTicketWriteback", browser)
+        self.assertNotIn("Write back to Freshservice", markup)
 
 
 if __name__ == "__main__":

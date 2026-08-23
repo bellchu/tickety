@@ -7,6 +7,7 @@ from ..schema import ExternalTicket, WebhookEvent
 
 class BaseITSMAdapter(ABC):
     provider_name: str = "base"
+    access_mode: str = "read_only"
     domain: str = ""
     oauth_access_token: str = ""
 
@@ -16,16 +17,23 @@ class BaseITSMAdapter(ABC):
         return False
 
     def capability_manifest(self) -> dict[str, dict[str, Any]]:
-        """Declare provider operations without implying unimplemented parity."""
+        """Declare the one-way sidecar contract shared by every provider.
+
+        Provider records are authoritative. Tickety may import them and store
+        local intelligence, but provider mutations are intentionally outside
+        the adapter interface.
+        """
         return {
+            "integration.mode": {"status": "supported", "mode": self.access_mode},
             "ticket.read": {"status": "supported"},
             "agent.read": {"status": "unsupported"},
-            "ticket.create": {"status": "unsupported"},
-            "ticket.update": {"status": "unsupported"},
-            "ticket.reply": {"status": "unsupported"},
-            "ticket.note": {"status": "unsupported"},
-            "ticket.attachment": {"status": "unsupported"},
-            "service_request.create": {"status": "unsupported"},
+            "requester.read": {"status": "unsupported"},
+            "ticket.create": {"status": "unsupported", "reason": "read_only_sidecar"},
+            "ticket.update": {"status": "unsupported", "reason": "read_only_sidecar"},
+            "ticket.reply": {"status": "unsupported", "reason": "read_only_sidecar"},
+            "ticket.note": {"status": "unsupported", "reason": "read_only_sidecar"},
+            "ticket.attachment": {"status": "unsupported", "reason": "read_only_sidecar"},
+            "service_request.create": {"status": "unsupported", "reason": "read_only_sidecar"},
             "webhook.ingest": {"status": "supported"},
         }
 
@@ -49,6 +57,11 @@ class BaseITSMAdapter(ABC):
 
     async def fetch_agents(self, max_pages: Optional[int] = None) -> List[dict]:
         return []
+
+    async def fetch_external_users(self, max_pages: Optional[int] = None) -> List[dict]:
+        """Return provider identities as read-only directory records."""
+        agents = await self.fetch_agents(max_pages=max_pages)
+        return [{**agent, "user_type": "agent"} for agent in agents]
 
     @abstractmethod
     def parse_webhook(

@@ -1,0 +1,45 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Toronto
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: npm
+    directory: /app/frontend-next
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:15"
+      timezone: America/Toronto
+
+  - package-ecosystem: npm
+    directory: /freshworks-app
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:30"
+      timezone: America/Toronto
+
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:45"
+      timezone: America/Toronto
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "10:00"
+      timezone: America/Toronto

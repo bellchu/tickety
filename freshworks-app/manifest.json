@@ -11,8 +11,7 @@
       "requests": {
         "ticketyBootstrap": {},
         "ticketyRedeem": {},
-        "ticketyTicketContext": {},
-        "ticketyTicketWriteback": {}
+        "ticketyTicketContext": {}
       }
     },
     "service_ticket": {
@@ -25,10 +24,16 @@
     }
   },
   "installation": {
-    "scopes": ["account", "service_workspace"]
+    "scopes": [
+      "account",
+      "service_workspace"
+    ]
+  },
+  "scripts": {
+    "fdk-unit-test": "vitest run --coverage"
   },
   "engines": {
     "node": "24.11.0",
-    "fdk": "10.0.0"
+    "fdk": "10.1.9"
   }
 }

@@ -1,6 +1,6 @@
 import os
-import math
 import re
+import sys
 import threading
 import ipaddress
 import socket
@@ -17,18 +17,8 @@ _ENV_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file_
 
 _SENSITIVE_KEYS = {
     "DATABASE_URL",
-    "DEEPSEEK_API_KEY",
-    "OPENAI_API_KEY",
-    "OPENAI_API_BASE",
-    "OPENROUTER_API_KEY",
-    "OPENROUTER_API_BASE",
-    "AZURE_API_KEY",
-    "AZURE_API_BASE",
-    "AZURE_API_VERSION",
-    "AZURE_AI_API_KEY",
-    "AZURE_AI_API_BASE",
+    "FOUNDRY_API_KEY",
     "CUSTOM_API_KEY",
-    "CUSTOM_API_BASE",
     "FRESHSERVICE_API_KEY",
     "JIRA_API_TOKEN",
     "FRESHSERVICE_OAUTH_CLIENT_SECRET",
@@ -43,14 +33,14 @@ _PLACEHOLDER_VALUES = {
     "your-key-here",
     "your-provider-api-key",
     "your-webhook-secret",
-    "your-azure-key-here",
-    "your-azure-ai-key-here",
-    "your-openrouter-key-here",
+    "your-foundry-key-here",
+    "your-custom-key-here",
 }
 
 _ALL_KEYS = [
     # Runtime mode / security
     "APP_MODE",
+    "TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED",
     "SEED_DEMO_DATA",
     "CORS_ALLOW_ORIGINS",
     "COOKIE_SECURE",
@@ -58,23 +48,12 @@ _ALL_KEYS = [
     "LLM_ALLOW_PRIVATE_ENDPOINTS",
     "LLM_ALLOW_INSECURE_ENDPOINTS",
     "LLM_ALLOWED_PROVIDER_HOSTS",
-    # LLM provider keys (multi-provider; see llm_manager.PROVIDERS)
-    "DEEPSEEK_API_KEY",
-    "OPENAI_API_KEY",
-    "OPENAI_API_BASE",
-    "OPENROUTER_API_KEY",
-    "OPENROUTER_API_BASE",
-    "AZURE_API_KEY",
-    "AZURE_API_BASE",
-    "AZURE_API_VERSION",
-    "AZURE_AI_API_KEY",
-    "AZURE_AI_API_BASE",
+    # Deliberately small LLM surface: Microsoft Foundry plus one custom API.
+    "FOUNDRY_API_KEY",
+    "FOUNDRY_API_BASE",
+    "FOUNDRY_AUTH_METHOD",
     "CUSTOM_API_KEY",
     "CUSTOM_API_BASE",
-    "CUSTOM_PROVIDER_TYPE",
-    "CUSTOM_API_VERSION",
-    "CUSTOM_TEMPERATURE",
-    "CUSTOM_MAX_TOKENS",
     "DEFAULT_MODEL",
     "LLM_ALLOW_SYNTHETIC",
     "LLM_REQUEST_TIMEOUT_SECONDS",
@@ -106,7 +85,6 @@ _ALL_KEYS = [
     "TICKET_EMBEDDING_MAX_CHARS",
     "TICKET_EMBEDDING_MAX_COMMENTS_PER_REFRESH",
     "TICKET_VECTOR_MIN_SCORE",
-    "TICKET_EMBEDDING_API_BASE",
     "TICKET_RAG_SCOPE_KEY",
     "TICKET_RAG_V2_SCOPE_ALLOWLIST",
     "TICKET_RAG_V2_WRITE_ENABLED",
@@ -176,6 +154,7 @@ _ALL_KEYS = [
 # Keys that are static infra config
 _READONLY_KEYS = {
     "APP_MODE",
+    "TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED",
     "SEED_DEMO_DATA",
     "DATABASE_URL",
     "NEXT_PUBLIC_API_URL",
@@ -189,12 +168,8 @@ _READONLY_KEYS = {
 }
 
 _LLM_BASE_URL_KEYS = {
-    "OPENAI_API_BASE",
-    "OPENROUTER_API_BASE",
-    "AZURE_API_BASE",
-    "AZURE_AI_API_BASE",
+    "FOUNDRY_API_BASE",
     "CUSTOM_API_BASE",
-    "TICKET_EMBEDDING_API_BASE",
 }
 
 _PRODUCTION_ENV_ONLY_KEYS = (
@@ -207,10 +182,7 @@ _PRODUCTION_ENV_ONLY_KEYS = (
     "WEBHOOK_MAX_AGE_SECONDS",
     "LOGIN_REQUIRED",
     "DEFAULT_MODEL",
-    "CUSTOM_PROVIDER_TYPE",
-    "CUSTOM_API_VERSION",
-    "CUSTOM_TEMPERATURE",
-    "CUSTOM_MAX_TOKENS",
+    "FOUNDRY_AUTH_METHOD",
     "LLM_ALLOW_SYNTHETIC",
     "LLM_REQUEST_TIMEOUT_SECONDS",
     "LLM_OVERALL_TIMEOUT_SECONDS",
@@ -241,7 +213,6 @@ _PRODUCTION_ENV_ONLY_KEYS = (
     "TICKET_EMBEDDING_MAX_CHARS",
     "TICKET_EMBEDDING_MAX_COMMENTS_PER_REFRESH",
     "TICKET_VECTOR_MIN_SCORE",
-    "TICKET_EMBEDDING_API_BASE",
     "TICKET_RAG_V2_WRITE_ENABLED",
     "TICKET_RAG_V2_WORKER_ENABLED",
     "TICKET_RAG_V2_READ_ENABLED",
@@ -283,6 +254,33 @@ _PRODUCTION_ENV_ONLY_KEYS = (
     "SSO_AUTO_PROVISION",
 }
 
+# A production administrator may opt in to editing operational/provider
+# settings through the portal. Infrastructure trust boundaries stay owned by
+# the deployment even when the portal is enabled.
+_PRODUCTION_INFRA_ONLY_KEYS = {
+    "CORS_ALLOW_ORIGINS",
+    "COOKIE_SECURE",
+    "COOKIE_SAMESITE",
+    "LOGIN_REQUIRED",
+    "JIRA_BASE_URL",
+    "JIRA_EMAIL",
+    "JIRA_API_TOKEN",
+    "JIRA_PROJECT_KEY",
+    "JIRA_ISSUE_TYPE",
+    "SSO_ENABLED",
+    "SSO_PROVIDER",
+    "SSO_CLIENT_ID",
+    "SSO_CLIENT_SECRET",
+    "SSO_DISCOVERY_URL",
+    "SSO_REDIRECT_URI",
+    "SSO_ALLOWED_DOMAINS",
+    "SSO_AUTO_PROVISION",
+}
+_PRODUCTION_ADMIN_PORTAL_KEYS = (
+    _PRODUCTION_ENV_ONLY_KEYS - _PRODUCTION_INFRA_ONLY_KEYS - _READONLY_KEYS
+)
+_ADMIN_PORTAL_APPROVAL_PREFIX = "__ADMIN_PORTAL_APPROVED__:"
+
 _lock = threading.Lock()
 _loaded = False
 
@@ -316,9 +314,6 @@ def _validate_llm_base_url(value: str) -> str:
     hostname = parsed.hostname.lower().rstrip(".")
     if (os.getenv("APP_MODE") or "production").strip().lower() == "production":
         allowed_hosts = {
-            "api.openai.com",
-            "openrouter.ai",
-            "api.deepseek.com",
             *{
                 host.strip().lower().rstrip(".")
                 for host in (os.getenv("LLM_ALLOWED_PROVIDER_HOSTS") or "").split(",")
@@ -340,6 +335,18 @@ def _validate_llm_base_url(value: str) -> str:
         if not ip.is_global:
             raise ValueError("LLM base URL must not target a private or reserved address")
     return value.rstrip("/")
+
+
+def _validate_foundry_base_url(value: str) -> str:
+    """Accept only Microsoft Foundry OpenAI-compatible v1 endpoints."""
+    normalized = _validate_llm_base_url(value)
+    parsed = urlparse(normalized)
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    if not hostname.endswith((".services.ai.azure.com", ".openai.azure.com")):
+        raise ValueError("Foundry endpoint must use a Microsoft Azure hostname")
+    if parsed.path.rstrip("/") != "/openai/v1":
+        raise ValueError("Foundry endpoint path must end with /openai/v1")
+    return normalized
 
 
 def get_bool(key: str, default: bool = False, aliases: tuple[str, ...] = ()) -> bool:
@@ -367,6 +374,11 @@ def is_demo_mode() -> bool:
 
 def is_production_mode() -> bool:
     return app_mode() == "production"
+
+
+def admin_settings_portal_enabled() -> bool:
+    """Whether production admin-approved DB overrides are enabled."""
+    return get_bool("TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED", default=False)
 
 
 def automation_enabled(key: str, legacy_alias: Optional[str] = None) -> bool:
@@ -405,7 +417,30 @@ def _read_db_overrides() -> dict:
         db.close()
 
 
-def _write_db_overrides(updates: dict):
+def _read_portal_approved_keys() -> set[str]:
+    """Return keys explicitly saved by an authenticated production admin."""
+    db = SessionLocal()
+    try:
+        rows = db.query(SettingsRecord.key).filter(
+            SettingsRecord.key.like(f"{_ADMIN_PORTAL_APPROVAL_PREFIX}%")
+        ).all()
+        return {
+            key.removeprefix(_ADMIN_PORTAL_APPROVAL_PREFIX)
+            for key, in rows
+            if key.startswith(_ADMIN_PORTAL_APPROVAL_PREFIX)
+        }
+    except Exception:
+        return set()
+    finally:
+        db.close()
+
+
+def _write_db_overrides(
+    updates: dict,
+    *,
+    actor_id: Optional[str] = None,
+    approved_keys: Optional[set[str]] = None,
+):
     db = SessionLocal()
     try:
         for key, value in updates.items():
@@ -414,6 +449,16 @@ def _write_db_overrides(updates: dict):
                 existing.value = value
             else:
                 db.add(SettingsRecord(key=key, value=value))
+        if actor_id:
+            for key in sorted(approved_keys or set()):
+                marker_key = f"{_ADMIN_PORTAL_APPROVAL_PREFIX}{key}"
+                marker = db.query(SettingsRecord).filter(
+                    SettingsRecord.key == marker_key
+                ).first()
+                if marker:
+                    marker.value = actor_id
+                else:
+                    db.add(SettingsRecord(key=marker_key, value=actor_id))
         db.commit()
     except Exception:
         db.rollback()
@@ -422,23 +467,33 @@ def _write_db_overrides(updates: dict):
         db.close()
 
 
-def load_settings_into_env():
+def load_settings_into_env() -> bool:
     """At startup, hydrate os.environ with DB-stored overrides so every
     module that reads env once at import time still sees the saved values."""
     global _loaded
     with _lock:
         overrides = _read_db_overrides()
+        production = is_production_mode()
+        portal_enabled = production and admin_settings_portal_enabled()
+        approved_keys = _read_portal_approved_keys() if portal_enabled else set()
+        changed = False
         for key, value in overrides.items():
-            if key not in _ALL_KEYS or key in _READONLY_KEYS or (
-                is_production_mode() and key in _PRODUCTION_ENV_ONLY_KEYS
+            if key not in _ALL_KEYS or key in _READONLY_KEYS:
+                continue
+            if production and key in _PRODUCTION_ENV_ONLY_KEYS and not (
+                portal_enabled
+                and key in _PRODUCTION_ADMIN_PORTAL_KEYS
+                and key in approved_keys
             ):
                 continue
             if value is not None:
                 if key in _LLM_BASE_URL_KEYS and value:
                     value = _validate_llm_base_url(value)
+                changed = changed or os.getenv(key) != value
                 os.environ[key] = value
         validate_effective_llm_urls()
         _loaded = True
+        return changed
 
 
 def validate_effective_llm_urls() -> None:
@@ -446,7 +501,20 @@ def validate_effective_llm_urls() -> None:
     for key in _LLM_BASE_URL_KEYS:
         value = (os.getenv(key) or "").strip()
         if value:
-            os.environ[key] = _validate_llm_base_url(value)
+            os.environ[key] = (
+                _validate_foundry_base_url(value)
+                if key == "FOUNDRY_API_BASE"
+                else _validate_llm_base_url(value)
+            )
+    from .llm_manager import foundry_auth_method, resolve_provider
+
+    foundry_auth_method()
+    default_model = (os.getenv("DEFAULT_MODEL") or "").strip()
+    if default_model:
+        resolve_provider(default_model)
+    embedding_model = (os.getenv("TICKET_EMBEDDING_MODEL") or "").strip()
+    if embedding_model:
+        resolve_provider(embedding_model)
 
 
 def get_settings() -> dict:
@@ -462,22 +530,22 @@ def get_settings() -> dict:
         return result
 
 
-def update_settings(payload: dict) -> dict:
+def update_settings(payload: dict, *, actor_id: Optional[str] = None) -> dict:
     with _lock:
+        production = is_production_mode()
+        portal_enabled = production and admin_settings_portal_enabled()
         base_url_credentials = {
-            "OPENAI_API_BASE": "OPENAI_API_KEY",
-            "OPENROUTER_API_BASE": "OPENROUTER_API_KEY",
-            "AZURE_API_BASE": "AZURE_API_KEY",
-            "AZURE_AI_API_BASE": "AZURE_AI_API_KEY",
+            "FOUNDRY_API_BASE": "FOUNDRY_API_KEY",
             "CUSTOM_API_BASE": "CUSTOM_API_KEY",
         }
-        embedding_model = (os.getenv("TICKET_EMBEDDING_MODEL") or "").strip()
-        if embedding_model.startswith("openai/"):
-            base_url_credentials["TICKET_EMBEDDING_API_BASE"] = "OPENAI_API_KEY"
-        elif embedding_model.startswith("custom/"):
-            base_url_credentials["TICKET_EMBEDDING_API_BASE"] = "CUSTOM_API_KEY"
         for base_key, credential_key in base_url_credentials.items():
             if base_key not in payload:
+                continue
+            if base_key == "FOUNDRY_API_BASE" and str(
+                payload.get("FOUNDRY_AUTH_METHOD")
+                or os.getenv("FOUNDRY_AUTH_METHOD")
+                or "api_key"
+            ).strip().lower() == "entra":
                 continue
             proposed_base = str(payload.get(base_key) or "").strip().rstrip("/")
             current_base = str(os.getenv(base_key) or "").strip().rstrip("/")
@@ -502,8 +570,12 @@ def update_settings(payload: dict) -> dict:
                 )
         updates = {}
         for key in _ALL_KEYS:
-            if key not in payload or key in _READONLY_KEYS or (
-                is_production_mode() and key in _PRODUCTION_ENV_ONLY_KEYS
+            if key not in payload or key in _READONLY_KEYS:
+                continue
+            if production and key in _PRODUCTION_ENV_ONLY_KEYS and not (
+                portal_enabled
+                and bool(actor_id)
+                and key in _PRODUCTION_ADMIN_PORTAL_KEYS
             ):
                 continue
             new_val = payload.get(key)
@@ -521,58 +593,80 @@ def update_settings(payload: dict) -> dict:
                     continue
                 new_val = os.getenv(key, "")
             if key in _LLM_BASE_URL_KEYS and new_val:
-                new_val = _validate_llm_base_url(new_val)
-            if key == "DEFAULT_MODEL":
+                new_val = (
+                    _validate_foundry_base_url(new_val)
+                    if key == "FOUNDRY_API_BASE"
+                    else _validate_llm_base_url(new_val)
+                )
+            if key in {"DEFAULT_MODEL", "TICKET_EMBEDDING_MODEL"}:
                 from .llm_manager import resolve_provider
 
                 resolve_provider(new_val)
-            if key == "CUSTOM_TEMPERATURE" and new_val:
-                try:
-                    temperature = float(new_val)
-                except (TypeError, ValueError) as exc:
-                    raise ValueError("Custom temperature must be a number from 0 to 2") from exc
-                if not math.isfinite(temperature) or not 0 <= temperature <= 2:
-                    raise ValueError("Custom temperature must be a number from 0 to 2")
-            if key == "CUSTOM_MAX_TOKENS" and new_val:
-                try:
-                    custom_max_tokens = int(new_val)
-                except (TypeError, ValueError) as exc:
-                    raise ValueError("Custom max tokens must be an integer from 64 to 4096") from exc
-                if not 64 <= custom_max_tokens <= 4096:
-                    raise ValueError("Custom max tokens must be an integer from 64 to 4096")
-            if key == "CUSTOM_PROVIDER_TYPE" and new_val and not re.fullmatch(
-                r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", new_val
-            ):
-                raise ValueError("Custom provider type contains unsupported characters")
+            if key == "FOUNDRY_AUTH_METHOD" and new_val not in {"api_key", "entra"}:
+                raise ValueError("FOUNDRY_AUTH_METHOD must be 'api_key' or 'entra'")
+            if key == "FRESHSERVICE_OAUTH_SCOPES" and new_val:
+                from .integrations.freshservice import FreshserviceAdapter
+
+                new_val = FreshserviceAdapter._validate_oauth_scopes(new_val)
             updates[key] = new_val
 
         if updates:
-            _write_db_overrides(updates)
+            approved_keys = {
+                key
+                for key in updates
+                if production and key in _PRODUCTION_ADMIN_PORTAL_KEYS
+            }
+            if actor_id or approved_keys:
+                _write_db_overrides(
+                    updates,
+                    actor_id=actor_id,
+                    approved_keys=approved_keys,
+                )
+            else:
+                _write_db_overrides(updates)
             for key, value in updates.items():
                 os.environ[key] = value
-            _reset_runtime()
 
+    if updates:
+        _reset_runtime()
     return get_settings()
 
 
-def _reset_runtime():
+def refresh_settings_from_db() -> bool:
+    """Apply newly admin-approved overrides in long-running worker processes."""
+    changed = load_settings_into_env()
+    if changed:
+        _reset_runtime(restart_scheduler=False)
+    return changed
+
+
+def _reset_runtime(*, restart_scheduler: bool = True):
     """Reset cached adapters and restart sync worker to pick up new env values."""
+    try:
+        from . import llm_manager
+
+        llm_manager.invalidate_model_catalog_refresh()
+    except Exception as e:
+        print(f"[settings] invalidate model catalog error kind={type(e).__name__}")
+
     try:
         from .integrations import registry
         registry._ADAPTERS.clear()
     except Exception as e:
         print(f"[settings] clear adapters error kind={type(e).__name__}")
 
-    try:
-        from . import sync_worker
-        sync_worker.stop_sync_worker()
-        sync_worker.start_sync_worker()
-    except Exception as e:
-        print(f"[settings] restart sync worker error kind={type(e).__name__}")
+    if restart_scheduler:
+        try:
+            from . import sync_worker
+            sync_worker.stop_sync_worker()
+            sync_worker.start_sync_worker()
+        except Exception as e:
+            print(f"[settings] restart sync worker error kind={type(e).__name__}")
 
     try:
-        from . import main as main_module
-        main_module.llm_mgr = main_module.LLMManager()
-        main_module.engine.llm = main_module.llm_mgr
+        main_module = sys.modules.get("app.backend.main")
+        if main_module is not None:
+            main_module.llm_mgr = main_module.LLMManager()
+            main_module.engine.llm = main_module.llm_mgr
     except Exception as e:
         print(f"[settings] reset llm manager error kind={type(e).__name__}")

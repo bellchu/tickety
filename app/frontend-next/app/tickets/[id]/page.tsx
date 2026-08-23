@@ -163,7 +163,11 @@ export default function TicketDetailPage() {
         </div>
       </section>
 
-      <AgentActionPanel ticket={ticket} />
+      {ticket.external_source === "freshservice" ? (
+        <FreshserviceSourcePanel ticket={ticket} />
+      ) : (
+        <AgentActionPanel ticket={ticket} />
+      )}
 
       <AIThinkingStream
         ticketId={ticket.id}
@@ -186,6 +190,35 @@ export default function TicketDetailPage() {
       {ticket.ai_reasoning && <ReasoningLog text={ticket.ai_reasoning} />}
 
     </PageFrame>
+  );
+}
+
+function FreshserviceSourcePanel({ ticket }: { ticket: Ticket }) {
+  const sourceUrl = safeExternalUrl(ticket.external_url);
+  return (
+    <section className="rounded-2xl border border-linen-400 bg-linen-50 p-5 shadow-sm sm:p-6" aria-labelledby="source-record-title">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-semantic-primary">System of record</p>
+          <h2 id="source-record-title" className="mt-1 text-lg font-semibold text-ink-700">Read-only Freshservice ticket</h2>
+          <p className="mt-1 max-w-3xl text-xs leading-5 text-ink-500">
+            Tickety imports this record for analysis. Ticket fields, replies, notes, and attachments can only be changed in Freshservice.
+          </p>
+        </div>
+        {sourceUrl && (
+          <a href={sourceUrl} target="_blank" rel="noopener noreferrer" className="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-lg border border-linen-400 bg-white px-4 text-sm font-semibold text-ink-700 hover:bg-linen-200">
+            Open in Freshservice <ArrowUpRight className="h-4 w-4" aria-hidden="true" />
+          </a>
+        )}
+      </div>
+      <dl className="mt-5 grid gap-4 border-t border-linen-300 pt-5 sm:grid-cols-2 lg:grid-cols-4">
+        <div><dt className="text-[11px] font-semibold uppercase tracking-wide text-ink-400">Status</dt><dd className="mt-1 text-sm font-medium text-ink-700">{ticket.status}</dd></div>
+        <div><dt className="text-[11px] font-semibold uppercase tracking-wide text-ink-400">Priority</dt><dd className="mt-1 text-sm font-medium text-ink-700">{ticket.priority}</dd></div>
+        <div><dt className="text-[11px] font-semibold uppercase tracking-wide text-ink-400">Tickety owner</dt><dd className="mt-1 text-sm font-medium text-ink-700">{ticket.assignee_name || "Unassigned"}</dd></div>
+        <div><dt className="text-[11px] font-semibold uppercase tracking-wide text-ink-400">ITSM assignee</dt><dd className="mt-1 text-sm font-medium text-ink-700">{ticket.external_assignee_name || ticket.external_assignee_id || "Unassigned"}</dd></div>
+        <div><dt className="text-[11px] font-semibold uppercase tracking-wide text-ink-400">Freshservice ID</dt><dd className="mt-1 font-mono text-sm font-medium text-ink-700">{ticket.external_id || "—"}</dd></div>
+      </dl>
+    </section>
   );
 }
 

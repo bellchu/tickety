@@ -57,8 +57,15 @@ class LLMContractTests(unittest.IsolatedAsyncioTestCase):
             llm_module, "_provider_controls_enabled", return_value=False
         )
         self.provider_controls.start()
+        self.provider_environment = patch.dict(os.environ, {
+            "CUSTOM_API_BASE": "https://provider.example/v1",
+            "LLM_ALLOWED_PROVIDER_HOSTS": "provider.example",
+            "LLM_ALLOW_PRIVATE_ENDPOINTS": "true",
+        }, clear=False)
+        self.provider_environment.start()
 
     def tearDown(self):
+        self.provider_environment.stop()
         self.provider_controls.stop()
 
     def test_redaction_covers_network_tokens_urls_and_private_keys(self):
@@ -72,12 +79,45 @@ class LLMContractTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(secret, redacted)
 
     def test_provider_routing_rejects_unknown_or_blank_models(self):
-        self.assertEqual(resolve_provider("openai/gpt-4.1-mini"), "openai")
+        self.assertEqual(resolve_provider("foundry/DeepSeek-V4-Flash"), "foundry")
         self.assertEqual(resolve_provider("custom/local-model"), "custom")
+        for unsupported in (
+            "openai/gpt-4.1-mini",
+            "openrouter/openai/gpt-4.1-mini",
+            "azure/deployment",
+            "deepseek-v4-flash",
+        ):
+            with self.subTest(unsupported=unsupported), self.assertRaises(ValueError):
+                resolve_provider(unsupported)
         with self.assertRaises(ValueError):
             resolve_provider("")
         with self.assertRaises(ValueError):
             resolve_provider("unqualified-model")
+
+    def test_foundry_dispatch_uses_deployment_name_and_openai_v1_endpoint(self):
+        with patch.dict(
+            os.environ,
+            {
+                "APP_MODE": "demo",
+                "DEFAULT_MODEL": "foundry/DeepSeek-V4-Flash",
+                "FOUNDRY_API_BASE": (
+                    "https://example.services.ai.azure.com/openai/v1"
+                ),
+                "FOUNDRY_AUTH_METHOD": "api_key",
+                "FOUNDRY_API_KEY": "configured-key",
+                "LLM_ALLOW_PRIVATE_ENDPOINTS": "true",
+            },
+            clear=False,
+        ):
+            kwargs = LLMManager()._build_kwargs([], False)
+
+        self.assertEqual(kwargs["model"], "DeepSeek-V4-Flash")
+        self.assertEqual(
+            kwargs["api_base"],
+            "https://example.services.ai.azure.com/openai/v1",
+        )
+        self.assertEqual(kwargs["custom_llm_provider"], "openai")
+        self.assertEqual(kwargs["api_key"], "configured-key")
 
     async def test_invalid_structured_output_fails_closed_without_mock_fallback(self):
         with (
@@ -85,8 +125,8 @@ class LLMContractTests(unittest.IsolatedAsyncioTestCase):
                 os.environ,
                 {
                     "APP_MODE": "production",
-                    "DEFAULT_MODEL": "deepseek-v4-flash",
-                    "DEEPSEEK_API_KEY": "configured-key",
+                    "DEFAULT_MODEL": "custom/test-model",
+                    "CUSTOM_API_KEY": "configured-key",
                 },
                 clear=False,
             ),
@@ -107,8 +147,8 @@ class LLMContractTests(unittest.IsolatedAsyncioTestCase):
                 os.environ,
                 {
                     "APP_MODE": "production",
-                    "DEFAULT_MODEL": "deepseek-v4-flash",
-                    "DEEPSEEK_API_KEY": "configured-key",
+                    "DEFAULT_MODEL": "custom/test-model",
+                    "CUSTOM_API_KEY": "configured-key",
                     "LLM_MAX_PROMPT_CHARS": "4000",
                 },
                 clear=False,
@@ -124,7 +164,7 @@ class LLMContractTests(unittest.IsolatedAsyncioTestCase):
 
         provider.assert_not_awaited()
 
-    async def test_supported_provider_receives_native_json_schema(self):
+    async def test_custom_provider_receives_json_object_mode(self):
         provider = AsyncMock(return_value=_completion(
             '{"sentiment":"Neutral","category":"Other","priority":"P3",'
             '"mood":"neutral","action":"respond","reasoning":"scope: single user; routine request"}'
@@ -132,24 +172,23 @@ class LLMContractTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.dict(os.environ, {
                 "APP_MODE": "production",
-                "DEFAULT_MODEL": "openai/gpt-4.1-mini",
-                "OPENAI_API_KEY": "configured-key",
+                "DEFAULT_MODEL": "custom/test-model",
+                "CUSTOM_API_KEY": "configured-key",
             }, clear=False),
             patch("app.backend.llm_manager.acompletion", new=provider),
         ):
             manager = LLMManager()
             await manager.analyze("ticket", response_model=TriageAnalysis)
         response_format = provider.await_args.kwargs["response_format"]
-        self.assertEqual(response_format["type"], "json_schema")
-        self.assertTrue(response_format["json_schema"]["strict"])
+        self.assertEqual(response_format, {"type": "json_object"})
 
     async def test_demo_synthetic_results_still_satisfy_task_contracts(self):
         with patch.dict(
             os.environ,
             {
                 "APP_MODE": "demo",
-                "DEFAULT_MODEL": "deepseek-v4-flash",
-                "DEEPSEEK_API_KEY": "",
+                "DEFAULT_MODEL": "custom/test-model",
+                "CUSTOM_API_KEY": "",
                 "LLM_ALLOW_SYNTHETIC": "true",
             },
             clear=False,
@@ -171,8 +210,8 @@ class LLMContractTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.dict(os.environ, {
                 "APP_MODE": "production",
-                "DEFAULT_MODEL": "deepseek-v4-flash",
-                "DEEPSEEK_API_KEY": "configured-key",
+                "DEFAULT_MODEL": "custom/test-model",
+                "CUSTOM_API_KEY": "configured-key",
             }, clear=False),
             patch("app.backend.llm_manager.acompletion", new=hangs),
             patch("app.backend.llm_manager._MAX_RETRIES", 1),
@@ -191,8 +230,8 @@ class LLMContractTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.dict(os.environ, {
                 "APP_MODE": "production",
-                "DEFAULT_MODEL": "deepseek-v4-flash",
-                "DEEPSEEK_API_KEY": "configured-key",
+                "DEFAULT_MODEL": "custom/test-model",
+                "CUSTOM_API_KEY": "configured-key",
             }, clear=False),
             patch.object(
                 llm_module,
@@ -238,8 +277,8 @@ class LLMContractTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.dict(os.environ, {
                 "APP_MODE": "production",
-                "DEFAULT_MODEL": "deepseek-v4-flash",
-                "DEEPSEEK_API_KEY": "configured-key",
+                "DEFAULT_MODEL": "custom/test-model",
+                "CUSTOM_API_KEY": "configured-key",
                 "LLM_MAX_CONCURRENCY": "2",
             }, clear=False),
             patch("app.backend.llm_manager.acompletion", new=provider),
@@ -254,8 +293,8 @@ class LLMContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_each_retry_reserves_full_system_and_user_token_estimate(self):
         with (
             patch.dict(os.environ, {
-                "DEFAULT_MODEL": "deepseek-v4-flash",
-                "DEEPSEEK_API_KEY": "configured-key",
+                "DEFAULT_MODEL": "custom/test-model",
+                "CUSTOM_API_KEY": "configured-key",
             }, clear=False),
             patch.object(llm_module, "acompletion", new=AsyncMock(return_value=_completion("{}"))),
             patch.object(llm_module, "_reserve_provider_capacity") as reserve_capacity,
@@ -272,8 +311,8 @@ class LLMContractTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.dict(os.environ, {
                 "APP_MODE": "production",
-                "DEFAULT_MODEL": "deepseek-v4-flash",
-                "DEEPSEEK_API_KEY": "configured-key",
+                "DEFAULT_MODEL": "custom/test-model",
+                "CUSTOM_API_KEY": "configured-key",
             }, clear=False),
             patch.object(llm_module, "acompletion", new=provider),
             patch.object(
@@ -355,8 +394,8 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_synthetic_artifact_is_explicit_and_cannot_change_priority(self):
         with patch.dict(os.environ, {
             "APP_MODE": "demo",
-            "DEFAULT_MODEL": "deepseek-v4-flash",
-            "DEEPSEEK_API_KEY": "",
+            "DEFAULT_MODEL": "custom/test-model",
+            "CUSTOM_API_KEY": "",
             "LLM_ALLOW_SYNTHETIC": "true",
         }, clear=False):
             synthetic = LLMManager()
@@ -779,7 +818,7 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(processed_ids, ["portal-approved"])
         self.assertTrue(process.await_args.kwargs["force"])
 
-    async def test_manual_ticket_auto_processing_reserves_user_budget_first(self):
+    async def test_production_manual_ticket_creation_is_blocked_before_ai_dispatch(self):
         payload = SimpleNamespace(
             subject="Manual ticket",
             description="Needs analysis",
@@ -792,7 +831,7 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
             asset_id=None,
         )
         user = UserRecord(id="agent-1", name="Agent", role="agent", is_active=True)
-        reserve = MagicMock(side_effect=HTTPException(status_code=429, detail="limited"))
+        reserve = MagicMock()
         process = AsyncMock()
         with (
             self.session_factory() as db,
@@ -803,12 +842,8 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertRaises(HTTPException) as raised,
         ):
             await main.create_ticket(payload, db, user)
-        self.assertEqual(raised.exception.status_code, 429)
-        reserve.assert_called_once_with(
-            unittest.mock.ANY,
-            "agent-1",
-            "ticket_create_auto_processing",
-        )
+        self.assertEqual(raised.exception.status_code, 409)
+        reserve.assert_not_called()
         process.assert_not_awaited()
         with self.session_factory() as db:
             self.assertEqual(db.query(TicketRecord).count(), 1)
@@ -1165,14 +1200,14 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         db = MagicMock()
         db.execute.return_value.first.return_value = SimpleNamespace(
             has_embedding=True,
-            embedding_model="openai/old-model#dimensions=1536",
+            embedding_model="custom/old-model#dimensions=1536",
         )
         with (
             patch.object(ticket_vectors, "ticket_vector_store_ready", return_value=True),
             patch.dict(os.environ, {
                 "APP_MODE": "production",
                 "TICKET_EMBEDDING_ENABLED": "true",
-                "TICKET_EMBEDDING_MODEL": "openai/new-model",
+                "TICKET_EMBEDDING_MODEL": "custom/new-model",
                 "TICKET_EMBEDDING_DIMENSIONS": "1536",
             }, clear=False),
         ):

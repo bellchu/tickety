@@ -104,7 +104,33 @@ print(f"Validated {count} Kubernetes resources from {len(sys.argv) - 1} file(s).
 PY
 }
 
+validate_existing_secret_rollout() {
+  "$yaml_python" - "$1" <<'PY'
+from pathlib import Path
+import sys
+import yaml
+
+expected_token = "deployment-validation"
+documents = list(yaml.safe_load_all(Path(sys.argv[1]).read_text()))
+deployments = {
+    document.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/component"):
+        document.get("spec", {}).get("template", {}).get("metadata", {})
+        .get("annotations", {}).get("tickety.io/existing-secret-rollout-token")
+    for document in documents
+    if isinstance(document, dict) and document.get("kind") == "Deployment"
+}
+expected = {"backend": expected_token, "worker": expected_token}
+actual = {component: deployments.get(component) for component in expected}
+if actual != expected:
+    raise SystemExit(f"existing Secret rollout annotations are invalid: {actual}")
+if any(isinstance(document, dict) and document.get("kind") == "Secret" for document in documents):
+    raise SystemExit("existingSecret rendering must not create a chart-managed Secret")
+print("Validated existing Secret rollout annotations.")
+PY
+}
+
 rendered_files=()
+existing_secret_render=""
 temporary_dir=""
 cleanup() {
   [[ -z $temporary_dir ]] || rm -rf "$temporary_dir"
@@ -169,7 +195,10 @@ if require_or_skip "$REQUIRE_HELM" helm; then
   render_chart external-database \
     --set postgresql.enabled=false \
     --set-string postgresql.externalDatabaseUrl='postgresql+psycopg2://tickety:password@database.example.test:5432/tickety'
-  render_chart existing-secret --set existingSecret=tickety-existing-secret
+  render_chart existing-secret \
+    --set existingSecret=tickety-existing-secret \
+    --set-string existingSecretRolloutToken=deployment-validation
+  existing_secret_render="$temporary_dir/existing-secret.yaml"
 fi
 
 shopt -s nullglob
@@ -183,6 +212,7 @@ if [[ -n $yaml_python ]]; then
   echo "Checking Kubernetes YAML resources..."
   if ((${#rendered_files[@]})); then
     validate_yaml_resources "${manifest_files[@]}" "${rendered_files[@]}"
+    validate_existing_secret_rollout "$existing_secret_render"
   else
     validate_yaml_resources "${manifest_files[@]}"
   fi

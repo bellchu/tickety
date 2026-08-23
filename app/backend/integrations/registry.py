@@ -65,12 +65,39 @@ def clear_adapter_cache(binding_id: str | None = None) -> None:
             _ADAPTERS.pop(key, None)
 
 
+def configured_provider() -> str:
+    """Resolve the runtime provider with a safe production-sidecar default."""
+    provider = (os.getenv("ITSM_PROVIDER") or "").strip().lower()
+    if not provider:
+        provider = (
+            "standalone"
+            if (os.getenv("APP_MODE") or "production").strip().lower() == "demo"
+            else "freshservice"
+        )
+    provider = "freshservice" if provider == "external" else provider
+    if (
+        (os.getenv("APP_MODE") or "production").strip().lower() == "production"
+        and provider != "freshservice"
+    ):
+        raise ValueError(
+            "Production Tickety runs only as a read-only Freshservice sidecar"
+        )
+    return provider
+
+
 def get_adapter(provider: str = None, *, binding=None) -> BaseITSMAdapter:
     provider = provider or (
         getattr(binding, "provider", None) if binding is not None else None
-    ) or os.getenv("ITSM_PROVIDER", "standalone")
+    ) or configured_provider()
     if provider == "external":
         provider = "freshservice"
+    if (
+        (os.getenv("APP_MODE") or "production").strip().lower() == "production"
+        and provider != "freshservice"
+    ):
+        raise ValueError(
+            "Production Tickety runs only as a read-only Freshservice sidecar"
+        )
     cache_key = provider
     config = None
     if binding is not None:

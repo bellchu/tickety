@@ -3,6 +3,9 @@ kind: Job
 metadata:
   name: tickety-migrate
   namespace: tickety
+  labels:
+    app.kubernetes.io/name: tickety
+    app.kubernetes.io/component: migration
 spec:
   backoffLimit: 3
   activeDeadlineSeconds: 300
@@ -11,6 +14,8 @@ spec:
     metadata:
       labels:
         app: tickety-migrate
+        app.kubernetes.io/name: tickety
+        app.kubernetes.io/component: migration
     spec:
       restartPolicy: Never
       automountServiceAccountToken: false

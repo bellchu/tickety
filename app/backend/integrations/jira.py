@@ -302,27 +302,6 @@ class JiraAdapter(BaseITSMAdapter):
             "active": raw.get("active") is not False,
         }
 
-    async def create_issue(self, payload: dict) -> dict:
-        self._assert_configured()
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{self.base_url}/rest/api/3/issue",
-                headers=self._headers(),
-                json=payload,
-            )
-            resp.raise_for_status()
-            return resp.json()
-
-    async def update_issue(self, issue_key: str, payload: dict) -> None:
-        self._assert_configured()
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.put(
-                f"{self.base_url}/rest/api/3/issue/{issue_key}",
-                headers=self._headers(),
-                json=payload,
-            )
-            resp.raise_for_status()
-
     def parse_webhook(
         self,
         payload: dict,
