@@ -19,7 +19,7 @@ RUN npm run build
 RUN npm run verify:production-routes
 
 # Stage 2: Python backend
-FROM python:3.11.16-slim AS backend
+FROM python:3.14.7-slim AS backend
 ARG PIP_VERSION=26.2.1
 ARG SETUPTOOLS_VERSION=84.0.0
 ARG WHEEL_VERSION=0.48.0
