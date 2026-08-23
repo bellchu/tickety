@@ -1,24 +1,30 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc">
-  <title id="title">Tickety — Resolve what matters.</title>
-  <desc id="desc">Tickety social card featuring the monochrome Precision Window identity.</desc>
-  <rect width="1200" height="630" fill="#0A0B0D"/>
-  <rect x="32" y="32" width="1136" height="566" rx="24" fill="none" stroke="#292C32"/>
-  <g fill="#FFFFFF" transform="translate(66 50) scale(.9)">
-    <path d="M12 8H26Q28 8 28 10V14Q28 16 26 16H18Q16 16 16 18V46Q16 48 18 48H26Q28 48 28 50V54Q28 56 26 56H12Q8 56 8 52V12Q8 8 12 8Z"/>
-    <path d="M52 8H38Q36 8 36 10V14Q36 16 38 16H46Q48 16 48 18V46Q48 48 46 48H38Q36 48 36 50V54Q36 56 38 56H52Q56 56 56 52V12Q56 8 52 8Z"/>
-  </g>
-  <text x="138" y="96" fill="#FFFFFF" font-family="Geist, Arial, sans-serif" font-size="40" font-weight="500" letter-spacing="-1">Tickety</text>
-  <text x="72" y="195" fill="#A7ABB3" font-family="Geist Mono, monospace" font-size="14" font-weight="600" letter-spacing="2">INTELLIGENT SERVICE OPERATIONS</text>
-  <text x="72" y="310" fill="#FFFFFF" font-family="Geist, Arial, sans-serif" font-size="68" font-weight="500" letter-spacing="-1.7">Resolve what matters.</text>
-  <text x="74" y="366" fill="#B9BDC5" font-family="Geist, Arial, sans-serif" font-size="22">Clear triage. Shared context. Accountable ownership.</text>
-  <path d="M72 522H612" stroke="#292C32"/>
-  <text x="72" y="555" fill="#838892" font-family="Geist Mono, monospace" font-size="13" font-weight="600" letter-spacing="1.8">CALM / VISIBLE / OWNED</text>
-  <rect x="790" y="55" width="340" height="520" rx="24" fill="#14161A" stroke="#30333A"/>
-  <path d="M822 135H1098M822 495H1098" stroke="#292C32"/>
-  <g fill="#FFFFFF" transform="translate(826 181) scale(4.2)">
-    <path d="M12 8H26Q28 8 28 10V14Q28 16 26 16H18Q16 16 16 18V46Q16 48 18 48H26Q28 48 28 50V54Q28 56 26 56H12Q8 56 8 52V12Q8 8 12 8Z"/>
-    <path d="M52 8H38Q36 8 36 10V14Q36 16 38 16H46Q48 16 48 18V46Q48 48 46 48H38Q36 48 36 50V54Q36 56 38 56H52Q56 56 56 52V12Q56 8 52 8Z"/>
-  </g>
-  <text x="822" y="105" fill="#7F848E" font-family="Geist Mono, monospace" font-size="12" font-weight="600" letter-spacing="1.5">PRECISION WINDOW / 64</text>
-  <text x="822" y="535" fill="#A7ABB3" font-family="Geist Mono, monospace" font-size="12" font-weight="600" letter-spacing="1.5">SHARED OWNERSHIP</text>
+  <title id="title">Tickety by Nexora — Resolve what matters.</title>
+  <desc id="desc">Nexora Tickety social card with the Nexora spectrum.</desc>
+  <defs>
+    <linearGradient id="spectrum" x1="72" y1="0" x2="1128" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#E11BCC"/>
+      <stop offset=".27" stop-color="#803CE8"/>
+      <stop offset=".52" stop-color="#005EB8"/>
+      <stop offset=".76" stop-color="#00F3D1"/>
+      <stop offset="1" stop-color="#66FC90"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="translate(990 105) rotate(132) scale(510 420)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#803CE8" stop-opacity=".34"/>
+      <stop offset="1" stop-color="#010D1B" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1200" height="630" fill="#010D1B"/>
+  <rect width="1200" height="630" fill="url(#glow)"/>
+  <rect x="0" y="0" width="1200" height="7" fill="url(#spectrum)"/>
+  <rect x="60" y="45" width="242" height="70" rx="6" fill="#FFFFFF"/>
+  <image href="nexora-logo.svg" x="76" y="60" width="210" height="40"/>
+  <rect x="326" y="63" width="1" height="34" fill="#FFFFFF" fill-opacity=".3"/>
+  <text x="350" y="88" fill="#FFFFFF" font-family="DM Mono, monospace" font-size="19" font-weight="500" letter-spacing="4">TICKETY</text>
+  <text x="72" y="205" fill="#979DA5" font-family="DM Mono, monospace" font-size="15" font-weight="500" letter-spacing="2.5">INTELLIGENT SERVICE OPERATIONS</text>
+  <text x="72" y="330" fill="#FFFFFF" font-family="DM Sans, Arial, sans-serif" font-size="72" font-weight="500" letter-spacing="-2">Resolve what matters.</text>
+  <text x="74" y="390" fill="#C9CDD3" font-family="DM Sans, Arial, sans-serif" font-size="24">Clear triage. Shared context. Accountable ownership.</text>
+  <path d="M72 516H1128" stroke="#FFFFFF" stroke-opacity=".16"/>
+  <text x="72" y="557" fill="#979DA5" font-family="DM Mono, monospace" font-size="14" font-weight="500" letter-spacing="2">FOCUS / MOMENTUM / IMPACT</text>
+  <path d="M946 212 1082 364M1082 212 946 364" stroke="url(#spectrum)" stroke-width="30" stroke-linecap="round"/>
 </svg>

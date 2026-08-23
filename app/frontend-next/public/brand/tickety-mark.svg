@@ -1,8 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
-  <title id="title">Tickety Precision Window mark</title>
-  <desc id="desc">Two balanced forms surround a protected central case.</desc>
-  <g fill="#0A0B0D">
-    <path d="M12 8H26Q28 8 28 10V14Q28 16 26 16H18Q16 16 16 18V46Q16 48 18 48H26Q28 48 28 50V54Q28 56 26 56H12Q8 56 8 52V12Q8 8 12 8Z"/>
-    <path d="M52 8H38Q36 8 36 10V14Q36 16 38 16H46Q48 16 48 18V46Q48 48 46 48H38Q36 48 36 50V54Q36 56 38 56H52Q56 56 56 52V12Q56 8 52 8Z"/>
-  </g>
+  <title id="title">Nexora Tickety</title>
+  <desc id="desc">Nexora spectrum mark for Tickety service operations.</desc>
+  <defs>
+    <linearGradient id="spectrum" x1="8" y1="10" x2="56" y2="54" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#E11BCC"/>
+      <stop offset=".3" stop-color="#803CE8"/>
+      <stop offset=".58" stop-color="#005EB8"/>
+      <stop offset=".8" stop-color="#00F3D1"/>
+      <stop offset="1" stop-color="#66FC90"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#010D1B"/>
+  <path d="M17 16 47 48M47 16 17 48" stroke="url(#spectrum)" stroke-width="8" stroke-linecap="round"/>
 </svg>

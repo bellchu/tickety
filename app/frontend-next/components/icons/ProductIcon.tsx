@@ -25,14 +25,14 @@ export function ProductIcon({
       )}
     >
       {active && (
-        <span className="absolute -left-3 h-3.5 w-0.5 bg-[#3D5AFE]" />
+        <span className="nexora-spectrum absolute -left-3 h-4 w-0.5" />
       )}
       <Icon
         className={cn(
           "h-[19px] w-[19px] transition-colors duration-150",
           active
             ? "text-white"
-            : "text-[#8491A1] group-hover:text-[#DCE3EB]"
+            : "text-[#979DA5] group-hover:text-white"
         )}
         strokeWidth={1.75}
         strokeLinecap="round"

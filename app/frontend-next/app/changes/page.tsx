@@ -30,7 +30,7 @@ const STATUS_STYLES: Record<string, string> = {
   Draft: "border-linen-500 bg-linen-300 text-ink-600",
   Submitted: "border-clay-400/40 bg-clay-400/10 text-clay-700",
   Approved: "border-moss-500/30 bg-moss-500/10 text-moss-700",
-  "In Progress": "border-blue-400/30 bg-blue-400/10 text-blue-600",
+  "In Progress": "border-clay-400/30 bg-clay-400/10 text-clay-700",
   Completed: "border-moss-500/40 bg-moss-500/15 text-moss-700",
   Rejected: "border-rust-400/30 bg-rust-400/10 text-rust-600",
   Cancelled: "border-linen-500 bg-linen-300 text-ink-500",
@@ -41,7 +41,7 @@ const RISK_STYLES: Record<string, string> = {
   High: "border-rust-400/30 bg-rust-400/10 text-rust-600",
 };
 const TYPE_STYLES: Record<string, string> = {
-  Normal: "border-blue-400/30 bg-blue-400/10 text-blue-600",
+  Normal: "border-clay-400/30 bg-clay-400/10 text-clay-700",
   Standard: "border-moss-500/30 bg-moss-500/10 text-moss-700",
   Emergency: "border-rust-400/30 bg-rust-400/10 text-rust-600",
 };

@@ -14,10 +14,10 @@ const metadataBase = new URL(
 
 export const metadata: Metadata = {
   metadataBase,
-  applicationName: "Tickety",
+  applicationName: "Nexora Tickety",
   title: {
-    default: "Tickety — Intelligent Service Operations",
-    template: "%s · Tickety",
+    default: "Tickety by Nexora — Intelligent Service Operations",
+    template: "%s · Nexora Tickety",
   },
   description:
     "AI-assisted service operations for decisive triage, accountable ownership, and faster resolution.",
@@ -32,8 +32,8 @@ export const metadata: Metadata = {
   },
   openGraph: {
     type: "website",
-    siteName: "Tickety",
-    title: "Tickety — Intelligent Service Operations",
+    siteName: "Nexora Tickety",
+    title: "Tickety by Nexora — Intelligent Service Operations",
     description:
       "Resolve what matters with clear triage, accountable ownership, and auditable service operations.",
     images: [
@@ -41,13 +41,13 @@ export const metadata: Metadata = {
         url: "/opengraph-image.png",
         width: 1200,
         height: 630,
-        alt: "Tickety — Resolve what matters.",
+        alt: "Nexora Tickety — Resolve what matters.",
       },
     ],
   },
   twitter: {
     card: "summary_large_image",
-    title: "Tickety — Intelligent Service Operations",
+    title: "Tickety by Nexora — Intelligent Service Operations",
     description:
       "Resolve what matters with clear triage, accountable ownership, and auditable service operations.",
     images: ["/twitter-image.png"],
@@ -56,7 +56,7 @@ export const metadata: Metadata = {
 
 export const viewport: Viewport = {
   colorScheme: "light",
-  themeColor: "#0A0B0D",
+  themeColor: "#010D1B",
 };
 
 export default function RootLayout({
@@ -66,7 +66,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body>
+      <body className="nexora-ui">
         <AppErrorBoundary>
           <Providers>
             <AppShell>{children}</AppShell>

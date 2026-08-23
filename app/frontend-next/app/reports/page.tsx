@@ -13,8 +13,8 @@ import { cn } from "@/lib/utils";
 import { Alert, EmptyState, ErrorState, Skeleton } from "@/components/ui";
 import { PageFrame, PageHeader } from "@/components/layout/PageLayout";
 
-const CHART_COLORS = ["#3D5AFE", "#7C8BFF", "#5C5347", "#9B9084", "#6B8E5A", "#D4A24C", "#C44A3F"];
-const PRIORITY_COLORS: Record<string, string> = { P1: "#C44A3F", P2: "#D4A24C", P3: "#3D5AFE", P4: "#9B9084" };
+const CHART_COLORS = ["#803CE8", "#005EB8", "#03CCB5", "#66FC90", "#E11BCC", "#F6AB3B", "#CF3E54"];
+const PRIORITY_COLORS: Record<string, string> = { P1: "#CF3E54", P2: "#F6AB3B", P3: "#803CE8", P4: "#7E8691" };
 
 export default function ReportsPage() {
   const summaryQuery = useQuery({ queryKey: ["report-summary"], queryFn: api.getReportSummary });
@@ -72,15 +72,15 @@ export default function ReportsPage() {
             <AreaChart data={volumeData}>
               <defs>
                 <linearGradient id="volGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#3D5AFE" stopOpacity={0.3} />
-                  <stop offset="95%" stopColor="#3D5AFE" stopOpacity={0} />
+                  <stop offset="5%" stopColor="#803CE8" stopOpacity={0.3} />
+                  <stop offset="95%" stopColor="#803CE8" stopOpacity={0} />
                 </linearGradient>
               </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="#E8E1D6" vertical={false} />
-              <XAxis dataKey="day" tick={{ fontSize: 10, fill: "#9B9084" }} interval="preserveStartEnd" />
-              <YAxis tick={{ fontSize: 10, fill: "#9B9084" }} allowDecimals={false} />
-              <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #E8E1D6" }} />
-              <Area type="monotone" dataKey="count" stroke="#3D5AFE" strokeWidth={2} fill="url(#volGrad)" />
+              <CartesianGrid strokeDasharray="3 3" stroke="#DDE2EA" vertical={false} />
+              <XAxis dataKey="day" tick={{ fontSize: 10, fill: "#7E8691" }} interval="preserveStartEnd" />
+              <YAxis tick={{ fontSize: 10, fill: "#7E8691" }} allowDecimals={false} />
+              <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #DDE2EA" }} />
+              <Area type="monotone" dataKey="count" stroke="#803CE8" strokeWidth={2} fill="url(#volGrad)" />
             </AreaChart>
           </ResponsiveContainer></>
         ) : (
@@ -114,10 +114,10 @@ export default function ReportsPage() {
           {statusQuery.isLoading ? <ChartSkeleton /> : statusQuery.isError ? <SectionError onRetry={() => void statusQuery.refetch()} /> : statusData.length > 0 ? (
             <ResponsiveContainer width="100%" height={220}>
               <BarChart data={statusData} layout="vertical">
-                <CartesianGrid strokeDasharray="3 3" stroke="#E8E1D6" horizontal={false} />
-                <XAxis type="number" tick={{ fontSize: 10, fill: "#9B9084" }} allowDecimals={false} />
-                <YAxis type="category" dataKey="name" tick={{ fontSize: 10, fill: "#9B9084" }} width={90} />
-                <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #E8E1D6" }} />
+                <CartesianGrid strokeDasharray="3 3" stroke="#DDE2EA" horizontal={false} />
+                <XAxis type="number" tick={{ fontSize: 10, fill: "#7E8691" }} allowDecimals={false} />
+                <YAxis type="category" dataKey="name" tick={{ fontSize: 10, fill: "#7E8691" }} width={90} />
+                <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #DDE2EA" }} />
                 <Bar dataKey="value" radius={[0, 4, 4, 0]}>
                   {statusData.map((_, i) => <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />)}
                 </Bar>
@@ -158,10 +158,10 @@ export default function ReportsPage() {
             {resolutionTime?.truncated && <Alert variant="warning" title="Resolution averages are sampled" className="text-xs">Calculated from the latest {resolutionTime.analyzed_tickets.toLocaleString()} of {resolutionTime.total_matching_tickets.toLocaleString()} matching resolved tickets.</Alert>}
             <ResponsiveContainer width="100%" height={220}>
               <BarChart data={resolutionData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#E8E1D6" vertical={false} />
-                <XAxis dataKey="category" tick={{ fontSize: 10, fill: "#9B9084" }} />
-                <YAxis tick={{ fontSize: 10, fill: "#9B9084" }} />
-                <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #E8E1D6" }} />
+                <CartesianGrid strokeDasharray="3 3" stroke="#DDE2EA" vertical={false} />
+                <XAxis dataKey="category" tick={{ fontSize: 10, fill: "#7E8691" }} />
+                <YAxis tick={{ fontSize: 10, fill: "#7E8691" }} />
+                <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #DDE2EA" }} />
                 <Bar dataKey="hours" radius={[4, 4, 0, 0]}>
                   {resolutionData.map((_, i) => <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />)}
                 </Bar>

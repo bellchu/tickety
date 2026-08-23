@@ -91,11 +91,11 @@ export function Sidebar({
       aria-modal={open ? "true" : undefined}
       role={open ? "dialog" : undefined}
       className={cn(
-        "fixed inset-y-0 left-0 z-50 flex w-64 flex-col border-r border-white/10 bg-[#101820] text-white shadow-2xl transition-transform duration-200 ease-out lg:translate-x-0 lg:shadow-none",
+        "fixed inset-y-0 left-0 z-50 flex w-[17rem] flex-col overflow-hidden border-r border-white/10 bg-[#010D1B] text-white shadow-2xl transition-transform duration-200 ease-out after:absolute after:inset-y-0 after:right-0 after:w-[2px] after:[background:var(--brand-spectrum)] lg:translate-x-0 lg:shadow-none",
         open ? "translate-x-0" : "-translate-x-full"
       )}
     >
-      <div className="flex h-16 items-center justify-between border-b border-white/10 px-4">
+      <div className="relative z-10 flex h-20 items-center justify-between border-b border-white/10 px-4">
         <Link href="/" className="-ml-0.5 rounded-md focus:outline-none focus:ring-2 focus:ring-clay-300" onClick={onClose}>
           <TicketyLogo inverse size="md" />
         </Link>
@@ -103,13 +103,13 @@ export function Sidebar({
           type="button"
           aria-label="Close navigation"
           onClick={onClose}
-          className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-300 transition-colors hover:bg-white/10 hover:text-white focus:outline-none focus:ring-2 focus:ring-clay-300 lg:hidden"
+          className="inline-flex h-9 w-9 items-center justify-center rounded-md text-slate-300 transition-colors hover:bg-white/10 hover:text-white focus:outline-none focus:ring-2 focus:ring-clay-300 lg:hidden"
         >
           <X className="h-5 w-5" aria-hidden="true" />
         </button>
       </div>
 
-      <nav aria-label="Workspace" className="flex-1 space-y-5 overflow-y-auto px-3 py-5">
+      <nav aria-label="Workspace" className="relative z-10 flex-1 space-y-5 overflow-y-auto px-3 py-5">
         {navigationSections.map((group) => {
           const visibleItems = group.items.filter((item) => canSeeItem(item.visibility));
           if (!visibleItems.length) return null;
@@ -120,7 +120,7 @@ export function Sidebar({
               <div
                 id={groupId}
                 className={cn(
-                  "px-3 pb-1.5 text-[10px] font-semibold uppercase tracking-[0.15em] transition-colors",
+                  "px-3 pb-1.5 font-mono text-[9px] font-medium uppercase tracking-[0.14em] transition-colors",
                   groupActive ? "text-slate-300" : "text-slate-500"
                 )}
               >
@@ -137,7 +137,7 @@ export function Sidebar({
                       aria-current={active ? "page" : undefined}
                       onClick={onClose}
                       className={cn(
-                        "group flex min-h-11 items-center gap-3 rounded-md px-3 py-1.5 text-[13px] transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#3D5AFE] lg:min-h-9",
+                        "group flex min-h-11 items-center gap-3 rounded-md px-3 py-1.5 text-[13px] transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#803CE8] lg:min-h-9",
                         active
                           ? "bg-white/[0.10] font-semibold text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)]"
                           : "font-normal text-[#AEB8C5] hover:bg-white/[0.055] hover:text-white"
@@ -154,7 +154,7 @@ export function Sidebar({
         })}
       </nav>
 
-      <div className="space-y-1 border-t border-white/10 bg-[#000A15] p-3">
+      <div className="relative z-10 space-y-1 border-t border-white/10 bg-[#021123] p-3">
         {canAccessAdmin && (
           <div className="px-3 py-1.5 text-slate-400 [&_*]:!text-slate-400">
             <SyncIndicator enabled={canAccessAdmin} />
@@ -164,7 +164,7 @@ export function Sidebar({
         {showLogin && (
           <LoginLink
             onNavigate={onClose}
-            className="mb-1 w-full border-white/15 bg-white/[0.06] text-white hover:border-white/25 hover:bg-white/10 focus-visible:ring-[#3D5AFE] focus-visible:ring-offset-[#101820]"
+            className="mb-1 w-full border-white/15 bg-white/[0.06] text-white hover:border-white/25 hover:bg-white/10 focus-visible:ring-[#803CE8] focus-visible:ring-offset-[#010D1B]"
           />
         )}
 
@@ -174,7 +174,7 @@ export function Sidebar({
             onClick={onClose}
             aria-current={pathname.startsWith("/settings") ? "page" : undefined}
             className={cn(
-              "group flex min-h-10 items-center gap-3 rounded-md px-3 py-2 text-[13px] transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#3D5AFE]",
+              "group flex min-h-10 items-center gap-3 rounded-md px-3 py-2 text-[13px] transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#803CE8]",
               pathname.startsWith("/settings")
                 ? "bg-white/[0.10] font-semibold text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)]"
                 : "font-normal text-[#AEB8C5] hover:bg-white/[0.055] hover:text-white"
@@ -197,7 +197,7 @@ export function Sidebar({
             onClick={onClose}
             aria-current={pathname.startsWith("/profile") ? "page" : undefined}
             className={cn(
-              "group flex min-h-14 items-center gap-3 rounded-lg px-2.5 py-2 text-[13px] transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#3D5AFE]",
+              "group flex min-h-14 items-center gap-3 rounded-md px-2.5 py-2 text-[13px] transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#803CE8]",
               pathname.startsWith("/profile")
                 ? "bg-white/[0.09] text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)]"
                 : "text-[#9AA5B3] hover:bg-white/[0.05] hover:text-white"
@@ -224,7 +224,7 @@ export function Sidebar({
               variant="ghost"
               size="sm"
               errorClassName="text-red-300"
-              className="mt-1 w-full justify-start border-transparent px-2.5 text-slate-400 hover:bg-white/[0.035] hover:text-white focus-visible:ring-[#3D5AFE] focus-visible:ring-offset-[#101820]"
+              className="mt-1 w-full justify-start border-transparent px-2.5 text-slate-400 hover:bg-white/[0.035] hover:text-white focus-visible:ring-[#803CE8] focus-visible:ring-offset-[#010D1B]"
             />
           )}
         </div>

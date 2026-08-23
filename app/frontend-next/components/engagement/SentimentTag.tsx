@@ -17,7 +17,7 @@ export function SentimentTag({ mood, size = "sm" }: Props) {
         "inline-flex items-center gap-1 rounded-md font-medium",
         size === "sm" ? "text-xs px-2 py-0.5" : "text-sm px-2.5 py-1",
         mood === "angry" || mood === "frustrated"
-          ? "bg-red-50 text-red-700"
+          ? "bg-[var(--color-danger-soft)] text-semantic-danger"
           : mood === "anxious" || mood === "confused"
           ? "bg-linen-200 text-ink-600"
           : mood === "neutral"

@@ -41,24 +41,25 @@ export function PageHeader({
   return (
     <header
       className={cn(
-        "flex flex-col gap-5 border-b border-linen-400 pb-6 sm:flex-row sm:items-end sm:justify-between",
+        "relative flex flex-col gap-5 border-b border-linen-400 pb-6 sm:flex-row sm:items-end sm:justify-between",
         className
       )}
     >
       <div className="min-w-0 max-w-3xl">
         {eyebrow && (
-          <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-ink-400">
+          <div className="flex items-center gap-2 font-mono text-[10px] font-medium uppercase tracking-[0.13em] text-ink-400">
             {icon && <span className="text-semantic-primary" aria-hidden="true">{icon}</span>}
             <span>{eyebrow}</span>
           </div>
         )}
-        <h1 className={cn("font-serif text-3xl tracking-[-0.03em] text-ink-700 sm:text-4xl", eyebrow && "mt-2")}>
+        <h1 className={cn("text-3xl font-medium tracking-[-0.035em] text-ink-700 sm:text-4xl", eyebrow && "mt-2")}>
           {title}
         </h1>
         {description && <div className="mt-2 text-sm leading-6 text-ink-500">{description}</div>}
         {meta && <div className="mt-2 text-xs text-ink-400">{meta}</div>}
       </div>
       {actions && <div className="flex shrink-0 flex-col gap-2 xs:flex-row sm:flex-row">{actions}</div>}
+      <span aria-hidden="true" className="nexora-spectrum absolute -bottom-px left-0 h-[2px] w-36" />
     </header>
   );
 }
@@ -94,7 +95,7 @@ export function SectionHeader({
   return (
     <div className={cn("flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between", className)}>
       <div className="min-w-0">
-        <h2 className="text-base font-semibold tracking-[-0.01em] text-ink-700">{title}</h2>
+        <h2 className="text-base font-medium tracking-[-0.01em] text-ink-700">{title}</h2>
         {description && <div className="mt-1 text-xs leading-5 text-ink-500">{description}</div>}
       </div>
       {actions && <div className="shrink-0">{actions}</div>}
@@ -111,7 +112,7 @@ export function DataToolbar({
   return (
     <section
       aria-label={label}
-      className={cn("rounded-2xl border border-linen-400 bg-linen-50 p-4 shadow-sm sm:p-5", className)}
+      className={cn("rounded-xl border border-linen-400 bg-linen-50 p-4 shadow-sm sm:p-5", className)}
       {...props}
     >
       {children}
@@ -126,7 +127,7 @@ export function ContentSurface({
 }: HTMLAttributes<HTMLElement>) {
   return (
     <section
-      className={cn("overflow-hidden rounded-2xl border border-linen-400 bg-linen-50 shadow-sm", className)}
+      className={cn("overflow-hidden rounded-xl border border-linen-400 bg-linen-50 shadow-sm", className)}
       {...props}
     >
       {children}

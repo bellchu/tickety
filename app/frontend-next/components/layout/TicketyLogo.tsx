@@ -1,61 +1,46 @@
+import Image from "next/image";
 import { cn } from "@/lib/utils";
-
-const PRECISION_WINDOW_LEFT_PATH =
-  "M12 8H26Q28 8 28 10V14Q28 16 26 16H18Q16 16 16 18V46Q16 48 18 48H26Q28 48 28 50V54Q28 56 26 56H12Q8 56 8 52V12Q8 8 12 8Z";
-const PRECISION_WINDOW_RIGHT_PATH =
-  "M52 8H38Q36 8 36 10V14Q36 16 38 16H46Q48 16 48 18V46Q48 48 46 48H38Q36 48 36 50V54Q36 56 38 56H52Q56 56 56 52V12Q56 8 52 8Z";
 
 type MarkTone = "gradient" | "solid" | "dark" | "reversed";
 type LogoSize = "sm" | "md" | "lg" | "xl";
 
-// Keep the earlier tone names as compatibility aliases. The identity itself
-// is deliberately monochrome; cobalt is reserved for product UI.
-const markToneClasses: Record<MarkTone, string> = {
-  gradient: "text-[#0A0B0D]",
-  solid: "text-[#0A0B0D]",
-  dark: "text-[#0A0B0D]",
-  reversed: "text-white",
-};
-
+/** Compact product mark used where the full Nexora wordmark cannot fit. */
 export function TicketyMark({
   className,
-  tone = "dark",
+  tone = "gradient",
 }: {
   className?: string;
   tone?: MarkTone;
 }) {
+  const monochrome = tone === "solid" || tone === "dark" || tone === "reversed";
+
   return (
     <span
       className={cn(
-        "inline-flex aspect-square shrink-0 items-center justify-center",
-        markToneClasses[tone],
+        "inline-grid aspect-square shrink-0 place-items-center overflow-hidden rounded-[22%]",
+        monochrome ? (tone === "reversed" ? "bg-white text-ink-700" : "bg-ink-700 text-white") : "nexora-spectrum text-white",
         className
       )}
+      aria-hidden="true"
     >
-      <svg
-        aria-hidden="true"
-        className="h-full w-full"
-        focusable="false"
-        viewBox="0 0 64 64"
-        xmlns="http://www.w3.org/2000/svg"
-      >
-        <path d={PRECISION_WINDOW_LEFT_PATH} fill="currentColor" />
-        <path d={PRECISION_WINDOW_RIGHT_PATH} fill="currentColor" />
+      <svg className="h-[58%] w-[58%]" viewBox="0 0 24 24" fill="none">
+        <path d="M5 5.5 19 18.5M19 5.5 5 18.5" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
       </svg>
     </span>
   );
 }
 
-const logoSizeClasses: Record<
+const logoSizes: Record<
   LogoSize,
-  { mark: string; word: string; descriptor: string }
+  { width: number; height: number; product: string; descriptor: string; gap: string }
 > = {
-  sm: { mark: "h-6 w-6", word: "text-[17px]", descriptor: "text-[7px]" },
-  md: { mark: "h-8 w-8", word: "text-[21px]", descriptor: "text-[8px]" },
-  lg: { mark: "h-9 w-9", word: "text-2xl", descriptor: "text-[8px]" },
-  xl: { mark: "h-10 w-10", word: "text-[27px]", descriptor: "text-[9px]" },
+  sm: { width: 88, height: 17, product: "text-[8px]", descriptor: "text-[6px]", gap: "gap-2" },
+  md: { width: 103, height: 20, product: "text-[9px]", descriptor: "text-[7px]", gap: "gap-2.5" },
+  lg: { width: 116, height: 22, product: "text-[10px]", descriptor: "text-[7px]", gap: "gap-3" },
+  xl: { width: 137, height: 26, product: "text-[11px]", descriptor: "text-[8px]", gap: "gap-3" },
 };
 
+/** Nexora parent identity paired with the Tickety service-operations product. */
 export function TicketyLogo({
   className,
   inverse = false,
@@ -67,38 +52,34 @@ export function TicketyLogo({
   showDescriptor?: boolean;
   size?: LogoSize;
 }) {
-  const sizing = logoSizeClasses[size];
+  const sizing = logoSizes[size];
 
   return (
     <span
-      aria-label="Tickety"
-      className={cn("inline-flex items-center gap-2", className)}
+      aria-label="Nexora Tickety"
+      className={cn(
+        "inline-flex items-center",
+        sizing.gap,
+        inverse && "rounded-md bg-white px-2.5 py-2 shadow-sm",
+        className
+      )}
       role="img"
     >
-      <TicketyMark className={sizing.mark} tone={inverse ? "reversed" : "dark"} />
-      <span
-        aria-hidden="true"
-        className="flex min-w-0 flex-col justify-center gap-0.5 leading-none"
-      >
-        <span
-          className={cn(
-            "whitespace-nowrap font-medium tracking-[-0.025em]",
-            sizing.word,
-            inverse ? "text-white" : "text-[#0A0B0D]"
-          )}
-          style={{ fontFamily: '"Geist", Arial, sans-serif' }}
-        >
+      <Image
+        src="/brand/nexora-logo.svg"
+        alt=""
+        width={sizing.width}
+        height={sizing.height}
+        className="h-auto shrink-0"
+      />
+      <span aria-hidden="true" className="h-6 w-px shrink-0 bg-ink-700/20" />
+      <span aria-hidden="true" className="flex min-w-0 flex-col justify-center leading-none">
+        <span className={cn("whitespace-nowrap font-mono font-medium uppercase tracking-[0.18em] text-ink-700", sizing.product)}>
           Tickety
         </span>
         {showDescriptor && (
-          <span
-            className={cn(
-              "whitespace-nowrap font-medium tracking-normal",
-              sizing.descriptor,
-              inverse ? "text-white/60" : "text-[#0A0B0D]/55"
-            )}
-          >
-            Service operations
+          <span className={cn("mt-1 whitespace-nowrap font-mono uppercase tracking-[0.08em] text-ink-400", sizing.descriptor)}>
+            Service ops
           </span>
         )}
       </span>

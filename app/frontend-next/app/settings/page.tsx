@@ -970,13 +970,13 @@ function DemoAdministrationState({ version }: { version?: BuildInfo }) {
     <PageFrame className="max-w-5xl space-y-8">
       <PageHeader eyebrow="Administration" icon={<SettingsIcon className="h-5 w-5" />} title="System settings" description="Sign in with a demo administrator account to configure this demo workspace." />
 
-      <div className="rounded-xl border border-blue-400/30 bg-blue-400/5 p-6 sm:p-8" role="status">
+      <div className="rounded-xl border border-clay-400/30 bg-clay-400/5 p-6 sm:p-8" role="status">
         <div className="flex items-start gap-4">
-          <div className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-white text-blue-500 shadow-sm">
+          <div className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-white text-clay-500 shadow-sm">
             <ShieldCheck className="h-5 w-5" aria-hidden="true" />
           </div>
           <div className="max-w-2xl">
-            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-blue-600">Demo administrator access</p>
+            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-clay-600">Demo administrator access</p>
             <h2 className="mt-1 text-xl font-semibold text-ink-700">Sign in to manage this demo</h2>
             <p className="mt-2 text-sm leading-6 text-ink-500">
               Configuration, integrations, and user access are available to an active demo administrator. The public demo session and demo supervisors remain read-only for protected administration features.
@@ -1144,7 +1144,7 @@ function FreshserviceOAuthSetup({
         </button>
       </div>
       {authMut.isError && (
-        <div className="rounded border border-rust-400/30 bg-rust-400/10 p-3 text-sm text-red-700">
+        <div className="rounded border border-rust-400/30 bg-rust-400/10 p-3 text-sm text-rust-600">
           {authMut.error instanceof Error ? authMut.error.message : "Failed to get authorization URL"}
         </div>
       )}
@@ -1195,8 +1195,8 @@ function DeploymentManagedLabel({ label, managed }: { label: string; managed: bo
 
 function DeploymentManagedNotice({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex items-start gap-2 rounded border border-blue-400/30 bg-blue-400/5 p-3 text-xs leading-5 text-ink-600" role="note">
-      <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-blue-500" aria-hidden="true" />
+    <div className="flex items-start gap-2 rounded border border-clay-400/30 bg-clay-400/5 p-3 text-xs leading-5 text-ink-600" role="note">
+      <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-clay-500" aria-hidden="true" />
       <p>{children}</p>
     </div>
   );
@@ -1538,7 +1538,7 @@ function StatusConfigSection() {
                   <span className="text-xs text-ink-400 ml-2">({s.name})</span>
                 </div>
                 <div className="flex gap-1.5">
-                  {s.is_open && <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-400/10 text-blue-500 border border-blue-400/20">open</span>}
+                  {s.is_open && <span className="rounded border border-clay-400/20 bg-clay-400/10 px-1.5 py-0.5 text-[10px] text-clay-600">open</span>}
                   {s.is_terminal && <span className="text-[10px] px-1.5 py-0.5 rounded bg-linen-300 text-ink-500">terminal</span>}
                 </div>
               </div>

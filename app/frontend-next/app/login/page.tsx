@@ -72,32 +72,32 @@ export default function LoginPage() {
   };
 
   return (
-    <main className="min-h-screen bg-[#F4F5F7] p-3 sm:p-5 lg:p-6">
-      <div className="mx-auto grid min-h-[calc(100vh-1.5rem)] w-full max-w-[1440px] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-[0_24px_80px_rgba(15,23,42,0.12)] sm:min-h-[calc(100vh-2.5rem)] lg:grid-cols-[minmax(0,1.05fr)_minmax(440px,0.95fr)]">
-        <section className="relative hidden overflow-hidden bg-[#0A0D12] px-12 py-11 text-white lg:flex lg:flex-col" aria-label="Tickety product overview">
-          <div className="absolute -right-24 -top-28 h-80 w-80 rounded-full bg-blue-500/20 blur-3xl" aria-hidden="true" />
-          <div className="absolute -bottom-36 left-1/4 h-96 w-96 rounded-full bg-cyan-400/10 blur-3xl" aria-hidden="true" />
+    <main className="nexora-ambient min-h-screen p-3 sm:p-5 lg:p-6">
+      <div className="relative mx-auto grid min-h-[calc(100vh-1.5rem)] w-full max-w-[1440px] overflow-hidden rounded-xl border border-linen-400 bg-white shadow-[0_24px_80px_rgba(1,13,27,0.13)] before:absolute before:inset-x-0 before:top-0 before:z-20 before:h-[3px] before:[background:var(--brand-spectrum)] sm:min-h-[calc(100vh-2.5rem)] lg:grid-cols-[minmax(0,1.05fr)_minmax(440px,0.95fr)]">
+        <section className="relative hidden overflow-hidden bg-[#010D1B] px-12 py-11 text-white lg:flex lg:flex-col" aria-label="Tickety product overview">
+          <div className="absolute -right-24 -top-28 h-80 w-80 rounded-full bg-[#E11BCC]/15 blur-3xl" aria-hidden="true" />
+          <div className="absolute -bottom-36 left-1/4 h-96 w-96 rounded-full bg-[#00F3D1]/10 blur-3xl" aria-hidden="true" />
 
           <div className="relative z-10">
             <TicketyLogo inverse size="xl" />
           </div>
 
           <div className="relative z-10 my-auto max-w-xl py-16">
-            <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-blue-300/20 bg-blue-400/10 px-3 py-1.5 text-xs font-semibold tracking-wide text-blue-100">
-              <span className="h-1.5 w-1.5 rounded-full bg-cyan-300" aria-hidden="true" />
+            <div className="mb-6 inline-flex items-center gap-2 border border-white/15 bg-white/[0.06] px-3 py-1.5 font-mono text-[10px] font-medium tracking-[0.14em] text-white/75">
+              <span className="nexora-spectrum h-1.5 w-1.5 rounded-full" aria-hidden="true" />
               OPERATIONS, IN FOCUS
             </div>
             <h1 className="max-w-lg text-4xl font-semibold leading-[1.08] tracking-[-0.035em] xl:text-5xl">
               Move support work forward with confidence.
             </h1>
-            <p className="mt-6 max-w-lg text-base leading-7 text-slate-300">
+            <p className="mt-6 max-w-lg text-base leading-7 text-[#C9CDD3]">
               Tickety gives service teams a calm, shared view of the work that needs attention now—and the context to act on it.
             </p>
 
             <ul className="mt-9 space-y-4" aria-label="Workspace capabilities">
               {workspaceBenefits.map((benefit) => (
-                <li key={benefit} className="flex items-start gap-3 text-sm leading-6 text-slate-200">
-                  <span className="mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full bg-blue-400/15 text-cyan-200" aria-hidden="true">
+                <li key={benefit} className="flex items-start gap-3 text-sm leading-6 text-[#E6E9EE]">
+                  <span className="mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full border border-white/15 bg-white/10 text-[#66FC90]" aria-hidden="true">
                     <Check className="h-3.5 w-3.5" />
                   </span>
                   {benefit}
@@ -106,13 +106,13 @@ export default function LoginPage() {
             </ul>
           </div>
 
-          <div className="relative z-10 flex items-center gap-2 text-xs text-slate-400">
-            <ShieldCheck className="h-4 w-4 text-emerald-300" aria-hidden="true" />
+          <div className="relative z-10 flex items-center gap-2 text-xs text-[#979DA5]">
+            <ShieldCheck className="h-4 w-4 text-[#66FC90]" aria-hidden="true" />
             Access is protected by your organization’s authentication policy.
           </div>
         </section>
 
-        <section className="flex items-center justify-center px-6 py-10 sm:px-12 lg:px-16 xl:px-24">
+        <section className="flex items-center justify-center bg-white px-6 py-10 sm:px-12 lg:px-16 xl:px-24">
           <div className="w-full max-w-md">
             <div className="mb-10 lg:hidden">
               <TicketyLogo size="xl" />

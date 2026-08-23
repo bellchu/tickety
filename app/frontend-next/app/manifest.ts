@@ -2,15 +2,15 @@ import type { MetadataRoute } from "next";
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: "Tickety — Intelligent Service Operations",
-    short_name: "Tickety",
+    name: "Tickety by Nexora — Intelligent Service Operations",
+    short_name: "Nexora Tickety",
     description:
       "AI-assisted service operations for decisive triage, accountable ownership, and faster resolution.",
     start_url: "/",
     scope: "/",
     display: "standalone",
-    background_color: "#F6F6F2",
-    theme_color: "#0A0B0D",
+    background_color: "#F8FAFE",
+    theme_color: "#010D1B",
     icons: [
       {
         src: "/icons/icon-192.png",

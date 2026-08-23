@@ -133,7 +133,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   if (authState === "checking") {
     return (
-      <main className="grid min-h-screen place-items-center bg-linen-100" aria-busy="true">
+      <main className="nexora-ambient grid min-h-screen place-items-center" aria-busy="true">
         <div className="flex flex-col items-center gap-4 text-sm text-ink-500">
           <TicketyLogo size="lg" />
           <span>Checking your session…</span>
@@ -144,10 +144,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <AppExperience>
-      <div className="min-h-screen bg-linen-100">
+      <div className="nexora-ambient min-h-screen">
         <a
           href="#main-content"
-          className="fixed left-4 top-3 z-[70] -translate-y-20 rounded-md bg-clay-500 px-3 py-2 text-sm font-semibold text-white shadow-lg transition-transform focus:translate-y-0 focus:outline-none focus:ring-2 focus:ring-white"
+          className="fixed left-4 top-3 z-[70] -translate-y-20 rounded-md bg-ink-700 px-3 py-2 text-sm font-semibold text-white shadow-lg transition-transform focus:translate-y-0 focus:outline-none focus:ring-2 focus:ring-white"
         >
           Skip to content
         </a>
@@ -158,7 +158,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <button
             type="button"
             aria-label="Close navigation"
-            className="fixed inset-0 z-40 bg-[#07111d]/60 backdrop-blur-sm lg:hidden"
+            className="fixed inset-0 z-40 bg-[#010D1B]/70 backdrop-blur-sm lg:hidden"
             onClick={() => {
               setNavigationOpen(false);
               menuButtonRef.current?.focus();

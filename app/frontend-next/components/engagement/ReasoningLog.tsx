@@ -4,12 +4,12 @@ import { ListTree } from "lucide-react";
 
 /** Color-coded semantic categories for AI reasoning log segments. */
 const CATEGORIES: { prefix: string; color: string }[] = [
-  { prefix: "scope:",    color: "bg-blue-50 border-blue-200 text-blue-800" },
-  { prefix: "urgency:",  color: "bg-red-50 border-red-200 text-red-800"   },
+  { prefix: "scope:",    color: "bg-[var(--color-info-soft)] border-clay-200 text-clay-800" },
+  { prefix: "urgency:",  color: "bg-[var(--color-danger-soft)] border-rust-400/30 text-rust-600"   },
   { prefix: "impact:",   color: "bg-amber-50 border-amber-200 text-amber-800" },
-  { prefix: "category:", color: "bg-emerald-50 border-emerald-200 text-emerald-800" },
+  { prefix: "category:", color: "bg-[var(--color-success-soft)] border-moss-400/30 text-moss-600" },
   { prefix: "status:",   color: "bg-linen-300 border-linen-400 text-ink-600" },
-  { prefix: "action:",   color: "bg-violet-50 border-violet-200 text-violet-800" },
+  { prefix: "action:",   color: "bg-[var(--color-primary-soft)] border-clay-200 text-clay-800" },
   { prefix: "note:",     color: "bg-linen-200 border-linen-400 text-ink-600" },
 ];
 

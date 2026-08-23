@@ -1,9 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 224 64" role="img" aria-labelledby="title desc">
-  <title id="title">Tickety</title>
-  <desc id="desc">Tickety inverse wordmark with the Precision Window symbol.</desc>
-  <g fill="#FFFFFF">
-    <path d="M12 8H26Q28 8 28 10V14Q28 16 26 16H18Q16 16 16 18V46Q16 48 18 48H26Q28 48 28 50V54Q28 56 26 56H12Q8 56 8 52V12Q8 8 12 8Z"/>
-    <path d="M52 8H38Q36 8 36 10V14Q36 16 38 16H46Q48 16 48 18V46Q48 48 46 48H38Q36 48 36 50V54Q36 56 38 56H52Q56 56 56 52V12Q56 8 52 8Z"/>
-    <text x="80" y="43" font-family="Geist, Arial, sans-serif" font-size="40" font-weight="500" letter-spacing="-1" text-rendering="geometricPrecision">Tickety</text>
-  </g>
-</svg>

@@ -196,12 +196,12 @@ export default function PortalPage() {
   };
 
   return (
-    <div className="min-h-screen bg-linen-100 text-ink-700">
+    <div className="nexora-ambient flex min-h-screen flex-col text-ink-700">
       <a href="#portal-main" className="fixed left-4 top-3 z-[120] -translate-y-20 rounded-lg bg-semantic-primary px-3 py-2 text-sm font-semibold text-white shadow-lg transition-transform focus:translate-y-0">
         Skip to content
       </a>
 
-      <header className="border-b border-linen-300 bg-linen-50/95 backdrop-blur-md">
+      <header className="relative border-b border-linen-300 bg-linen-50/95 backdrop-blur-md after:absolute after:inset-x-0 after:bottom-0 after:h-[2px] after:[background:var(--brand-spectrum)]">
         <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4 sm:px-6 lg:px-8">
           <TicketyLogo />
           <div className="flex items-center gap-3">
@@ -218,9 +218,10 @@ export default function PortalPage() {
         </div>
       </header>
 
-      <main id="portal-main" tabIndex={-1} className="outline-none">
-        <section className="relative overflow-hidden border-b border-linen-300 bg-linen-50">
-          <div className="pointer-events-none absolute right-[-8rem] top-[-12rem] h-[28rem] w-[28rem] rounded-full bg-[var(--color-primary-soft)] blur-3xl" aria-hidden="true" />
+      <main id="portal-main" tabIndex={-1} className="flex-1 outline-none">
+        <section className="relative overflow-hidden border-b border-linen-300 bg-white/85">
+          <div className="pointer-events-none absolute -left-32 -top-40 h-[28rem] w-[28rem] rounded-full bg-[#E11BCC]/10 blur-3xl" aria-hidden="true" />
+          <div className="pointer-events-none absolute right-[-8rem] top-[-12rem] h-[28rem] w-[28rem] rounded-full bg-[#00F3D1]/10 blur-3xl" aria-hidden="true" />
           <div className="relative mx-auto grid max-w-6xl gap-8 px-4 py-12 sm:px-6 sm:py-16 lg:grid-cols-[1.15fr_0.85fr] lg:items-center lg:gap-16 lg:px-8 lg:py-20">
             <div>
               <Badge variant="info" icon={<Sparkles className="h-3 w-3" />}>Support that keeps you moving</Badge>
@@ -364,9 +365,9 @@ export default function PortalPage() {
         </div>
       </main>
 
-      <footer className="border-t border-linen-300 bg-linen-50">
-        <div className="mx-auto flex max-w-6xl flex-col gap-2 px-4 py-6 text-xs text-ink-400 sm:flex-row sm:items-center sm:justify-between sm:px-6 lg:px-8">
-          <span>Powered by Tickety Service Operations</span>
+      <footer className="relative border-t border-white/10 bg-[#010D1B] text-[#979DA5] before:absolute before:inset-x-0 before:top-0 before:h-[2px] before:[background:var(--brand-spectrum)]">
+        <div className="mx-auto flex max-w-6xl flex-col gap-3 px-4 py-6 text-xs sm:flex-row sm:items-center sm:justify-between sm:px-6 lg:px-8">
+          <TicketyLogo inverse size="sm" />
           <span>Private by design · No account required</span>
         </div>
       </footer>

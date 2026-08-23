@@ -16,9 +16,9 @@ export function ImpactBar({ points, tier, momentum }: Props) {
   return (
     <div className="flex items-center gap-3">
       {momentum > 0 && (
-        <div className="flex items-center gap-1 px-2 py-1 rounded-lg bg-orange-50 border border-orange-200">
-          <Flame className="w-3.5 h-3.5 text-orange-500" />
-          <span className="text-xs font-semibold text-orange-600">{momentum}</span>
+        <div className="flex items-center gap-1 rounded-lg border border-amber-400/30 bg-[var(--color-warning-soft)] px-2 py-1">
+          <Flame className="h-3.5 w-3.5 text-semantic-warning" />
+          <span className="text-xs font-semibold text-semantic-warning">{momentum}</span>
         </div>
       )}
       <div className="flex items-center gap-2 min-w-[180px]">
