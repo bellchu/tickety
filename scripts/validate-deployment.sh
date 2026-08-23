@@ -67,6 +67,9 @@ while IFS= read -r -d '' script; do
 done < <(find "$ROOT_DIR/k8s" "$ROOT_DIR/scripts" -type f -name '*.sh' -print0 2>/dev/null)
 bash -n "${shell_scripts[@]}"
 
+echo "Checking production target regression guard..."
+"$ROOT_DIR/scripts/verify-production-target.sh" --self-test
+
 yaml_python=""
 json_python=""
 for candidate in python3 python; do

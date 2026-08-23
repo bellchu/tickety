@@ -257,6 +257,18 @@ kubectl get pods,jobs,service,ingress --namespace tickety
 kubectl get --raw /api/v1/namespaces/tickety/services/http:tickety-frontend:80/proxy/api/health/ready
 ```
 
+For this repository's production environment, run the target guard immediately
+before and after the rollout. It rejects any namespace that does not own the
+`tickety.situ.io` ingress or whose active frontend manifest is not the one
+served by that public origin:
+
+```sh
+scripts/verify-production-target.sh --namespace <production-namespace> [--context <production-context>]
+```
+
+`tickety.imbell.com` is not a production target and cannot be used as
+production deployment evidence.
+
 For a non-default release name, namespace, or frontend service port, replace
 the values in the last command. A `ready` response confirms that the frontend
 can reach the backend and that the backend can query PostgreSQL. Backend
