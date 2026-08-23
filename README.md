@@ -217,6 +217,14 @@ For an isolated Freshservice proof of concept, see the [Freshservice trial POC g
 
 Production Tickety is a one-way Freshservice sidecar. The provider adapter exposes only reads, the capability manifest permanently marks provider mutations unsupported, and the Freshworks package contains no write template. Manual ticket creation, ticket field updates, bulk lifecycle changes, deletion, and requester-portal submission are demo-only; make authoritative changes in Freshservice. AI summaries, retrieval indexes, recommendations, and other derived artifacts remain local to Tickety.
 
+Both scheduled incremental sync and the manual **Fetch tickets** action reconcile
+every fetched ticket's Freshservice status into `external_status`,
+`workflow_status`, and the displayed `status`. This happens even when
+**Overwrite existing tickets** is disabled; that option controls whether the
+remaining provider fields replace their existing local projections. Resolved
+and closed source states are displayed as `Closed`, with provider resolution
+timestamps retained when available.
+
 Identity is also one-way and non-federated: Tickety owns its own users, passwords, sessions, and roles. Freshservice agents and requesters are copied into a separate read-only external directory for ticket context only. Provider sync never creates or updates Tickety users, matches accounts by email/name, grants a Tickety role/session, assigns a local owner, or routes points to a local user.
 
 Tickety ships in **demo mode** for evaluation with anonymous read access and an
