@@ -234,6 +234,9 @@ export interface Settings {
   LOGIN_REQUIRED: string;
   SSO_ENABLED: string;
   SSO_PROVIDER: string;
+  SSO_ENTRA_TENANT_ID: string;
+  SSO_OKTA_DOMAIN: string;
+  SSO_OKTA_AUTH_SERVER_ID: string;
   SSO_CLIENT_ID: string;
   SSO_CLIENT_SECRET: string;
   SSO_DISCOVERY_URL: string;

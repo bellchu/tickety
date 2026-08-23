@@ -460,6 +460,48 @@ class SessionRecord(Base):
     user_agent = Column(Text, nullable=True)
 
 
+class SsoIdentityRecord(Base):
+    """Stable OIDC subject linked to a local Tickety account.
+
+    Email is retained only as an audit/display value. Authentication resolves
+    the immutable issuer + subject pair so renamed or recycled email addresses
+    cannot silently inherit an existing account.
+    """
+
+    __tablename__ = "sso_identities"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    provider = Column(String(32), nullable=False)
+    issuer = Column(String(512), nullable=False)
+    subject = Column(String(512), nullable=False)
+    email_at_link = Column(String(320), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    last_login_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("issuer", "subject", name="uix_sso_identity_subject"),
+        UniqueConstraint("user_id", "issuer", name="uix_sso_identity_user_issuer"),
+    )
+
+
+class SsoTransactionRecord(Base):
+    """Single-use, database-backed OIDC authorization transaction."""
+
+    __tablename__ = "sso_transactions"
+
+    state_hash = Column(String(64), primary_key=True)
+    nonce = Column(String(128), nullable=False)
+    code_verifier = Column(String(128), nullable=False)
+    next_path = Column(String(2048), nullable=False, default="/")
+    provider = Column(String(32), nullable=False)
+    discovery_url = Column(String(2048), nullable=False)
+    redirect_uri = Column(String(2048), nullable=False)
+    client_id = Column(String(512), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False, index=True)
+
+
 class KbArticleRecord(Base):
     """Knowledge Base articles."""
     __tablename__ = "kb_articles"

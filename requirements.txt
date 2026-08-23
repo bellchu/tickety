@@ -10,5 +10,6 @@ alembic>=1.13,<2
 psycopg2-binary
 apscheduler
 httpx
+pyjwt[crypto]>=2.13,<3
 websockets
 tiktoken>=0.13,<1

@@ -43,7 +43,8 @@ Important groups are:
 
 - `backend.image` and `frontend.image`: registry repository, immutable tag, and
   pull policy.
-- `config`: runtime mode, public origin, CORS, login, and cookie controls.
+- `config`: runtime mode, public origin, CORS, login, cookie controls, and the
+  structured `config.sso` Entra ID/Okta/OIDC settings.
 - `secrets`: provider, webhook, SSO, and ITSM credentials stored in the
   chart-managed Secret.
 - `existingSecret`: use a secret manager-provisioned Secret instead. It must
@@ -58,6 +59,12 @@ Important groups are:
 - `backup`: optional custom-format PostgreSQL backups on a dedicated PVC, with
   archive validation, overlap prevention, and age-based retention. This
   currently requires the bundled PostgreSQL instance.
+
+For SSO, set `config.sso.provider` to `entra` or `okta`, put the client ID and
+tenant/domain in `config.sso`, and store `SSO_CLIENT_SECRET` in `secrets` or the
+Secret named by `existingSecret`. The callback is derived from
+`config.frontendUrl`. See the [SSO setup
+guide](../../../docs/sso.md) for complete provider configuration and examples.
 
 When the chart owns the Secret and bundled PostgreSQL, it generates an
 alphanumeric database password on first install and reuses it on upgrades.

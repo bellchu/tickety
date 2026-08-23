@@ -144,7 +144,9 @@ pydantic-core==2.46.4
 pydantic-settings==2.15.0
     # via litellm
 pyjwt==2.13.0
-    # via msal
+    # via
+    #   -r requirements.txt
+    #   msal
 python-dotenv==1.2.3
     # via
     #   -r requirements.txt

@@ -76,6 +76,18 @@ config:
   corsAllowOrigins: ""
   cookieSecure: false
   cookieSameSite: lax
+  sso:
+    enabled: false
+    # Presets: entra or okta. Use oidc plus discoveryUrl for another public
+    # OpenID Connect provider. The redirect URI is derived from frontendUrl.
+    provider: entra
+    clientId: ""
+    entraTenantId: ""
+    oktaDomain: ""
+    oktaAuthServerId: org
+    discoveryUrl: ""
+    allowedDomains: ""
+    autoProvision: false
   ragV2:
     scopeKey: default
     scopeAllowlist: default

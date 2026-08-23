@@ -184,7 +184,7 @@ export const api = {
     }),
   logout: () => fetchAPI<{ status: string }>("/auth/logout", { method: "POST" }),
   getAuthMe: () => fetchAPI<import("./types").AuthContext>("/auth/me"),
-  getSsoConfig: () => fetchAPI<{ enabled: boolean; provider: string }>("/auth/sso/config"),
+  getSsoConfig: () => fetchAPI<import("./sso-login").SsoLoginConfig>("/auth/sso/config"),
   // Users / Agents CRUD
   getUsers: () => fetchAPI<import("./types").UserOut[]>("/users"),
   createUser: (payload: import("./types").UserCreateInput) =>

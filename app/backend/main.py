@@ -27,6 +27,7 @@ from .database import (
     TicketCommentRecord, TicketCategoryRecord, TicketAuditLogRecord,
     SessionRecord, KbArticleRecord, TicketLinkRecord,
     TicketStatusConfigRecord, TicketPriorityConfigRecord, NotificationConfigRecord,
+    SsoIdentityRecord, SsoTransactionRecord,
     ProjectRecord, ServiceItemRecord, ServiceRequestRecord,
     ProblemRecord, ProblemTicketLinkRecord,
     ChangeRecord, ChangeApprovalRecord, ChangeTicketLinkRecord,
@@ -128,6 +129,7 @@ from .integrations.embedded import (
 )
 from .sync_worker import start_sync_worker, stop_sync_worker, get_sync_status
 from . import settings as settings_module
+from . import sso as sso_service
 from .security import RequestBodyLimitMiddleware
 from .privacy import redact_data
 from .production_security import (
@@ -136,7 +138,7 @@ from .production_security import (
 
 # Single source of truth for the backend version. Bump when shipping user-visible
 # changes. Build SHA/time are injected at image build time (see Dockerfile).
-VERSION = "1.1.1"
+VERSION = "1.2.0"
 BUILD_SHA = os.getenv("TICKETY_BUILD_SHA", "local")
 BUILD_TIME = os.getenv("TICKETY_BUILD_TIME", "")
 
@@ -2461,6 +2463,29 @@ def _delete_session_cookie(resp: Response, name: str):
     )
 
 
+def _set_sso_state_cookie(resp: Response, value: str):
+    resp.set_cookie(
+        SSO_STATE_COOKIE,
+        value,
+        max_age=sso_service.SSO_TRANSACTION_TTL_SECONDS,
+        httponly=True,
+        secure=_cookie_secure(),
+        # The IdP returns through a cross-site top-level GET. Strict would drop
+        # the state cookie; None is unnecessary for this redirect flow.
+        samesite="lax",
+        path="/api/auth/sso",
+    )
+
+
+def _delete_sso_state_cookie(resp: Response):
+    resp.delete_cookie(
+        SSO_STATE_COOKIE,
+        secure=_cookie_secure(),
+        samesite="lax",
+        path="/api/auth/sso",
+    )
+
+
 def _create_session(db: Session, user_id: str, request: Request) -> str:
     token = secrets.token_urlsafe(32)
     session = SessionRecord(
@@ -2534,165 +2559,272 @@ async def auth_me(
 
 @app.get("/auth/sso/config")
 async def sso_config():
-    return {
-        "enabled": os.getenv("SSO_ENABLED", "").lower() == "true",
-        "provider": os.getenv("SSO_PROVIDER", ""),
-    }
+    return JSONResponse(
+        sso_service.public_sso_config(),
+        headers={"Cache-Control": "no-store"},
+    )
 
 
-@app.get("/auth/sso/login")
-async def sso_login():
-    if os.getenv("SSO_ENABLED", "").lower() != "true":
-        raise HTTPException(status_code=400, detail="SSO is not enabled")
-
-    client_id = os.getenv("SSO_CLIENT_ID", "")
-    redirect_uri = os.getenv("SSO_REDIRECT_URI", "")
-    discovery_url = os.getenv("SSO_DISCOVERY_URL", "")
-
-    if not client_id or not redirect_uri or not discovery_url:
-        raise HTTPException(status_code=400, detail="SSO is not fully configured")
-
-    try:
-        async with httpx.AsyncClient() as hc:
-            resp = await hc.get(discovery_url)
-            resp.raise_for_status()
-            config = resp.json()
-    except Exception:
-        raise HTTPException(status_code=500, detail="Failed to fetch OIDC discovery document")
-
-    auth_endpoint = config.get("authorization_endpoint")
-    if not auth_endpoint:
-        raise HTTPException(status_code=500, detail="OIDC provider missing authorization_endpoint")
-
-    state = secrets.token_urlsafe(32)
-    params = {
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
-        "response_type": "code",
-        "scope": "openid email profile",
-        "state": state,
-    }
-    url = f"{auth_endpoint}?{urllib.parse.urlencode(params)}"
-
-    resp = RedirectResponse(url=url, status_code=302)
-    _set_session_cookie(resp, SSO_STATE_COOKIE, state, 600)
-    return resp
+def _sso_frontend_redirect(path: str, **params: str) -> str:
+    safe_path = "/login" if path == "/login" else sso_service.safe_next_path(path)
+    frontend_origin = (os.getenv("FRONTEND_URL") or "").strip().rstrip("/")
+    target = f"{frontend_origin}{safe_path}" if frontend_origin else safe_path
+    if params:
+        separator = "&" if "?" in target else "?"
+        target = f"{target}{separator}{urllib.parse.urlencode(params)}"
+    return target
 
 
-@app.get("/auth/sso/callback")
-async def sso_callback(
-    code: str, state: str,
-    request: Request,
-    db: Session = Depends(get_db),
-):
-    if os.getenv("SSO_ENABLED", "").lower() != "true":
-        raise HTTPException(status_code=400, detail="SSO is not enabled")
+def _sso_failure_response(error_code: str, next_path: str = "/") -> RedirectResponse:
+    login_params = {"sso_error": error_code}
+    safe_next = sso_service.safe_next_path(next_path)
+    if safe_next != "/":
+        login_params["next"] = safe_next
+    response = RedirectResponse(
+        url=_sso_frontend_redirect("/login", **login_params),
+        status_code=302,
+        headers={"Cache-Control": "no-store"},
+    )
+    _delete_sso_state_cookie(response)
+    return response
 
-    saved_state = request.cookies.get(SSO_STATE_COOKIE)
-    if not saved_state or not hmac.compare_digest(saved_state, state):
-        raise HTTPException(status_code=400, detail="Invalid state parameter")
 
-    client_id = os.getenv("SSO_CLIENT_ID", "")
-    client_secret = os.getenv("SSO_CLIENT_SECRET", "")
-    redirect_uri = os.getenv("SSO_REDIRECT_URI", "")
-    discovery_url = os.getenv("SSO_DISCOVERY_URL", "")
-
-    try:
-        async with httpx.AsyncClient() as hc:
-            resp = await hc.get(discovery_url)
-            resp.raise_for_status()
-            config = resp.json()
-    except Exception:
-        raise HTTPException(status_code=500, detail="Failed to fetch OIDC discovery document")
-
-    token_endpoint = config.get("token_endpoint")
-    userinfo_endpoint = config.get("userinfo_endpoint")
-    if not token_endpoint:
-        raise HTTPException(status_code=500, detail="OIDC provider missing token_endpoint")
-
-    # Exchange code for tokens
-    token_data = {
-        "grant_type": "authorization_code",
-        "code": code,
-        "redirect_uri": redirect_uri,
-        "client_id": client_id,
-        "client_secret": client_secret,
-    }
-    try:
-        async with httpx.AsyncClient() as hc:
-            token_resp = await hc.post(token_endpoint, data=token_data)
-            token_resp.raise_for_status()
-            token_json = token_resp.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Failed to exchange authorization code")
-
-    access_token = token_json.get("access_token")
-    if not access_token:
-        raise HTTPException(status_code=400, detail="No access_token in token response")
-
-    # Fetch userinfo
-    email = None
-    name = None
-    if userinfo_endpoint:
-        try:
-            async with httpx.AsyncClient() as hc:
-                ui_resp = await hc.get(
-                    userinfo_endpoint,
-                    headers={"Authorization": f"Bearer {access_token}"},
-                )
-                ui_resp.raise_for_status()
-                userinfo = ui_resp.json()
-                email = userinfo.get("email")
-                name = userinfo.get("name") or userinfo.get("preferred_username")
-        except Exception:
-            raise HTTPException(status_code=400, detail="Failed to fetch userinfo")
-
-    if not email:
-        raise HTTPException(status_code=400, detail="SSO provider did not return an email address")
-    email = email.strip().lower()
+def _sso_allowed_email(email: str) -> bool:
     allowed_domains = {
-        d.strip().lower()
-        for d in os.getenv("SSO_ALLOWED_DOMAINS", "").split(",")
-        if d.strip()
+        domain.strip().lower()
+        for domain in (os.getenv("SSO_ALLOWED_DOMAINS") or "").split(",")
+        if domain.strip()
     }
-    if allowed_domains:
-        domain = email.split("@")[-1] if "@" in email else ""
-        if domain not in allowed_domains:
-            raise HTTPException(status_code=403, detail="SSO email domain is not allowed")
+    if not allowed_domains:
+        return True
+    domain = email.rsplit("@", 1)[-1] if "@" in email else ""
+    return domain in allowed_domains
 
-    # Find or create user
-    user = db.query(UserRecord).filter(func.lower(UserRecord.email) == email).first()
+
+def _resolve_sso_user(
+    db: Session,
+    identity: sso_service.OidcIdentity,
+    provider_type: str,
+) -> tuple[UserRecord, SsoIdentityRecord]:
+    linked = db.query(SsoIdentityRecord).filter(
+        SsoIdentityRecord.issuer == identity.issuer,
+        SsoIdentityRecord.subject == identity.subject,
+    ).first()
+    if linked:
+        user = db.query(UserRecord).filter(UserRecord.id == linked.user_id).first()
+        if not user or not user.is_active:
+            raise PermissionError("account_deactivated")
+        linked.email_at_link = identity.email
+        linked.last_login_at = datetime.utcnow()
+        return user, linked
+
+    matching_users = db.query(UserRecord).filter(
+        func.lower(UserRecord.email) == identity.email
+    ).limit(2).all()
+    if len(matching_users) > 1:
+        raise PermissionError("identity_conflict")
+    user = matching_users[0] if matching_users else None
+    if user and not user.is_active:
+        raise PermissionError("account_deactivated")
     if not user:
         if not settings_module.get_bool("SSO_AUTO_PROVISION", default=False):
-            raise HTTPException(status_code=403, detail="SSO account is not provisioned")
+            raise PermissionError("account_not_provisioned")
         import uuid as _uuid
+
         user = UserRecord(
             id=f"u-{_uuid.uuid4().hex[:8]}",
-            email=email,
-            name=name or email,
+            email=identity.email,
+            name=identity.name or identity.email,
             role="agent",
             is_active=True,
             password_hash="",
         )
         db.add(user)
-        db.commit()
-        db.refresh(user)
-    elif not user.is_active:
-        raise HTTPException(status_code=403, detail="Account is deactivated")
+        db.flush()
+
+    conflicting_link = db.query(SsoIdentityRecord).filter(
+        SsoIdentityRecord.user_id == user.id,
+        SsoIdentityRecord.issuer == identity.issuer,
+    ).first()
+    if conflicting_link:
+        raise PermissionError("identity_conflict")
+
+    linked = SsoIdentityRecord(
+        user_id=user.id,
+        provider=provider_type,
+        issuer=identity.issuer,
+        subject=identity.subject,
+        email_at_link=identity.email,
+        created_at=datetime.utcnow(),
+        last_login_at=datetime.utcnow(),
+    )
+    db.add(linked)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        raced_link = db.query(SsoIdentityRecord).filter(
+            SsoIdentityRecord.issuer == identity.issuer,
+            SsoIdentityRecord.subject == identity.subject,
+        ).first()
+        if not raced_link:
+            raise PermissionError("identity_conflict")
+        raced_user = db.query(UserRecord).filter(
+            UserRecord.id == raced_link.user_id,
+            UserRecord.is_active.is_(True),
+        ).first()
+        if not raced_user:
+            raise PermissionError("account_deactivated")
+        return raced_user, raced_link
+    return user, linked
+
+
+@app.get("/auth/sso/login")
+async def sso_login(
+    next: str = Query("/", max_length=2048),
+    db: Session = Depends(get_db),
+):
+    next_path = sso_service.safe_next_path(next)
+    try:
+        config = sso_service.resolve_sso_config()
+        metadata = await sso_service.fetch_oidc_metadata(config)
+    except sso_service.SsoConfigurationError:
+        return _sso_failure_response("configuration_error", next_path)
+    except sso_service.SsoProtocolError:
+        return _sso_failure_response("provider_unavailable", next_path)
+
+    state = secrets.token_urlsafe(32)
+    nonce = secrets.token_urlsafe(32)
+    code_verifier = secrets.token_urlsafe(64)
+    state_hash = hashlib.sha256(state.encode("ascii")).hexdigest()
+    now = datetime.utcnow()
+    db.query(SsoTransactionRecord).filter(
+        SsoTransactionRecord.expires_at <= now
+    ).delete(synchronize_session=False)
+    db.add(SsoTransactionRecord(
+        state_hash=state_hash,
+        nonce=nonce,
+        code_verifier=code_verifier,
+        next_path=next_path,
+        provider=config.provider_type,
+        discovery_url=config.discovery_url,
+        redirect_uri=config.redirect_uri,
+        client_id=config.client_id,
+        created_at=now,
+        expires_at=now + timedelta(seconds=sso_service.SSO_TRANSACTION_TTL_SECONDS),
+    ))
+    db.commit()
+    url = sso_service.build_authorization_url(
+        metadata,
+        config,
+        state=state,
+        nonce=nonce,
+        code_verifier=code_verifier,
+    )
+    resp = RedirectResponse(
+        url=url,
+        status_code=302,
+        headers={"Cache-Control": "no-store"},
+    )
+    _set_sso_state_cookie(resp, state)
+    return resp
+
+
+@app.get("/auth/sso/callback")
+async def sso_callback(
+    request: Request,
+    db: Session = Depends(get_db),
+    code: Optional[str] = Query(None, max_length=4096),
+    state: Optional[str] = Query(None, max_length=1024),
+    error: Optional[str] = Query(None, max_length=256),
+):
+    saved_state = request.cookies.get(SSO_STATE_COOKIE)
+    if not state or not saved_state or not hmac.compare_digest(saved_state, state):
+        return _sso_failure_response("invalid_state")
+    state_hash = hashlib.sha256(state.encode("utf-8")).hexdigest()
+    transaction = db.query(SsoTransactionRecord).filter(
+        SsoTransactionRecord.state_hash == state_hash
+    ).with_for_update().first()
+    if not transaction or transaction.expires_at <= datetime.utcnow():
+        if transaction:
+            db.delete(transaction)
+            db.commit()
+        return _sso_failure_response("expired_request")
+    next_path = sso_service.safe_next_path(transaction.next_path)
+    transaction_provider = transaction.provider
+    transaction_discovery_url = transaction.discovery_url
+    transaction_redirect_uri = transaction.redirect_uri
+    transaction_client_id = transaction.client_id
+    transaction_code_verifier = transaction.code_verifier
+    transaction_nonce = transaction.nonce
+    db.delete(transaction)
+    db.commit()
+
+    if error:
+        return _sso_failure_response(
+            "access_denied" if error == "access_denied" else "provider_error",
+            next_path,
+        )
+    if not code:
+        return _sso_failure_response("provider_error", next_path)
+
+    try:
+        config = sso_service.resolve_sso_config()
+        if not all((
+            transaction_provider == config.provider_type,
+            transaction_discovery_url == config.discovery_url,
+            transaction_redirect_uri == config.redirect_uri,
+            transaction_client_id == config.client_id,
+        )):
+            return _sso_failure_response("configuration_changed", next_path)
+        metadata = await sso_service.fetch_oidc_metadata(config)
+        token_payload = await sso_service.exchange_authorization_code(
+            metadata,
+            config,
+            code=code,
+            code_verifier=transaction_code_verifier,
+        )
+        identity = await sso_service.resolve_oidc_identity(
+            token_payload,
+            metadata,
+            config,
+            nonce=transaction_nonce,
+        )
+    except sso_service.SsoConfigurationError:
+        return _sso_failure_response("configuration_error", next_path)
+    except sso_service.SsoProtocolError:
+        return _sso_failure_response("invalid_identity", next_path)
+
+    if not _sso_allowed_email(identity.email):
+        return _sso_failure_response("domain_not_allowed", next_path)
+    try:
+        user, linked_identity = _resolve_sso_user(
+            db,
+            identity,
+            config.provider_type,
+        )
+    except PermissionError as exc:
+        db.rollback()
+        code_value = str(exc) if str(exc) in {
+            "account_deactivated",
+            "account_not_provisioned",
+            "identity_conflict",
+        } else "access_denied"
+        return _sso_failure_response(code_value, next_path)
 
     token = _create_session(db, user.id, request)
     user.last_login_at = datetime.utcnow()
+    linked_identity.last_login_at = datetime.utcnow()
+    linked_identity.email_at_link = identity.email
     db.commit()
 
-    frontend_origin = os.getenv("FRONTEND_URL", "").strip()
-    redirect_to = "/"
-    if frontend_origin:
-        parsed = urllib.parse.urlparse(frontend_origin)
-        redirect_to = f"{parsed.scheme}://{parsed.netloc}/"
-
-    resp = RedirectResponse(url=redirect_to, status_code=302)
+    resp = RedirectResponse(
+        url=_sso_frontend_redirect(next_path),
+        status_code=302,
+        headers={"Cache-Control": "no-store"},
+    )
     _set_session_cookie(resp, SESSION_COOKIE, token, SESSION_TTL_DAYS * 86400)
-    _delete_session_cookie(resp, SSO_STATE_COOKIE)
+    _delete_sso_state_cookie(resp)
     return resp
 
 

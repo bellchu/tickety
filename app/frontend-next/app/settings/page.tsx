@@ -121,6 +121,9 @@ const PRODUCTION_DEPLOYMENT_KEYS = new Set([
   "SYNC_INTERVAL_SECONDS",
   "SSO_ENABLED",
   "SSO_PROVIDER",
+  "SSO_ENTRA_TENANT_ID",
+  "SSO_OKTA_DOMAIN",
+  "SSO_OKTA_AUTH_SERVER_ID",
   "SSO_CLIENT_ID",
   "SSO_DISCOVERY_URL",
   "SSO_REDIRECT_URI",
@@ -143,6 +146,9 @@ const PRODUCTION_INFRASTRUCTURE_KEYS = new Set([
   "JIRA_ISSUE_TYPE",
   "SSO_ENABLED",
   "SSO_PROVIDER",
+  "SSO_ENTRA_TENANT_ID",
+  "SSO_OKTA_DOMAIN",
+  "SSO_OKTA_AUTH_SERVER_ID",
   "SSO_CLIENT_ID",
   "SSO_CLIENT_SECRET",
   "SSO_DISCOVERY_URL",
@@ -234,6 +240,16 @@ export default function SettingsPage() {
   const adminPortalEditsEnabled = data?.TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED === "true";
   const productionOperationalSettingsReadOnly = appMode === "production" && !adminPortalEditsEnabled;
   const productionSecuritySettingsReadOnly = appMode === "production";
+  const configuredSsoProvider = ((form.SSO_PROVIDER as string) || "entra").trim().toLowerCase();
+  const ssoProviderType = ["entra", "entra id", "azure ad", "azure active directory", "microsoft entra", "microsoft entra id"].includes(configuredSsoProvider)
+    ? "entra"
+    : configuredSsoProvider === "okta"
+      ? "okta"
+      : "oidc";
+  const derivedSsoRedirectUri = (form.SSO_REDIRECT_URI as string)
+    || ((form.FRONTEND_URL as string)?.trim().replace(/\/+$/, "")
+      ? `${(form.FRONTEND_URL as string).trim().replace(/\/+$/, "")}/api/auth/sso/callback`
+      : "");
   const isDeploymentManaged = (key: string) => (
     appMode === "production"
     && PRODUCTION_DEPLOYMENT_KEYS.has(key)
@@ -812,28 +828,55 @@ export default function SettingsPage() {
 
           <ToggleRow
             label="Enable SSO (OIDC)"
-            desc="Allow users to sign in via an OpenID Connect provider (Google, Azure AD, Okta, etc.)"
+            desc="Allow users to sign in through Microsoft Entra ID, Okta, or another OpenID Connect provider."
             value={(form.SSO_ENABLED as string) === "true"}
-            onChange={(v) => handleChange("SSO_ENABLED", v ? "true" : "false")}
+            onChange={(v) => {
+              handleChange("SSO_ENABLED", v ? "true" : "false");
+              if (v && !form.SSO_PROVIDER) handleChange("SSO_PROVIDER", "entra");
+            }}
             disabled={productionSecuritySettingsReadOnly}
           />
 
           {(form.SSO_ENABLED as string) === "true" && (
             <div className="space-y-4 pt-2">
-              <Field label={<DeploymentManagedLabel label="SSO Provider Name" managed={productionSecuritySettingsReadOnly} />}>
-                <input type="text" value={form.SSO_PROVIDER || ""} onChange={(e) => handleChange("SSO_PROVIDER", e.target.value)} placeholder="e.g. Google, Azure AD, Okta" className="input-base" disabled={productionSecuritySettingsReadOnly} />
+              <Field label={<DeploymentManagedLabel label="Identity Provider" managed={productionSecuritySettingsReadOnly} />}>
+                <select value={ssoProviderType} onChange={(e) => handleChange("SSO_PROVIDER", e.target.value)} className="input-base" disabled={productionSecuritySettingsReadOnly}>
+                  <option value="entra">Microsoft Entra ID</option>
+                  <option value="okta">Okta</option>
+                  <option value="oidc">Generic OpenID Connect</option>
+                </select>
               </Field>
+              {ssoProviderType === "entra" && (
+                <Field label={<DeploymentManagedLabel label="Entra Tenant ID" managed={productionSecuritySettingsReadOnly} />}>
+                  <input type="text" value={form.SSO_ENTRA_TENANT_ID || ""} onChange={(e) => handleChange("SSO_ENTRA_TENANT_ID", e.target.value)} placeholder="Directory (tenant) ID" className="input-base" disabled={productionSecuritySettingsReadOnly} />
+                  <span className="block text-xs leading-5 text-ink-400">Use the Directory (tenant) ID GUID from the app registration. Multi-tenant authorities are intentionally not accepted.</span>
+                </Field>
+              )}
+              {ssoProviderType === "okta" && (
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <Field label={<DeploymentManagedLabel label="Okta Domain" managed={productionSecuritySettingsReadOnly} />}>
+                    <input type="text" value={form.SSO_OKTA_DOMAIN || ""} onChange={(e) => handleChange("SSO_OKTA_DOMAIN", e.target.value)} placeholder="company.okta.com" className="input-base" disabled={productionSecuritySettingsReadOnly} />
+                  </Field>
+                  <Field label={<DeploymentManagedLabel label="Authorization Server" managed={productionSecuritySettingsReadOnly} />}>
+                    <input type="text" value={form.SSO_OKTA_AUTH_SERVER_ID || "org"} onChange={(e) => handleChange("SSO_OKTA_AUTH_SERVER_ID", e.target.value)} placeholder="org" className="input-base" disabled={productionSecuritySettingsReadOnly} />
+                    <span className="block text-xs leading-5 text-ink-400">Use <code>org</code> for standard SSO, or enter a configured custom authorization-server ID.</span>
+                  </Field>
+                </div>
+              )}
               <Field label={<DeploymentManagedLabel label="Client ID" managed={productionSecuritySettingsReadOnly} />}>
                 <input type="text" value={form.SSO_CLIENT_ID || ""} onChange={(e) => handleChange("SSO_CLIENT_ID", e.target.value)} placeholder="OIDC client ID" className="input-base" disabled={productionSecuritySettingsReadOnly} />
               </Field>
               <Field label={<DeploymentManagedLabel label="Client Secret" managed={productionSecuritySettingsReadOnly} />}>
                 <SecretInput value={form.SSO_CLIENT_SECRET || ""} onChange={(v) => handleChange("SSO_CLIENT_SECRET", v)} placeholder="OIDC client secret" disabled={productionSecuritySettingsReadOnly} />
               </Field>
-              <Field label={<DeploymentManagedLabel label="Discovery URL" managed={productionSecuritySettingsReadOnly} />}>
-                <input type="text" value={form.SSO_DISCOVERY_URL || ""} onChange={(e) => handleChange("SSO_DISCOVERY_URL", e.target.value)} placeholder="https://accounts.google.com/.well-known/openid-configuration" className="input-base" disabled={productionSecuritySettingsReadOnly} />
-              </Field>
-              <Field label={<DeploymentManagedLabel label="Redirect URI" managed={productionSecuritySettingsReadOnly} />}>
-                <input type="text" value={form.SSO_REDIRECT_URI || ""} onChange={(e) => handleChange("SSO_REDIRECT_URI", e.target.value)} placeholder="http://localhost:3000/api/auth/sso/callback" className="input-base" disabled={productionSecuritySettingsReadOnly} />
+              {ssoProviderType === "oidc" && (
+                <Field label={<DeploymentManagedLabel label="Discovery URL" managed={productionSecuritySettingsReadOnly} />}>
+                  <input type="text" value={form.SSO_DISCOVERY_URL || ""} onChange={(e) => handleChange("SSO_DISCOVERY_URL", e.target.value)} placeholder="https://identity.example/.well-known/openid-configuration" className="input-base" disabled={productionSecuritySettingsReadOnly} />
+                </Field>
+              )}
+              <Field label="Sign-in Redirect URI">
+                <input type="text" value={derivedSsoRedirectUri} readOnly className="input-base" aria-describedby="sso-redirect-help" />
+                <span id="sso-redirect-help" className="block text-xs leading-5 text-ink-400">Copy this exact Web sign-in redirect URI into the Entra app registration or Okta app integration. It is derived from Frontend URL.</span>
               </Field>
               <Field label={<DeploymentManagedLabel label="Allowed Email Domains" managed={productionSecuritySettingsReadOnly} />}>
                 <input type="text" value={form.SSO_ALLOWED_DOMAINS || ""} onChange={(e) => handleChange("SSO_ALLOWED_DOMAINS", e.target.value)} placeholder="company.com,subsidiary.com" className="input-base" disabled={productionSecuritySettingsReadOnly} />
@@ -845,12 +888,7 @@ export default function SettingsPage() {
                 onChange={(v) => handleChange("SSO_AUTO_PROVISION", v ? "true" : "false")}
                 disabled={productionSecuritySettingsReadOnly}
               />
-              <p className="text-xs text-ink-400">
-                Use the well-known URL for your provider. Common ones:<br />
-                Google: <code className="bg-linen-200 px-1">https://accounts.google.com/.well-known/openid-configuration</code><br />
-                Azure AD: <code className="bg-linen-200 px-1">https://login.microsoftonline.com/&#123;tenant&#125;/v2.0/.well-known/openid-configuration</code><br />
-                Okta: <code className="bg-linen-200 px-1">https://&#123;your-domain&#125;/.well-known/openid-configuration</code>
-              </p>
+              <p className="text-xs leading-5 text-ink-400">Entra and Okta discovery endpoints are generated automatically from the preset fields. Client secrets remain deployment-managed and are never returned to the browser.</p>
             </div>
           )}
         </SettingsSection>

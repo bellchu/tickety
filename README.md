@@ -246,16 +246,18 @@ traffic.
    should manage operational/provider settings from the portal.
 2. Provision a non-demo administrator (or a reviewed SSO bootstrap path), then
    verify the documented demo credentials no longer work.
-3. Optionally enable **SSO (OIDC)** — supports Google, Azure AD, Okta, and any OpenID Connect provider.
+3. Optionally enable **SSO (OIDC)**. Microsoft Entra ID and Okta have guided
+   presets; generic OpenID Connect providers remain supported. See the
+   [SSO setup guide](docs/sso.md).
 
 | Setting | What it does |
 |---|---|
 | Require Login | Controls whether users must sign in; configure it in the deployment environment/Secret. |
 | Enable SSO | Enables OIDC-based Single Sign-On. It is deployment-managed in production. |
-| SSO Provider Name | Display name shown on the SSO login button (e.g. "Google", "Okta"); deployment-managed in production. |
-| Client ID / Secret | OIDC credentials from your identity provider; deployment-managed in production. |
-| Discovery URL | Provider's `.well-known/openid-configuration` endpoint; deployment-managed in production. |
-| Redirect URI | Must match the callback URL registered with your provider (e.g. `https://yourdomain.com/api/auth/sso/callback`); deployment-managed in production. |
+| Identity Provider | Selects the Entra ID, Okta, or generic OIDC preset; deployment-managed in production. |
+| Tenant ID / Okta Domain | Generates provider discovery without requiring users to copy protocol URLs. |
+| Client ID / Secret | Server-side OIDC credentials; the secret remains deployment-managed and is never returned to the browser. |
+| Sign-in Redirect URI | Derived as `FRONTEND_URL + /api/auth/sso/callback` and must be registered exactly at the provider. |
 
 ### Background worker roles
 
@@ -357,7 +359,7 @@ to an `api` process. Sync intervals are bounded and controlled with
 | Priorities | Custom priority levels with per-priority SLA hours and sort weights |
 | Organisation | Workspace name, logo URL, primary colour |
 | AI Automation | Toggle: auto-triage, auto-summarisation, auto-routing, auto-resolution, systemic detection |
-| Security & Auth | Require Login (production mode), SSO/OIDC (Google, Azure AD, Okta, generic) |
+| Security & Auth | Require Login (production mode), SSO/OIDC (Microsoft Entra ID, Okta, generic) |
 | Notifications | Enable/disable alert events (new ticket, SLA breach, escalation, assignment, comment) per channel (in-app/email/webhook) |
 | Maintenance | Repair AI data gaps, retroactively triage untriaged tickets |
 

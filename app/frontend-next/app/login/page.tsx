@@ -6,13 +6,7 @@ import { ArrowRight, Check, LockKeyhole, ShieldCheck } from "lucide-react";
 import { TicketyLogo } from "@/components/layout/TicketyLogo";
 import { Alert, Button } from "@/components/ui";
 import { api, queryClient } from "@/lib/api";
-
-function getSafeNextPath() {
-  if (typeof window === "undefined") return "/";
-  const next = new URLSearchParams(window.location.search).get("next");
-  if (!next || !next.startsWith("/") || next.startsWith("//")) return "/";
-  return next;
-}
+import { safeNextPath, ssoErrorMessage, ssoLoginUrl } from "@/lib/sso-login";
 
 const workspaceBenefits = [
   "Prioritize incidents, requests, and changes in one queue",
@@ -27,20 +21,30 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [ssoEnabled, setSsoEnabled] = useState(false);
+  const [ssoRequested, setSsoRequested] = useState(false);
+  const [ssoReady, setSsoReady] = useState(false);
+  const [ssoConfigLoaded, setSsoConfigLoaded] = useState(false);
   const [ssoProvider, setSsoProvider] = useState("");
   const [ssoLoading, setSsoLoading] = useState(false);
+  const [showPasswordLogin, setShowPasswordLogin] = useState(false);
 
   useEffect(() => {
-    setNextPath(getSafeNextPath());
+    const search = window.location.search;
+    setNextPath(safeNextPath(search));
+    setError(ssoErrorMessage(search));
     api
       .getSsoConfig()
       .then((config) => {
-        setSsoEnabled(config.enabled);
+        setSsoRequested(config.enabled);
+        setSsoReady(config.enabled && config.ready);
         setSsoProvider(config.provider);
+        setShowPasswordLogin(!(config.enabled && config.ready));
       })
       .catch(() => {
-        // Password authentication remains available when SSO discovery is offline.
+        setShowPasswordLogin(true);
+      })
+      .finally(() => {
+        setSsoConfigLoaded(true);
       });
   }, []);
 
@@ -64,7 +68,7 @@ export default function LoginPage() {
   const handleSsoLogin = () => {
     setSsoLoading(true);
     queryClient.clear();
-    window.location.assign("/api/auth/sso/login");
+    window.location.assign(ssoLoginUrl(nextPath));
   };
 
   return (
@@ -120,7 +124,13 @@ export default function LoginPage() {
               <p className="mt-3 text-sm leading-6 text-ink-500">Sign in to continue to your service operations workspace.</p>
             </div>
 
-            {ssoEnabled && (
+            {!ssoConfigLoaded && (
+              <Button className="w-full" size="lg" variant="secondary" pending pendingLabel="Loading sign-in options…">
+                Loading sign-in options…
+              </Button>
+            )}
+
+            {ssoReady && (
               <>
                 <Button
                   className="w-full"
@@ -133,15 +143,40 @@ export default function LoginPage() {
                 >
                   Continue with {ssoProvider || "SSO"}
                 </Button>
-                <div className="my-6 flex items-center gap-4" aria-hidden="true">
-                  <div className="h-px flex-1 bg-linen-400" />
-                  <span className="text-xs font-medium uppercase tracking-wider text-ink-400">or use email</span>
-                  <div className="h-px flex-1 bg-linen-400" />
-                </div>
+                {!showPasswordLogin && (
+                  <Button
+                    className="mt-3 w-full"
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setShowPasswordLogin(true)}
+                  >
+                    Use email and password instead
+                  </Button>
+                )}
               </>
             )}
 
-            <form onSubmit={handleSubmit} className="space-y-5" aria-busy={loading}>
+            {ssoConfigLoaded && ssoRequested && !ssoReady && (
+              <Alert variant="warning" title="Single sign-on needs attention" className="mb-5">
+                Your administrator has enabled SSO, but its deployment configuration is incomplete. Local sign-in remains available.
+              </Alert>
+            )}
+
+            {error && (
+              <Alert variant="danger" title="Sign-in failed" className="mb-5">
+                {error}
+              </Alert>
+            )}
+
+            {showPasswordLogin && ssoReady && (
+              <div className="my-6 flex items-center gap-4" aria-hidden="true">
+                <div className="h-px flex-1 bg-linen-400" />
+                <span className="text-xs font-medium uppercase tracking-wider text-ink-400">local account</span>
+                <div className="h-px flex-1 bg-linen-400" />
+              </div>
+            )}
+
+            {ssoConfigLoaded && showPasswordLogin && <form onSubmit={handleSubmit} className="space-y-5" aria-busy={loading}>
               <div>
                 <label htmlFor="email" className="mb-2 block text-sm font-semibold text-ink-600">Work email</label>
                 <input
@@ -177,12 +212,6 @@ export default function LoginPage() {
                 />
               </div>
 
-              {error && (
-                <Alert variant="danger" title="Sign-in failed">
-                  {error}
-                </Alert>
-              )}
-
               <Button
                 className="w-full"
                 size="lg"
@@ -193,7 +222,7 @@ export default function LoginPage() {
               >
                 Sign in
               </Button>
-            </form>
+            </form>}
 
             <div className="mt-8 flex items-start gap-3 rounded-xl border border-linen-400 bg-linen-100 px-4 py-3 text-xs leading-5 text-ink-500">
               <LockKeyhole className="mt-0.5 h-4 w-4 shrink-0 text-ink-400" aria-hidden="true" />

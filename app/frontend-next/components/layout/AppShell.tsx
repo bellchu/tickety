@@ -75,7 +75,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         queryClient.clear();
         setAuthContext(null);
         if (error instanceof APIError && error.status === 401) {
-          router.replace(`/login?next=${encodeURIComponent(pathname)}`);
+          const destination = `${window.location.pathname}${window.location.search}`;
+          router.replace(`/login?next=${encodeURIComponent(destination)}`);
           return;
         }
         // Let page-level queries render the appropriate connection error for

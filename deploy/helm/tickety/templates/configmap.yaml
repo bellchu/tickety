@@ -6,6 +6,21 @@
 {{- if and (eq .Values.config.appMode "production") (eq (trim $corsAllowOrigins) "*") }}
   {{- fail "production config.corsAllowOrigins cannot be '*'" }}
 {{- end }}
+{{- if and .Values.config.sso.enabled (not .Values.config.sso.clientId) }}
+  {{- fail "config.sso.clientId is required when SSO is enabled" }}
+{{- end }}
+{{- if and .Values.config.sso.enabled (eq .Values.config.sso.provider "entra") (not .Values.config.sso.entraTenantId) }}
+  {{- fail "config.sso.entraTenantId is required for the Entra preset" }}
+{{- end }}
+{{- if and .Values.config.sso.enabled (eq .Values.config.sso.provider "okta") (not .Values.config.sso.oktaDomain) }}
+  {{- fail "config.sso.oktaDomain is required for the Okta preset" }}
+{{- end }}
+{{- if and .Values.config.sso.enabled (eq .Values.config.sso.provider "oidc") (not .Values.config.sso.discoveryUrl) }}
+  {{- fail "config.sso.discoveryUrl is required for a generic OIDC provider" }}
+{{- end }}
+{{- if and .Values.config.sso.enabled (not .Values.existingSecret) (not (index .Values.secrets "SSO_CLIENT_SECRET")) }}
+  {{- fail "secrets.SSO_CLIENT_SECRET or existingSecret is required when SSO is enabled" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -21,6 +36,15 @@ data:
   CORS_ALLOW_ORIGINS: {{ $corsAllowOrigins | quote }}
   COOKIE_SECURE: {{ .Values.config.cookieSecure | quote }}
   COOKIE_SAMESITE: {{ .Values.config.cookieSameSite | quote }}
+  SSO_ENABLED: {{ .Values.config.sso.enabled | quote }}
+  SSO_PROVIDER: {{ .Values.config.sso.provider | quote }}
+  SSO_CLIENT_ID: {{ .Values.config.sso.clientId | quote }}
+  SSO_ENTRA_TENANT_ID: {{ .Values.config.sso.entraTenantId | quote }}
+  SSO_OKTA_DOMAIN: {{ .Values.config.sso.oktaDomain | quote }}
+  SSO_OKTA_AUTH_SERVER_ID: {{ .Values.config.sso.oktaAuthServerId | quote }}
+  SSO_DISCOVERY_URL: {{ .Values.config.sso.discoveryUrl | quote }}
+  SSO_ALLOWED_DOMAINS: {{ .Values.config.sso.allowedDomains | quote }}
+  SSO_AUTO_PROVISION: {{ .Values.config.sso.autoProvision | quote }}
   TICKET_RAG_SCOPE_KEY: {{ .Values.config.ragV2.scopeKey | quote }}
   TICKET_RAG_V2_SCOPE_ALLOWLIST: {{ .Values.config.ragV2.scopeAllowlist | quote }}
   TICKET_RAG_V2_WRITE_ENABLED: {{ .Values.config.ragV2.writeEnabled | quote }}

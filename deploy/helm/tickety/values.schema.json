@@ -75,7 +75,7 @@
     },
     "config": {
       "type": "object",
-      "required": ["appMode", "deploymentClass", "loginRequired", "cookieSecure", "cookieSameSite", "ragV2", "extra"],
+      "required": ["appMode", "deploymentClass", "loginRequired", "cookieSecure", "cookieSameSite", "sso", "ragV2", "extra"],
       "properties": {
         "appMode": { "enum": ["demo", "production"] },
         "deploymentClass": { "enum": ["poc", "production"] },
@@ -85,6 +85,28 @@
         "corsAllowOrigins": { "type": "string" },
         "cookieSecure": { "type": "boolean" },
         "cookieSameSite": { "enum": ["lax", "strict", "none"] },
+        "sso": {
+          "type": "object",
+          "required": [
+            "enabled", "provider", "clientId", "entraTenantId",
+            "oktaDomain", "oktaAuthServerId", "discoveryUrl",
+            "allowedDomains", "autoProvision"
+          ],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "provider": { "enum": ["entra", "okta", "oidc"] },
+            "clientId": { "type": "string" },
+            "entraTenantId": {
+              "type": "string",
+              "pattern": "^$|^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+            },
+            "oktaDomain": { "type": "string" },
+            "oktaAuthServerId": { "type": "string", "minLength": 1 },
+            "discoveryUrl": { "type": "string" },
+            "allowedDomains": { "type": "string" },
+            "autoProvision": { "type": "boolean" }
+          }
+        },
         "ragV2": {
           "type": "object",
           "required": [
@@ -124,6 +146,16 @@
                 "CORS_ALLOW_ORIGINS",
                 "COOKIE_SECURE",
                 "COOKIE_SAMESITE",
+                "SSO_ENABLED",
+                "SSO_PROVIDER",
+                "SSO_CLIENT_ID",
+                "SSO_ENTRA_TENANT_ID",
+                "SSO_OKTA_DOMAIN",
+                "SSO_OKTA_AUTH_SERVER_ID",
+                "SSO_DISCOVERY_URL",
+                "SSO_REDIRECT_URI",
+                "SSO_ALLOWED_DOMAINS",
+                "SSO_AUTO_PROVISION",
                 "DATABASE_URL",
                 "POSTGRES_PASSWORD"
               ]

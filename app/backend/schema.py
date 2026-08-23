@@ -340,6 +340,9 @@ class Settings(BaseModel):
     LOGIN_REQUIRED: Optional[str] = None
     SSO_ENABLED: Optional[str] = None
     SSO_PROVIDER: Optional[str] = None
+    SSO_ENTRA_TENANT_ID: Optional[str] = None
+    SSO_OKTA_DOMAIN: Optional[str] = None
+    SSO_OKTA_AUTH_SERVER_ID: Optional[str] = None
     SSO_CLIENT_ID: Optional[str] = None
     SSO_CLIENT_SECRET: Optional[str] = None
     SSO_DISCOVERY_URL: Optional[str] = None
