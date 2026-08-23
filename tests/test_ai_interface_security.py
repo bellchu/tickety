@@ -279,7 +279,9 @@ class ProtectedAIRouteTests(unittest.TestCase):
         self.assertEqual(read.status_code, 200, read.text)
         self.assertEqual(write.status_code, 200, write.text)
         get_settings.assert_called_once()
-        update_settings.assert_called_once_with({"LLM_PROVIDER": "malicious"})
+        update_settings.assert_called_once_with(
+            {"LLM_PROVIDER": "malicious"}, actor_id="real-admin"
+        )
 
     def test_auth_context_distinguishes_demo_fallback_from_real_session(self):
         with (
@@ -1757,17 +1759,33 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
 
 
 class LLMInterfaceContractTests(unittest.TestCase):
+    def test_provider_catalog_contains_only_foundry_and_custom_api(self):
+        self.assertEqual(set(llm_manager.PROVIDERS), {"foundry", "custom"})
+
+    def test_model_catalog_auto_refresh_is_throttled(self):
+        refresh = AsyncMock(return_value={})
+        with (
+            patch.object(llm_manager, "fetch_live_models", new=refresh),
+            patch.object(llm_manager, "_MODEL_AUTO_REFRESHED_AT", 0.0),
+            patch.object(llm_manager.time, "monotonic", return_value=500.0),
+        ):
+            asyncio.run(llm_manager.refresh_live_models_if_stale())
+            asyncio.run(llm_manager.refresh_live_models_if_stale())
+
+        refresh.assert_awaited_once()
+
     def test_model_catalog_dispatch_reserves_provider_capacity(self):
         payload = {"data": [{"id": "gpt-4.1"}]}
         with (
             patch.dict(os.environ, {
                 "APP_MODE": "production",
-                "OPENAI_API_KEY": "catalog-test-key",
+                "CUSTOM_API_KEY": "catalog-test-key",
+                "CUSTOM_API_BASE": "https://provider.example/v1",
             }, clear=True),
             patch.object(llm_manager, "_reserve_provider_capacity") as reserve,
             patch(
                 "app.backend.settings._validate_llm_base_url",
-                return_value="https://api.openai.com/v1",
+                return_value="https://provider.example/v1",
             ),
             patch.object(
                 llm_manager,
@@ -1778,16 +1796,17 @@ class LLMInterfaceContractTests(unittest.TestCase):
         ):
             result = asyncio.run(llm_manager.fetch_live_models())
 
-        reserve.assert_called_once_with("openai", 1)
+        reserve.assert_called_once_with("custom", 1)
         fetch.assert_awaited_once()
-        self.assertIn("openai", result)
+        self.assertIn("custom", result)
 
     def test_model_catalog_capacity_failure_prevents_provider_http(self):
         fetch = AsyncMock(return_value={"data": []})
         with (
             patch.dict(os.environ, {
                 "APP_MODE": "production",
-                "OPENAI_API_KEY": "catalog-test-key",
+                "CUSTOM_API_KEY": "catalog-test-key",
+                "CUSTOM_API_BASE": "https://provider.example/v1",
             }, clear=True),
             patch.object(
                 llm_manager,
@@ -1796,7 +1815,7 @@ class LLMInterfaceContractTests(unittest.TestCase):
             ),
             patch(
                 "app.backend.settings._validate_llm_base_url",
-                return_value="https://api.openai.com/v1",
+                return_value="https://provider.example/v1",
             ),
             patch.object(llm_manager, "_get_json_limited", new=fetch),
             patch.object(llm_manager, "_save_fetched_models"),
@@ -1823,10 +1842,10 @@ class LLMInterfaceContractTests(unittest.TestCase):
             self.assertEqual(main._cors_allow_origins(), [])
             self.assertTrue(main._cookie_secure())
 
-    def test_custom_max_tokens_cannot_raise_task_limit_or_exceed_global_cap(self):
+    def test_removed_custom_token_control_cannot_change_task_limit(self):
         cases = (
             ("4096", 300, 300),
-            ("200", 300, 200),
+            ("200", 300, 300),
             ("999999", 999999, 4096),
         )
         for configured, task_limit, expected in cases:
@@ -1865,9 +1884,8 @@ class LLMInterfaceContractTests(unittest.TestCase):
             "TICKET_EMBEDDING_MODEL": "custom/private-embedding",
             "CUSTOM_API_KEY": "configured-key",
             "CUSTOM_API_BASE": "",
-            "TICKET_EMBEDDING_API_BASE": "",
         }, clear=True):
-            with self.assertRaisesRegex(ValueError, "required for custom embeddings"):
+            with self.assertRaisesRegex(ValueError, "CUSTOM_API_BASE is required"):
                 ticket_vectors._embedding_kwargs()
 
     def test_duplicate_json_keys_are_rejected(self):
@@ -2092,11 +2110,13 @@ class RetrievalEvidenceContractTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.dict(os.environ, {
                 "TICKET_EMBEDDING_ENABLED": "true",
-                "TICKET_EMBEDDING_MODEL": "openai/test-embedding",
+                "TICKET_EMBEDDING_MODEL": "custom/test-embedding",
                 "TICKET_EMBEDDING_DIMENSIONS": "2",
-                "OPENAI_API_KEY": "configured-test-key",
+                "CUSTOM_API_KEY": "configured-test-key",
+                "CUSTOM_API_BASE": "https://provider.example/v1",
                 "WEBHOOK_SECRET": "opaqueWebhookValue7Kite",
-                "OPENAI_API_BASE": "",
+                "LLM_ALLOWED_PROVIDER_HOSTS": "provider.example",
+                "LLM_ALLOW_PRIVATE_ENDPOINTS": "true",
                 "LLM_ENFORCE_PROVIDER_LIMITS": "false",
                 "APP_MODE": "production",
             }, clear=False),
@@ -2129,7 +2149,6 @@ class RetrievalEvidenceContractTests(unittest.IsolatedAsyncioTestCase):
             "TICKET_EMBEDDING_DIMENSIONS": "2",
             "CUSTOM_API_KEY": "first-opaque-key",
             "CUSTOM_API_BASE": "https://provider-a.example/v1",
-            "CUSTOM_PROVIDER_TYPE": "openai",
             "LLM_ALLOW_PRIVATE_ENDPOINTS": "true",
             "LLM_ALLOWED_PROVIDER_HOSTS": "provider-a.example,provider-b.example",
         }
@@ -2151,8 +2170,10 @@ class RetrievalEvidenceContractTests(unittest.IsolatedAsyncioTestCase):
             patch.dict(os.environ, {
                 "APP_MODE": "demo",
                 "TICKET_EMBEDDING_ENABLED": "true",
-                "TICKET_EMBEDDING_MODEL": "openai/test-embedding",
-                "OPENAI_API_KEY": "configured-test-key",
+                "TICKET_EMBEDDING_MODEL": "custom/test-embedding",
+                "CUSTOM_API_KEY": "configured-test-key",
+                "CUSTOM_API_BASE": "https://provider.example/v1",
+                "LLM_ALLOW_PRIVATE_ENDPOINTS": "true",
             }, clear=False),
             patch("litellm.aembedding", new=provider),
         ):
@@ -2171,9 +2192,11 @@ class RetrievalEvidenceContractTests(unittest.IsolatedAsyncioTestCase):
                 "APP_MODE": "demo",
                 "LOGIN_REQUIRED": "true",
                 "TICKET_EMBEDDING_ENABLED": "true",
-                "TICKET_EMBEDDING_MODEL": "openai/test-embedding",
+                "TICKET_EMBEDDING_MODEL": "custom/test-embedding",
                 "TICKET_EMBEDDING_DIMENSIONS": "2",
-                "OPENAI_API_KEY": "configured-test-key",
+                "CUSTOM_API_KEY": "configured-test-key",
+                "CUSTOM_API_BASE": "https://provider.example/v1",
+                "LLM_ALLOW_PRIVATE_ENDPOINTS": "true",
                 "LLM_ENFORCE_PROVIDER_LIMITS": "false",
             }, clear=False),
             patch("litellm.aembedding", new=provider),

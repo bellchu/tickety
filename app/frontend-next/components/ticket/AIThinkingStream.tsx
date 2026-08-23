@@ -9,7 +9,7 @@ import {
   isTriageProgressMessage,
   triageWatchdogDelayMs,
 } from "@/lib/realtime-validation";
-import { ListChecks, Loader2, CheckCircle2, RefreshCw } from "lucide-react";
+import { ListChecks, Loader2, CheckCircle2, RefreshCw, AlertTriangle } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Alert, Button } from "@/components/ui";
 
@@ -86,7 +86,9 @@ export function AIThinkingStream({ ticketId, hasExisting, onComplete }: Props) {
         const result = payload;
         clearWatchdog();
         setResult(result);
-        setSteps((prev) => prev.map((s) => ({ ...s, status: "done" as const })));
+        setSteps((prev) => prev.map((s) => (
+          s.status === "error" ? s : { ...s, status: "done" as const }
+        )));
         setRunning(false);
         wsRef.current?.disconnect();
         wsRef.current = null;
@@ -119,6 +121,12 @@ export function AIThinkingStream({ ticketId, hasExisting, onComplete }: Props) {
 
       {error && <Alert className="mb-4" variant="danger" title="Analysis did not complete">{error}</Alert>}
 
+      {result && result.errors.length > 0 && (
+        <Alert className="mb-4" variant="warning" title="Analysis completed with partial results">
+          Some AI-generated details were unavailable. The available results are shown below; run the analysis again to retry the missing step.
+        </Alert>
+      )}
+
       <AnimatePresence mode="popLayout">
         {steps.length > 0 && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="space-y-2 mb-4">
@@ -128,12 +136,15 @@ export function AIThinkingStream({ ticketId, hasExisting, onComplete }: Props) {
                   <CheckCircle2 className="w-3.5 h-3.5 text-ink-400" />
                 ) : step.status === "active" ? (
                   <Loader2 className="w-3.5 h-3.5 text-ink-600 animate-spin" />
+                ) : step.status === "error" ? (
+                  <AlertTriangle className="w-3.5 h-3.5 text-semantic-danger" />
                 ) : (
                   <div className="w-3.5 h-3.5 rounded-full border-2 border-linen-400" />
                 )}
                 <span className={
                   step.status === "done" ? "text-ink-600" :
                   step.status === "active" ? "text-ink-700 font-medium" :
+                  step.status === "error" ? "text-semantic-danger font-medium" :
                   "text-ink-400"
                 }>
                   {step.label}

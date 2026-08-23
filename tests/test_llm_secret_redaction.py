@@ -49,14 +49,16 @@ class LLMExactSecretBoundaryTests(unittest.IsolatedAsyncioTestCase):
             os.environ,
             {
                 "APP_MODE": "demo",
-                "OPENAI_API_KEY": secret,
+                "CUSTOM_API_KEY": secret,
+                "CUSTOM_API_BASE": "https://provider.example/v1",
+                "LLM_ALLOW_PRIVATE_ENDPOINTS": "true",
                 "WEBHOOK_SECRET": foreign_secret,
                 "LLM_PERSIST_METRICS": "false",
                 "LLM_ENFORCE_PROVIDER_LIMITS": "false",
             },
             clear=True,
         ):
-            manager = LLMManager("openai/gpt-4o")
+            manager = LLMManager("custom/gpt-4o")
             completion = AsyncMock(return_value=response)
             output = io.StringIO()
             with patch.object(llm_manager, "acompletion", completion):
@@ -78,18 +80,21 @@ class LLMExactSecretBoundaryTests(unittest.IsolatedAsyncioTestCase):
     async def test_fetched_provider_output_is_redacted_before_save_and_return(self):
         secret = "quartzFable9Zebra"
         provider_models = [{
-            "id": "openai/gpt-safe-model",
+            "id": "custom/gpt-safe-model",
             "label": f"Provider echoed {secret}",
         }]
 
         with patch.dict(
             os.environ,
-            {"OPENAI_API_KEY": secret},
+            {
+                "CUSTOM_API_KEY": secret,
+                "CUSTOM_API_BASE": "https://provider.example/v1",
+            },
             clear=True,
         ):
             with patch.object(
                 llm_manager,
-                "_fetch_openai_models",
+                "_fetch_openai_compatible_models",
                 AsyncMock(return_value=provider_models),
             ), patch.object(llm_manager, "_save_fetched_models") as save_models:
                 result = await llm_manager.fetch_live_models()

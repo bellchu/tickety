@@ -21,6 +21,16 @@ from ..ai_state import invalidate_ticket_ai, invalidate_ticket_resolution
 from .registry import get_adapter
 
 
+def _project_source_status(source_status: str) -> tuple[str, str, str]:
+    """Project one provider status into external, workflow, and display state."""
+    workflow_status = (
+        "Closed"
+        if source_status.lower() in ("closed", "resolved")
+        else source_status
+    )
+    return source_status, workflow_status, workflow_status
+
+
 def _upsert_ticket(
     db: Session,
     ext: ExternalTicket,
@@ -29,21 +39,43 @@ def _upsert_ticket(
     binding_id: str = "legacy",
 ) -> tuple[str, Optional[TicketRecord]]:
     """Upsert an external ticket. Returns (action, ticket) where action is
-    one of "new" / "updated" / "skipped". When `overwrite` is False and the
-    ticket already exists locally, it is left untouched and ("skipped", None)
-    is returned so callers can avoid re-fetching already-imported tickets."""
+    one of "new" / "updated" / "skipped". Source status is authoritative and
+    is always reconciled. When `overwrite` is False, other fields on an
+    existing local ticket remain untouched."""
     existing = db.query(TicketRecord).filter(
         TicketRecord.binding_id == binding_id,
         TicketRecord.external_source == provider,
         TicketRecord.external_id == ext.external_id,
     ).first()
 
-    if existing and not overwrite:
-        return "skipped", None
-
-    workflow_status = "Closed" if ext.status.lower() in ("closed", "resolved") else ext.status
+    authoritative_status = _project_source_status(ext.status)
+    external_status, workflow_status, display_status = authoritative_status
 
     if existing:
+        source_status_changed = (
+            existing.external_status,
+            existing.workflow_status,
+            existing.status,
+        ) != authoritative_status
+        if not overwrite:
+            if not source_status_changed:
+                return "skipped", None
+            existing.external_status = external_status
+            existing.workflow_status = workflow_status
+            existing.status = display_status
+            if ext.updated_at is not None:
+                existing.external_updated_at = ext.updated_at
+            existing.external_resolved_at = ext.resolved_at
+            existing.updated_at = datetime.utcnow()
+            if ext.status.lower() in ("closed", "resolved"):
+                existing.resolved_at = (
+                    ext.resolved_at or existing.resolved_at or datetime.utcnow()
+                )
+            db.commit()
+            db.refresh(existing)
+            refresh_ticket_documents_if_indexed(db, existing)
+            return "updated", existing
+
         analysis_input_changed = (
             existing.subject != ext.subject or existing.description != ext.description
         )
@@ -53,7 +85,7 @@ def _upsert_ticket(
             or existing.description != ext.description
             or existing.reporter != ext.reporter
             or existing.priority != ext.priority
-            or existing.external_status != ext.status
+            or source_status_changed
             or existing.external_assignee_id != ext.assignee_id
             or existing.external_workspace_id != ext.external_workspace_id
             or existing.external_updated_at != ext.updated_at
@@ -76,7 +108,7 @@ def _upsert_ticket(
             invalidate_ticket_resolution(existing)
         existing.reporter = ext.reporter
         existing.priority = ext.priority
-        existing.external_status = ext.status
+        existing.external_status = external_status
         existing.external_assignee_id = ext.assignee_id
         existing.external_workspace_id = ext.external_workspace_id
         existing.external_updated_at = ext.updated_at
@@ -92,10 +124,10 @@ def _upsert_ticket(
         existing.response_due_at = ext.fr_due_by or existing.response_due_at
         existing.updated_at = datetime.utcnow()
         if ext.status.lower() in ("closed", "resolved"):
-            existing.status = "Closed"
+            existing.status = display_status
             existing.resolved_at = ext.resolved_at or existing.resolved_at or datetime.utcnow()
         else:
-            existing.status = existing.workflow_status or ext.status
+            existing.status = display_status
         db.commit()
         db.refresh(existing)
         # Keep already-promoted evidence current for every provider update.
@@ -137,15 +169,28 @@ def _upsert_ticket(
     return "new", new_ticket
 
 
-def _existing_external_ids(db: Session, provider: str, binding_id: str = "legacy") -> set:
-    """Return the set of external_ids already imported for `provider`.
-    Used to pre-filter so we don't issue a DB query per fetched ticket."""
-    rows = db.query(TicketRecord.external_id).filter(
+def _existing_external_ticket_states(
+    db: Session,
+    provider: str,
+    binding_id: str = "legacy",
+) -> dict[str, tuple[Optional[str], Optional[str], Optional[str]]]:
+    """Return existing source/local status state keyed by external ID.
+
+    Manual fetch uses this to skip unchanged existing tickets without issuing
+    a database query for every fetched ticket, while still reconciling any
+    source status change even when full overwrite is disabled.
+    """
+    rows = db.query(
+        TicketRecord.external_id,
+        TicketRecord.external_status,
+        TicketRecord.workflow_status,
+        TicketRecord.status,
+    ).filter(
         TicketRecord.binding_id == binding_id,
         TicketRecord.external_source == provider,
         TicketRecord.external_id.isnot(None),
     ).all()
-    return {r[0] for r in rows}
+    return {row[0]: (row[1], row[2], row[3]) for row in rows}
 
 
 def sync_tickets_from_external(adapter=None, *, binding_id: str = "legacy") -> dict:
@@ -263,10 +308,10 @@ def fetch_tickets_by_days(
     """Manually fetch all tickets updated in the last `days` days from the
     external ITSM provider, walking every page while respecting rate limits.
 
-    Skip-vs-overwrite: by default tickets already imported (matched by
-    external_source + external_id) are *not* re-written, so re-running a fetch
-    for an overlapping window won't clobber local AI triage / status changes.
-    Pass overwrite=True to force-refresh existing records from the source.
+    Source status is always reconciled for tickets already imported (matched
+    by external_source + external_id). With overwrite=False, all other local
+    fields are preserved. Pass overwrite=True to force-refresh every provider
+    field on existing records.
     """
     days = max(1, min(int(days), 365))
     adapter = adapter or get_adapter()
@@ -282,15 +327,21 @@ def fetch_tickets_by_days(
         tickets: List[ExternalTicket] = asyncio.run(adapter.fetch_tickets_since(since))
         result["fetched"] = len(tickets)
 
-        # Pre-load existing external ids once to avoid N queries.
-        existing_ids = _existing_external_ids(db, adapter.provider_name, binding_id)
+        # Pre-load status state once so unchanged existing tickets avoid an
+        # extra DB query while changed source statuses still reach the upsert.
+        existing_states = _existing_external_ticket_states(
+            db, adapter.provider_name, binding_id
+        )
 
         max_persisted_updated_at = None
         for ext in tickets:
             try:
-                if ext.external_id in existing_ids and not overwrite:
-                    result["skipped"] += 1
-                    continue
+                existing_state = existing_states.get(ext.external_id)
+                if existing_state is not None and not overwrite:
+                    authoritative_state = _project_source_status(ext.status)
+                    if existing_state == authoritative_state:
+                        result["skipped"] += 1
+                        continue
                 action, ticket = _upsert_ticket(
                     db,
                     ext,
@@ -299,7 +350,6 @@ def fetch_tickets_by_days(
                     binding_id=binding_id,
                 )
                 if action == "new":
-                    existing_ids.add(ext.external_id)
                     result["new"] += 1
                 elif action == "updated":
                     result["updated"] += 1
@@ -307,6 +357,12 @@ def fetch_tickets_by_days(
                     result["skipped"] += 1
                 if ticket and ext.updated_at:
                     max_persisted_updated_at = max(max_persisted_updated_at or ext.updated_at, ext.updated_at)
+                if ticket:
+                    existing_states[ext.external_id] = (
+                        ticket.external_status,
+                        ticket.workflow_status,
+                        ticket.status,
+                    )
             except Exception as e:
                 print(f"[fetch] ticket upsert failed kind={type(e).__name__}")
                 # Roll back the aborted transaction so a single poison ticket
@@ -323,7 +379,9 @@ def fetch_tickets_by_days(
         ).first()
         if not sync_state:
             sync_state = SyncStateRecord(
-                binding_id=binding_id, provider=adapter.provider_name
+                binding_id=binding_id,
+                provider=adapter.provider_name,
+                total_synced=0,
             )
             db.add(sync_state)
         # Only advance the cursor when the manual fetch window starts at or

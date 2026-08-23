@@ -22,10 +22,11 @@ const PROVIDER_OPTIONS = [
   { value: "freshservice", label: "Freshservice", description: "Read-only system of record" },
 ];
 
-const PROVIDER_IDS = ["deepseek", "openai", "openrouter", "azure", "azure_ai", "custom"] as const;
+const PROVIDER_IDS = ["foundry", "custom"] as const;
 
 const API_READ_ONLY_KEYS = new Set([
   "APP_MODE",
+  "TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED",
   "SEED_DEMO_DATA",
   "DATABASE_URL",
   "NEXT_PUBLIC_API_URL",
@@ -41,16 +42,9 @@ const API_READ_ONLY_KEYS = new Set([
 // Production renders these effective values for visibility, but changes must be
 // made through the reviewed deployment environment/Secret rather than the DB.
 const PRODUCTION_DEPLOYMENT_KEYS = new Set([
-  "DEEPSEEK_API_KEY",
-  "OPENAI_API_KEY",
-  "OPENAI_API_BASE",
-  "OPENROUTER_API_KEY",
-  "OPENROUTER_API_BASE",
-  "AZURE_API_KEY",
-  "AZURE_API_BASE",
-  "AZURE_API_VERSION",
-  "AZURE_AI_API_KEY",
-  "AZURE_AI_API_BASE",
+  "FOUNDRY_API_KEY",
+  "FOUNDRY_API_BASE",
+  "FOUNDRY_AUTH_METHOD",
   "CUSTOM_API_KEY",
   "CUSTOM_API_BASE",
   "FRESHSERVICE_API_KEY",
@@ -64,10 +58,6 @@ const PRODUCTION_DEPLOYMENT_KEYS = new Set([
   "COOKIE_SAMESITE",
   "LOGIN_REQUIRED",
   "DEFAULT_MODEL",
-  "CUSTOM_PROVIDER_TYPE",
-  "CUSTOM_API_VERSION",
-  "CUSTOM_TEMPERATURE",
-  "CUSTOM_MAX_TOKENS",
   "LLM_ALLOW_SYNTHETIC",
   "LLM_REQUEST_TIMEOUT_SECONDS",
   "LLM_OVERALL_TIMEOUT_SECONDS",
@@ -98,7 +88,6 @@ const PRODUCTION_DEPLOYMENT_KEYS = new Set([
   "TICKET_EMBEDDING_MAX_CHARS",
   "TICKET_EMBEDDING_MAX_COMMENTS_PER_REFRESH",
   "TICKET_VECTOR_MIN_SCORE",
-  "TICKET_EMBEDDING_API_BASE",
   "TICKET_RAG_V2_WRITE_ENABLED",
   "TICKET_RAG_V2_WORKER_ENABLED",
   "TICKET_RAG_V2_READ_ENABLED",
@@ -133,6 +122,29 @@ const PRODUCTION_DEPLOYMENT_KEYS = new Set([
   "SSO_ENABLED",
   "SSO_PROVIDER",
   "SSO_CLIENT_ID",
+  "SSO_DISCOVERY_URL",
+  "SSO_REDIRECT_URI",
+  "SSO_ALLOWED_DOMAINS",
+  "SSO_AUTO_PROVISION",
+]);
+
+// These settings define deployment trust boundaries or unsupported provider
+// destinations. They remain read-only even when admin portal editing is
+// explicitly enabled for operational settings and credentials.
+const PRODUCTION_INFRASTRUCTURE_KEYS = new Set([
+  "CORS_ALLOW_ORIGINS",
+  "COOKIE_SECURE",
+  "COOKIE_SAMESITE",
+  "LOGIN_REQUIRED",
+  "JIRA_BASE_URL",
+  "JIRA_EMAIL",
+  "JIRA_API_TOKEN",
+  "JIRA_PROJECT_KEY",
+  "JIRA_ISSUE_TYPE",
+  "SSO_ENABLED",
+  "SSO_PROVIDER",
+  "SSO_CLIENT_ID",
+  "SSO_CLIENT_SECRET",
   "SSO_DISCOVERY_URL",
   "SSO_REDIRECT_URI",
   "SSO_ALLOWED_DOMAINS",
@@ -219,8 +231,14 @@ export default function SettingsPage() {
   const [saved, setSaved] = useState(false);
   const [freshserviceAuthMode, setFreshserviceAuthMode] = useState<FreshserviceAuthMode>("api");
   const appMode = ((form.APP_MODE || data?.APP_MODE) as string) || "demo";
-  const productionSettingsReadOnly = appMode === "production";
-  const isDeploymentManaged = (key: string) => productionSettingsReadOnly && PRODUCTION_DEPLOYMENT_KEYS.has(key);
+  const adminPortalEditsEnabled = data?.TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED === "true";
+  const productionOperationalSettingsReadOnly = appMode === "production" && !adminPortalEditsEnabled;
+  const productionSecuritySettingsReadOnly = appMode === "production";
+  const isDeploymentManaged = (key: string) => (
+    appMode === "production"
+    && PRODUCTION_DEPLOYMENT_KEYS.has(key)
+    && (PRODUCTION_INFRASTRUCTURE_KEYS.has(key) || !adminPortalEditsEnabled)
+  );
 
   useEffect(() => {
     if (data) {
@@ -280,16 +298,10 @@ export default function SettingsPage() {
   };
 
   const activeProviderId = useMemo(() => {
-    if (!catalog) return "deepseek";
     const model = (form.DEFAULT_MODEL || "").trim();
-    if (model.startsWith("openrouter/")) return "openrouter";
-    if (model.startsWith("azure_ai/")) return "azure_ai";
-    if (model.startsWith("azure/")) return "azure";
-    if (model.startsWith("openai/")) return "openai";
     if (model.startsWith("custom/")) return "custom";
-    if (model.startsWith("deepseek")) return "deepseek";
-    return (catalog.current_provider as string) || "deepseek";
-  }, [form.DEFAULT_MODEL, catalog]);
+    return (catalog?.current_provider as string) || "foundry";
+  }, [catalog, form.DEFAULT_MODEL]);
 
   const activeProvider: LlmProvider | undefined = catalog ? (catalog[activeProviderId] as LlmProvider) : undefined;
   const itProvider = "freshservice";
@@ -313,7 +325,7 @@ export default function SettingsPage() {
     freshserviceAuthReady
   );
   const isExternalProvider = true;
-  const baselineForm = useMemo(() => data ? {
+  const baselineForm = useMemo<SettingsType | null>(() => data ? {
     ...data,
     ITSM_PROVIDER: "freshservice",
   } : null, [data]);
@@ -359,6 +371,7 @@ export default function SettingsPage() {
     for (const key of Object.keys(form)) {
       const v = form[key as keyof SettingsType];
       if (typeof v !== "string" || v === "") continue;
+      if (baselineForm && v === baselineForm[key as keyof SettingsType]) continue;
       if (v.includes("****")) continue;
       if (API_READ_ONLY_KEYS.has(key)) continue;
       if (isDeploymentManaged(key)) continue;
@@ -441,6 +454,12 @@ export default function SettingsPage() {
         </Alert>
       )}
 
+      {appMode === "production" && adminPortalEditsEnabled && (
+        <Alert variant="info" title="Global admin settings enabled">
+          Provider credentials and operational settings saved here become admin-approved runtime overrides. Deployment trust boundaries such as runtime mode, database access, CORS, cookies, login enforcement, and SSO remain locked.
+        </Alert>
+      )}
+
       <nav aria-label="Settings sections" className="sticky top-20 z-20 -mx-1 flex gap-1 overflow-x-auto rounded-xl border border-linen-400 bg-linen-50/95 p-1 shadow-sm backdrop-blur">
         {[
           ["settings-ai", "AI"],
@@ -453,8 +472,8 @@ export default function SettingsPage() {
 
       <form onSubmit={handleSubmit} className="space-y-8">
         {/* ═══ LLM Configuration ═══ */}
-        <SettingsSection id="settings-ai" title="LLM Configuration" subtitle="Choose the AI provider and model for ticket triage, summarization, and resolution">
-          {productionSettingsReadOnly && (
+        <SettingsSection id="settings-ai" title="LLM Configuration" subtitle="Use Microsoft Foundry or one simplified custom OpenAI-compatible API">
+          {productionOperationalSettingsReadOnly && (
             <DeploymentManagedNotice>
               Provider selection, model routing, endpoints, and credentials are read-only here. Update the deployment environment/Secret and roll out the workloads to change them.
             </DeploymentManagedNotice>
@@ -471,10 +490,10 @@ export default function SettingsPage() {
                     key={pid}
                     type="button"
                     onClick={() => handleProviderChange(pid)}
-                    disabled={productionSettingsReadOnly}
+                    disabled={productionOperationalSettingsReadOnly}
                     className={cn(
                       "min-h-[68px] rounded border px-3 py-2 text-left transition-colors",
-                      productionSettingsReadOnly && "cursor-not-allowed opacity-70",
+                      productionOperationalSettingsReadOnly && "cursor-not-allowed opacity-70",
                       selected
                         ? "border-clay-500 bg-clay-50 text-clay-700"
                         : "border-linen-400 bg-linen-50 text-ink-600 hover:bg-linen-200"
@@ -494,25 +513,25 @@ export default function SettingsPage() {
             </div>
           </Field>
 
-          <Field label={<DeploymentManagedLabel label="Default Model" managed={productionSettingsReadOnly} />}>
-            {activeProvider && activeProvider.models && activeProvider.models.length > 0 ? (
-              <fieldset disabled={productionSettingsReadOnly} className="contents">
+          <Field label={<DeploymentManagedLabel label="Default Model" managed={productionOperationalSettingsReadOnly} />}>
+            {activeProvider ? (
+              <fieldset disabled={productionOperationalSettingsReadOnly} className="contents">
                 <SearchableSelect
                   value={form.DEFAULT_MODEL || ""}
-                  options={activeProvider.models}
+                  options={activeProvider.models || []}
                   onChange={(v) => handleChange("DEFAULT_MODEL", v)}
                   placeholder={activeProvider.model_hint || "Select or search for a model…"}
-                  disabled={productionSettingsReadOnly}
+                  disabled={productionOperationalSettingsReadOnly}
                 />
               </fieldset>
             ) : (
-              <input type="text" value={form.DEFAULT_MODEL || ""} onChange={(e) => handleChange("DEFAULT_MODEL", e.target.value)} placeholder={activeProvider?.model_hint || "model id"} className="input-base" disabled={productionSettingsReadOnly} />
+              <input type="text" value={form.DEFAULT_MODEL || ""} onChange={(e) => handleChange("DEFAULT_MODEL", e.target.value)} placeholder="model id" className="input-base" disabled={productionOperationalSettingsReadOnly} />
             )}
           </Field>
 
           <div className="flex items-center justify-between">
             <span className="text-xs text-ink-500">
-              {fetchedInfo ? `Last fetch: ${fetchedInfo.total_models} models from ${fetchedInfo.providers_queried.length} providers` : "Model list shows built-in defaults + any previously fetched models."}
+              {fetchedInfo ? `Last fetch: ${fetchedInfo.total_models} models from ${fetchedInfo.providers_queried.length} configured APIs` : "Models are fetched automatically from configured APIs and cached; use refresh to fetch now."}
             </span>
             <button type="button" onClick={() => refreshMut.mutate()} disabled={refreshMut.isPending} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded border border-linen-400 text-xs font-medium text-ink-600 hover:bg-linen-200 disabled:opacity-50">
               {refreshMut.isPending ? <RefreshCw className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
@@ -521,11 +540,16 @@ export default function SettingsPage() {
           </div>
 
           {activeProvider?.env_keys.map((ek) => (
-            <Field key={ek.key} label={<DeploymentManagedLabel label={ek.label} managed={productionSettingsReadOnly} />} ready={keyReady(ek.key)}>
-              {ek.secret ? (
-                <SecretInput value={(form[ek.key as keyof SettingsType] as string) || ""} onChange={(v) => handleChange(ek.key as keyof SettingsType, v)} placeholder={ek.placeholder} disabled={productionSettingsReadOnly} />
+            <Field key={ek.key} label={<DeploymentManagedLabel label={ek.label} managed={productionOperationalSettingsReadOnly} />} ready={keyReady(ek.key)}>
+              {ek.key === "FOUNDRY_AUTH_METHOD" ? (
+                <select value={(form.FOUNDRY_AUTH_METHOD as string) || "api_key"} onChange={(e) => handleChange("FOUNDRY_AUTH_METHOD", e.target.value)} className="input-base" disabled={productionOperationalSettingsReadOnly}>
+                  <option value="api_key">API key</option>
+                  <option value="entra">Microsoft Entra ID</option>
+                </select>
+              ) : ek.secret ? (
+                <SecretInput value={(form[ek.key as keyof SettingsType] as string) || ""} onChange={(v) => handleChange(ek.key as keyof SettingsType, v)} placeholder={ek.placeholder} disabled={productionOperationalSettingsReadOnly} />
               ) : (
-                <input type="text" value={(form[ek.key as keyof SettingsType] as string) || ""} onChange={(e) => handleChange(ek.key as keyof SettingsType, e.target.value)} placeholder={ek.placeholder} className="input-base" disabled={productionSettingsReadOnly} />
+                <input type="text" value={(form[ek.key as keyof SettingsType] as string) || ""} onChange={(e) => handleChange(ek.key as keyof SettingsType, e.target.value)} placeholder={ek.placeholder} className="input-base" disabled={productionOperationalSettingsReadOnly} />
               )}
             </Field>
           ))}
@@ -604,11 +628,11 @@ export default function SettingsPage() {
               </div>
 
               {freshserviceAuthMode === "api" ? (
-                <Field label={<DeploymentManagedLabel label="Freshservice API Key" managed={productionSettingsReadOnly} />} ready={keyReady("FRESHSERVICE_API_KEY")}>
-                  <SecretInput value={form.FRESHSERVICE_API_KEY || ""} onChange={(v) => handleChange("FRESHSERVICE_API_KEY", v)} placeholder="Paste API key" disabled={productionSettingsReadOnly} />
+                <Field label={<DeploymentManagedLabel label="Freshservice API Key" managed={productionOperationalSettingsReadOnly} />} ready={keyReady("FRESHSERVICE_API_KEY")}>
+                  <SecretInput value={form.FRESHSERVICE_API_KEY || ""} onChange={(v) => handleChange("FRESHSERVICE_API_KEY", v)} placeholder="Paste API key" disabled={productionOperationalSettingsReadOnly} />
                 </Field>
               ) : (
-                <FreshserviceOAuthSetup form={form} onChange={handleChange} keyReady={keyReady} productionSettingsReadOnly={productionSettingsReadOnly} />
+                <FreshserviceOAuthSetup form={form} onChange={handleChange} keyReady={keyReady} productionSettingsReadOnly={productionOperationalSettingsReadOnly} />
               )}
 
               <AdvancedPanel title="Advanced Freshservice Sync">
@@ -629,8 +653,8 @@ export default function SettingsPage() {
                       <option value="occasional">Occasional</option>
                     </select>
                   </Field>
-                  <Field label={<DeploymentManagedLabel label="Webhook Secret" managed={productionSettingsReadOnly} />} ready={keyReady("WEBHOOK_SECRET")}>
-                    <SecretInput value={form.WEBHOOK_SECRET || ""} onChange={(v) => handleChange("WEBHOOK_SECRET", v)} placeholder="Shared secret" disabled={productionSettingsReadOnly} />
+                  <Field label={<DeploymentManagedLabel label="Webhook Secret" managed={productionOperationalSettingsReadOnly} />} ready={keyReady("WEBHOOK_SECRET")}>
+                    <SecretInput value={form.WEBHOOK_SECRET || ""} onChange={(v) => handleChange("WEBHOOK_SECRET", v)} placeholder="Shared secret" disabled={productionOperationalSettingsReadOnly} />
                   </Field>
                   <Field label="Sync Interval" ready={Boolean(form.SYNC_INTERVAL_SECONDS?.trim())}>
                     <input type="number" min={10} value={form.SYNC_INTERVAL_SECONDS || ""} onChange={(e) => handleChange("SYNC_INTERVAL_SECONDS", e.target.value)} placeholder="60" className="input-base" />
@@ -704,7 +728,7 @@ export default function SettingsPage() {
 
         {/* ═══ Security & Auth ═══ */}
         <SettingsSection id="settings-access" title="Security & Authentication" subtitle="Require login and configure Single Sign-On (OIDC) for production deployments">
-          {productionSettingsReadOnly && (
+          {productionSecuritySettingsReadOnly && (
             <DeploymentManagedNotice>
               Authentication, SSO, CORS, and cookie controls are read-only here. Their effective values come from the deployment environment/Secret.
             </DeploymentManagedNotice>
@@ -731,22 +755,22 @@ export default function SettingsPage() {
             />
           </Field>
           <div className="grid grid-cols-2 gap-4">
-            <Field label={<DeploymentManagedLabel label="CORS Allow Origins" managed={productionSettingsReadOnly} />}>
+            <Field label={<DeploymentManagedLabel label="CORS Allow Origins" managed={productionSecuritySettingsReadOnly} />}>
               <input
                 type="text"
                 value={form.CORS_ALLOW_ORIGINS || ""}
                 onChange={(e) => handleChange("CORS_ALLOW_ORIGINS", e.target.value)}
                 placeholder="https://support.example.com"
                 className="input-base"
-                disabled={productionSettingsReadOnly}
+                disabled={productionSecuritySettingsReadOnly}
               />
             </Field>
-            <Field label={<DeploymentManagedLabel label="Cookie SameSite" managed={productionSettingsReadOnly} />}>
+            <Field label={<DeploymentManagedLabel label="Cookie SameSite" managed={productionSecuritySettingsReadOnly} />}>
               <select
                 value={(form.COOKIE_SAMESITE as string) || "lax"}
                 onChange={(e) => handleChange("COOKIE_SAMESITE", e.target.value)}
                 className="input-base"
-                disabled={productionSettingsReadOnly}
+                disabled={productionSecuritySettingsReadOnly}
               >
                 <option value="lax">Lax</option>
                 <option value="strict">Strict</option>
@@ -759,7 +783,7 @@ export default function SettingsPage() {
             desc="Require HTTPS for session cookies. Production mode enables this by default."
             value={(form.COOKIE_SECURE as string) === "true" || (((form.COOKIE_SECURE as string) || "") === "" && appMode === "production")}
             onChange={(v) => handleChange("COOKIE_SECURE", v ? "true" : "false")}
-            disabled={productionSettingsReadOnly}
+            disabled={productionSecuritySettingsReadOnly}
           />
           <ToggleRow
             label="Seed Demo Data"
@@ -773,7 +797,7 @@ export default function SettingsPage() {
             desc="When enabled, users must sign in. When disabled (default), the app runs in demo mode — no login needed."
             value={(form.LOGIN_REQUIRED as string) === "true" || (((form.LOGIN_REQUIRED as string) || "") === "" && appMode === "production")}
             onChange={(v) => handleChange("LOGIN_REQUIRED", v ? "true" : "false")}
-            disabled={productionSettingsReadOnly}
+            disabled={productionSecuritySettingsReadOnly}
           />
 
           {appMode === "demo" && (form.LOGIN_REQUIRED as string) === "true" && (
@@ -791,35 +815,35 @@ export default function SettingsPage() {
             desc="Allow users to sign in via an OpenID Connect provider (Google, Azure AD, Okta, etc.)"
             value={(form.SSO_ENABLED as string) === "true"}
             onChange={(v) => handleChange("SSO_ENABLED", v ? "true" : "false")}
-            disabled={productionSettingsReadOnly}
+            disabled={productionSecuritySettingsReadOnly}
           />
 
           {(form.SSO_ENABLED as string) === "true" && (
             <div className="space-y-4 pt-2">
-              <Field label={<DeploymentManagedLabel label="SSO Provider Name" managed={productionSettingsReadOnly} />}>
-                <input type="text" value={form.SSO_PROVIDER || ""} onChange={(e) => handleChange("SSO_PROVIDER", e.target.value)} placeholder="e.g. Google, Azure AD, Okta" className="input-base" disabled={productionSettingsReadOnly} />
+              <Field label={<DeploymentManagedLabel label="SSO Provider Name" managed={productionSecuritySettingsReadOnly} />}>
+                <input type="text" value={form.SSO_PROVIDER || ""} onChange={(e) => handleChange("SSO_PROVIDER", e.target.value)} placeholder="e.g. Google, Azure AD, Okta" className="input-base" disabled={productionSecuritySettingsReadOnly} />
               </Field>
-              <Field label={<DeploymentManagedLabel label="Client ID" managed={productionSettingsReadOnly} />}>
-                <input type="text" value={form.SSO_CLIENT_ID || ""} onChange={(e) => handleChange("SSO_CLIENT_ID", e.target.value)} placeholder="OIDC client ID" className="input-base" disabled={productionSettingsReadOnly} />
+              <Field label={<DeploymentManagedLabel label="Client ID" managed={productionSecuritySettingsReadOnly} />}>
+                <input type="text" value={form.SSO_CLIENT_ID || ""} onChange={(e) => handleChange("SSO_CLIENT_ID", e.target.value)} placeholder="OIDC client ID" className="input-base" disabled={productionSecuritySettingsReadOnly} />
               </Field>
-              <Field label={<DeploymentManagedLabel label="Client Secret" managed={productionSettingsReadOnly} />}>
-                <SecretInput value={form.SSO_CLIENT_SECRET || ""} onChange={(v) => handleChange("SSO_CLIENT_SECRET", v)} placeholder="OIDC client secret" disabled={productionSettingsReadOnly} />
+              <Field label={<DeploymentManagedLabel label="Client Secret" managed={productionSecuritySettingsReadOnly} />}>
+                <SecretInput value={form.SSO_CLIENT_SECRET || ""} onChange={(v) => handleChange("SSO_CLIENT_SECRET", v)} placeholder="OIDC client secret" disabled={productionSecuritySettingsReadOnly} />
               </Field>
-              <Field label={<DeploymentManagedLabel label="Discovery URL" managed={productionSettingsReadOnly} />}>
-                <input type="text" value={form.SSO_DISCOVERY_URL || ""} onChange={(e) => handleChange("SSO_DISCOVERY_URL", e.target.value)} placeholder="https://accounts.google.com/.well-known/openid-configuration" className="input-base" disabled={productionSettingsReadOnly} />
+              <Field label={<DeploymentManagedLabel label="Discovery URL" managed={productionSecuritySettingsReadOnly} />}>
+                <input type="text" value={form.SSO_DISCOVERY_URL || ""} onChange={(e) => handleChange("SSO_DISCOVERY_URL", e.target.value)} placeholder="https://accounts.google.com/.well-known/openid-configuration" className="input-base" disabled={productionSecuritySettingsReadOnly} />
               </Field>
-              <Field label={<DeploymentManagedLabel label="Redirect URI" managed={productionSettingsReadOnly} />}>
-                <input type="text" value={form.SSO_REDIRECT_URI || ""} onChange={(e) => handleChange("SSO_REDIRECT_URI", e.target.value)} placeholder="http://localhost:3000/api/auth/sso/callback" className="input-base" disabled={productionSettingsReadOnly} />
+              <Field label={<DeploymentManagedLabel label="Redirect URI" managed={productionSecuritySettingsReadOnly} />}>
+                <input type="text" value={form.SSO_REDIRECT_URI || ""} onChange={(e) => handleChange("SSO_REDIRECT_URI", e.target.value)} placeholder="http://localhost:3000/api/auth/sso/callback" className="input-base" disabled={productionSecuritySettingsReadOnly} />
               </Field>
-              <Field label={<DeploymentManagedLabel label="Allowed Email Domains" managed={productionSettingsReadOnly} />}>
-                <input type="text" value={form.SSO_ALLOWED_DOMAINS || ""} onChange={(e) => handleChange("SSO_ALLOWED_DOMAINS", e.target.value)} placeholder="company.com,subsidiary.com" className="input-base" disabled={productionSettingsReadOnly} />
+              <Field label={<DeploymentManagedLabel label="Allowed Email Domains" managed={productionSecuritySettingsReadOnly} />}>
+                <input type="text" value={form.SSO_ALLOWED_DOMAINS || ""} onChange={(e) => handleChange("SSO_ALLOWED_DOMAINS", e.target.value)} placeholder="company.com,subsidiary.com" className="input-base" disabled={productionSecuritySettingsReadOnly} />
               </Field>
               <ToggleRow
                 label="Auto-Provision SSO Users"
                 desc="Create new active agent accounts for trusted SSO domains. Keep disabled when accounts should be pre-approved."
                 value={(form.SSO_AUTO_PROVISION as string) === "true"}
                 onChange={(v) => handleChange("SSO_AUTO_PROVISION", v ? "true" : "false")}
-                disabled={productionSettingsReadOnly}
+                disabled={productionSecuritySettingsReadOnly}
               />
               <p className="text-xs text-ink-400">
                 Use the well-known URL for your provider. Common ones:<br />

@@ -25,14 +25,14 @@ export function ProductIcon({
       )}
     >
       {active && (
-        <span className="absolute -left-3 h-3.5 w-0.5 bg-[#803CE8]" />
+        <span className="absolute -left-3 h-4 w-0.5 rounded-full bg-[#A974EC]" />
       )}
       <Icon
         className={cn(
           "h-[19px] w-[19px] transition-colors duration-150",
           active
-            ? "text-[#DCE3EB]"
-            : "text-[#8491A1] group-hover:text-[#C9D1DA]"
+            ? "text-white"
+            : "text-[#8491A1] group-hover:text-[#DCE3EB]"
         )}
         strokeWidth={1.75}
         strokeLinecap="round"

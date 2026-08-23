@@ -11,6 +11,12 @@ import { LoginLink } from "@/components/layout/LoginLink";
 import { LogoutButton } from "@/components/layout/LogoutButton";
 import { ProductIcon } from "@/components/icons/ProductIcon";
 import {
+  isNavigationItemActive,
+  navigationSections,
+  type NavigationIconKey,
+  type NavigationVisibility,
+} from "@/lib/navigation";
+import {
   LayoutDashboard,
   Inbox,
   Users,
@@ -30,6 +36,22 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
+const navigationIcons: Record<NavigationIconKey, typeof LayoutDashboard> = {
+  dashboard: LayoutDashboard,
+  tickets: Inbox,
+  time: Clock3,
+  services: Package,
+  problems: AlertOctagon,
+  changes: GitBranch,
+  assets: Laptop,
+  knowledge: BookOpen,
+  agents: Users,
+  surveys: MessageSquareHeart,
+  leaderboard: TrendingUp,
+  reports: BarChart3,
+  intelligence: Radar,
+};
+
 function initials(name?: string) {
   if (!name) return "ME";
   return name
@@ -40,45 +62,6 @@ function initials(name?: string) {
     .slice(0, 2)
     .toUpperCase();
 }
-
-const navGroups = [
-  {
-    label: "Overview",
-    items: [{ href: "/", label: "Dashboard", icon: LayoutDashboard }],
-  },
-  {
-    label: "Work",
-    items: [
-      { href: "/tickets", label: "Tickets", icon: Inbox },
-      { href: "/time", label: "My Time", icon: Clock3 },
-    ],
-  },
-  {
-    label: "Service management",
-    items: [
-      { href: "/services", label: "Services", icon: Package },
-      { href: "/problems", label: "Problems", icon: AlertOctagon },
-      { href: "/changes", label: "Changes", icon: GitBranch },
-      { href: "/assets", label: "Assets", icon: Laptop },
-      { href: "/knowledge", label: "Knowledge Base", icon: BookOpen },
-    ],
-  },
-  {
-    label: "People",
-    items: [
-      { href: "/agents", label: "Agents", icon: Users },
-      { href: "/surveys", label: "Surveys", icon: MessageSquareHeart },
-      { href: "/leaderboard", label: "Leaderboard", icon: TrendingUp },
-    ],
-  },
-  {
-    label: "Insights",
-    items: [
-      { href: "/reports", label: "Reports", icon: BarChart3 },
-      { href: "/intelligence", label: "Intelligence", icon: Radar },
-    ],
-  },
-];
 
 export function Sidebar({
   open = false,
@@ -95,6 +78,11 @@ export function Sidebar({
   const isDemoFallback = me?.auth_kind === "demo_fallback";
   const showLogin = isDemoFallback;
   const showLogout = me?.auth_kind === "session";
+  const canSeeItem = (visibility: NavigationVisibility) => (
+    visibility === "all"
+    || (visibility === "admin" && canAccessAdmin)
+    || (visibility === "intelligence" && canAccessIntelligence)
+  );
 
   return (
     <aside
@@ -103,41 +91,45 @@ export function Sidebar({
       aria-modal={open ? "true" : undefined}
       role={open ? "dialog" : undefined}
       className={cn(
-        "fixed inset-y-0 left-0 z-50 flex w-64 flex-col border-r border-white/10 bg-[#010D1B] text-white shadow-2xl transition-transform duration-200 ease-out lg:translate-x-0 lg:shadow-none",
+        "fixed inset-y-0 left-0 z-50 flex w-[17rem] flex-col border-r border-white/10 bg-[#010D1B] text-white shadow-2xl transition-transform duration-200 ease-out lg:translate-x-0 lg:shadow-none",
         open ? "translate-x-0" : "-translate-x-full"
       )}
     >
-      <div className="flex h-16 items-center justify-between border-b border-[#D9DEE6] bg-white px-4">
-        <Link href="/" className="-ml-0.5 rounded-md focus:outline-none focus:ring-2 focus:ring-clay-300" onClick={onClose}>
-          <TicketyLogo size="md" />
+      <div className="flex h-20 items-center justify-between border-b border-white/10 px-5">
+        <Link href="/" className="-ml-0.5 rounded-md focus:outline-none focus:ring-2 focus:ring-clay-400" onClick={onClose}>
+          <TicketyLogo inverse showDescriptor size="md" />
         </Link>
         <button
           type="button"
           aria-label="Close navigation"
           onClick={onClose}
-          className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-[#59616B] transition-colors hover:bg-[#F2F5F9] hover:text-[#010D1B] focus:outline-none focus:ring-2 focus:ring-clay-300 lg:hidden"
+          className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-white/10 hover:text-white focus:outline-none focus:ring-2 focus:ring-clay-400 lg:hidden"
         >
           <X className="h-5 w-5" aria-hidden="true" />
         </button>
       </div>
 
-      <nav aria-label="Workspace" className="flex-1 space-y-3 overflow-y-auto px-3 py-4">
-        {navGroups.map((group) => {
-          const visibleItems = group.items.filter((item) => (
-            (item.href !== "/intelligence" || canAccessIntelligence) &&
-            (item.href !== "/agents" || canAccessAdmin)
-          ));
+      <nav aria-label="Workspace" className="flex-1 space-y-5 overflow-y-auto px-3 py-5">
+        {navigationSections.map((group) => {
+          const visibleItems = group.items.filter((item) => canSeeItem(item.visibility));
           if (!visibleItems.length) return null;
           const groupId = `nav-${group.label.toLowerCase().replaceAll(" ", "-")}`;
+          const groupActive = visibleItems.some((item) => isNavigationItemActive(pathname, item.href));
           return (
             <div key={group.label} role="group" aria-labelledby={groupId}>
-              <div id={groupId} className="px-3 pb-1 text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+              <div
+                id={groupId}
+                className={cn(
+                  "px-3 pb-1.5 text-[10px] font-semibold uppercase tracking-[0.15em] transition-colors",
+                  groupActive ? "text-slate-300" : "text-slate-500"
+                )}
+              >
                 {group.label}
               </div>
-              <div className="space-y-0.5">
+              <div className="space-y-1">
                 {visibleItems.map((item) => {
-                  const Icon = item.icon;
-                  const active = pathname === item.href || (item.href !== "/" && pathname.startsWith(item.href));
+                  const Icon = navigationIcons[item.icon];
+                  const active = isNavigationItemActive(pathname, item.href);
                   return (
                     <Link
                       key={item.label}
@@ -145,10 +137,10 @@ export function Sidebar({
                       aria-current={active ? "page" : undefined}
                       onClick={onClose}
                       className={cn(
-                        "group flex min-h-11 items-center gap-3 rounded-md px-3 py-1.5 text-[13px] transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#803CE8] lg:min-h-9",
+                        "group flex min-h-11 items-center gap-3 rounded-lg px-3 py-2 text-[13px] transition-[background-color,color,box-shadow] duration-150 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#803CE8] lg:min-h-10",
                         active
-                          ? "bg-white/[0.045] font-medium text-[#F2F5F8]"
-                          : "font-normal text-[#9AA5B3] hover:bg-white/[0.035] hover:text-[#E7EBF0]"
+                          ? "bg-white/[0.10] font-semibold text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)]"
+                          : "font-normal text-[#AEB8C5] hover:bg-white/[0.055] hover:text-white"
                       )}
                     >
                       <ProductIcon icon={Icon} active={active} />
@@ -162,7 +154,7 @@ export function Sidebar({
         })}
       </nav>
 
-      <div className="space-y-0.5 border-t border-white/10 p-3">
+      <div className="space-y-1 border-t border-white/10 bg-[#000A15] p-3">
         {canAccessAdmin && (
           <div className="px-3 py-1.5 text-slate-400 [&_*]:!text-slate-400">
             <SyncIndicator enabled={canAccessAdmin} />
@@ -184,8 +176,8 @@ export function Sidebar({
             className={cn(
               "group flex min-h-10 items-center gap-3 rounded-md px-3 py-2 text-[13px] transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#803CE8]",
               pathname.startsWith("/settings")
-                ? "font-medium text-[#F2F5F8]"
-                : "font-normal text-[#9AA5B3] hover:bg-white/[0.035] hover:text-[#E7EBF0]"
+                ? "bg-white/[0.10] font-semibold text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)]"
+                : "font-normal text-[#AEB8C5] hover:bg-white/[0.055] hover:text-white"
             )}
           >
             <ProductIcon
@@ -207,8 +199,8 @@ export function Sidebar({
             className={cn(
               "group flex min-h-14 items-center gap-3 rounded-lg px-2.5 py-2 text-[13px] transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#803CE8]",
               pathname.startsWith("/profile")
-                ? "bg-white/[0.06] text-[#F2F5F8]"
-                : "text-[#9AA5B3] hover:bg-white/[0.035] hover:text-[#E7EBF0]"
+                ? "bg-white/[0.09] text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)]"
+                : "text-[#9AA5B3] hover:bg-white/[0.05] hover:text-white"
             )}
           >
             <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full border border-white/15 bg-white/[0.08] text-[11px] font-semibold text-white">

@@ -1,17 +1,13 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import { Search, ChevronDown } from "lucide-react";
+import { filterModelOptions, type ModelOption } from "@/lib/model-options";
 import { cn } from "@/lib/utils";
-
-interface Option {
-  id: string;
-  label: string;
-}
 
 interface Props {
   value: string;
-  options: Option[];
+  options: ModelOption[];
   onChange: (value: string) => void;
   placeholder?: string;
   disabled?: boolean;
@@ -27,27 +23,25 @@ export function SearchableSelect({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [highlighted, setHighlighted] = useState(0);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const listboxId = useId();
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
         setOpen(false);
+        setQuery("");
       }
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, []);
 
-  const filtered = query
-    ? options.filter(
-        (o) =>
-          o.id.toLowerCase().includes(query.toLowerCase()) ||
-          o.label.toLowerCase().includes(query.toLowerCase())
-      )
-    : options;
+  const filtered = filterModelOptions(options, query);
+  const customModelId = query.trim();
 
   const selectedOption = options.find((o) => o.id === value);
 
@@ -55,22 +49,50 @@ export function SearchableSelect({
     onChange(id);
     setOpen(false);
     setQuery("");
+    requestAnimationFrame(() => triggerRef.current?.focus());
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      setHighlighted((h) => Math.min(h + 1, filtered.length - 1));
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setHighlighted((h) => Math.max(h - 1, 0));
-    } else if (e.key === "Enter" && open && filtered[highlighted]) {
-      e.preventDefault();
-      select(filtered[highlighted].id);
-    } else if (e.key === "Escape") {
-      setOpen(false);
+  const openMenu = () => {
+    const selectedIndex = options.findIndex((option) => option.id === value);
+    setQuery("");
+    setHighlighted(selectedIndex >= 0 ? selectedIndex : 0);
+    setOpen(true);
+  };
+
+  const closeMenu = (restoreFocus = false) => {
+    setOpen(false);
+    setQuery("");
+    if (restoreFocus) {
+      requestAnimationFrame(() => triggerRef.current?.focus());
     }
   };
+
+  const handleSearchKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setHighlighted((current) =>
+        filtered.length > 0 ? Math.min(current + 1, filtered.length - 1) : 0,
+      );
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setHighlighted((current) => Math.max(current - 1, 0));
+    } else if (e.key === "Enter" && filtered[highlighted]) {
+      e.preventDefault();
+      select(filtered[highlighted].id);
+    } else if (e.key === "Enter" && customModelId) {
+      e.preventDefault();
+      select(customModelId);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      closeMenu(true);
+    }
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    const frame = requestAnimationFrame(() => searchRef.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [open]);
 
   useEffect(() => {
     if (open && listRef.current) {
@@ -95,73 +117,120 @@ export function SearchableSelect({
 
   return (
     <div ref={containerRef} className="relative">
-      <div className="relative">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-ink-400" />
-        <input
-          ref={inputRef}
-          type="text"
-          value={open ? query : (selectedOption?.label || value)}
-          onChange={(e) => {
-            setQuery(e.target.value);
-            setOpen(true);
-            setHighlighted(0);
-          }}
-          onFocus={() => { setOpen(true); setQuery(""); }}
-          onKeyDown={handleKeyDown}
-          placeholder={placeholder}
-          className="input-base input-search pr-8"
-          disabled={disabled}
+      <button
+        ref={triggerRef}
+        type="button"
+        aria-label="Choose model"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls={open ? listboxId : undefined}
+        onClick={() => (open ? closeMenu() : openMenu())}
+        onKeyDown={(event) => {
+          if (!open && (event.key === "ArrowDown" || event.key === "Enter" || event.key === " ")) {
+            event.preventDefault();
+            openMenu();
+          }
+        }}
+        className="input-base flex items-center justify-between gap-2 text-left disabled:cursor-not-allowed disabled:opacity-60"
+        disabled={disabled}
+      >
+        <span className={cn("truncate", !value && "text-ink-400")}>
+          {selectedOption?.label || value || placeholder}
+        </span>
+        <ChevronDown
+          aria-hidden="true"
+          className={cn("h-3.5 w-3.5 shrink-0 text-ink-400 transition-transform", open && "rotate-180")}
         />
-        <button
-          type="button"
-          onClick={() => { setOpen(!open); inputRef.current?.focus(); }}
-          className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-ink-400 hover:text-ink-600"
-        >
-          <ChevronDown className={cn("w-3.5 h-3.5 transition-transform", open && "rotate-180")} />
-        </button>
-      </div>
+      </button>
 
       {open && (
-        <ul
-          ref={listRef}
-          className="absolute z-50 mt-1 w-full max-h-56 overflow-y-auto rounded border border-linen-400 bg-linen-50 shadow-lg"
-        >
-          {filtered.length === 0 ? (
-            <li className="px-3 py-2 text-xs text-ink-400">
-              No match for &ldquo;{query}&rdquo;
-              <button
-                type="button"
-                onClick={() => { onChange(query); setOpen(false); setQuery(""); }}
-                className="ml-2 text-ink-600 hover:text-ink-700 underline"
-              >
-                use it anyway
-              </button>
-            </li>
-          ) : (
-            filtered.map((o, i) => (
+        <div className="absolute z-50 mt-1 w-full overflow-hidden rounded border border-linen-400 bg-linen-50 shadow-lg">
+          <div className="border-b border-linen-300 p-2">
+            <div className="relative">
+              <Search
+                aria-hidden="true"
+                className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-400"
+              />
+              <input
+                ref={searchRef}
+                type="search"
+                role="combobox"
+                aria-label="Search models"
+                aria-autocomplete="list"
+                aria-expanded="true"
+                aria-controls={listboxId}
+                aria-activedescendant={
+                  filtered[highlighted]
+                    ? `${listboxId}-option-${highlighted}`
+                    : undefined
+                }
+                value={query}
+                onChange={(event) => {
+                  setQuery(event.target.value);
+                  setHighlighted(0);
+                }}
+                onKeyDown={handleSearchKeyDown}
+                placeholder="Search models…"
+                className="input-base input-search"
+              />
+            </div>
+          </div>
+
+          <ul
+            ref={listRef}
+            id={listboxId}
+            role="listbox"
+            aria-label="Models"
+            className="max-h-56 overflow-y-auto"
+          >
+            {filtered.map((option, index) => (
               <li
-                key={o.id}
-                onClick={() => select(o.id)}
-                onMouseEnter={() => setHighlighted(i)}
+                id={`${listboxId}-option-${index}`}
+                key={option.id}
+                role="option"
+                aria-selected={option.id === value}
+                onClick={() => select(option.id)}
+                onMouseEnter={() => setHighlighted(index)}
                 className={cn(
-                  "px-3 py-2 text-sm cursor-pointer transition-colors",
-                  i === highlighted
+                  "cursor-pointer px-3 py-2 text-sm transition-colors",
+                  index === highlighted
                     ? "bg-linen-300 text-ink-700"
-                    : o.id === value
-                    ? "bg-linen-200 font-semibold text-ink-700"
-                    : "text-ink-600 hover:bg-linen-200"
+                    : option.id === value
+                      ? "bg-linen-200 font-semibold text-ink-700"
+                      : "text-ink-600 hover:bg-linen-200",
                 )}
               >
-                {o.label}
+                <span className="block truncate">{option.label}</span>
+                {option.id !== option.label && (
+                  <span className="block truncate text-[11px] font-normal text-ink-400">
+                    {option.id}
+                  </span>
+                )}
               </li>
-            ))
+            ))}
+          </ul>
+
+          {filtered.length === 0 && (
+            <div className="px-3 py-2 text-xs text-ink-400">
+              No match for &ldquo;{query}&rdquo;
+              {customModelId && (
+                <button
+                  type="button"
+                  onClick={() => select(customModelId)}
+                  className="ml-2 text-ink-600 underline hover:text-ink-700"
+                >
+                  use it anyway
+                </button>
+              )}
+            </div>
           )}
-          <li className="border-t border-linen-300 px-3 py-1.5 text-[11px] text-ink-400">
+
+          <div className="border-t border-linen-300 px-3 py-1.5 text-[11px] text-ink-400">
             {query
               ? `${filtered.length} of ${options.length}`
               : `${options.length} models`}
-          </li>
-        </ul>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -167,31 +167,21 @@ export interface PointsNotification {
 export interface TriageStep {
   step: string;
   label: string;
-  status: "pending" | "active" | "done";
+  status: "pending" | "active" | "done" | "error";
 }
 
 export interface Settings {
   APP_MODE: string;
+  TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED: string;
   SEED_DEMO_DATA: string;
   CORS_ALLOW_ORIGINS: string;
   COOKIE_SECURE: string;
   COOKIE_SAMESITE: string;
-  DEEPSEEK_API_KEY: string;
-  OPENAI_API_KEY: string;
-  OPENAI_API_BASE: string;
-  OPENROUTER_API_KEY: string;
-  OPENROUTER_API_BASE: string;
-  AZURE_API_KEY: string;
-  AZURE_API_BASE: string;
-  AZURE_API_VERSION: string;
-  AZURE_AI_API_KEY: string;
-  AZURE_AI_API_BASE: string;
+  FOUNDRY_API_KEY: string;
+  FOUNDRY_API_BASE: string;
+  FOUNDRY_AUTH_METHOD: string;
   CUSTOM_API_KEY: string;
   CUSTOM_API_BASE: string;
-  CUSTOM_PROVIDER_TYPE: string;
-  CUSTOM_API_VERSION: string;
-  CUSTOM_TEMPERATURE: string;
-  CUSTOM_MAX_TOKENS: string;
   DEFAULT_MODEL: string;
   TICKET_RAG_SCOPE_KEY: string;
   TICKET_RAG_V2_SCOPE_ALLOWLIST: string;

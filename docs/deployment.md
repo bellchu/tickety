@@ -174,7 +174,10 @@ It can contain provider and integration credentials too. For example:
 ```sh
 kubectl -n tickety create secret generic tickety-production \
   --from-literal=DATABASE_URL='postgresql+psycopg2://tickety:<url-encoded-password>@db.example.net:5432/tickety' \
-  --from-literal=OPENAI_API_KEY='<provider-key>'
+  --from-literal=FOUNDRY_API_KEY='<foundry-key>' \
+  --from-literal=FOUNDRY_API_BASE='https://<resource>.services.ai.azure.com/openai/v1' \
+  --from-literal=DEFAULT_MODEL='foundry/<deployment-name>' \
+  --from-literal=LLM_ALLOWED_PROVIDER_HOSTS='<resource>.services.ai.azure.com'
 ```
 
 Use it with an external PostgreSQL service:

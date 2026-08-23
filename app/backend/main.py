@@ -75,6 +75,7 @@ from .llm_manager import (
     LLMManager,
     get_llm_metrics,
     get_llm_catalog,
+    refresh_live_models_if_stale,
 )
 from .ai_contracts import (
     ResolutionAnalysis,
@@ -4039,7 +4040,7 @@ def trigger_sync(
 @app.post("/admin/sync/fetch")
 def fetch_sync(
     days: int = Query(7, ge=1, le=365, description="Fetch tickets updated in the last N days"),
-    overwrite: bool = Query(False, description="Overwrite already-imported tickets from the source"),
+    overwrite: bool = Query(False, description="Refresh all provider fields on already-imported tickets"),
     binding_id: Optional[str] = Query(None, max_length=36),
     db: Session = Depends(get_db),
     user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
@@ -4047,10 +4048,9 @@ def fetch_sync(
     """Manual "fetch by days" pull from the ITSM provider.
 
     Walks every page of tickets updated in the last `days` days while
-    respecting the provider's rate limits. By default tickets that are
-    already imported (matched by external_source + external_id) are skipped
-    so re-running an overlapping window won't clobber local AI triage / status
-    changes; pass overwrite=true to force-refresh them from the source.
+    respecting the provider's rate limits. Source status is always reconciled
+    for already-imported tickets. Other local fields remain unchanged unless
+    overwrite=true requests a full provider refresh.
     """
     _reserve_ai_request(db, user.id, "itsm_fetch")
     adapter, effective_binding_id = _sync_adapter_for_binding(db, binding_id)
@@ -4253,10 +4253,13 @@ async def oauth_callback(
 
     # Persist tokens in the database so the adapter picks them up on restart.
     try:
-        settings_module.update_settings({
-            "FRESHSERVICE_OAUTH_ACCESS_TOKEN": access_token,
-            "FRESHSERVICE_OAUTH_REFRESH_TOKEN": refresh_token,
-        })
+        settings_module.update_settings(
+            {
+                "FRESHSERVICE_OAUTH_ACCESS_TOKEN": access_token,
+                "FRESHSERVICE_OAUTH_REFRESH_TOKEN": refresh_token,
+            },
+            actor_id=user.id,
+        )
     except Exception as exc:
         print(f"[oauth] token persistence failed kind={type(exc).__name__}")
         raise HTTPException(503, "OAuth token persistence failed") from None
@@ -4290,10 +4293,13 @@ async def oauth_refresh(
     access_token = tokens.get("access_token", "")
     refresh_token = tokens.get("refresh_token", "")
     try:
-        settings_module.update_settings({
-            "FRESHSERVICE_OAUTH_ACCESS_TOKEN": access_token,
-            "FRESHSERVICE_OAUTH_REFRESH_TOKEN": refresh_token,
-        })
+        settings_module.update_settings(
+            {
+                "FRESHSERVICE_OAUTH_ACCESS_TOKEN": access_token,
+                "FRESHSERVICE_OAUTH_REFRESH_TOKEN": refresh_token,
+            },
+            actor_id=user.id,
+        )
     except Exception as exc:
         print(f"[oauth] token persistence failed kind={type(exc).__name__}")
         raise HTTPException(503, "OAuth token persistence failed") from None
@@ -4399,10 +4405,10 @@ async def get_settings(_user: UserRecord = Depends(require_protected_ai_role("ad
 @app.put("/admin/settings")
 async def update_settings(
     payload: dict,
-    _user: UserRecord = Depends(require_protected_ai_role("admin")),
+    user: UserRecord = Depends(require_protected_ai_role("admin")),
 ):
     try:
-        return settings_module.update_settings(payload)
+        return settings_module.update_settings(payload, actor_id=user.id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
@@ -4412,9 +4418,8 @@ async def update_settings(
 
 @app.get("/admin/llm/catalog")
 async def llm_catalog(_user: UserRecord = Depends(require_protected_ai_role("admin"))):
-    """Provider catalog for the settings UI: list of supported providers,
-    their preset models, which env vars they need, and which of those are
-    already configured. Never returns secret values."""
+    """Return the Foundry catalog, refreshing deployments when stale."""
+    await refresh_live_models_if_stale()
     return get_llm_catalog()
 
 
@@ -4449,12 +4454,7 @@ async def refresh_models(
     db: Session = Depends(get_db),
     user: UserRecord = Depends(require_protected_ai_role("admin")),
 ):
-    """Fetch the latest available models from each configured LLM provider.
-
-    Queries DeepSeek, OpenAI, and OpenRouter for their current model lists.
-    Only providers with a valid API key configured are queried; others are
-    left with their preset defaults. Results are persisted so the catalog
-    picks them up on restart."""
+    """Immediately refresh Foundry and Custom AI API model catalogs."""
     _reserve_ai_request(db, user.id, "refresh_model_catalog")
     from .llm_manager import fetch_live_models
     results = await fetch_live_models()

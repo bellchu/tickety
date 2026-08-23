@@ -21,6 +21,14 @@ _SCHEDULER_ENABLED_ENV = "TICKETY_SCHEDULER_ENABLED"
 _VALID_PROCESS_ROLES = {"api", "worker", "all"}
 
 
+def _refresh_admin_settings() -> None:
+    """Pick up portal-approved settings without restarting the worker pod."""
+    try:
+        settings_module.refresh_settings_from_db()
+    except Exception as exc:
+        print(f"[settings] worker refresh error kind={type(exc).__name__}")
+
+
 def process_role() -> str:
     """Return this process's explicit runtime role.
 
@@ -71,6 +79,7 @@ def _auto_triage_job():
     """Background scanner: pick up tickets with missing AI data and fill
     the gaps — triage first, then summary, then resolution. Processes up
     to 10 tickets per 30‑second sweep."""
+    _refresh_admin_settings()
     try:
         db = SessionLocal()
         auto_triage = settings_module.automation_enabled("AUTO_TRIAGE_ENABLED", "AUTO_TRIAGE")
@@ -279,6 +288,7 @@ def _auto_triage_job():
 
 
 def _sync_job():
+    _refresh_admin_settings()
     provider = configured_provider()
     if provider in ("standalone", "none", ""):
         # An activated binding is authoritative over the legacy provider env.

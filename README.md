@@ -1,6 +1,6 @@
 <div align="center">
   <img src="https://img.shields.io/badge/python-3.11-blue" alt="Python 3.11">
-  <img src="https://img.shields.io/badge/next.js-15.5-black" alt="Next.js 15.5">
+  <img src="https://img.shields.io/badge/next.js-16.3-black" alt="Next.js 16.3">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT">
 </div>
 
@@ -28,8 +28,8 @@ Tickety — a read-only AI sidekick for an existing ITSM system. Freshservice is
 | Layer | Tech |
 |---|---|
 | Backend | Python 3.11 · FastAPI · SQLAlchemy · APScheduler |
-| Frontend | Next.js 15.5 · Tailwind CSS · TanStack Query · Recharts |
-| AI | LiteLLM (DeepSeek · OpenAI · OpenRouter · Azure · Custom) |
+| Frontend | Next.js 16.3 · Tailwind CSS · TanStack Query · Recharts |
+| AI | LiteLLM (Microsoft Foundry · Custom OpenAI-compatible API) |
 | Database | PostgreSQL |
 | Infra | Docker Compose · Kubernetes · Helm · AKS |
 
@@ -68,37 +68,36 @@ embedding workflows require `LOGIN_REQUIRED=true` in demo mode in addition to
 their individual enable flags; explicitly requested admin operations remain
 available without changing the public browsing mode.
 
-## LLM Providers
+## AI APIs
 
-Tickety supports **5 built-in providers** plus a **custom provider** for any OpenAI-compatible endpoint.
+Tickety exposes exactly two AI entries. Microsoft Foundry is the default; a
+single simplified Custom AI API is available for another OpenAI-compatible
+endpoint. Named direct-provider and aggregator routes are not accepted.
 
-> **Recommended:** [DeepSeek](https://deepseek.com) offers the best price/performance ratio among all major providers — excellent triage and summarization quality at a fraction of the cost.
-
-| Provider | Model format | Notes |
+| Entry | Model format | Required settings |
 |---|---|---|
-| **DeepSeek** | `deepseek-v4-flash`, `deepseek-v4-pro` | Best value — needs `DEEPSEEK_API_KEY` |
-| **OpenAI** | `openai/gpt-4o`, `openai/gpt-4o-mini` | Needs `OPENAI_API_KEY`, optional `OPENAI_API_BASE` for proxies |
-| **OpenRouter** | `openrouter/<model-id>` | Aggregates 200+ models — `OPENROUTER_API_KEY` |
-| **Azure** | `azure/<deployment-name>` | Azure OpenAI — `AZURE_API_KEY` + `AZURE_API_BASE` + `AZURE_API_VERSION` |
-| **Azure AI** | `azure_ai/<model-id>` | Models as a Service — `AZURE_AI_API_KEY` + `AZURE_AI_API_BASE` |
-| **Custom** | `custom/<any-model>` | Any OpenAI-compatible API (vLLM, Ollama, Groq, Together AI, etc.) |
+| **Microsoft Foundry** | `foundry/<deployment-name>` | `FOUNDRY_API_BASE` ending in `/openai/v1`; either `FOUNDRY_API_KEY` or `FOUNDRY_AUTH_METHOD=entra` |
+| **Custom AI API** | `custom/<model-id>` | `CUSTOM_API_BASE` and `CUSTOM_API_KEY` |
 
-### Custom Provider
+Example Foundry configuration matching the current [OpenAI v1-compatible
+Microsoft Foundry API](https://learn.microsoft.com/en-us/azure/foundry/openai/api-version-lifecycle):
 
-Configure any OpenAI-compatible endpoint with deployment environment/Secret
-values. The production Settings page shows their effective masked state as
-read-only; demo mode cannot dispatch AI requests:
+```bash
+FOUNDRY_API_BASE=https://<resource>.services.ai.azure.com/openai/v1
+FOUNDRY_AUTH_METHOD=api_key
+FOUNDRY_API_KEY=<foundry-key>
+DEFAULT_MODEL=foundry/DeepSeek-V4-Flash
+```
 
-| Setting | Description |
-|---|---|
-| Custom API Key | Your provider's API key |
-| Custom API Base URL | Endpoint URL (e.g. `https://api.groq.com/openai/v1`) |
-| LiteLLM Provider Type | Default `openai` — also supports `anthropic`, `gemini`, `groq`, `together_ai` etc. |
-| API Version | Optional (e.g. `2024-10-21`) |
-| Temperature | Optional 0–2 (e.g. `0.7`) |
-| Max Tokens | Optional (e.g. `4096`) |
-| Default Model | A provider-qualified identifier such as `custom/my-model`; unknown or blank identifiers are rejected. |
-| **Fetch Latest Models** | Auto-discovers available models from your custom endpoint |
+Set `FOUNDRY_AUTH_METHOD=entra` to use `DefaultAzureCredential` and automatic
+token refresh instead of a key. The identity needs the applicable Foundry data
+plane role. The Custom AI API intentionally has no provider-type, API-version,
+temperature, or token-cap controls: endpoint, key, and model are the complete
+configuration.
+
+Both configured APIs are queried through `GET <base>/models` when the admin
+catalog cache is stale (at most once every five minutes). The Settings page
+also provides **Fetch Latest Models** for an immediate refresh.
 
 ### Ticket Intelligence Retrieval
 
@@ -111,7 +110,7 @@ Embeddings are opt-in to avoid surprise token spend:
 
 ```bash
 TICKET_EMBEDDING_ENABLED=true
-TICKET_EMBEDDING_MODEL=openai/text-embedding-3-small
+TICKET_EMBEDDING_MODEL=foundry/text-embedding-3-small
 TICKET_EMBEDDING_DIMENSIONS=1536
 TICKET_VECTOR_MIN_SCORE=0.25
 ```
@@ -178,10 +177,10 @@ AI_ARTIFACT_RETENTION_DAYS=90
 Provider concurrency uses expiring database-backed leases shared by API and
 worker replicas; request and token ceilings are reserved before each retry.
 Provider base URLs must use public HTTPS endpoints unless deployment-owned
-private/insecure endpoint exceptions are deliberately enabled. In production,
-Azure, custom, proxy, and embedding hosts must also be explicitly listed in
-`LLM_ALLOWED_PROVIDER_HOSTS`; built-in OpenAI, OpenRouter, and DeepSeek hosts
-are allowed by default. Prompt-free
+private/insecure endpoint exceptions are deliberately enabled. Foundry URLs
+must use a Microsoft Azure hostname and end in `/openai/v1`. In production,
+both Foundry and custom hosts must be explicitly listed in
+`LLM_ALLOWED_PROVIDER_HOSTS`. Prompt-free
 latency, retry, token, failure, and synthetic-result counters are available to
 admins and supervisors at `GET /admin/llm/metrics`.
 
@@ -198,16 +197,18 @@ atomically so a captured request cannot be replayed.
 OAuth callback state is likewise single-use, bounded, and charged to the
 authenticated administrator's request budget before token exchange.
 
-In production, credentials, provider/model routing, model and user budgets,
-automation toggles, embedding destinations, ITSM provider destinations,
-CORS/cookie/login controls, webhook controls, and SSO configuration are
-deployment-owned environment/Secret values. Database overrides for those keys
-are ignored, so a stale or previously compromised settings row cannot override
-the reviewed deployment configuration after restart.
+Production settings are deployment-owned by default. When
+`TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED=true`, an active authenticated `admin`
+may save provider credentials, model routing, operational budgets, automation,
+embedding, and Freshservice settings through the Settings page. Production
+loads only overrides carrying an admin-approval marker, so stale demo rows do
+not become active after a mode change. Secret values remain masked, destination
+validation remains enforced, and workers refresh approved changes from the
+database without requiring a pod restart.
 
-The Settings page displays the effective, masked state of those values but
-makes their controls read-only in production. **Save Changes** submits only
-application-managed settings; change deployment-managed fields in the workload
+Runtime mode, database and proxy URLs, private-network/provider allowlists,
+CORS, cookie/login enforcement, Jira destinations, and SSO remain
+deployment-managed trust boundaries. Change those values in the workload
 environment/Secret and roll out the affected workloads.
 
 ## Production mode
@@ -232,7 +233,9 @@ for review. Provision a separate real admin or SSO identity before switching
 traffic.
 
 1. Set `APP_MODE=production`, `LOGIN_REQUIRED=true`, secure cookie settings,
-   and an exact `CORS_ALLOW_ORIGINS` value in the deployment Secret.
+   and an exact `CORS_ALLOW_ORIGINS` value in the deployment Secret. Set
+   `TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED=true` only when authenticated admins
+   should manage operational/provider settings from the portal.
 2. Provision a non-demo administrator (or a reviewed SSO bootstrap path), then
    verify the documented demo credentials no longer work.
 3. Optionally enable **SSO (OIDC)** — supports Google, Azure AD, Okta, and any OpenID Connect provider.
@@ -337,7 +340,7 @@ to an `api` process. Sync intervals are bounded and controlled with
 
 | Section | What you configure |
 |---|---|
-| LLM | Provider (DeepSeek/OpenAI/OpenRouter/Azure/Custom), default model, API keys, live model fetching |
+| LLM | Microsoft Foundry or Custom AI API, default model, endpoint credentials, automatic model fetching |
 | Freshservice sidecar | Read-only Freshservice domain, workspace, ticket includes, agent filter, sync interval, and credentials |
 | SLA targets | Resolution-time targets per priority (P1/P2/P3 hours) |
 | Agents | Create and manage accounts, assign admin/supervisor/agent roles |

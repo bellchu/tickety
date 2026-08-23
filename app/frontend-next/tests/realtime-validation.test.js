@@ -73,6 +73,17 @@ test("triage messages require valid progress and complete result structures", ()
     type: "progress", timeout_seconds: 900,
     steps: [{ step: "triage", label: "Classifying", status: "active" }],
   }), true);
+  assert.equal(isTriageProgressMessage({
+    type: "progress", timeout_seconds: 900,
+    steps: [
+      { step: "triage", label: "Classifying", status: "done" },
+      { step: "resolution", label: "Drafting resolution plan", status: "error" },
+    ],
+  }), true);
+  assert.equal(isTriageProgressMessage({
+    type: "progress", timeout_seconds: 900,
+    steps: [{ step: "resolution", label: "Drafting resolution plan", status: "failed" }],
+  }), false);
   assert.equal(isTriageProgressMessage(null), false);
   assert.equal(isTriageProgressMessage({ type: "progress", timeout_seconds: 900, steps: null }), false);
   assert.equal(isTicketAnalysisResult(analysis(), "ticket-1"), true);
