@@ -25,7 +25,7 @@ export function ProductIcon({
       )}
     >
       {active && (
-        <span className="absolute -left-3 h-4 w-0.5 rounded-full bg-[#A974EC]" />
+        <span className="absolute -left-3 h-3.5 w-0.5 bg-[#3D5AFE]" />
       )}
       <Icon
         className={cn(
