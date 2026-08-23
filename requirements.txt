@@ -11,4 +11,4 @@ psycopg2-binary
 apscheduler
 httpx
 websockets
-tiktoken>=0.13,<1
+tiktoken>=0.14.0,<1
