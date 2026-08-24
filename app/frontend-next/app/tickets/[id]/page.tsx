@@ -7,6 +7,7 @@ import { canAccessProtectedIntelligence } from "@/lib/auth";
 import type { ResolutionPlan, Ticket, TicketAnalysisResult, TicketAuditEntry, TicketComment, UserOut } from "@/lib/types";
 import { useParams } from "next/navigation";
 import { AIThinkingStream } from "@/components/ticket/AIThinkingStream";
+import { TicketSignalStrip } from "@/components/ticket/TicketSignalStrip";
 import {
   ArrowLeft, ArrowUpRight, User, Tag, Flag, MessageSquare,
   Gauge, Wrench, Inbox,
@@ -18,7 +19,8 @@ import {
 } from "@/lib/utils";
 import { Alert, Button, EmptyState, ErrorState, Skeleton } from "@/components/ui";
 import { PageFrame } from "@/components/layout/PageLayout";
-import { analysisLifecycleLabel, relatedStrength, routingLabel, sourceKindLabel } from "@/lib/ticket-intelligence";
+import { analysisLifecycleLabel, relatedStrength, routingLabel, sourceKindLabel, ticketSignalRatings } from "@/lib/ticket-intelligence";
+import { persistedAnalysisErrorDetails } from "@/lib/analysis-errors";
 
 export default function TicketDetailPage() {
   const params = useParams();
@@ -93,6 +95,7 @@ export default function TicketDetailPage() {
           <h1 id="ticket-title" title={ticket.subject} className="mt-3 max-w-5xl truncate text-2xl font-semibold tracking-[-0.025em] text-ink-700 sm:text-3xl">
             {ticket.subject}
           </h1>
+          <TicketSignalStrip ratings={ticketSignalRatings(ticket, latestAnalysis)} />
         </div>
       </section>
 
@@ -104,6 +107,7 @@ export default function TicketDetailPage() {
             compact
             ticketId={ticket.id}
             hasExisting={Boolean(ticket.ai_reasoning || ticket.ai_status || ticket.ai_generated_at)}
+            recoveryState={ticket.ai_status}
             onComplete={setLatestAnalysis}
           />
         }
@@ -452,7 +456,8 @@ function TicketBriefPanel({
   const risk = Math.min(100, Math.max(0, ticket.escalation_risk || 0));
   const riskLabel = risk >= 70 ? "High" : risk >= 40 ? "Medium" : "Low";
   const lifecycle = analysisLifecycleLabel(ticket);
-  const detailOpen = ["partial", "failed", "dead_letter"].includes(ticket.ai_status || "");
+  const detailOpen = Boolean(ticket.ai_error) || ["partial", "failed", "dead_letter"].includes(ticket.ai_status || "");
+  const failureDetail = persistedAnalysisErrorDetails(ticket.ai_error);
 
   return (
     <section className="space-y-4 rounded-2xl border border-linen-400 bg-linen-50 p-4 shadow-sm sm:p-5" aria-labelledby="ticket-brief-title">
@@ -518,10 +523,11 @@ function TicketBriefPanel({
       <details key={`${ticket.id}-${detailOpen}`} open={detailOpen || undefined} className="border-t border-linen-300 pt-4">
         <summary className="cursor-pointer text-sm font-semibold text-ink-700">Technical details</summary>
         <div className="mt-3 space-y-4 text-xs text-ink-500">
-          <dl className="grid gap-3 sm:grid-cols-3">
+          <dl className="grid gap-3 sm:grid-cols-3 xl:grid-cols-4">
             <div><dt className="text-ink-400">Model</dt><dd className="mt-1 break-all font-medium text-ink-600">{ticket.ai_model || "Not available"}</dd></div>
             <div><dt className="text-ink-400">Lifecycle</dt><dd className="mt-1 font-medium text-ink-600">{lifecycle}</dd></div>
             <div><dt className="text-ink-400">Generated</dt><dd className="mt-1 font-medium text-ink-600">{ticket.ai_generated_at ? formatTimeAgo(ticket.ai_generated_at) : "Not available"}</dd></div>
+            {failureDetail && <div><dt className="text-ink-400">Last failure</dt><dd className="mt-1 font-medium text-ink-600">{failureDetail}</dd></div>}
           </dl>
           {ticket.ai_reasoning && <div><p className="font-semibold text-ink-600">Reasoning</p><p className="mt-1 whitespace-pre-wrap leading-5">{ticket.ai_reasoning}</p></div>}
           <div>

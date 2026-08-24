@@ -9,6 +9,7 @@ import {
   isTriageProgressMessage,
   triageWatchdogDelayMs,
 } from "@/lib/realtime-validation";
+import { analysisErrorDetails } from "@/lib/analysis-errors";
 import { ListChecks, Loader2, CheckCircle2, RefreshCw, AlertTriangle } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Alert, Button } from "@/components/ui";
@@ -16,11 +17,12 @@ import { Alert, Button } from "@/components/ui";
 interface Props {
   ticketId: string;
   hasExisting?: boolean;
+  recoveryState?: string | null;
   onComplete?: (result: TicketAnalysisResult) => void;
   compact?: boolean;
 }
 
-export function AIThinkingStream({ ticketId, hasExisting, onComplete, compact = false }: Props) {
+export function AIThinkingStream({ ticketId, hasExisting, recoveryState, onComplete, compact = false }: Props) {
   const [steps, setSteps] = useState<TriageStep[]>([]);
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<TicketAnalysisResult | null>(null);
@@ -28,6 +30,7 @@ export function AIThinkingStream({ ticketId, hasExisting, onComplete, compact = 
   const wsRef = useRef<ReturnType<typeof createTicketStreamWS> | null>(null);
   const watchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const queryClient = useQueryClient();
+  const recoveryQueued = recoveryState === "queued";
 
   const clearWatchdog = () => {
     if (watchdogRef.current) {
@@ -122,6 +125,8 @@ export function AIThinkingStream({ ticketId, hasExisting, onComplete, compact = 
             <p className="mt-0.5 text-xs text-ink-500">
               {running
                 ? "Analyzing the ticket and refreshing decision support…"
+                : recoveryQueued
+                  ? "Missing steps are queued for automatic retry."
                 : result
                   ? "Analysis finished; the guidance below has been refreshed."
                   : hasExisting
@@ -130,8 +135,8 @@ export function AIThinkingStream({ ticketId, hasExisting, onComplete, compact = 
             </p>
           </div>
         </div>
-        <Button variant="secondary" size="sm" onClick={startTriage} pending={running} pendingLabel="Analyzing…" leadingIcon={<RefreshCw className="h-3.5 w-3.5" />}>
-          {hasExisting || result ? "Re-run analysis" : "Run analysis"}
+        <Button variant="secondary" size="sm" onClick={startTriage} pending={running} pendingLabel="Analyzing…" disabled={recoveryQueued} leadingIcon={<RefreshCw className="h-3.5 w-3.5" />}>
+          {recoveryQueued ? "Retry scheduled" : hasExisting || result ? "Re-run analysis" : "Run analysis"}
         </Button>
       </div>
 
@@ -139,7 +144,7 @@ export function AIThinkingStream({ ticketId, hasExisting, onComplete, compact = 
 
       {result && result.errors.length > 0 && (
         <Alert className="mt-4" variant="warning" title="Analysis completed with partial results">
-          Some AI-generated details were unavailable. The available results are shown below; run the analysis again to retry the missing step.
+          {analysisErrorDetails(result.errors)}. Available results remain visible. Tickety will automatically retry only the missing steps while retry capacity remains.
         </Alert>
       )}
 

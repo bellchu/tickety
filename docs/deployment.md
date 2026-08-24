@@ -259,8 +259,8 @@ kubectl get --raw /api/v1/namespaces/tickety/services/http:tickety-frontend:80/p
 
 For this repository's production environment, run the target guard immediately
 before and after the rollout. It rejects any namespace that does not own the
-`tickety.situ.io` ingress or whose active frontend manifest is not the one
-served by that public origin:
+`tickety.situ.io` ingress or whose active frontend hashed asset set is not the
+one served by that public origin:
 
 ```sh
 scripts/verify-production-target.sh --namespace <production-namespace> [--context <production-context>]

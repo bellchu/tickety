@@ -13,8 +13,9 @@ Usage: scripts/verify-production-target.sh --namespace NAME [--context NAME]
        scripts/verify-production-target.sh --self-test
 
 Prove that the selected Kubernetes namespace is the Tickety production target.
-The gate requires its ingress to own tickety.situ.io, its active frontend build
-manifest to match the one served publicly, and the public readiness check to pass.
+The gate requires its ingress to own tickety.situ.io, every hashed public asset
+from its active frontend build to match the files served publicly, and the public
+readiness check to pass.
 Run it immediately before and after every production rollout.
 EOF
 }
@@ -58,7 +59,7 @@ validate_evidence() {
     return 1
   fi
   if [[ -z $internal_manifest_sha || $internal_manifest_sha != "$external_manifest_sha" ]]; then
-    echo "Production target rejected: public frontend manifest does not match the selected workload." >&2
+    echo "Production target rejected: public frontend asset set does not match the selected workload." >&2
     return 1
   fi
   if ! grep -Eq '"status"[[:space:]]*:[[:space:]]*"ready"' <<<"$readiness_body"; then
@@ -67,8 +68,17 @@ validate_evidence() {
   fi
 }
 
+select_active_frontend_pod() {
+  local expected_image=$1
+
+  awk -v expected="$expected_image" \
+    '$2 == expected && $3 == "<none>" && $4 == "true" { print $1; exit }'
+}
+
 self_test() {
   local ready='{"status":"ready"}'
+  local pods
+  local selected_pod
 
   validate_evidence "$PRODUCTION_HOST" build_123 same_sha same_sha "$ready" >/dev/null
   if validate_evidence tickety.imbell.com build_123 same_sha same_sha "$ready" >/dev/null 2>&1; then
@@ -81,6 +91,16 @@ self_test() {
   fi
   if validate_evidence "$PRODUCTION_HOST" build_123 same_sha same_sha '{"status":"starting"}' >/dev/null 2>&1; then
     echo "Self-test failed: a non-ready public target was accepted." >&2
+    exit 1
+  fi
+  pods=$'frontend-old old-image 2026-08-23T22:52:09Z true\nfrontend-new current-image <none> true'
+  selected_pod=$(select_active_frontend_pod current-image <<<"$pods")
+  if [[ $selected_pod != frontend-new ]]; then
+    echo "Self-test failed: the active frontend Pod was not selected." >&2
+    exit 1
+  fi
+  if [[ -n $(select_active_frontend_pod old-image <<<"$pods") ]]; then
+    echo "Self-test failed: a terminating frontend Pod was selected." >&2
     exit 1
   fi
   echo "Production target guard self-test passed."
@@ -143,30 +163,56 @@ ACTIVE_CONTEXT=$("${KUBECTL[@]}" config current-context)
 INGRESS_HOSTS=$("${KUBECTL[@]}" get ingress --namespace "$NAMESPACE" -o jsonpath='{range .items[*].spec.rules[*]}{.host}{"\n"}{end}')
 validate_ingress_host "$INGRESS_HOSTS"
 
-FRONTEND_POD=$("${KUBECTL[@]}" get pods --namespace "$NAMESPACE" \
+FRONTEND_IMAGE=$("${KUBECTL[@]}" get deployment frontend --namespace "$NAMESPACE" -o jsonpath='{.spec.template.spec.containers[0].image}')
+FRONTEND_PODS=$("${KUBECTL[@]}" get pods --namespace "$NAMESPACE" \
   --selector app.kubernetes.io/component=frontend \
   --field-selector status.phase=Running \
-  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+  -o custom-columns='NAME:.metadata.name,IMAGE:.spec.containers[0].image,DELETING:.metadata.deletionTimestamp,READY:.status.containerStatuses[0].ready' \
+  --no-headers 2>/dev/null || true)
+FRONTEND_POD=$(select_active_frontend_pod "$FRONTEND_IMAGE" <<<"$FRONTEND_PODS")
 if [[ -z $FRONTEND_POD ]]; then
-  FRONTEND_POD=$("${KUBECTL[@]}" get pods --namespace "$NAMESPACE" \
+  FRONTEND_PODS=$("${KUBECTL[@]}" get pods --namespace "$NAMESPACE" \
     --selector app=frontend \
     --field-selector status.phase=Running \
-    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+    -o custom-columns='NAME:.metadata.name,IMAGE:.spec.containers[0].image,DELETING:.metadata.deletionTimestamp,READY:.status.containerStatuses[0].ready' \
+    --no-headers 2>/dev/null || true)
+  FRONTEND_POD=$(select_active_frontend_pod "$FRONTEND_IMAGE" <<<"$FRONTEND_PODS")
 fi
 if [[ -z $FRONTEND_POD ]]; then
-  echo "Production target rejected: no running frontend Pod in namespace $NAMESPACE." >&2
+  echo "Production target rejected: no ready, non-terminating frontend Pod uses the Deployment image in namespace $NAMESPACE." >&2
   exit 1
 fi
 
 BUILD_ID=$("${KUBECTL[@]}" exec --namespace "$NAMESPACE" "$FRONTEND_POD" -- cat /app/.next/BUILD_ID)
 MANIFEST_PATH="/app/.next/static/$BUILD_ID/_buildManifest.js"
-INTERNAL_MANIFEST_SHA=$("${KUBECTL[@]}" exec --namespace "$NAMESPACE" "$FRONTEND_POD" -- cat "$MANIFEST_PATH" | hash_stream)
-EXTERNAL_MANIFEST_SHA=$(curl --fail --silent --show-error --max-time 20 \
-  "$PRODUCTION_URL/_next/static/$BUILD_ID/_buildManifest.js" | hash_stream)
+ASSET_PATHS=$("${KUBECTL[@]}" exec --namespace "$NAMESPACE" "$FRONTEND_POD" -- \
+  find /app/.next/static -type f ! -path "$MANIFEST_PATH" ! -path "/app/.next/static/$BUILD_ID/_ssgManifest.js" | LC_ALL=C sort)
+INTERNAL_ASSET_MANIFEST=""
+EXTERNAL_ASSET_MANIFEST=""
+ASSET_COUNT=0
+while IFS= read -r ASSET_PATH; do
+  [[ -n $ASSET_PATH ]] || continue
+  if [[ $ASSET_PATH != /app/.next/static/* || $ASSET_PATH == *"/../"* || $ASSET_PATH == *"/.." ]]; then
+    echo "Production target rejected: unsafe frontend asset path: $ASSET_PATH" >&2
+    exit 1
+  fi
+  RELATIVE_PATH=${ASSET_PATH#/app/.next}
+  PUBLIC_PATH="/_next$RELATIVE_PATH"
+  INTERNAL_ASSET_SHA=$("${KUBECTL[@]}" exec --namespace "$NAMESPACE" "$FRONTEND_POD" -- cat "$ASSET_PATH" | hash_stream)
+  EXTERNAL_ASSET_SHA=$(curl --globoff --fail --silent --show-error --max-time 20 "$PRODUCTION_URL$PUBLIC_PATH" | hash_stream)
+  INTERNAL_ASSET_MANIFEST+="$PUBLIC_PATH $INTERNAL_ASSET_SHA"$'\n'
+  EXTERNAL_ASSET_MANIFEST+="$PUBLIC_PATH $EXTERNAL_ASSET_SHA"$'\n'
+  ASSET_COUNT=$((ASSET_COUNT + 1))
+done <<<"$ASSET_PATHS"
+if ((ASSET_COUNT == 0)); then
+  echo "Production target rejected: selected frontend has no public build assets." >&2
+  exit 1
+fi
+INTERNAL_MANIFEST_SHA=$(printf '%s' "$INTERNAL_ASSET_MANIFEST" | hash_stream)
+EXTERNAL_MANIFEST_SHA=$(printf '%s' "$EXTERNAL_ASSET_MANIFEST" | hash_stream)
 READINESS_BODY=$(curl --fail --silent --show-error --max-time 20 "$PRODUCTION_URL/api/health/ready")
 
 validate_evidence "$INGRESS_HOSTS" "$BUILD_ID" "$INTERNAL_MANIFEST_SHA" "$EXTERNAL_MANIFEST_SHA" "$READINESS_BODY"
 
-FRONTEND_IMAGE=$("${KUBECTL[@]}" get deployment frontend --namespace "$NAMESPACE" -o jsonpath='{.spec.template.spec.containers[0].image}')
 echo "Production target verified: context=$ACTIVE_CONTEXT namespace=$NAMESPACE host=$PRODUCTION_HOST"
-echo "Frontend evidence: pod=$FRONTEND_POD image=$FRONTEND_IMAGE build_id=$BUILD_ID manifest_sha256=$INTERNAL_MANIFEST_SHA"
+echo "Frontend evidence: pod=$FRONTEND_POD image=$FRONTEND_IMAGE build_id=$BUILD_ID assets=$ASSET_COUNT asset_set_sha256=$INTERNAL_MANIFEST_SHA"

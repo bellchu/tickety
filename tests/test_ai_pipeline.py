@@ -437,9 +437,113 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(ticket.priority, original_priority)
                 self.assertIsNone(ticket.ai_reasoning)
                 self.assertEqual(ticket.ai_status, "queued")
-                self.assertEqual(ticket.ai_error, "triage_failed")
+                self.assertEqual(ticket.ai_error, "triage:invalid_output")
         finally:
             main.engine.llm = old_llm
+
+    async def test_partial_analysis_classifies_and_queues_only_failed_artifact(self):
+        class PartialLLM:
+            model_name = "custom/test"
+            is_mock = False
+            allow_synthetic = False
+
+            async def analyze(self, _prompt, *, response_model=None, **_kwargs):
+                if response_model is TriageAnalysis:
+                    return {
+                        "sentiment": "Moderate",
+                        "category": "Hardware",
+                        "priority": "P3",
+                        "mood": "concerned",
+                        "action": "route",
+                        "reasoning": "scope: single user; printer is blocked",
+                    }
+                if response_model is TicketSummary:
+                    raise LLMInvalidOutputError("invalid summary contract")
+                if response_model is ResolutionAnalysis:
+                    return {
+                        "root_cause_hypothesis": "Paper is obstructing the feed path.",
+                        "resolution_steps": [
+                            "Power off the printer and clear the documented feed path."
+                        ],
+                        "confidence": "medium",
+                        "estimated_effort": "low",
+                        "escalation_advice": "Escalate if the path cannot be cleared safely.",
+                        "preventive_note": "Use supported paper stock.",
+                    }
+                raise AssertionError(response_model)
+
+        old_llm = main.engine.llm
+        main.engine.llm = PartialLLM()
+        try:
+            with (
+                self.session_factory() as db,
+                patch.object(
+                    ticket_vectors,
+                    "refresh_ticket_documents",
+                    new=AsyncMock(return_value=0),
+                ),
+            ):
+                ticket = db.get(TicketRecord, "ticket-1")
+                ticket.external_source = "freshservice"
+                db.commit()
+                result = await main._run_ticket_analysis(ticket, db)
+        finally:
+            main.engine.llm = old_llm
+
+        self.assertEqual(
+            result["errors"],
+            [{"step": "summary", "error": "invalid_output"}],
+        )
+        with self.session_factory() as db:
+            ticket = db.get(TicketRecord, "ticket-1")
+            self.assertEqual(ticket.ai_status, "queued")
+            self.assertEqual(ticket.ai_error, "summary:invalid_output")
+            self.assertEqual(ticket.ai_requested_artifacts, "summary")
+            self.assertEqual(ticket.ai_attempts, 1)
+            self.assertIsNotNone(ticket.ai_next_attempt_at)
+            self.assertIsNone(ticket.summary)
+            self.assertIsNotNone(ticket.recommended_solution)
+            self.assertIsNotNone(ticket.ai_reasoning)
+
+    async def test_refresh_failure_uses_the_same_targeted_retry_boundary(self):
+        old_llm = main.engine.llm
+        main.engine.llm = SimpleNamespace(
+            model_name="custom/test",
+            is_mock=False,
+            allow_synthetic=False,
+            overall_timeout=90,
+        )
+        try:
+            with self.session_factory() as db:
+                ticket = db.get(TicketRecord, "ticket-1")
+                ticket.ai_reasoning = "scope: single user; triage is current"
+                ticket.summary = "A current summary."
+                ticket.recommended_solution = "{}"
+                ticket.ai_status = "completed"
+                db.commit()
+                with (
+                    patch.object(
+                        ticket_vectors,
+                        "refresh_ticket_documents",
+                        new=AsyncMock(side_effect=RuntimeError("store unavailable")),
+                    ),
+                    self.assertRaises(LLMUnavailableError),
+                ):
+                    await main._run_ticket_analysis(
+                        ticket,
+                        db,
+                        force=True,
+                        artifacts={"refresh"},
+                    )
+        finally:
+            main.engine.llm = old_llm
+
+        with self.session_factory() as db:
+            ticket = db.get(TicketRecord, "ticket-1")
+            self.assertEqual(ticket.ai_status, "queued")
+            self.assertEqual(ticket.ai_error, "refresh:internal_error")
+            self.assertEqual(ticket.ai_requested_artifacts, "refresh")
+            self.assertEqual(ticket.ai_attempts, 1)
 
     async def test_source_change_during_remote_call_discards_stale_result(self):
         session_factory = self.session_factory
@@ -554,6 +658,46 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         finally:
             main.engine.llm = old_llm
         self.assertEqual(fake.models, [TicketSummary])
+
+    async def test_failed_worker_retry_is_counted_once_by_the_shared_orchestrator(self):
+        class InvalidSummaryLLM:
+            model_name = "custom/test"
+            is_mock = False
+            allow_synthetic = False
+
+            async def analyze(self, _prompt, *, response_model=None, **_kwargs):
+                if response_model is TicketSummary:
+                    raise LLMInvalidOutputError("invalid summary contract")
+                raise AssertionError(response_model)
+
+        old_llm = main.engine.llm
+        main.engine.llm = InvalidSummaryLLM()
+        try:
+            with (
+                self.session_factory() as db,
+                patch.object(main, "_reserve_ai_request"),
+                patch.object(
+                    ticket_vectors,
+                    "refresh_ticket_documents",
+                    new=AsyncMock(return_value=0),
+                ),
+            ):
+                ticket = db.get(TicketRecord, "ticket-1")
+                ticket.ai_reasoning = "scope: single user; triage is current"
+                ticket.recommended_solution = "{}"
+                ticket.ai_status = "queued"
+                ticket.ai_requested_artifacts = "summary"
+                db.commit()
+                with self.assertRaises(LLMUnavailableError):
+                    await main._auto_process(ticket, db, force=True)
+        finally:
+            main.engine.llm = old_llm
+
+        with self.session_factory() as db:
+            ticket = db.get(TicketRecord, "ticket-1")
+            self.assertEqual(ticket.ai_attempts, 1)
+            self.assertEqual(ticket.ai_requested_artifacts, "summary")
+            self.assertEqual(ticket.ai_error, "summary:invalid_output")
 
     async def test_changed_forced_triage_invalidates_and_regenerates_downstream(self):
         class ChangingLLM:
@@ -731,6 +875,8 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         with self.session_factory() as db:
             ticket = db.get(TicketRecord, "ticket-1")
             ticket.ai_status = "queued"
+            ticket.ai_requested_artifacts = "summary"
+            ticket.external_source = "freshservice"
             db.commit()
         process = AsyncMock()
         with (

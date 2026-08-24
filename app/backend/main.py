@@ -72,6 +72,7 @@ from .schema import (
 )
 from .llm_manager import (
     LLMAnalysisError,
+    LLMInvalidInputError,
     LLMInvalidOutputError,
     LLMUnavailableError,
     LLMManager,
@@ -1831,6 +1832,27 @@ def _schedule_ai_retry(
     return True
 
 
+def _analysis_step_error_code(exc: BaseException) -> str:
+    """Reduce an internal exception to a stable, non-sensitive failure class."""
+    if isinstance(exc, asyncio.TimeoutError):
+        return "timeout"
+    if isinstance(exc, LLMInvalidInputError):
+        return "invalid_input"
+    if isinstance(exc, LLMInvalidOutputError):
+        return "invalid_output"
+    if isinstance(exc, LLMUnavailableError):
+        return "provider_unavailable"
+    if isinstance(exc, LLMAnalysisError):
+        return "analysis_rejected"
+    return "internal_error"
+
+
+def _analysis_error_signature(errors: List[Dict[str, str]]) -> str:
+    return ",".join(
+        f"{error['step']}:{error['error']}" for error in errors
+    )
+
+
 async def _auto_process(ticket: TicketRecord, db, force: bool = False):
     """Worker/webhook adapter for the shared claimed artifact orchestrator."""
     if not force and not _automation_enabled("AUTO_TRIAGE_ENABLED", "AUTO_TRIAGE"):
@@ -1870,7 +1892,7 @@ async def _auto_process(ticket: TicketRecord, db, force: bool = False):
             db.commit()
         return
     try:
-        result = await _run_ticket_analysis(
+        await _run_ticket_analysis(
             ticket,
             db,
             force=force or bool(requested),
@@ -1888,11 +1910,6 @@ async def _auto_process(ticket: TicketRecord, db, force: bool = False):
             expected_claim_id=getattr(exc, "analysis_claim_id", None),
         )
         raise
-    failed_artifacts = {
-        item["step"] for item in result.get("errors", []) if item.get("step") in artifacts
-    }
-    if failed_artifacts:
-        _schedule_ai_retry(db, ticket_id, failed_artifacts, "artifact_failed")
 
 
 def _ticket_kb_context(ticket: TicketRecord) -> str:
@@ -2170,14 +2187,26 @@ async def _run_ticket_analysis(
     progress=None,
 ) -> Dict[str, Any]:
     """Run claimed AI artifacts through one ownership-safe orchestrator."""
-    artifacts = set(artifacts or {"triage", "summary", "route", "resolution"})
-    if not artifacts.issubset({"triage", "summary", "route", "resolution"}):
+    requested_artifacts = set(
+        artifacts
+        if artifacts is not None
+        else {"triage", "summary", "route", "resolution", "refresh"}
+    )
+    if not requested_artifacts.issubset(
+        {"triage", "summary", "route", "resolution", "refresh"}
+    ):
         raise ValueError("unsupported AI artifact")
+    artifacts = set(requested_artifacts)
+    if artifacts - {"refresh"}:
+        # Every generated artifact can change the indexed ticket document.
+        # Treat refresh as a deterministic downstream dependency while keeping
+        # the durable retry request scoped to the failed generated artifact.
+        artifacts.add("refresh")
     ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket.id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
     if not force:
-        persisted_artifacts = artifacts - {"route"}
+        persisted_artifacts = artifacts - {"route", "refresh"}
         artifact_cached = bool(persisted_artifacts) and all(
             _artifact_is_current(db, ticket, artifact)
             for artifact in persisted_artifacts
@@ -2255,15 +2284,22 @@ async def _run_ticket_analysis(
                 setattr(exc, "analysis_claim_id", claim_id)
             except Exception:
                 pass
-            if not (
+            claim_terminal = (
                 isinstance(exc, HTTPException)
                 and exc.detail in {"analysis_input_changed", "analysis_claim_lost"}
-            ):
+            )
+            if not claim_terminal:
+                error_code = _analysis_step_error_code(exc)
+                error_signature = f"triage:{error_code}"
+                print(
+                    f"[analysis] artifact failed ticket={ticket.id[:8]} "
+                    f"step=triage code={error_code}"
+                )
                 _schedule_ai_retry(
                     db,
                     ticket.id,
-                    artifacts,
-                    "triage_failed",
+                    requested_artifacts,
+                    error_signature,
                     expected_claim_id=claim_id,
                 )
             await emit("triage", "error")
@@ -2303,11 +2339,20 @@ async def _run_ticket_analysis(
                 setattr(exc, "analysis_claim_id", claim_id)
             except Exception:
                 pass
+            error_code = _analysis_step_error_code(exc)
+            failed_steps = sorted(tasks)
+            error_signature = ",".join(
+                f"{step}:{error_code}" for step in failed_steps
+            )
+            print(
+                f"[analysis] artifact group failed ticket={ticket_id[:8]} "
+                f"steps={'+'.join(failed_steps)} code={error_code}"
+            )
             _schedule_ai_retry(
                 db,
                 ticket_id,
                 set(tasks),
-                "pipeline_timeout" if isinstance(exc, asyncio.TimeoutError) else "analysis_failed",
+                error_signature,
                 expected_claim_id=claim_id,
             )
             raise
@@ -2319,7 +2364,12 @@ async def _run_ticket_analysis(
         if "summary" in task_results:
             result = task_results["summary"]
             if isinstance(result, Exception):
-                errors.append({"step": "summary", "error": "analysis_step_failed"})
+                error_code = _analysis_step_error_code(result)
+                errors.append({"step": "summary", "error": error_code})
+                print(
+                    f"[analysis] artifact failed ticket={ticket.id[:8]} "
+                    f"step=summary code={error_code}"
+                )
                 await emit("summary", "error")
             else:
                 summary = result
@@ -2330,7 +2380,12 @@ async def _run_ticket_analysis(
         if "resolution" in task_results:
             result = task_results["resolution"]
             if isinstance(result, Exception):
-                errors.append({"step": "resolution", "error": "analysis_step_failed"})
+                error_code = _analysis_step_error_code(result)
+                errors.append({"step": "resolution", "error": error_code})
+                print(
+                    f"[analysis] artifact failed ticket={ticket.id[:8]} "
+                    f"step=resolution code={error_code}"
+                )
                 await emit("resolution", "error")
             else:
                 plan_dict = result
@@ -2342,41 +2397,56 @@ async def _run_ticket_analysis(
 
     route = None
     if "route" in artifacts:
-        await emit("route", "active")
-        route = intel.recommend_assignee(db, ticket)
-        await emit("route", "done")
-
-    await emit("refresh", "active")
-    documents_changed = 0
-    try:
-        async def refresh_heartbeat() -> None:
-            _renew_analysis_lease(db, ticket.id, claim_id)
-
-        documents_changed = await ticket_vectors.refresh_ticket_documents(
-            db,
-            ticket,
-            heartbeat=refresh_heartbeat,
-            deadline_monotonic=pipeline_deadline,
-        )
-        await emit("refresh", "done")
-    except asyncio.TimeoutError as exc:
-        db.rollback()
         try:
-            setattr(exc, "analysis_claim_id", claim_id)
-        except Exception:
-            pass
-        _schedule_ai_retry(
-            db,
-            ticket.id,
-            artifacts,
-            "pipeline_timeout",
-            expected_claim_id=claim_id,
-        )
-        await emit("refresh", "error")
-        raise
-    except Exception:
-        errors.append({"step": "ticket_intelligence", "error": "analysis_step_failed"})
-        await emit("refresh", "error")
+            await emit("route", "active")
+            route = intel.recommend_assignee(db, ticket)
+            await emit("route", "done")
+        except Exception as exc:
+            error_code = _analysis_step_error_code(exc)
+            errors.append({"step": "route", "error": error_code})
+            print(
+                f"[analysis] artifact failed ticket={ticket.id[:8]} "
+                f"step=route code={error_code}"
+            )
+            await emit("route", "error")
+
+    documents_changed = 0
+    if "refresh" in artifacts:
+        await emit("refresh", "active")
+        try:
+            async def refresh_heartbeat() -> None:
+                _renew_analysis_lease(db, ticket.id, claim_id)
+
+            documents_changed = await ticket_vectors.refresh_ticket_documents(
+                db,
+                ticket,
+                heartbeat=refresh_heartbeat,
+                deadline_monotonic=pipeline_deadline,
+            )
+            await emit("refresh", "done")
+        except asyncio.TimeoutError as exc:
+            db.rollback()
+            try:
+                setattr(exc, "analysis_claim_id", claim_id)
+            except Exception:
+                pass
+            _schedule_ai_retry(
+                db,
+                ticket.id,
+                {"refresh"},
+                "refresh:timeout",
+                expected_claim_id=claim_id,
+            )
+            await emit("refresh", "error")
+            raise
+        except Exception as exc:
+            error_code = _analysis_step_error_code(exc)
+            errors.append({"step": "refresh", "error": error_code})
+            print(
+                f"[analysis] artifact failed ticket={ticket.id[:8]} "
+                f"step=refresh code={error_code}"
+            )
+            await emit("refresh", "error")
 
     try:
         _pipeline_remaining(pipeline_deadline)
@@ -2386,7 +2456,11 @@ async def _run_ticket_analysis(
         except Exception:
             pass
         _schedule_ai_retry(
-            db, ticket.id, artifacts, "pipeline_timeout", expected_claim_id=claim_id
+            db,
+            ticket.id,
+            requested_artifacts,
+            "pipeline:timeout",
+            expected_claim_id=claim_id,
         )
         raise
     db.refresh(ticket)
@@ -2398,7 +2472,8 @@ async def _run_ticket_analysis(
     ticket.ai_status = (
         "partial" if errors else "completed" if complete else "triage_completed"
     )
-    ticket.ai_error = ",".join(error["step"] for error in errors) or None
+    error_signature = _analysis_error_signature(errors)
+    ticket.ai_error = error_signature or None
     ticket.ai_generated_at = datetime.utcnow()
     ticket.ai_synthetic = db.query(AIArtifactRecord).filter(
         AIArtifactRecord.ticket_id == ticket.id,
@@ -2414,8 +2489,21 @@ async def _run_ticket_analysis(
     db.commit()
     await emit("done", "done")
 
-    if errors and len(artifacts) == 1:
-        raise LLMUnavailableError("AI artifact generation failed")
+    failed_artifacts = {
+        error["step"] for error in errors if error["step"] in artifacts
+    }
+    if failed_artifacts:
+        _schedule_ai_retry(
+            db,
+            ticket.id,
+            failed_artifacts,
+            error_signature,
+        )
+
+    if errors and len(requested_artifacts) == 1:
+        exc = LLMUnavailableError("AI artifact generation failed")
+        setattr(exc, "analysis_claim_id", claim_id)
+        raise exc
 
     return {
         "ticket_id": ticket.id,

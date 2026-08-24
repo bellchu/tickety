@@ -1,7 +1,20 @@
 /** @type {import('next').NextConfig} */
 const pkg = require("./package.json");
 
+function productionBuildId() {
+  const normalized = (process.env.NEXT_PUBLIC_BUILD_SHA || "local")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 96);
+  return normalized || "local";
+}
+
 const nextConfig = {
+  // Keep the public asset path stable through proxies that normalize URL
+  // casing, while retaining the immutable source/worktree build stamp.
+  generateBuildId: productionBuildId,
   // Inject build-identifiable version info into the client bundle so the
   // footer can show which image is running. `NEXT_PUBLIC_BUILD_SHA` /
   // `NEXT_PUBLIC_BUILD_TIME` are supplied at image build time (Dockerfile).
