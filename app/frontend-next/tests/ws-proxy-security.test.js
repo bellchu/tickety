@@ -20,8 +20,8 @@ test("WebSocket handler forwards only ws paths with original auth headers", () =
     headers: {
       connection: "upgrade, x-forwarded-host",
       cookie: "tickety_session=opaque",
-      host: "tickety.situ.io",
-      origin: "https://tickety.situ.io",
+      host: "tickety.nexora.com",
+      origin: "https://tickety.nexora.com",
       "x-forwarded-host": "evil.invalid",
       "x-forwarded-proto": "http",
     },
@@ -34,15 +34,15 @@ test("WebSocket handler forwards only ws paths with original auth headers", () =
   assert.equal(calls.length, 1);
   assert.equal(calls[0].req, req);
   assert.equal(calls[0].req.headers.cookie, "tickety_session=opaque");
-  assert.equal(calls[0].req.headers.origin, "https://tickety.situ.io");
-  assert.equal(calls[0].req.headers["x-forwarded-host"], "tickety.situ.io");
+  assert.equal(calls[0].req.headers.origin, "https://tickety.nexora.com");
+  assert.equal(calls[0].req.headers["x-forwarded-host"], "tickety.nexora.com");
   assert.equal(calls[0].req.headers["x-forwarded-proto"], "https");
 });
 
 test("WebSocket forwarding metadata cannot follow a spoofed Origin", () => {
   const req = {
     headers: {
-      host: "tickety.situ.io",
+      host: "tickety.nexora.com",
       origin: "https://evil.invalid",
       "x-forwarded-host": "evil.invalid",
       "x-forwarded-proto": "https",
@@ -52,7 +52,7 @@ test("WebSocket forwarding metadata cannot follow a spoofed Origin", () => {
 
   sanitizeWebSocketForwardingHeaders(req);
 
-  assert.equal(req.headers["x-forwarded-host"], "tickety.situ.io");
+  assert.equal(req.headers["x-forwarded-host"], "tickety.nexora.com");
   assert.equal(req.headers["x-forwarded-proto"], "https");
   assert.notEqual(
     `${req.headers["x-forwarded-proto"]}://${req.headers["x-forwarded-host"]}`,

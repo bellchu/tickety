@@ -21,7 +21,7 @@ from sqlalchemy import and_, case, desc, func, or_, text
 from sqlalchemy.exc import IntegrityError
 
 from .database import (
-    init_db, get_db, SessionLocal,
+    Base, init_db, get_db, SessionLocal,
     TicketRecord, UserRecord, RecognitionRecord,
     ExternalUserRecord, SyncStateRecord,
     TicketCommentRecord, TicketCategoryRecord, TicketAuditLogRecord,
@@ -3590,6 +3590,55 @@ async def delete_user(
     user.is_active = False
     db.commit()
     return {"status": "deactivated", "user_id": user_id}
+
+
+@app.delete("/users/{user_id}/purge")
+async def purge_user(
+    user_id: str,
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(require_role("admin")),
+):
+    user = db.query(UserRecord).filter(UserRecord.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.is_active:
+        raise HTTPException(status_code=409, detail="Deactivate the user before purging the account")
+
+    removed_owned_records = 0
+    cleared_history_references = 0
+    user_foreign_keys = [
+        foreign_key
+        for table in Base.metadata.sorted_tables
+        for foreign_key in table.foreign_keys
+        if foreign_key.target_fullname == "users.id"
+    ]
+    try:
+        # Required references are account-owned records and cannot survive the
+        # account. Nullable references are historical attribution and remain
+        # available after their link to the purged identity is cleared.
+        for foreign_key in user_foreign_keys:
+            column = foreign_key.parent
+            if not column.nullable:
+                result = db.execute(column.table.delete().where(column == user_id))
+                removed_owned_records += result.rowcount or 0
+        for foreign_key in user_foreign_keys:
+            column = foreign_key.parent
+            if column.nullable:
+                result = db.execute(
+                    column.table.update().where(column == user_id).values({column.name: None})
+                )
+                cleared_history_references += result.rowcount or 0
+        db.delete(user)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return {
+        "status": "purged",
+        "user_id": user_id,
+        "removed_owned_records": removed_owned_records,
+        "cleared_history_references": cleared_history_references,
+    }
 
 
 # ── Knowledge Base ─────────────────────────────────────────────

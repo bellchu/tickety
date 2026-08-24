@@ -37,10 +37,10 @@ test("proxy errors expose only the stable public code", async () => {
 test("deployment public URL survives TLS termination before the pod", () => {
   assert.deepEqual(
     publicForwardingIdentity(
-      "http://tickety.situ.io/api/tickets",
-      "https://tickety.situ.io",
+      "http://tickety.nexora.com/api/tickets",
+      "https://tickety.nexora.com",
     ),
-    { host: "tickety.situ.io", proto: "https" },
+    { host: "tickety.nexora.com", proto: "https" },
   );
   assert.deepEqual(
     publicForwardingIdentity(
@@ -93,7 +93,7 @@ test("request proxy strips hop headers but preserves auth and browser origin sig
       connection: "upgrade, x-private-hop",
       cookie: "tickety_session=opaque",
       host: "attacker.invalid",
-      origin: "https://tickety.situ.io",
+      origin: "https://tickety.nexora.com",
       "proxy-authorization": "private-proxy-secret",
       "sec-fetch-site": "same-origin",
       "transfer-encoding": "chunked",
@@ -104,7 +104,7 @@ test("request proxy strips hop headers but preserves auth and browser origin sig
       "x-forwarded-proto": "http",
       "cf-connecting-ip": "203.0.113.98",
     }),
-    "tickety.situ.io",
+    "tickety.nexora.com",
     "https",
   );
   for (const name of [
@@ -121,9 +121,9 @@ test("request proxy strips hop headers but preserves auth and browser origin sig
   }
   assert.equal(headers.get("authorization"), "Bearer session-capability");
   assert.equal(headers.get("cookie"), "tickety_session=opaque");
-  assert.equal(headers.get("origin"), "https://tickety.situ.io");
+  assert.equal(headers.get("origin"), "https://tickety.nexora.com");
   assert.equal(headers.get("sec-fetch-site"), "same-origin");
-  assert.equal(headers.get("x-forwarded-host"), "tickety.situ.io");
+  assert.equal(headers.get("x-forwarded-host"), "tickety.nexora.com");
   assert.equal(headers.get("x-forwarded-proto"), "https");
 });
 

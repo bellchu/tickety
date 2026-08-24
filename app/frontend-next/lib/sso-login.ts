@@ -43,6 +43,12 @@ export function ssoErrorMessage(search: string): string {
   return code ? SSO_ERROR_MESSAGES[code] || "Single sign-on could not be completed. Please try again." : "";
 }
 
+export function hasActiveSession(context: unknown): boolean {
+  if (!context || typeof context !== "object") return false;
+  const candidate = context as { auth_kind?: unknown; is_active?: unknown };
+  return candidate.auth_kind === "session" && candidate.is_active === true;
+}
+
 export function ssoLoginUrl(nextPath: string): string {
   const params = new URLSearchParams({ next: nextPath });
   return `/api/auth/sso/login?${params.toString()}`;

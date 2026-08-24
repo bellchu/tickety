@@ -330,11 +330,11 @@ class SettingsSecurityTests(unittest.TestCase):
             self.assertEqual(os.environ["FRESHSERVICE_DOMAIN"], "support.example.com")
             write_overrides.assert_not_called()
 
-    def test_production_admin_can_save_portal_enabled_provider_secret(self):
+    def test_production_admin_can_save_provider_secret_without_portal_flag(self):
         with (
             patch.dict(os.environ, {
                 "APP_MODE": "production",
-                "TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED": "true",
+                "TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED": "false",
                 "CUSTOM_API_KEY": "reviewed-deployment-key",
             }, clear=False),
             patch.object(settings, "_write_db_overrides") as write_overrides,
@@ -397,24 +397,39 @@ class SettingsSecurityTests(unittest.TestCase):
             self.assertEqual(os.environ["CUSTOM_API_KEY"], "reviewed-deployment-key")
             write_overrides.assert_not_called()
 
-    def test_production_infrastructure_boundaries_remain_deployment_owned(self):
+    def test_production_admin_can_override_security_settings(self):
         with (
             patch.dict(os.environ, {
                 "APP_MODE": "production",
-                "TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED": "true",
+                "TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED": "false",
                 "CORS_ALLOW_ORIGINS": "https://tickety.example",
+                "COOKIE_SECURE": "true",
+                "COOKIE_SAMESITE": "lax",
+                "LOGIN_REQUIRED": "true",
             }, clear=False),
             patch.object(settings, "_write_db_overrides") as write_overrides,
+            patch.object(settings, "_reset_runtime"),
         ):
             settings.update_settings(
                 {
                     "CORS_ALLOW_ORIGINS": "*",
+                    "COOKIE_SECURE": "false",
+                    "COOKIE_SAMESITE": "strict",
+                    "LOGIN_REQUIRED": "false",
                 },
                 actor_id="global-admin",
             )
 
-            self.assertEqual(os.environ["CORS_ALLOW_ORIGINS"], "https://tickety.example")
-            write_overrides.assert_not_called()
+            self.assertEqual(os.environ["CORS_ALLOW_ORIGINS"], "*")
+            self.assertEqual(os.environ["COOKIE_SECURE"], "false")
+            self.assertEqual(os.environ["COOKIE_SAMESITE"], "strict")
+            self.assertEqual(os.environ["LOGIN_REQUIRED"], "false")
+            updates = write_overrides.call_args.args[0]
+            self.assertEqual(updates["CORS_ALLOW_ORIGINS"], "*")
+            self.assertEqual(
+                write_overrides.call_args.kwargs["approved_keys"],
+                set(updates),
+            )
 
     def test_production_admin_can_configure_sso_without_global_portal_toggle(self):
         tenant_id = "11111111-2222-4333-8444-555555555555"
@@ -513,7 +528,7 @@ class SettingsSecurityTests(unittest.TestCase):
         with (
             patch.dict(os.environ, {
                 "APP_MODE": "production",
-                "TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED": "true",
+                "TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED": "false",
                 "CUSTOM_API_KEY": deployment_key,
                 "FOUNDRY_API_BASE": "",
                 "CUSTOM_API_BASE": "",

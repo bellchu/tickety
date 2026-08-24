@@ -205,6 +205,7 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   deleteUser: (id: string) => fetchAPI<{ status: string }>(`/users/${id}`, { method: "DELETE" }),
+  purgeUser: (id: string) => fetchAPI<{ status: string; user_id: string; removed_owned_records: number; cleared_history_references: number }>(`/users/${id}/purge`, { method: "DELETE" }),
   // Knowledge Base
   getKbArticles: async (search?: string, category?: string) => {
     const params = new URLSearchParams();

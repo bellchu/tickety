@@ -9,6 +9,8 @@ from sqlalchemy.pool import StaticPool
 from app.backend import main
 from app.backend.database import (
     Base,
+    RecognitionRecord,
+    SessionRecord,
     TicketCategoryRecord,
     TicketRecord,
     UserRecord,
@@ -30,11 +32,13 @@ class RouteAuthorizationTests(unittest.TestCase):
                 UserRecord(id="admin", name="Admin", role="admin", is_active=True),
                 UserRecord(id="supervisor", name="Supervisor", role="supervisor", is_active=True),
                 UserRecord(id="agent", name="Agent", role="agent", is_active=True),
+                UserRecord(id="inactive", name="Inactive", role="agent", is_active=False),
                 TicketRecord(
                     id="ticket-1",
                     subject="Production incident",
                     recommended_solution="stale generated guidance",
                     ai_status="complete",
+                    assignee_id="inactive",
                 ),
                 TicketCategoryRecord(name="Network"),
             ])
@@ -121,7 +125,40 @@ class RouteAuthorizationTests(unittest.TestCase):
         response = self.client.get("/users")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual({user["id"] for user in response.json()}, {"admin", "supervisor", "agent"})
+        self.assertEqual({user["id"] for user in response.json()}, {"admin", "supervisor", "agent", "inactive"})
+
+    def test_only_admin_can_purge_a_deactivated_user(self):
+        with self.session_factory() as db:
+            db.add_all([
+                SessionRecord(token="inactive-session", user_id="inactive"),
+                RecognitionRecord(user_id="inactive", recognition_key="inactive-award"),
+            ])
+            db.commit()
+
+        self._as_role("supervisor")
+        response = self.client.delete("/users/inactive/purge")
+        self.assertEqual(response.status_code, 403)
+
+        self._as_role("admin")
+        response = self.client.delete("/users/inactive/purge")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "purged")
+        with self.session_factory() as db:
+            self.assertIsNone(db.get(UserRecord, "inactive"))
+            self.assertIsNone(db.get(SessionRecord, "inactive-session"))
+            self.assertEqual(
+                db.query(RecognitionRecord).filter(RecognitionRecord.user_id == "inactive").count(),
+                0,
+            )
+            self.assertIsNotNone(db.get(TicketRecord, "ticket-1"))
+            self.assertIsNone(db.get(TicketRecord, "ticket-1").assignee_id)
+
+    def test_active_user_must_be_deactivated_before_purge(self):
+        self._as_role("admin")
+        response = self.client.delete("/users/agent/purge")
+        self.assertEqual(response.status_code, 409)
+        with self.session_factory() as db:
+            self.assertIsNotNone(db.get(UserRecord, "agent"))
 
     def test_agent_cannot_bulk_update_tickets(self):
         self._as_role("agent")

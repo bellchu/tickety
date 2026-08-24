@@ -265,24 +265,10 @@ _PRODUCTION_ENV_ONLY_KEYS = (
     "SSO_AUTO_PROVISION",
 }
 
-# A production administrator may opt in to editing operational/provider
-# settings through the portal. Infrastructure trust boundaries stay owned by
-# the deployment even when the portal is enabled.
-_PRODUCTION_INFRA_ONLY_KEYS = {
-    "CORS_ALLOW_ORIGINS",
-    "COOKIE_SECURE",
-    "COOKIE_SAMESITE",
-    "LOGIN_REQUIRED",
-    "JIRA_BASE_URL",
-    "JIRA_EMAIL",
-    "JIRA_API_TOKEN",
-    "JIRA_PROJECT_KEY",
-    "JIRA_ISSUE_TYPE",
-    "SSO_REDIRECT_URI",
-}
-_PRODUCTION_ADMIN_PORTAL_KEYS = (
-    _PRODUCTION_ENV_ONLY_KEYS - _PRODUCTION_INFRA_ONLY_KEYS - _READONLY_KEYS
-)
+# Production values saved through the authenticated admin endpoint override
+# deployment defaults. Truly static process/bootstrap settings remain in
+# _READONLY_KEYS and cannot be changed through the application.
+_PRODUCTION_ADMIN_PORTAL_KEYS = _PRODUCTION_ENV_ONLY_KEYS - _READONLY_KEYS
 _PRODUCTION_SSO_PORTAL_KEYS = {
     "SSO_ENABLED",
     "SSO_PROVIDER",
@@ -491,23 +477,15 @@ def load_settings_into_env() -> bool:
     with _lock:
         overrides = _read_db_overrides()
         production = is_production_mode()
-        portal_enabled = production and admin_settings_portal_enabled()
-        # SSO is intentionally admin-manageable even when the broader global
-        # settings portal is disabled, so its signed approval markers must be
-        # honored independently at process startup.
+        # Only overrides carrying an approval marker written by an
+        # authenticated administrator may supersede production defaults.
         approved_keys = _read_portal_approved_keys() if production else set()
         changed = False
         for key, value in overrides.items():
             if key not in _ALL_KEYS or key in _READONLY_KEYS:
                 continue
             if production and key in _PRODUCTION_ENV_ONLY_KEYS:
-                approved_sso = key in _PRODUCTION_SSO_PORTAL_KEYS and key in approved_keys
-                approved_operational = (
-                    portal_enabled
-                    and key in _PRODUCTION_ADMIN_PORTAL_KEYS
-                    and key in approved_keys
-                )
-                if not (approved_sso or approved_operational):
+                if key not in approved_keys:
                     continue
             if value is not None:
                 if key in _LLM_BASE_URL_KEYS and value:
@@ -556,7 +534,6 @@ def get_settings() -> dict:
 def update_settings(payload: dict, *, actor_id: Optional[str] = None) -> dict:
     with _lock:
         production = is_production_mode()
-        portal_enabled = production and admin_settings_portal_enabled()
         base_url_credentials = {
             "FOUNDRY_API_BASE": "FOUNDRY_API_KEY",
             "CUSTOM_API_BASE": "CUSTOM_API_KEY",
@@ -610,13 +587,7 @@ def update_settings(payload: dict, *, actor_id: Optional[str] = None) -> dict:
             if key not in payload or key in _READONLY_KEYS:
                 continue
             if production and key in _PRODUCTION_ENV_ONLY_KEYS:
-                authenticated_sso_change = bool(actor_id) and key in _PRODUCTION_SSO_PORTAL_KEYS
-                authenticated_operational_change = (
-                    portal_enabled
-                    and bool(actor_id)
-                    and key in _PRODUCTION_ADMIN_PORTAL_KEYS
-                )
-                if not (authenticated_sso_change or authenticated_operational_change):
+                if not actor_id:
                     continue
             new_val = payload.get(key)
             if new_val is None:

@@ -35,6 +35,7 @@ export default function AgentsPage() {
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<UserOut | null>(null);
   const [deactivating, setDeactivating] = useState<UserOut | null>(null);
+  const [purging, setPurging] = useState<UserOut | null>(null);
   const [search, setSearch] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -63,13 +64,28 @@ export default function AgentsPage() {
       setNotice("Agent access deactivated.");
     },
   });
+  const purgeMutation = useMutation({
+    mutationFn: (id: string) => api.purgeUser(id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["users"] });
+      void queryClient.invalidateQueries({ queryKey: ["leaderboard"] });
+      setPurging(null);
+      setNotice("Deactivated account permanently purged.");
+    },
+  });
 
   const activeUsers = useMemo(() => (usersQuery.data ?? []).filter((user) => user.is_active), [usersQuery.data]);
+  const inactiveUsers = useMemo(() => (usersQuery.data ?? []).filter((user) => !user.is_active), [usersQuery.data]);
   const filteredUsers = useMemo(() => {
     const term = search.trim().toLowerCase();
     if (!term) return activeUsers;
     return activeUsers.filter((user) => [user.name, user.email ?? "", user.title ?? "", user.role].some((value) => value.toLowerCase().includes(term)));
   }, [activeUsers, search]);
+  const filteredInactiveUsers = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    if (!term) return inactiveUsers;
+    return inactiveUsers.filter((user) => [user.name, user.email ?? "", user.title ?? "", user.role].some((value) => value.toLowerCase().includes(term)));
+  }, [inactiveUsers, search]);
   const retrying = usersQuery.isFetching && !usersQuery.isLoading;
 
   if (authQuery.isLoading) {
@@ -150,9 +166,36 @@ export default function AgentsPage() {
         )}
       </section>
 
+      <section className="overflow-hidden rounded-2xl border border-linen-400 bg-linen-50 shadow-sm" aria-label="Deactivated accounts">
+        <div className="border-b border-linen-400 p-4">
+          <h2 className="text-sm font-semibold text-ink-700">Deactivated accounts</h2>
+          <p className="mt-1 text-xs text-ink-500">{inactiveUsers.length} deactivated · {filteredInactiveUsers.length} shown. Purging permanently removes the account and its authentication data.</p>
+        </div>
+        {usersQuery.isLoading ? (
+          <div className="space-y-3 p-5"><Skeleton className="h-14 w-full" /></div>
+        ) : filteredInactiveUsers.length === 0 ? (
+          <EmptyState className="m-5" icon={<Users className="h-5 w-5" />} title={search ? "No deactivated accounts match this search" : "No deactivated accounts"} description={search ? "Try another name, role, email address, or title." : "Accounts will appear here after their access is deactivated."} />
+        ) : (
+          <div className="divide-y divide-linen-300">
+            {filteredInactiveUsers.map((user) => (
+              <div key={user.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0 opacity-75"><AgentIdentity user={user} /></div>
+                <div className="flex items-center gap-2">
+                  <Badge variant="neutral">Deactivated</Badge>
+                  <Badge variant={roleVariant(user.role)}>{user.role}</Badge>
+                  <Button size="sm" variant="destructive" leadingIcon={<Trash2 className="h-4 w-4" />} onClick={() => { purgeMutation.reset(); setPurging(user); }}>Purge</Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
       <UserFormDialog open={formOpen || Boolean(editing)} user={editing} demoMode={isDemoMode} onOpenChange={(open) => { if (!open) { setFormOpen(false); setEditing(null); createMutation.reset(); updateMutation.reset(); } }} onSubmit={(payload) => editing ? updateMutation.mutate({ id: editing.id, payload }) : createMutation.mutate(payload)} pending={createMutation.isPending || updateMutation.isPending} error={createMutation.error || updateMutation.error} />
       <ConfirmDialog open={Boolean(deactivating)} onOpenChange={(open) => { if (!open) { setDeactivating(null); deactivateMutation.reset(); } }} title="Deactivate agent access?" description={`${deactivating?.name ?? "This agent"} will no longer appear in the active roster or receive new assignments. Historical work remains available.`} confirmLabel="Deactivate agent" destructive pending={deactivateMutation.isPending} onConfirm={() => { if (deactivating) deactivateMutation.mutate(deactivating.id); }} />
       {deactivateMutation.isError && <Alert variant="danger" title="Deactivation failed">{deactivateMutation.error instanceof Error ? deactivateMutation.error.message : "Please try again."}</Alert>}
+      <ConfirmDialog open={Boolean(purging)} onOpenChange={(open) => { if (!open) { setPurging(null); purgeMutation.reset(); } }} title="Permanently purge this account?" description={`${purging?.name ?? "This user"} and all sign-in data, SSO links, recognitions, approvals, and time entries owned by the account will be permanently removed. Historical records with optional attribution will remain but will no longer identify this user. This cannot be undone.`} confirmLabel="Permanently purge" destructive pending={purgeMutation.isPending} onConfirm={() => { if (purging) purgeMutation.mutate(purging.id); }} />
+      {purgeMutation.isError && <Alert variant="danger" title="Account purge failed">{purgeMutation.error instanceof Error ? purgeMutation.error.message : "Please try again."}</Alert>}
     </PageFrame>
   );
 }

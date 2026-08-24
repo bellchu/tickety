@@ -6,7 +6,7 @@ import { ArrowRight, Check, LockKeyhole, ShieldCheck } from "lucide-react";
 import { TicketyLogo } from "@/components/layout/TicketyLogo";
 import { Alert, Button } from "@/components/ui";
 import { api, queryClient } from "@/lib/api";
-import { safeNextPath, ssoErrorMessage, ssoLoginUrl } from "@/lib/sso-login";
+import { hasActiveSession, safeNextPath, ssoErrorMessage, ssoLoginUrl } from "@/lib/sso-login";
 
 const workspaceBenefits = [
   "Prioritize incidents, requests, and changes in one queue",
@@ -30,23 +30,43 @@ export default function LoginPage() {
 
   useEffect(() => {
     const search = window.location.search;
-    setNextPath(safeNextPath(search));
-    setError(ssoErrorMessage(search));
-    api
-      .getSsoConfig()
-      .then((config) => {
+    const destination = safeNextPath(search);
+    let cancelled = false;
+    setNextPath(destination);
+
+    const initializeLogin = async () => {
+      try {
+        const context = await api.getAuthMe();
+        if (hasActiveSession(context)) {
+          router.replace(destination);
+          router.refresh();
+          return;
+        }
+      } catch {
+        // An unauthenticated response is expected for visitors who need this page.
+      }
+      if (cancelled) return;
+
+      setError(ssoErrorMessage(search));
+      try {
+        const config = await api.getSsoConfig();
+        if (cancelled) return;
         setSsoRequested(config.enabled);
         setSsoReady(config.enabled && config.ready);
         setSsoProvider(config.provider);
         setShowPasswordLogin(!(config.enabled && config.ready));
-      })
-      .catch(() => {
-        setShowPasswordLogin(true);
-      })
-      .finally(() => {
-        setSsoConfigLoaded(true);
-      });
-  }, []);
+      } catch {
+        if (!cancelled) setShowPasswordLogin(true);
+      } finally {
+        if (!cancelled) setSsoConfigLoaded(true);
+      }
+    };
+
+    void initializeLogin();
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();

@@ -1,0 +1,8 @@
+{
+	auto_https disable_redirects
+}
+
+https://localhost, https://tickety.nexora.com {
+	tls internal
+	reverse_proxy frontend:3000
+}

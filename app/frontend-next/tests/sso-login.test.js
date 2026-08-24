@@ -18,7 +18,7 @@ function loadHelpers() {
   return loaded.exports;
 }
 
-const { safeNextPath, ssoErrorMessage, ssoLoginUrl } = loadHelpers();
+const { hasActiveSession, safeNextPath, ssoErrorMessage, ssoLoginUrl } = loadHelpers();
 
 test("SSO preserves only same-origin application destinations", () => {
   assert.equal(safeNextPath("?next=%2Ftickets%2F123%3Ftab%3Dactivity"), "/tickets/123?tab=activity");
@@ -41,4 +41,11 @@ test("SSO errors are stable and user-facing", () => {
   assert.match(ssoErrorMessage("?sso_error=group_claim_overage"), /could not be verified/);
   assert.match(ssoErrorMessage("?sso_error=unknown"), /could not be completed/);
   assert.equal(ssoErrorMessage(""), "");
+});
+
+test("an active session takes precedence over a stale SSO error", () => {
+  assert.equal(hasActiveSession({ auth_kind: "session", is_active: true }), true);
+  assert.equal(hasActiveSession({ auth_kind: "session", is_active: false }), false);
+  assert.equal(hasActiveSession({ auth_kind: "demo_fallback", is_active: true }), false);
+  assert.equal(hasActiveSession(null), false);
 });

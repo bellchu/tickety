@@ -38,117 +38,6 @@ const API_READ_ONLY_KEYS = new Set([
   "TICKET_RAG_V2_SCOPE_ALLOWLIST",
 ]);
 
-// Keep this list aligned with app/backend/settings.py::_PRODUCTION_ENV_ONLY_KEYS.
-// Production renders these effective values for visibility, but changes must be
-// made through the reviewed deployment environment/Secret rather than the DB.
-const PRODUCTION_DEPLOYMENT_KEYS = new Set([
-  "FOUNDRY_API_KEY",
-  "FOUNDRY_API_BASE",
-  "FOUNDRY_AUTH_METHOD",
-  "CUSTOM_API_KEY",
-  "CUSTOM_API_BASE",
-  "FRESHSERVICE_API_KEY",
-  "JIRA_API_TOKEN",
-  "FRESHSERVICE_OAUTH_CLIENT_SECRET",
-  "WEBHOOK_SECRET",
-  "WEBHOOK_MAX_AGE_SECONDS",
-  "SSO_CLIENT_SECRET",
-  "CORS_ALLOW_ORIGINS",
-  "COOKIE_SECURE",
-  "COOKIE_SAMESITE",
-  "LOGIN_REQUIRED",
-  "DEFAULT_MODEL",
-  "LLM_ALLOW_SYNTHETIC",
-  "LLM_REQUEST_TIMEOUT_SECONDS",
-  "LLM_OVERALL_TIMEOUT_SECONDS",
-  "LLM_MAX_PROMPT_CHARS",
-  "LLM_MAX_CONCURRENCY",
-  "LLM_PERSIST_METRICS",
-  "LLM_DAILY_TOKEN_BUDGET",
-  "LLM_PROVIDER_REQUESTS_PER_MINUTE",
-  "LLM_PROVIDER_TOKENS_PER_MINUTE",
-  "LLM_ENFORCE_PROVIDER_LIMITS",
-  "AI_USER_REQUESTS_PER_MINUTE",
-  "AI_USER_REQUESTS_PER_DAY",
-  "ANALYTICS_USER_REQUESTS_PER_MINUTE",
-  "ANALYTICS_USER_REQUESTS_PER_DAY",
-  "AI_INDEX_WRITES_PER_MINUTE",
-  "AI_INDEX_WRITES_PER_DAY",
-  "PORTAL_TICKETS_PER_MINUTE",
-  "PORTAL_TICKETS_PER_DAY",
-  "PORTAL_TICKETS_GLOBAL_PER_MINUTE",
-  "PORTAL_TICKETS_GLOBAL_PER_DAY",
-  "AI_ANALYSIS_LEASE_SECONDS",
-  "AI_ANALYSIS_MAX_ATTEMPTS",
-  "AI_PIPELINE_TIMEOUT_SECONDS",
-  "AI_BACKGROUND_TICKETS_PER_SWEEP",
-  "TICKET_EMBEDDING_ENABLED",
-  "TICKET_EMBEDDING_MODEL",
-  "TICKET_EMBEDDING_DIMENSIONS",
-  "TICKET_EMBEDDING_TIMEOUT_SECONDS",
-  "TICKET_EMBEDDING_MAX_CHARS",
-  "TICKET_EMBEDDING_MAX_COMMENTS_PER_REFRESH",
-  "TICKET_VECTOR_MIN_SCORE",
-  "TICKET_RAG_V2_WRITE_ENABLED",
-  "TICKET_RAG_V2_WORKER_ENABLED",
-  "TICKET_RAG_V2_READ_ENABLED",
-  "TICKET_RAG_CHUNK_TARGET_TOKENS",
-  "TICKET_RAG_CHUNK_MAX_TOKENS",
-  "TICKET_RAG_CHUNK_OVERLAP_TOKENS",
-  "TICKET_RAG_EMBED_BATCH_SIZE",
-  "TICKET_RAG_EMBED_LEASE_SECONDS",
-  "TICKET_RAG_WORKER_POLL_SECONDS",
-  "TICKET_RAG_QUERY_CACHE_TTL_SECONDS",
-  "TICKET_RAG_QUERY_CACHE_MAX_ROWS",
-  "TICKET_RAG_SNAPSHOT_TTL_SECONDS",
-  "AUTO_TRIAGE_ENABLED",
-  "AUTO_SUMMARIZE_ENABLED",
-  "AUTO_ROUTE_ENABLED",
-  "AUTO_RESOLVE_ENABLED",
-  "AUTO_SYSTEMIC_ENABLED",
-  "ITSM_PROVIDER",
-  "FRESHSERVICE_DOMAIN",
-  "FRESHWORKS_ORG_DOMAIN",
-  "FRESHSERVICE_WORKSPACE_ID",
-  "FRESHSERVICE_TICKET_INCLUDES",
-  "FRESHSERVICE_AGENT_STATE",
-  "FRESHSERVICE_OAUTH_CLIENT_ID",
-  "FRESHSERVICE_OAUTH_REDIRECT_URI",
-  "FRESHSERVICE_OAUTH_SCOPES",
-  "JIRA_BASE_URL",
-  "JIRA_EMAIL",
-  "JIRA_PROJECT_KEY",
-  "JIRA_ISSUE_TYPE",
-  "SYNC_INTERVAL_SECONDS",
-  "SSO_ENABLED",
-  "SSO_PROVIDER",
-  "SSO_ENTRA_TENANT_ID",
-  "SSO_OKTA_DOMAIN",
-  "SSO_OKTA_AUTH_SERVER_ID",
-  "SSO_CLIENT_ID",
-  "SSO_DISCOVERY_URL",
-  "SSO_REDIRECT_URI",
-  "SSO_ALLOWED_DOMAINS",
-  "SSO_ALLOWED_GROUP_IDS",
-  "SSO_AUTO_PROVISION",
-]);
-
-// These settings define deployment trust boundaries or unsupported provider
-// destinations. They remain read-only even when admin portal editing is
-// explicitly enabled for operational settings and credentials.
-const PRODUCTION_INFRASTRUCTURE_KEYS = new Set([
-  "CORS_ALLOW_ORIGINS",
-  "COOKIE_SECURE",
-  "COOKIE_SAMESITE",
-  "LOGIN_REQUIRED",
-  "JIRA_BASE_URL",
-  "JIRA_EMAIL",
-  "JIRA_API_TOKEN",
-  "JIRA_PROJECT_KEY",
-  "JIRA_ISSUE_TYPE",
-  "SSO_REDIRECT_URI",
-]);
-
 const SSO_PORTAL_KEYS = new Set([
   "SSO_ENABLED", "SSO_PROVIDER", "SSO_ENTRA_TENANT_ID", "SSO_OKTA_DOMAIN",
   "SSO_OKTA_AUTH_SERVER_ID", "SSO_CLIENT_ID", "SSO_CLIENT_SECRET",
@@ -236,9 +125,8 @@ export default function SettingsPage() {
   const [saved, setSaved] = useState(false);
   const [freshserviceAuthMode, setFreshserviceAuthMode] = useState<FreshserviceAuthMode>("api");
   const appMode = ((form.APP_MODE || data?.APP_MODE) as string) || "demo";
-  const adminPortalEditsEnabled = data?.TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED === "true";
-  const productionOperationalSettingsReadOnly = appMode === "production" && !adminPortalEditsEnabled;
-  const productionSecuritySettingsReadOnly = appMode === "production";
+  const productionOperationalSettingsReadOnly = false;
+  const productionSecuritySettingsReadOnly = false;
   const configuredSsoProvider = ((form.SSO_PROVIDER as string) || "entra").trim().toLowerCase();
   const ssoProviderType = ["entra", "entra id", "azure ad", "azure active directory", "microsoft entra", "microsoft entra id"].includes(configuredSsoProvider)
     ? "entra"
@@ -249,12 +137,6 @@ export default function SettingsPage() {
     || ((form.FRONTEND_URL as string)?.trim().replace(/\/+$/, "")
       ? `${(form.FRONTEND_URL as string).trim().replace(/\/+$/, "")}/api/auth/sso/callback`
       : "");
-  const isDeploymentManaged = (key: string) => (
-    appMode === "production"
-    && !SSO_PORTAL_KEYS.has(key)
-    && PRODUCTION_DEPLOYMENT_KEYS.has(key)
-    && (PRODUCTION_INFRASTRUCTURE_KEYS.has(key) || !adminPortalEditsEnabled)
-  );
 
   useEffect(() => {
     if (data) {
@@ -308,7 +190,6 @@ export default function SettingsPage() {
   });
 
   const handleChange = (key: keyof SettingsType, value: string) => {
-    if (isDeploymentManaged(String(key))) return;
     if (mutation.isError) mutation.reset();
     setForm((prev) => ({ ...prev, [key]: value }));
   };
@@ -391,7 +272,6 @@ export default function SettingsPage() {
       if (baselineForm && v === baselineForm[key as keyof SettingsType]) continue;
       if (v.includes("****")) continue;
       if (API_READ_ONLY_KEYS.has(key)) continue;
-      if (isDeploymentManaged(key)) continue;
       payload[key] = v;
     }
     mutation.mutate(payload);
@@ -471,9 +351,9 @@ export default function SettingsPage() {
         </Alert>
       )}
 
-      {appMode === "production" && adminPortalEditsEnabled && (
+      {appMode === "production" && (
         <Alert variant="info" title="Global admin settings enabled">
-          Provider credentials and operational settings saved here become admin-approved runtime overrides. Deployment trust boundaries such as runtime mode, database access, CORS, cookies, and login enforcement remain locked. SSO can be managed below by administrators.
+          Settings saved here become admin-approved runtime overrides. Static bootstrap settings such as runtime mode, database access, and public API wiring remain deployment-managed.
         </Alert>
       )}
 
@@ -490,11 +370,6 @@ export default function SettingsPage() {
       <form onSubmit={handleSubmit} className="space-y-8">
         {/* ═══ LLM Configuration ═══ */}
         <SettingsSection id="settings-ai" title="LLM Configuration" subtitle="Use Microsoft Foundry or one simplified custom OpenAI-compatible API">
-          {productionOperationalSettingsReadOnly && (
-            <DeploymentManagedNotice>
-              Provider selection, model routing, endpoints, and credentials are read-only here. Update the deployment environment/Secret and roll out the workloads to change them.
-            </DeploymentManagedNotice>
-          )}
           <Field label="Provider">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
               {PROVIDER_IDS.map((pid) => {
@@ -745,11 +620,6 @@ export default function SettingsPage() {
 
         {/* ═══ Security & Auth ═══ */}
         <SettingsSection id="settings-access" title="Security & Authentication" subtitle="Require login and configure Single Sign-On (OIDC) for production deployments">
-          {productionSecuritySettingsReadOnly && (
-            <DeploymentManagedNotice>
-              Runtime mode, login enforcement, CORS, and cookie controls remain deployment-managed. Administrators can configure and switch SSO providers below.
-            </DeploymentManagedNotice>
-          )}
           <Field label="Runtime Mode">
             <select
               value={appMode}
@@ -1184,25 +1054,8 @@ function Field({ label, children, ready }: { label: React.ReactNode; children: R
 }
 
 function DeploymentManagedLabel({ label, managed }: { label: string; managed: boolean }) {
-  return (
-    <span className="inline-flex flex-wrap items-center gap-2">
-      <span>{label}</span>
-      {managed && (
-        <span className="inline-flex items-center gap-1 rounded-full border border-linen-400 bg-linen-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink-400">
-          <ShieldCheck className="h-3 w-3" aria-hidden="true" /> Deployment managed
-        </span>
-      )}
-    </span>
-  );
-}
-
-function DeploymentManagedNotice({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="flex items-start gap-2 rounded border border-clay-400/30 bg-clay-400/5 p-3 text-xs leading-5 text-ink-600" role="note">
-      <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-clay-500" aria-hidden="true" />
-      <p>{children}</p>
-    </div>
-  );
+  void managed;
+  return label;
 }
 
 function ReadyPill() {

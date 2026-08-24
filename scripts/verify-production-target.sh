@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PRODUCTION_HOST=tickety.situ.io
-PRODUCTION_URL=https://tickety.situ.io
+PRODUCTION_HOST=tickety.nexora.com
+PRODUCTION_URL=https://tickety.nexora.com
 NAMESPACE=""
 KUBE_CONTEXT=""
 SELF_TEST=false
@@ -13,7 +13,7 @@ Usage: scripts/verify-production-target.sh --namespace NAME [--context NAME]
        scripts/verify-production-target.sh --self-test
 
 Prove that the selected Kubernetes namespace is the Tickety production target.
-The gate requires its ingress to own tickety.situ.io, every hashed public asset
+The gate requires its ingress to own tickety.nexora.com, every hashed public asset
 from its active frontend build to match the files served publicly, and the public
 readiness check to pass.
 Run it immediately before and after every production rollout.

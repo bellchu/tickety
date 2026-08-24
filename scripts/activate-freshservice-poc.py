@@ -61,7 +61,7 @@ def main() -> int:
         host = f"{host}.freshservice.com"
 
     base_url = (os.getenv("POC_TICKETY_URL") or "http://127.0.0.1:8000").rstrip("/") + "/"
-    origin = (os.getenv("FRONTEND_URL") or "https://tickety.situ.io").rstrip("/")
+    origin = (os.getenv("FRONTEND_URL") or "https://tickety.nexora.com").rstrip("/")
     with httpx.Client(
         base_url=base_url,
         headers={"Origin": origin},
