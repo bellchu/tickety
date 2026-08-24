@@ -1,0 +1,261 @@
+"use client";
+
+import { useEffect } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  Activity,
+  ArrowLeft,
+  Clock3,
+  Database,
+  Gauge,
+  History,
+  MessagesSquare,
+  RefreshCw,
+  ShieldCheck,
+} from "lucide-react";
+import { api, APIError } from "@/lib/api";
+import { canAccessAdministration } from "@/lib/auth";
+import { formatTimeAgo } from "@/lib/utils";
+import { Alert, Button, ErrorState, Skeleton } from "@/components/ui";
+import {
+  ContentSurface,
+  PageFrame,
+  PageHeader,
+  SectionHeader,
+  SummaryStrip,
+} from "@/components/layout/PageLayout";
+
+function isAuthError(error: unknown) {
+  return error instanceof APIError && error.status === 401;
+}
+
+function formatDate(value: string | null) {
+  if (!value) return "Not yet";
+  return new Date(value).toLocaleString();
+}
+
+function statusLabel(status: string) {
+  if (status === "running") return "Sync running";
+  if (status === "throttled") return "Provider pause";
+  if (status === "error") return "Needs attention";
+  if (status === "success") return "Healthy";
+  if (status === "queued") return "Queued";
+  return "Waiting to start";
+}
+
+export default function TicketSyncStatusPage() {
+  const router = useRouter();
+  const queryClient = useQueryClient();
+  const authQuery = useQuery({
+    queryKey: ["auth-me"],
+    queryFn: api.getAuthMe,
+    retry: false,
+  });
+  const canAccess = canAccessAdministration(authQuery.data);
+  const statusQuery = useQuery({
+    queryKey: ["sync-status"],
+    queryFn: api.getSyncStatus,
+    enabled: canAccess,
+    refetchInterval: 10_000,
+    retry: false,
+  });
+  const triggerMutation = useMutation({
+    mutationFn: api.triggerSync,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["sync-status"] });
+      void queryClient.invalidateQueries({ queryKey: ["tickets"] });
+    },
+  });
+
+  const authError = isAuthError(authQuery.error) || isAuthError(statusQuery.error);
+  useEffect(() => {
+    if (authError) router.replace("/login?next=/settings/sync");
+  }, [authError, router]);
+
+  if (authQuery.isLoading || (canAccess && statusQuery.isLoading)) {
+    return <SyncStatusSkeleton />;
+  }
+  if (authError) return null;
+  if (!canAccess) {
+    return (
+      <PageFrame>
+        <ErrorState
+          title="Administrator access required"
+          description="Ticket synchronization status and provider controls are available only to active administrators."
+        />
+      </PageFrame>
+    );
+  }
+  if (statusQuery.error || !statusQuery.data) {
+    return (
+      <PageFrame>
+        <ErrorState
+          title="Sync status is unavailable"
+          description="The current provider state could not be loaded. No provider changes were attempted."
+          onRetry={() => void statusQuery.refetch()}
+          retrying={statusQuery.isFetching}
+        />
+      </PageFrame>
+    );
+  }
+
+  const status = statusQuery.data;
+  const remainingPercent = status.rate_limit_total && status.rate_limit_remaining != null
+    ? Math.max(0, Math.min(100, (status.rate_limit_remaining / status.rate_limit_total) * 100))
+    : null;
+
+  return (
+    <PageFrame className="max-w-6xl space-y-8">
+      <PageHeader
+        eyebrow="Settings · Ticketing"
+        icon={<Activity className="h-5 w-5" />}
+        title="Freshservice sync status"
+        description="Current tickets are synchronized first. Historical tickets and conversation threads drain through bounded background queues."
+        meta={`Provider: ${status.provider} · checked ${formatTimeAgo(new Date().toISOString())}`}
+        actions={(
+          <div className="flex gap-2">
+            <Link href="/settings" className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-linen-500 bg-linen-50 px-4 text-sm font-semibold text-ink-700 shadow-sm hover:bg-linen-200">
+              <ArrowLeft className="h-4 w-4" /> Settings
+            </Link>
+            <Button
+              variant="secondary"
+              onClick={() => void statusQuery.refetch()}
+              pending={statusQuery.isFetching}
+              pendingLabel="Refreshing…"
+              leadingIcon={<RefreshCw className="h-4 w-4" />}
+            >
+              Refresh
+            </Button>
+            <Button
+              onClick={() => triggerMutation.mutate()}
+              pending={triggerMutation.isPending}
+              pendingLabel="Starting…"
+              leadingIcon={<Activity className="h-4 w-4" />}
+            >
+              Run bounded sync
+            </Button>
+          </div>
+        )}
+      />
+
+      {status.last_status === "throttled" && (
+        <Alert variant="warning" title="Freshservice requested a pause">
+          Tickety will issue no more provider requests until {formatDate(status.next_retry_at)}. This is a normal rate-protection state, not a failed sync.
+        </Alert>
+      )}
+      {status.last_status === "error" && (
+        <Alert variant="danger" title="The latest batch needs attention">
+          The page checkpoint was retained, so the next run can retry without losing already imported tickets.
+        </Alert>
+      )}
+      {triggerMutation.isError && (
+        <Alert variant="danger" title="The sync could not be started">
+          {triggerMutation.error instanceof Error ? triggerMutation.error.message : "Unknown request error"}
+        </Alert>
+      )}
+
+      <SummaryStrip label="Ticket synchronization overview">
+        <Metric label="Local tickets" value={status.local_ticket_count.toLocaleString()} detail={`${status.total_synced.toLocaleString()} source changes applied`} icon={<Database className="h-4 w-4" />} />
+        <Metric label="Current lane" value={statusLabel(status.last_status)} detail={status.recent_completed_at ? `Completed ${formatTimeAgo(status.recent_completed_at)}` : `Page ${status.recent_page}`} icon={<Clock3 className="h-4 w-4" />} />
+        <Metric label="Historical queue" value={status.history_complete ? "Complete" : `${status.history_processed.toLocaleString()} scanned`} detail={status.history_complete ? "Full inventory checkpointed" : `Next page ${status.history_page}`} icon={<History className="h-4 w-4" />} />
+        <Metric label="API budget" value={status.rate_limit_remaining == null ? "Awaiting headers" : `${status.rate_limit_remaining.toLocaleString()} left`} detail={status.rate_limit_total ? `${Math.round(remainingPercent ?? 0)}% of ${status.rate_limit_total.toLocaleString()} available` : "Reported by Freshservice"} icon={<Gauge className="h-4 w-4" />} />
+      </SummaryStrip>
+
+      <ContentSurface className="p-5 sm:p-6">
+        <SectionHeader title="Synchronization lanes" description="Each checkpoint is committed before another Freshservice page is requested." />
+        <div className="mt-5 grid gap-4 lg:grid-cols-3">
+          <LaneCard
+            icon={<Clock3 className="h-5 w-5" />}
+            title="Current and new tickets"
+            state={status.recent_cycle_started_at ? "In progress" : "Caught up"}
+            detail={status.recent_cycle_started_at
+              ? `Updated since ${formatDate(status.recent_since_at)} · page ${status.recent_page}`
+              : `Last completed ${formatDate(status.recent_completed_at)}`}
+            policy={`${status.recent_pages_per_sync} page${status.recent_pages_per_sync === 1 ? "" : "s"} admitted per run`}
+          />
+          <LaneCard
+            icon={<History className="h-5 w-5" />}
+            title="Historical tickets"
+            state={status.history_complete ? "Complete" : "Background import"}
+            detail={`${status.history_processed.toLocaleString()} records scanned · page ${status.history_page}`}
+            policy={`${status.history_pages_per_sync} ascending page${status.history_pages_per_sync === 1 ? "" : "s"} per run`}
+          />
+          <LaneCard
+            icon={<MessagesSquare className="h-5 w-5" />}
+            title="Conversation threads"
+            state="Newest first"
+            detail={`${status.conversations_processed.toLocaleString()} ticket threads hydrated`}
+            policy={`${status.conversations_per_sync} thread${status.conversations_per_sync === 1 ? "" : "s"} admitted per run`}
+          />
+        </div>
+      </ContentSurface>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <ContentSurface className="p-5 sm:p-6">
+          <SectionHeader title="Latest batch" description={`Runs every ${status.sync_interval_seconds} seconds when the worker is ready.`} />
+          <dl className="mt-5 divide-y divide-linen-300 text-sm">
+            <Detail label="Started" value={formatDate(status.run_started_at)} />
+            <Detail label="Finished" value={formatDate(status.run_finished_at)} />
+            <Detail label="New tickets" value={status.last_batch_new.toLocaleString()} />
+            <Detail label="Updated tickets" value={status.last_batch_updated.toLocaleString()} />
+            <Detail label="Record errors" value={status.last_batch_errors.toLocaleString()} />
+          </dl>
+        </ContentSurface>
+        <ContentSurface className="p-5 sm:p-6">
+          <SectionHeader title="Provider protection" description="Freshservice headers are authoritative for the shared account budget." />
+          <div className="mt-5 flex items-start gap-3 rounded-xl border border-moss-500/25 bg-moss-500/10 p-4">
+            <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-moss-600" />
+            <div>
+              <p className="text-sm font-semibold text-ink-700">Bounded and resumable</p>
+              <p className="mt-1 text-xs leading-5 text-ink-500">List requests are paced, resource embeds are excluded from discovery, low remaining capacity pauses the queue, and `Retry-After` survives worker restarts.</p>
+            </div>
+          </div>
+          <dl className="mt-3 divide-y divide-linen-300 text-sm">
+            <Detail label="Last request cost" value={status.rate_limit_used == null ? "Not reported" : `${status.rate_limit_used} credit${status.rate_limit_used === 1 ? "" : "s"}`} />
+            <Detail label="Next allowed request" value={status.next_retry_at ? formatDate(status.next_retry_at) : "Ready"} />
+          </dl>
+        </ContentSurface>
+      </div>
+    </PageFrame>
+  );
+}
+
+function Metric({ label, value, detail, icon }: { label: string; value: string; detail: string; icon: React.ReactNode }) {
+  return (
+    <div className="rounded-2xl border border-linen-400 bg-linen-50 p-4 shadow-sm sm:p-5">
+      <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.1em] text-ink-400">{icon}{label}</div>
+      <p className="mt-3 text-2xl font-semibold tracking-[-0.035em] text-ink-700">{value}</p>
+      <p className="mt-1 text-xs leading-5 text-ink-500">{detail}</p>
+    </div>
+  );
+}
+
+function LaneCard({ icon, title, state, detail, policy }: { icon: React.ReactNode; title: string; state: string; detail: string; policy: string }) {
+  return (
+    <article className="rounded-xl border border-linen-400 bg-linen-100 p-4">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-semantic-primary">{icon}</span>
+        <span className="rounded-full bg-linen-300 px-2.5 py-1 text-[11px] font-semibold text-ink-600">{state}</span>
+      </div>
+      <h3 className="mt-4 text-sm font-semibold text-ink-700">{title}</h3>
+      <p className="mt-1 text-xs leading-5 text-ink-500">{detail}</p>
+      <p className="mt-3 border-t border-linen-300 pt-3 text-[11px] font-medium text-ink-400">{policy}</p>
+    </article>
+  );
+}
+
+function Detail({ label, value }: { label: string; value: string }) {
+  return <div className="flex items-center justify-between gap-4 py-3"><dt className="text-ink-500">{label}</dt><dd className="text-right font-medium text-ink-700">{value}</dd></div>;
+}
+
+function SyncStatusSkeleton() {
+  return (
+    <PageFrame className="max-w-6xl space-y-8" aria-busy="true" aria-label="Loading ticket sync status">
+      <div className="space-y-3 border-b border-linen-400 pb-6"><Skeleton className="h-3 w-36" /><Skeleton className="h-10 w-80" /><Skeleton className="h-4 w-full max-w-2xl" /></div>
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{Array.from({ length: 4 }).map((_, index) => <Skeleton key={index} className="h-32" rounded="lg" />)}</div>
+      <Skeleton className="h-72" rounded="lg" />
+    </PageFrame>
+  );
+}

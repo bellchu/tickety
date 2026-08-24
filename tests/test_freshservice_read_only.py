@@ -8,7 +8,10 @@ from fastapi import HTTPException
 
 from app.backend import main
 from app.backend.integrations import freshservice, registry
-from app.backend.integrations.freshservice import FreshserviceAdapter
+from app.backend.integrations.freshservice import (
+    FreshserviceAdapter,
+    FreshserviceRateLimited,
+)
 
 
 class FreshserviceReadOnlyContractTests(unittest.TestCase):
@@ -141,6 +144,67 @@ class FreshserviceReadOnlyContractTests(unittest.TestCase):
             for call in adapter._rate_limited_get.await_args_list
         ]
         self.assertEqual(workspace_params, ["10", "20"])
+
+    def test_background_ticket_page_is_lightweight_and_does_not_hydrate_threads(self):
+        adapter = FreshserviceAdapter({
+            "FRESHSERVICE_DOMAIN": "readonly.freshservice.com",
+            "FRESHSERVICE_API_KEY": "test-key",
+            "FRESHSERVICE_TICKET_INCLUDES": "stats,requester",
+        })
+        response = MagicMock(status_code=200, headers={})
+        response.json.return_value = {
+            "tickets": [{
+                "id": 1,
+                "subject": "Current ticket",
+                "description_text": "description",
+                "priority": 2,
+                "status": 2,
+            }]
+        }
+        adapter._rate_limited_get = AsyncMock(return_value=response)
+        adapter.fetch_ticket_conversations = AsyncMock(return_value=[])
+        client_context = MagicMock()
+        client_context.__aenter__ = AsyncMock(return_value=object())
+        client_context.__aexit__ = AsyncMock(return_value=None)
+
+        with patch.object(freshservice.httpx, "AsyncClient", return_value=client_context):
+            page = asyncio.run(adapter.fetch_ticket_page(
+                since=None,
+                page=1,
+                order_type="asc",
+                include_resources=False,
+            ))
+
+        self.assertEqual([ticket.external_id for ticket in page.tickets], ["1"])
+        params = adapter._rate_limited_get.await_args.args[2]
+        self.assertEqual(params["order_type"], "asc")
+        self.assertNotIn("include", params)
+        adapter.fetch_ticket_conversations.assert_not_awaited()
+
+    def test_429_is_returned_to_orchestrator_without_blocking_retry_sleep(self):
+        adapter = FreshserviceAdapter({
+            "FRESHSERVICE_DOMAIN": "readonly.freshservice.com",
+            "FRESHSERVICE_API_KEY": "test-key",
+            "FRESHSERVICE_MIN_INTERVAL_SECONDS": "0.25",
+        })
+        response = MagicMock(
+            status_code=429,
+            headers={
+                "Retry-After": "90",
+                "X-RateLimit-Total": "100.0",
+                "X-RateLimit-Remaining": "0.0",
+                "X-RateLimit-Used-CurrentRequest": "1.0",
+            },
+        )
+        client = MagicMock()
+        client.get = AsyncMock(return_value=response)
+
+        with self.assertRaises(FreshserviceRateLimited) as raised:
+            asyncio.run(adapter._rate_limited_get(client, "https://example", {}))
+
+        self.assertEqual(raised.exception.retry_after, 90)
+        client.get.assert_awaited_once()
+        self.assertEqual(adapter.rate_limit_snapshot()["remaining"], 0)
 
     def test_embedded_ticket_context_route_is_get_only(self):
         methods = set()

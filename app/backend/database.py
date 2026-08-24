@@ -92,6 +92,7 @@ class TicketRecord(Base):
     external_updated_at = Column(DateTime, nullable=True)
     external_conversation_text = Column(Text, nullable=True)
     external_conversation_updated_at = Column(DateTime, nullable=True)
+    external_conversations_synced_at = Column(DateTime, nullable=True, index=True)
     external_created_at = Column(DateTime, nullable=True)
     external_resolved_at = Column(DateTime, nullable=True)
     external_due_by = Column(DateTime, nullable=True)
@@ -267,6 +268,29 @@ class SyncStateRecord(Base):
     last_status = Column(String, default="idle")
     last_error = Column(Text, nullable=True)
     total_synced = Column(Integer, default=0)
+    # Durable priority and background lanes for large Freshservice accounts.
+    recent_since_at = Column(DateTime, nullable=True)
+    recent_cycle_started_at = Column(DateTime, nullable=True)
+    recent_page = Column(Integer, nullable=False, default=1)
+    recent_workspace_index = Column(Integer, nullable=False, default=0)
+    recent_completed_at = Column(DateTime, nullable=True)
+    history_page = Column(Integer, nullable=False, default=1)
+    history_workspace_index = Column(Integer, nullable=False, default=0)
+    history_complete = Column(Boolean, nullable=False, default=False)
+    history_processed = Column(Integer, nullable=False, default=0)
+    conversations_processed = Column(Integer, nullable=False, default=0)
+    # A durable lease prevents overlapping scheduled and manual provider calls
+    # and can be reclaimed after an interrupted worker run.
+    run_token = Column(String(36), nullable=True, index=True)
+    run_started_at = Column(DateTime, nullable=True)
+    run_finished_at = Column(DateTime, nullable=True)
+    next_retry_at = Column(DateTime, nullable=True, index=True)
+    rate_limit_total = Column(Integer, nullable=True)
+    rate_limit_remaining = Column(Integer, nullable=True)
+    rate_limit_used = Column(Integer, nullable=True)
+    last_batch_new = Column(Integer, nullable=False, default=0)
+    last_batch_updated = Column(Integer, nullable=False, default=0)
+    last_batch_errors = Column(Integer, nullable=False, default=0)
 
     __table_args__ = (
         UniqueConstraint(
@@ -1060,6 +1084,7 @@ def _ensure_columns():
         "external_fr_due_by": "TIMESTAMP",
         "external_conversation_text": "TEXT",
         "external_conversation_updated_at": "TIMESTAMP",
+        "external_conversations_synced_at": "TIMESTAMP",
     }
     with engine.begin() as conn:
         for col, ddl in additions.items():
@@ -1082,6 +1107,26 @@ def _ensure_columns():
             "automatic_ai_enabled_by": "VARCHAR(255)",
             "automatic_ai_paused_at": "TIMESTAMP",
             "automatic_ai_paused_by": "VARCHAR(255)",
+            "recent_since_at": "TIMESTAMP",
+            "recent_cycle_started_at": "TIMESTAMP",
+            "recent_page": "INTEGER NOT NULL DEFAULT 1",
+            "recent_workspace_index": "INTEGER NOT NULL DEFAULT 0",
+            "recent_completed_at": "TIMESTAMP",
+            "history_page": "INTEGER NOT NULL DEFAULT 1",
+            "history_workspace_index": "INTEGER NOT NULL DEFAULT 0",
+            "history_complete": "BOOLEAN NOT NULL DEFAULT FALSE",
+            "history_processed": "INTEGER NOT NULL DEFAULT 0",
+            "conversations_processed": "INTEGER NOT NULL DEFAULT 0",
+            "run_token": "VARCHAR(36)",
+            "run_started_at": "TIMESTAMP",
+            "run_finished_at": "TIMESTAMP",
+            "next_retry_at": "TIMESTAMP",
+            "rate_limit_total": "INTEGER",
+            "rate_limit_remaining": "INTEGER",
+            "rate_limit_used": "INTEGER",
+            "last_batch_new": "INTEGER NOT NULL DEFAULT 0",
+            "last_batch_updated": "INTEGER NOT NULL DEFAULT 0",
+            "last_batch_errors": "INTEGER NOT NULL DEFAULT 0",
         }
         with engine.begin() as conn:
             for col, ddl in sync_additions.items():

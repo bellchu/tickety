@@ -60,7 +60,7 @@ new schema version; never alter an indexed vector dimension in place.
 
    ```sh
    TICKETY_BENCH_TOKEN=... python scripts/benchmark-rag-v2.py \
-     evaluation/rag-labelled.jsonl --base-url https://tickety.example.com
+     evaluation/rag-labelled.jsonl --base-url https://tickety.nexora.com
    ```
 
 6. Enable reads for an internal/low-risk scope. Confirm snapshot creation and

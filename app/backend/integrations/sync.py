@@ -1,11 +1,13 @@
 import json
 import hashlib
+import os
+import asyncio
 import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional
 
-from sqlalchemy import or_
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from ..database import (
@@ -1156,7 +1158,427 @@ def _existing_external_ticket_states(
     return {row[0]: (row[1], row[2], row[3]) for row in rows}
 
 
+def _bounded_sync_setting(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def freshservice_sync_limits() -> dict[str, int]:
+    """Return conservative per-sweep provider work admission limits."""
+    return {
+        "recent_pages": _bounded_sync_setting(
+            "FRESHSERVICE_RECENT_PAGES_PER_SYNC", 2, 1, 10
+        ),
+        "history_pages": _bounded_sync_setting(
+            "FRESHSERVICE_HISTORY_PAGES_PER_SYNC", 1, 0, 5
+        ),
+        "conversations": _bounded_sync_setting(
+            "FRESHSERVICE_CONVERSATIONS_PER_SYNC", 1, 0, 5
+        ),
+        "lease_seconds": _bounded_sync_setting(
+            "FRESHSERVICE_SYNC_LEASE_SECONDS", 900, 120, 3600
+        ),
+    }
+
+
+def _find_sync_state(db: Session, adapter, binding_id: str) -> Optional[SyncStateRecord]:
+    return db.query(SyncStateRecord).filter(
+        SyncStateRecord.binding_id == binding_id,
+        SyncStateRecord.provider == adapter.provider_name,
+    ).first()
+
+
+def _ensure_sync_state(db: Session, adapter, binding_id: str) -> SyncStateRecord:
+    state = _find_sync_state(db, adapter, binding_id)
+    if state is not None:
+        return state
+    state = SyncStateRecord(
+        binding_id=binding_id,
+        provider=adapter.provider_name,
+        last_status="idle",
+        total_synced=0,
+    )
+    db.add(state)
+    db.commit()
+    db.refresh(state)
+    return state
+
+
+def _claim_freshservice_run(
+    db: Session,
+    state: SyncStateRecord,
+    *,
+    lease_seconds: int,
+) -> Optional[str]:
+    now = datetime.utcnow()
+    if state.next_retry_at and state.next_retry_at > now:
+        return None
+    token = str(uuid.uuid4())
+    stale_before = now - timedelta(seconds=lease_seconds)
+    claimed = db.query(SyncStateRecord).filter(
+        SyncStateRecord.id == state.id,
+        or_(
+            SyncStateRecord.run_token.is_(None),
+            SyncStateRecord.run_started_at.is_(None),
+            SyncStateRecord.run_started_at < stale_before,
+        ),
+    ).update(
+        {
+            SyncStateRecord.run_token: token,
+            SyncStateRecord.run_started_at: now,
+            SyncStateRecord.last_status: "running",
+            SyncStateRecord.last_error: None,
+        },
+        synchronize_session=False,
+    )
+    db.commit()
+    return token if claimed == 1 else None
+
+
+def _capture_freshservice_budget(state: SyncStateRecord, adapter) -> bool:
+    snapshot = adapter.rate_limit_snapshot()
+    state.rate_limit_total = snapshot.get("total")
+    state.rate_limit_remaining = snapshot.get("remaining")
+    state.rate_limit_used = snapshot.get("used")
+    if adapter.should_pause_requests():
+        # Freshservice minute windows do not expose a reset timestamp on a
+        # successful response. Waiting a full minute protects capacity shared
+        # with other integrations and custom apps on the account.
+        state.next_retry_at = datetime.utcnow() + timedelta(seconds=60)
+        return True
+    return False
+
+
+def _advance_page_cursor(state: SyncStateRecord, page_data, *, recent: bool) -> bool:
+    """Advance a provider cursor. Returns True when the lane is complete."""
+    page_attr = "recent_page" if recent else "history_page"
+    workspace_attr = (
+        "recent_workspace_index" if recent else "history_workspace_index"
+    )
+    if page_data.has_next_page:
+        setattr(state, page_attr, getattr(state, page_attr) + 1)
+        return False
+    next_workspace = getattr(state, workspace_attr) + 1
+    if next_workspace < page_data.workspace_count:
+        setattr(state, workspace_attr, next_workspace)
+        setattr(state, page_attr, 1)
+        return False
+    return True
+
+
+def _persist_freshservice_page(
+    db: Session,
+    *,
+    state: SyncStateRecord,
+    adapter,
+    binding_id: str,
+    tickets: List[ExternalTicket],
+) -> tuple[dict[str, int], SyncStateRecord]:
+    counts = {"new": 0, "updated": 0, "errors": 0}
+    for ext in tickets:
+        try:
+            action, _ticket = _apply_external_ticket(
+                db,
+                state=state,
+                ext=ext,
+                adapter=adapter,
+                overwrite=True,
+                binding_id=binding_id,
+            )
+            if action in {"new", "updated"}:
+                counts[action] += 1
+        except Exception as exc:
+            if hasattr(exc, "retry_after"):
+                raise
+            db.rollback()
+            counts["errors"] += 1
+            print(
+                "[sync] Freshservice ticket page upsert failed "
+                f"kind={type(exc).__name__}"
+            )
+            state = _find_sync_state(db, adapter, binding_id)
+            if state is None:
+                raise RuntimeError("Freshservice sync state disappeared") from exc
+    return counts, state
+
+
+def _hydrate_freshservice_conversations(
+    db: Session,
+    *,
+    state: SyncStateRecord,
+    adapter,
+    binding_id: str,
+    limit: int,
+) -> tuple[int, int, SyncStateRecord]:
+    if limit <= 0:
+        return 0, 0, state
+    candidates = db.query(TicketRecord).filter(
+        TicketRecord.binding_id == binding_id,
+        TicketRecord.external_source == adapter.provider_name,
+        TicketRecord.external_id.isnot(None),
+        or_(
+            TicketRecord.external_conversations_synced_at.is_(None),
+            and_(
+                TicketRecord.external_updated_at.isnot(None),
+                TicketRecord.external_conversations_synced_at
+                < TicketRecord.external_updated_at,
+            ),
+        ),
+    ).order_by(
+        TicketRecord.external_updated_at.desc(),
+        TicketRecord.external_created_at.desc(),
+        TicketRecord.external_id.desc(),
+    ).limit(limit).all()
+    hydrated = 0
+    errors = 0
+    for ticket in candidates:
+        try:
+            conversations = asyncio.run(
+                adapter.fetch_ticket_conversations(ticket.external_id)
+            )
+            artifacts = _project_conversations(
+                db,
+                state=state,
+                ticket=ticket,
+                conversations=conversations,
+                # A single observation can safely update known records but is
+                # not sufficient evidence to tombstone an absent provider row.
+                confirmed_absent_ids=set(),
+            )
+            requested = artifacts & _enabled_analysis_artifacts()
+            if requested:
+                _queue_analysis(ticket, requested)
+            ticket.external_conversations_synced_at = datetime.utcnow()
+            db.commit()
+            hydrated += 1
+        except Exception as exc:
+            if hasattr(exc, "retry_after"):
+                raise
+            db.rollback()
+            errors += 1
+            print(
+                "[sync] Freshservice conversation hydration failed "
+                f"kind={type(exc).__name__}"
+            )
+            state = _find_sync_state(db, adapter, binding_id)
+            if state is None:
+                raise RuntimeError("Freshservice sync state disappeared") from exc
+            break
+        if _capture_freshservice_budget(state, adapter):
+            db.commit()
+            break
+    return hydrated, errors, state
+
+
+def _sync_freshservice_tickets(adapter, *, binding_id: str) -> dict:
+    """Synchronize Freshservice in small durable batches, newest work first."""
+    from .freshservice import FreshserviceRateLimited
+
+    limits = freshservice_sync_limits()
+    result = {
+        "new": 0,
+        "updated": 0,
+        "errors": 0,
+        "fetched": 0,
+        "recent_pages": 0,
+        "history_pages": 0,
+        "conversations": 0,
+        "deferred": 0,
+        "throttled": 0,
+    }
+    db: Session = SessionLocal()
+    token: Optional[str] = None
+    try:
+        state = _ensure_sync_state(db, adapter, binding_id)
+        now = datetime.utcnow()
+        if state.next_retry_at and state.next_retry_at > now:
+            result["deferred"] = 1
+            return result
+        token = _claim_freshservice_run(
+            db, state, lease_seconds=limits["lease_seconds"]
+        )
+        if token is None:
+            result["deferred"] = 1
+            return result
+        state = _find_sync_state(db, adapter, binding_id)
+        if state is None:
+            raise RuntimeError("Freshservice sync state disappeared")
+
+        if state.recent_cycle_started_at is None:
+            cycle_started = datetime.utcnow().replace(microsecond=0)
+            state.recent_cycle_started_at = cycle_started
+            state.recent_since_at = state.last_synced_at or cycle_started.replace(
+                hour=0, minute=0, second=0
+            )
+            state.recent_page = 1
+            state.recent_workspace_index = 0
+            db.commit()
+
+        pause_for_budget = False
+        for _ in range(limits["recent_pages"]):
+            page_data = asyncio.run(adapter.fetch_ticket_page(
+                since=state.recent_since_at,
+                page=state.recent_page,
+                workspace_index=state.recent_workspace_index,
+                order_type="asc",
+                include_resources=False,
+            ))
+            result["recent_pages"] += 1
+            result["fetched"] += len(page_data.tickets)
+            counts, state = _persist_freshservice_page(
+                db,
+                state=state,
+                adapter=adapter,
+                binding_id=binding_id,
+                tickets=page_data.tickets,
+            )
+            for key in ("new", "updated", "errors"):
+                result[key] += counts[key]
+            if counts["errors"]:
+                break
+            lane_complete = _advance_page_cursor(state, page_data, recent=True)
+            if lane_complete:
+                state.last_synced_at = state.recent_cycle_started_at - timedelta(
+                    seconds=5
+                )
+                state.recent_completed_at = datetime.utcnow()
+                state.recent_since_at = None
+                state.recent_cycle_started_at = None
+                state.recent_page = 1
+                state.recent_workspace_index = 0
+            state.total_synced = (
+                (state.total_synced or 0) + counts["new"] + counts["updated"]
+            )
+            pause_for_budget = _capture_freshservice_budget(state, adapter)
+            db.commit()
+            if lane_complete or pause_for_budget:
+                break
+
+        if (
+            not pause_for_budget
+            and not result["errors"]
+            and not state.history_complete
+        ):
+            for _ in range(limits["history_pages"]):
+                page_data = asyncio.run(adapter.fetch_ticket_page(
+                    since=datetime(1970, 1, 1),
+                    page=state.history_page,
+                    workspace_index=state.history_workspace_index,
+                    order_type="asc",
+                    include_resources=False,
+                ))
+                result["history_pages"] += 1
+                result["fetched"] += len(page_data.tickets)
+                counts, state = _persist_freshservice_page(
+                    db,
+                    state=state,
+                    adapter=adapter,
+                    binding_id=binding_id,
+                    tickets=page_data.tickets,
+                )
+                for key in ("new", "updated", "errors"):
+                    result[key] += counts[key]
+                if counts["errors"]:
+                    break
+                state.history_processed = (state.history_processed or 0) + len(
+                    page_data.tickets
+                )
+                state.total_synced = (
+                    (state.total_synced or 0)
+                    + counts["new"]
+                    + counts["updated"]
+                )
+                state.history_complete = _advance_page_cursor(
+                    state, page_data, recent=False
+                )
+                pause_for_budget = _capture_freshservice_budget(state, adapter)
+                db.commit()
+                if state.history_complete or pause_for_budget:
+                    break
+
+        if not pause_for_budget and not result["errors"]:
+            hydrated, errors, state = _hydrate_freshservice_conversations(
+                db,
+                state=state,
+                adapter=adapter,
+                binding_id=binding_id,
+                limit=limits["conversations"],
+            )
+            result["conversations"] = hydrated
+            result["errors"] += errors
+            state.conversations_processed = (
+                state.conversations_processed or 0
+            ) + hydrated
+            pause_for_budget = adapter.should_pause_requests()
+
+        state.last_batch_new = result["new"]
+        state.last_batch_updated = result["updated"]
+        state.last_batch_errors = result["errors"]
+        state.run_finished_at = datetime.utcnow()
+        state.run_token = None
+        if pause_for_budget:
+            state.last_status = "throttled"
+            result["throttled"] = 1
+        elif result["errors"]:
+            state.last_status = "error"
+            state.last_error = "One or more provider records could not be synchronized"
+        else:
+            state.last_status = "success"
+            state.last_error = None
+            if state.next_retry_at and state.next_retry_at <= datetime.utcnow():
+                state.next_retry_at = None
+        db.commit()
+    except FreshserviceRateLimited as exc:
+        db.rollback()
+        state = _find_sync_state(db, adapter, binding_id)
+        if state is not None:
+            _capture_freshservice_budget(state, adapter)
+            state.next_retry_at = datetime.utcnow() + timedelta(
+                seconds=exc.retry_after
+            )
+            state.last_status = "throttled"
+            state.last_error = None
+            state.run_finished_at = datetime.utcnow()
+            state.run_token = None
+            state.last_batch_new = result["new"]
+            state.last_batch_updated = result["updated"]
+            state.last_batch_errors = result["errors"]
+            db.commit()
+        result["throttled"] = 1
+    except Exception as exc:
+        db.rollback()
+        state = _find_sync_state(db, adapter, binding_id)
+        if state is not None:
+            state.last_status = "error"
+            state.last_error = f"sync_failed:{type(exc).__name__}"
+            state.last_batch_new = result["new"]
+            state.last_batch_updated = result["updated"]
+            state.last_batch_errors = result["errors"] + 1
+            state.run_finished_at = datetime.utcnow()
+            state.run_token = None
+            db.commit()
+        result["errors"] += 1
+        print(f"[sync] fatal Freshservice error kind={type(exc).__name__}")
+    finally:
+        db.close()
+    return result
+
+
 def sync_tickets_from_external(adapter=None, *, binding_id: str = "legacy") -> dict:
+    adapter = adapter or get_adapter()
+    if (
+        adapter.provider_name.strip().lower() == "freshservice"
+        and hasattr(adapter, "fetch_ticket_page")
+        and hasattr(adapter, "rate_limit_snapshot")
+    ):
+        return _sync_freshservice_tickets(adapter, binding_id=binding_id)
+    return _sync_tickets_legacy(adapter, binding_id=binding_id)
+
+
+def _sync_tickets_legacy(adapter=None, *, binding_id: str = "legacy") -> dict:
     adapter = adapter or get_adapter()
     db: Session = SessionLocal()
     result = {"new": 0, "updated": 0, "errors": 0}
@@ -1269,8 +1691,7 @@ def fetch_tickets_by_days(
     *,
     binding_id: str = "legacy",
 ) -> dict:
-    """Manually fetch all tickets updated in the last `days` days from the
-    external ITSM provider, walking every page while respecting rate limits.
+    """Prioritize a recent provider window without creating a traffic burst.
 
     Source status is always reconciled for tickets already imported (matched
     by external_source + external_id). With overwrite=False, all other local
@@ -1279,6 +1700,46 @@ def fetch_tickets_by_days(
     """
     days = max(1, min(int(days), 365))
     adapter = adapter or get_adapter()
+    if (
+        adapter.provider_name.strip().lower() == "freshservice"
+        and hasattr(adapter, "fetch_ticket_page")
+        and hasattr(adapter, "rate_limit_snapshot")
+    ):
+        # Freshservice tenants can contain hundreds of pages. Manual requests
+        # re-prioritize the recent lane and execute only one bounded sweep;
+        # remaining pages resume in the dedicated worker.
+        db: Session = SessionLocal()
+        try:
+            state = _ensure_sync_state(db, adapter, binding_id)
+            active_lease = bool(
+                state.run_token
+                and state.run_started_at
+                and state.run_started_at
+                > datetime.utcnow()
+                - timedelta(seconds=freshservice_sync_limits()["lease_seconds"])
+            )
+            if not active_lease:
+                now = datetime.utcnow().replace(microsecond=0)
+                state.recent_since_at = now - timedelta(days=days)
+                state.recent_cycle_started_at = now
+                state.recent_page = 1
+                state.recent_workspace_index = 0
+                state.last_status = "queued"
+                state.last_error = None
+                db.commit()
+        finally:
+            db.close()
+        batch = sync_tickets_from_external(adapter, binding_id=binding_id)
+        return {
+            "new": batch["new"],
+            "updated": batch["updated"],
+            "skipped": 0,
+            "errors": batch["errors"],
+            "fetched": batch["fetched"],
+            "days": days,
+            "overwrite": True,
+            "queued": bool(batch["deferred"] or batch["recent_pages"]),
+        }
     db: Session = SessionLocal()
     result = {
         "new": 0, "updated": 0, "skipped": 0, "errors": 0,

@@ -182,6 +182,30 @@ class SyncStatus(BaseModel):
     last_status: str = "idle"
     last_error: Optional[str] = None
     total_synced: int = 0
+    recent_since_at: Optional[datetime] = None
+    recent_cycle_started_at: Optional[datetime] = None
+    recent_page: int = 1
+    recent_workspace_index: int = 0
+    recent_completed_at: Optional[datetime] = None
+    history_page: int = 1
+    history_workspace_index: int = 0
+    history_complete: bool = False
+    history_processed: int = 0
+    conversations_processed: int = 0
+    run_started_at: Optional[datetime] = None
+    run_finished_at: Optional[datetime] = None
+    next_retry_at: Optional[datetime] = None
+    rate_limit_total: Optional[int] = None
+    rate_limit_remaining: Optional[int] = None
+    rate_limit_used: Optional[int] = None
+    last_batch_new: int = 0
+    last_batch_updated: int = 0
+    last_batch_errors: int = 0
+    local_ticket_count: int = 0
+    sync_interval_seconds: int = 60
+    recent_pages_per_sync: int = 2
+    history_pages_per_sync: int = 1
+    conversations_per_sync: int = 1
 
 
 class ExternalUser(BaseModel):
@@ -358,6 +382,11 @@ class Settings(BaseModel):
     FRESHSERVICE_WORKSPACE_ID: Optional[str] = None
     FRESHSERVICE_TICKET_INCLUDES: Optional[str] = None
     FRESHSERVICE_AGENT_STATE: Optional[str] = None
+    FRESHSERVICE_MIN_INTERVAL_SECONDS: Optional[str] = None
+    FRESHSERVICE_RATE_LIMIT_RESERVE: Optional[str] = None
+    FRESHSERVICE_RECENT_PAGES_PER_SYNC: Optional[str] = None
+    FRESHSERVICE_HISTORY_PAGES_PER_SYNC: Optional[str] = None
+    FRESHSERVICE_CONVERSATIONS_PER_SYNC: Optional[str] = None
     FRESHSERVICE_OAUTH_CLIENT_ID: Optional[str] = None
     FRESHSERVICE_OAUTH_CLIENT_SECRET: Optional[str] = None
     FRESHSERVICE_OAUTH_REDIRECT_URI: Optional[str] = None

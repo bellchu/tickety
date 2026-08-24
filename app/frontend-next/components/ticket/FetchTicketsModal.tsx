@@ -15,12 +15,11 @@ interface Props {
 export function FetchTicketsModal({ open, onClose }: Props) {
   const queryClient = useQueryClient();
   const [days, setDays] = useState(7);
-  const [overwrite, setOverwrite] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<FetchTicketsResult | null>(null);
 
   const mutation = useMutation({
-    mutationFn: () => api.fetchTickets(days, overwrite),
+    mutationFn: () => api.fetchTickets(days),
     onSuccess: (res) => {
       setResult(res.result);
       queryClient.invalidateQueries({ queryKey: ["tickets"] });
@@ -45,15 +44,15 @@ export function FetchTicketsModal({ open, onClose }: Props) {
       open={open}
       onOpenChange={(next) => { if (!next) close(); }}
       title="Fetch tickets from ITSM"
-      description="Import recently updated source records. Pagination and provider rate limits are handled automatically."
+      description="Prioritize recently updated source records without creating a provider traffic burst."
       dismissible={!mutation.isPending}
       footer={result ? <Button onClick={close}>Done</Button> : <><Button variant="secondary" onClick={close} disabled={mutation.isPending}>Cancel</Button><Button onClick={() => mutation.mutate()} disabled={days < 1} pending={mutation.isPending} pendingLabel="Fetching…" leadingIcon={<Download className="h-4 w-4" />}>Fetch last {days} day{days > 1 ? "s" : ""}</Button></>}
     >
         <div className="space-y-4">
           <p className="text-sm text-ink-500">
-            Pull tickets updated in the last N days from your ITSM provider.
-            Source status changes are always synchronized for existing tickets.
-            Pagination and rate limits are handled automatically.
+            Move tickets updated in the last N days to the front of the sync queue.
+            This request imports one bounded batch; remaining pages continue in
+            the background under the provider&apos;s reported rate limit.
           </p>
 
           <div>
@@ -86,22 +85,6 @@ export function FetchTicketsModal({ open, onClose }: Props) {
             </div>
           </div>
 
-          <label className="flex items-start gap-2.5 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={overwrite}
-              onChange={(e) => setOverwrite(e.target.checked)}
-              disabled={mutation.isPending}
-              className="mt-0.5 w-4 h-4 rounded border-linen-400 text-clay-500 focus:ring-clay-400/30"
-            />
-            <span className="text-sm text-ink-600">
-              <span className="font-medium">Overwrite existing tickets</span>
-              <span className="block text-xs text-ink-500 mt-0.5">
-                Refresh all provider fields; status changes sync either way.
-              </span>
-            </span>
-          </label>
-
           {error && (
             <Alert variant="danger" title="Fetch failed">{error}</Alert>
           )}
@@ -109,7 +92,7 @@ export function FetchTicketsModal({ open, onClose }: Props) {
           {result && (
             <div className="rounded-lg bg-linen-200 border border-linen-400 p-3">
               <div className="flex items-center gap-1.5 text-ink-600 text-sm font-medium mb-2">
-                <CheckCircle2 className="w-4 h-4" /> Fetch complete
+                <CheckCircle2 className="w-4 h-4" /> {result.queued ? "Priority sync started" : "Fetch complete"}
               </div>
               <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-sm">
                 <span className="text-ink-600">Fetched from source</span>

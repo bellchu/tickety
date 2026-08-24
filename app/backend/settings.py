@@ -109,6 +109,11 @@ _ALL_KEYS = [
     "FRESHSERVICE_WORKSPACE_ID",
     "FRESHSERVICE_TICKET_INCLUDES",
     "FRESHSERVICE_AGENT_STATE",
+    "FRESHSERVICE_MIN_INTERVAL_SECONDS",
+    "FRESHSERVICE_RATE_LIMIT_RESERVE",
+    "FRESHSERVICE_RECENT_PAGES_PER_SYNC",
+    "FRESHSERVICE_HISTORY_PAGES_PER_SYNC",
+    "FRESHSERVICE_CONVERSATIONS_PER_SYNC",
     "FRESHSERVICE_OAUTH_CLIENT_ID",
     "FRESHSERVICE_OAUTH_CLIENT_SECRET",
     "FRESHSERVICE_OAUTH_REDIRECT_URI",
@@ -243,6 +248,11 @@ _PRODUCTION_ENV_ONLY_KEYS = (
     "FRESHSERVICE_WORKSPACE_ID",
     "FRESHSERVICE_TICKET_INCLUDES",
     "FRESHSERVICE_AGENT_STATE",
+    "FRESHSERVICE_MIN_INTERVAL_SECONDS",
+    "FRESHSERVICE_RATE_LIMIT_RESERVE",
+    "FRESHSERVICE_RECENT_PAGES_PER_SYNC",
+    "FRESHSERVICE_HISTORY_PAGES_PER_SYNC",
+    "FRESHSERVICE_CONVERSATIONS_PER_SYNC",
     "FRESHSERVICE_OAUTH_CLIENT_ID",
     "FRESHSERVICE_OAUTH_REDIRECT_URI",
     "FRESHSERVICE_OAUTH_SCOPES",
@@ -640,6 +650,24 @@ def update_settings(payload: dict, *, actor_id: Optional[str] = None) -> dict:
                 from .integrations.freshservice import FreshserviceAdapter
 
                 new_val = FreshserviceAdapter._validate_oauth_scopes(new_val)
+            freshservice_numeric_bounds = {
+                "FRESHSERVICE_MIN_INTERVAL_SECONDS": (0.25, 60.0, float),
+                "FRESHSERVICE_RATE_LIMIT_RESERVE": (2, 10_000, int),
+                "FRESHSERVICE_RECENT_PAGES_PER_SYNC": (1, 10, int),
+                "FRESHSERVICE_HISTORY_PAGES_PER_SYNC": (0, 5, int),
+                "FRESHSERVICE_CONVERSATIONS_PER_SYNC": (0, 5, int),
+            }
+            if key in freshservice_numeric_bounds and new_val:
+                minimum, maximum, parser = freshservice_numeric_bounds[key]
+                try:
+                    parsed = parser(new_val)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"{key} must be numeric") from exc
+                if parsed < minimum or parsed > maximum:
+                    raise ValueError(
+                        f"{key} must be between {minimum} and {maximum}"
+                    )
+                new_val = str(parsed)
             updates[key] = new_val
 
         if updates:

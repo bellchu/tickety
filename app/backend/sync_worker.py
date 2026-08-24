@@ -10,6 +10,7 @@ from sqlalchemy import or_
 from .database import SessionLocal, SyncStateRecord, TicketRecord
 from .integrations.sync import (
     AUTOMATIC_AI_LOOKBACK_DAYS,
+    freshservice_sync_limits,
     queue_recent_automatic_ai,
     sync_tickets_from_external,
 )
@@ -434,6 +435,20 @@ def get_sync_status() -> dict:
             SyncStateRecord.binding_id == binding_id,
             SyncStateRecord.provider == current_provider
         ).first()
+        local_ticket_count = db.query(TicketRecord).filter(
+            TicketRecord.binding_id == binding_id,
+            TicketRecord.external_source == current_provider,
+        ).count()
+        limits = freshservice_sync_limits()
+        operational = {
+            "local_ticket_count": local_ticket_count,
+            "sync_interval_seconds": _bounded_interval(
+                "SYNC_INTERVAL_SECONDS", 60, 10, 86_400
+            ),
+            "recent_pages_per_sync": limits["recent_pages"],
+            "history_pages_per_sync": limits["history_pages"],
+            "conversations_per_sync": limits["conversations"],
+        }
         if not state:
             return {"provider": current_provider, "binding_id": binding_id,
                     "last_synced_at": None, "last_synced": 0,
@@ -443,7 +458,17 @@ def get_sync_status() -> dict:
                     "automatic_ai_enabled_at": None,
                     "automatic_ai_paused_at": None,
                     "automatic_ai_lookback_days": AUTOMATIC_AI_LOOKBACK_DAYS,
-                    "last_status": "idle", "last_error": None, "total_synced": 0}
+                    "last_status": "idle", "last_error": None, "total_synced": 0,
+                    "recent_since_at": None, "recent_cycle_started_at": None,
+                    "recent_page": 1, "recent_workspace_index": 0,
+                    "recent_completed_at": None, "history_page": 1,
+                    "history_workspace_index": 0, "history_complete": False,
+                    "history_processed": 0, "conversations_processed": 0,
+                    "run_started_at": None, "run_finished_at": None,
+                    "next_retry_at": None, "rate_limit_total": None,
+                    "rate_limit_remaining": None, "rate_limit_used": None,
+                    "last_batch_new": 0, "last_batch_updated": 0,
+                    "last_batch_errors": 0, **operational}
         return {
             "provider": current_provider,
             "binding_id": binding_id,
@@ -463,9 +488,43 @@ def get_sync_status() -> dict:
                 if state.automatic_ai_paused_at else None
             ),
             "automatic_ai_lookback_days": AUTOMATIC_AI_LOOKBACK_DAYS,
-            "last_status": state.last_status,
+            "last_status": state.last_status or "idle",
             "last_error": state.last_error,
-            "total_synced": state.total_synced,
+            "total_synced": state.total_synced or 0,
+            "recent_since_at": (
+                state.recent_since_at.isoformat() if state.recent_since_at else None
+            ),
+            "recent_cycle_started_at": (
+                state.recent_cycle_started_at.isoformat()
+                if state.recent_cycle_started_at else None
+            ),
+            "recent_page": state.recent_page or 1,
+            "recent_workspace_index": state.recent_workspace_index or 0,
+            "recent_completed_at": (
+                state.recent_completed_at.isoformat()
+                if state.recent_completed_at else None
+            ),
+            "history_page": state.history_page or 1,
+            "history_workspace_index": state.history_workspace_index or 0,
+            "history_complete": bool(state.history_complete),
+            "history_processed": state.history_processed or 0,
+            "conversations_processed": state.conversations_processed or 0,
+            "run_started_at": (
+                state.run_started_at.isoformat() if state.run_started_at else None
+            ),
+            "run_finished_at": (
+                state.run_finished_at.isoformat() if state.run_finished_at else None
+            ),
+            "next_retry_at": (
+                state.next_retry_at.isoformat() if state.next_retry_at else None
+            ),
+            "rate_limit_total": state.rate_limit_total,
+            "rate_limit_remaining": state.rate_limit_remaining,
+            "rate_limit_used": state.rate_limit_used,
+            "last_batch_new": state.last_batch_new or 0,
+            "last_batch_updated": state.last_batch_updated or 0,
+            "last_batch_errors": state.last_batch_errors or 0,
+            **operational,
         }
     finally:
         db.close()

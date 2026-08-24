@@ -154,10 +154,35 @@ export interface Recognition {
 
 export interface SyncStatus {
   provider: string;
+  binding_id: string | null;
   last_synced_at: string | null;
   last_status: string;
   last_error: string | null;
   total_synced: number;
+  recent_since_at: string | null;
+  recent_cycle_started_at: string | null;
+  recent_page: number;
+  recent_workspace_index: number;
+  recent_completed_at: string | null;
+  history_page: number;
+  history_workspace_index: number;
+  history_complete: boolean;
+  history_processed: number;
+  conversations_processed: number;
+  run_started_at: string | null;
+  run_finished_at: string | null;
+  next_retry_at: string | null;
+  rate_limit_total: number | null;
+  rate_limit_remaining: number | null;
+  rate_limit_used: number | null;
+  last_batch_new: number;
+  last_batch_updated: number;
+  last_batch_errors: number;
+  local_ticket_count: number;
+  sync_interval_seconds: number;
+  recent_pages_per_sync: number;
+  history_pages_per_sync: number;
+  conversations_per_sync: number;
 }
 
 export interface TriageResult {
@@ -227,6 +252,11 @@ export interface Settings {
   FRESHSERVICE_WORKSPACE_ID: string;
   FRESHSERVICE_TICKET_INCLUDES: string;
   FRESHSERVICE_AGENT_STATE: string;
+  FRESHSERVICE_MIN_INTERVAL_SECONDS: string;
+  FRESHSERVICE_RATE_LIMIT_RESERVE: string;
+  FRESHSERVICE_RECENT_PAGES_PER_SYNC: string;
+  FRESHSERVICE_HISTORY_PAGES_PER_SYNC: string;
+  FRESHSERVICE_CONVERSATIONS_PER_SYNC: string;
   FRESHSERVICE_OAUTH_CLIENT_ID: string;
   FRESHSERVICE_OAUTH_CLIENT_SECRET: string;
   FRESHSERVICE_OAUTH_REDIRECT_URI: string;
@@ -466,6 +496,7 @@ export interface FetchTicketsResult {
   fetched: number;
   days: number;
   overwrite: boolean;
+  queued?: boolean;
 }
 
 // ── External ITSM user directory ─────────────────────────────

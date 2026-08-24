@@ -5,8 +5,8 @@ config:
   appMode: production
   seedDemoData: "false"
   loginRequired: true
-  frontendUrl: https://support.example.com
-  corsAllowOrigins: https://support.example.com
+  frontendUrl: https://tickety.nexora.com
+  corsAllowOrigins: https://tickety.nexora.com
   cookieSecure: true
   cookieSameSite: lax
   # Entra example (see docs/sso.md); keep the real secret outside this file:
@@ -31,11 +31,11 @@ frontend:
 ingress:
   enabled: true
   className: nginx
-  host: support.example.com
+  host: tickety.nexora.com
   tls:
     - secretName: tickety-tls
       hosts:
-        - support.example.com
+        - tickety.nexora.com
 
 postgresql:
   enabled: true

@@ -229,12 +229,18 @@ For an isolated Freshservice proof of concept, see the [Freshservice trial POC g
 
 Production Tickety is a one-way Freshservice sidecar. The provider adapter exposes only reads, the capability manifest permanently marks provider mutations unsupported, and the Freshworks package contains no write template. Manual ticket creation, ticket field updates, bulk lifecycle changes, deletion, and requester-portal submission are demo-only; make authoritative changes in Freshservice. AI summaries, retrieval indexes, recommendations, and other derived artifacts remain local to Tickety.
 
-Both scheduled incremental sync and the manual **Fetch tickets** action reconcile
-every fetched ticket's Freshservice status into `external_status`,
-`workflow_status`, and the displayed `status`. This happens even when
-**Overwrite existing tickets** is disabled; that option controls whether the
-remaining provider fields replace their existing local projections. Resolved
-and closed source states are displayed as `Closed`, with provider resolution
+Freshservice synchronization is checkpointed and rate-aware. Every sweep reads
+current-day and newly updated tickets first, commits each page before requesting
+another, then admits a small ascending historical page and a small newest-first
+conversation batch. List discovery excludes costly embedded resources, honors
+the account-wide rate headers and `Retry-After`, and resumes every cursor after
+a restart. The manual **Fetch tickets** action reprioritizes a recent window
+without turning the HTTP request into an unbounded inventory import. Admins can
+inspect all lanes at **Settings → Ticket sync status**.
+
+Every fetched ticket's Freshservice status is reconciled into
+`external_status`, `workflow_status`, and the displayed `status`. Resolved and
+closed source states are displayed as `Closed`, with provider resolution
 timestamps retained when available.
 
 Identity is also one-way and non-federated: Tickety owns its own users, passwords, sessions, and roles. Freshservice agents and requesters are copied into a separate read-only external directory for ticket context only. Provider sync never creates or updates Tickety users, matches accounts by email/name, grants a Tickety role/session, assigns a local owner, or routes points to a local user.
@@ -353,6 +359,8 @@ through the same provider-wide Foundry budgets as realtime work.
 | `GET /intelligence/alerts` | Escalation-prone tickets, SLA at-risk/breached |
 | `GET /intelligence/systemic` | Systemic issue clusters |
 | `GET /leaderboard` | Agent leaderboard (points, tier, rank) |
+| `GET /admin/sync/status` | Admin: recent, historical, conversation, and Freshservice rate-budget checkpoints |
+| `POST /admin/sync/trigger` | Admin: run one bounded provider sync sweep |
 | `POST /auth/login` | Session login (cookie) |
 | `POST /auth/logout` | Clear session |
 | `GET /auth/sso/config` | Check if SSO is enabled |
@@ -366,7 +374,7 @@ through the same provider-wide Foundry budgets as realtime work.
 | Section | What you configure |
 |---|---|
 | LLM | Microsoft Foundry or Custom AI API, default model, endpoint credentials, automatic model fetching |
-| Freshservice sidecar | Read-only Freshservice domain, workspace, ticket includes, agent filter, sync interval, and credentials |
+| Freshservice sidecar | Read-only Freshservice credentials, conservative per-sweep limits, API budget reserve, and ticket sync status |
 | SLA targets | Resolution-time targets per priority (P1/P2/P3 hours) |
 | Agents | Create and manage accounts, assign admin/supervisor/agent roles |
 | Categories | Ticket classification categories with colour coding |

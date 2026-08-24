@@ -4694,6 +4694,48 @@ async def sync_status(
         last_status=s.get("last_status", "idle"),
         last_error="sync_failed" if s.get("last_error") else None,
         total_synced=s.get("total_synced", 0),
+        recent_since_at=(
+            datetime.fromisoformat(s["recent_since_at"])
+            if s.get("recent_since_at") else None
+        ),
+        recent_cycle_started_at=(
+            datetime.fromisoformat(s["recent_cycle_started_at"])
+            if s.get("recent_cycle_started_at") else None
+        ),
+        recent_page=s.get("recent_page", 1),
+        recent_workspace_index=s.get("recent_workspace_index", 0),
+        recent_completed_at=(
+            datetime.fromisoformat(s["recent_completed_at"])
+            if s.get("recent_completed_at") else None
+        ),
+        history_page=s.get("history_page", 1),
+        history_workspace_index=s.get("history_workspace_index", 0),
+        history_complete=s.get("history_complete", False),
+        history_processed=s.get("history_processed", 0),
+        conversations_processed=s.get("conversations_processed", 0),
+        run_started_at=(
+            datetime.fromisoformat(s["run_started_at"])
+            if s.get("run_started_at") else None
+        ),
+        run_finished_at=(
+            datetime.fromisoformat(s["run_finished_at"])
+            if s.get("run_finished_at") else None
+        ),
+        next_retry_at=(
+            datetime.fromisoformat(s["next_retry_at"])
+            if s.get("next_retry_at") else None
+        ),
+        rate_limit_total=s.get("rate_limit_total"),
+        rate_limit_remaining=s.get("rate_limit_remaining"),
+        rate_limit_used=s.get("rate_limit_used"),
+        last_batch_new=s.get("last_batch_new", 0),
+        last_batch_updated=s.get("last_batch_updated", 0),
+        last_batch_errors=s.get("last_batch_errors", 0),
+        local_ticket_count=s.get("local_ticket_count", 0),
+        sync_interval_seconds=s.get("sync_interval_seconds", 60),
+        recent_pages_per_sync=s.get("recent_pages_per_sync", 2),
+        history_pages_per_sync=s.get("history_pages_per_sync", 1),
+        conversations_per_sync=s.get("conversations_per_sync", 1),
     )
 
 

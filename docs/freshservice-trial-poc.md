@@ -10,7 +10,7 @@ Run the POC as a dedicated Tickety deployment with:
 APP_MODE=production
 TICKETY_DEPLOYMENT_CLASS=poc
 FRESHSERVICE_API_KEY=replace-with-a-trial-only-key
-FRESHSERVICE_OAUTH_SCOPES="freshservice.tickets.view freshservice.agents.manage freshservice.requesters.view"
+FRESHSERVICE_OAUTH_SCOPES="freshservice.tickets.view freshservice.tickets.conversations.view freshservice.agents.manage freshservice.requesters.view"
 ```
 
 The POC must use a separate database, cache, secrets, hostname, and encryption keys. Do not reuse a production Freshservice API key or Tickety data store. The credential is referenced as `env://freshservice`; it is never accepted or returned by the binding API. Use a dedicated Freshservice integration agent whose role can view the required records but cannot create, edit, reply, add notes, attach files, or delete. Freshservice uses the `freshservice.agents.manage` OAuth scope for the agent-list read endpoint and `freshservice.requesters.view` for requester/contact profiles, so the provider role is the required second layer of least privilege.

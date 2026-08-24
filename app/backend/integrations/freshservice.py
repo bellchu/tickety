@@ -6,6 +6,7 @@ import hmac
 import hashlib
 import base64
 import urllib.parse
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, List, Optional
 
@@ -38,7 +39,10 @@ DEFAULT_FRESHSERVICE_OAUTH_SCOPES = (
 ALLOWED_FRESHSERVICE_OAUTH_SCOPES = frozenset(
     DEFAULT_FRESHSERVICE_OAUTH_SCOPES.split()
 )
-DEFAULT_TICKET_LIST_INCLUDES = "stats,requester"
+# List embeds cost additional account-wide API credits. Ticket discovery stays
+# lightweight by default; conversation detail is hydrated later in explicitly
+# bounded background work and requester profiles use the separate directory.
+DEFAULT_TICKET_LIST_INCLUDES = ""
 SUPPORTED_TICKET_LIST_INCLUDES = {
     "stats",
     "requester",
@@ -53,6 +57,23 @@ PLACEHOLDER_FRESHSERVICE_DOMAINS = {
     "yourdomain.example.com",
     "acme.freshservice.com",
 }
+
+
+class FreshserviceRateLimited(RuntimeError):
+    """A non-fatal provider pause carrying the authoritative retry delay."""
+
+    def __init__(self, retry_after: float):
+        self.retry_after = max(1.0, retry_after)
+        super().__init__("Freshservice rate limit window is exhausted")
+
+
+@dataclass(frozen=True)
+class FreshserviceTicketPage:
+    tickets: List[ExternalTicket]
+    page: int
+    workspace_index: int
+    workspace_count: int
+    has_next_page: bool
 
 
 class FreshserviceAdapter(BaseITSMAdapter):
@@ -86,6 +107,22 @@ class FreshserviceAdapter(BaseITSMAdapter):
             "FRESHSERVICE_TICKET_INCLUDES", DEFAULT_TICKET_LIST_INCLUDES
         )
         self.agent_state = configured("FRESHSERVICE_AGENT_STATE").strip().lower()
+        try:
+            self.min_interval_s = max(
+                0.25, float(configured("FRESHSERVICE_MIN_INTERVAL_SECONDS", "1.6"))
+            )
+        except (TypeError, ValueError):
+            self.min_interval_s = 1.6
+        try:
+            self.rate_limit_reserve = max(
+                2, int(configured("FRESHSERVICE_RATE_LIMIT_RESERVE", "10"))
+            )
+        except (TypeError, ValueError):
+            self.rate_limit_reserve = 10
+        self._rate_limit_total: Optional[int] = None
+        self._rate_limit_remaining: Optional[int] = None
+        self._rate_limit_used: Optional[int] = None
+        self._last_retry_after: Optional[float] = None
 
         # OAuth 2.0
         self.oauth_client_id = configured("FRESHSERVICE_OAUTH_CLIENT_ID")
@@ -355,39 +392,72 @@ class FreshserviceAdapter(BaseITSMAdapter):
     # with a minimum interval, (2) honour the Retry-After header on 429,
     # and (3) back off when X-RateLimit-Remaining gets low. See
     # https://api.freshservice.com/#intro (Rate limit / Pagination).
-    _MIN_INTERVAL_S = float(os.getenv("FRESHSERVICE_MIN_INTERVAL_S", "1.6"))
     _MAX_PAGES = int(os.getenv("FRESHSERVICE_MAX_PAGES", "500"))
 
+    @staticmethod
+    def _header_int(response: httpx.Response, name: str) -> Optional[int]:
+        value = response.headers.get(name)
+        if value is None:
+            return None
+        try:
+            # Freshservice currently serializes these numeric headers as both
+            # integers ("70") and decimal strings ("70.0") across accounts.
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
+
+    def _capture_rate_limit(self, response: httpx.Response) -> None:
+        self._rate_limit_total = self._header_int(response, "X-RateLimit-Total")
+        self._rate_limit_remaining = self._header_int(
+            response, "X-RateLimit-Remaining"
+        )
+        self._rate_limit_used = self._header_int(
+            response, "X-RateLimit-Used-CurrentRequest"
+        )
+        retry_after = response.headers.get("Retry-After")
+        if retry_after is None:
+            self._last_retry_after = None
+        else:
+            try:
+                self._last_retry_after = max(1.0, float(retry_after))
+            except (TypeError, ValueError):
+                self._last_retry_after = 60.0
+
+    def rate_limit_snapshot(self) -> dict[str, Optional[int]]:
+        return {
+            "total": self._rate_limit_total,
+            "remaining": self._rate_limit_remaining,
+            "used": self._rate_limit_used,
+        }
+
+    def should_pause_requests(self) -> bool:
+        return (
+            self._rate_limit_remaining is not None
+            and self._rate_limit_remaining <= self.rate_limit_reserve
+        )
+
     async def _rate_limited_get(self, client: httpx.AsyncClient, url: str, params: dict) -> httpx.Response:
-        """GET with rate-limit pacing + 429 retry. Returns the Response."""
-        # Pace: never fire two list requests closer than _MIN_INTERVAL_S.
+        """GET with pacing and a non-blocking, durable 429 handoff."""
+        # Pace consecutive provider requests even when they use different
+        # endpoint-specific sub-limits.
         elapsed = time.monotonic() - getattr(self, "_last_get_ts", 0.0)
-        if elapsed < self._MIN_INTERVAL_S:
-            await asyncio.sleep(self._MIN_INTERVAL_S - elapsed)
+        if elapsed < self.min_interval_s:
+            await asyncio.sleep(self.min_interval_s - elapsed)
 
         resp = await client.get(url, auth=self._auth(), headers=self._headers(), params=params)
         self._last_get_ts = time.monotonic()
-
-        # Honor remaining-budget header: if we're close to the limit,
-        # wait out the rest of the window so the next call doesn't 429.
-        remaining = resp.headers.get("X-Ratelimit-Remaining")
-        if remaining is not None:
-            try:
-                if int(remaining) <= 2:
-                    await asyncio.sleep(2.0)
-            except ValueError:
-                pass
-
-        # 429 -> respect Retry-After (seconds) then retry once.
-        if resp.status_code == 429:
-            retry_after = float(resp.headers.get("Retry-After", "5") or "5")
-            print(f"[External] rate limited; sleeping {retry_after}s")
-            await asyncio.sleep(retry_after + 0.5)
-            self._last_get_ts = time.monotonic()
-            resp = await client.get(url, auth=self._auth(), headers=self._headers(), params=params)
         if resp.status_code == 401 and await self._refresh_oauth_access_token():
+            elapsed = time.monotonic() - getattr(self, "_last_get_ts", 0.0)
+            if elapsed < self.min_interval_s:
+                await asyncio.sleep(self.min_interval_s - elapsed)
             self._last_get_ts = time.monotonic()
             resp = await client.get(url, auth=self._auth(), headers=self._headers(), params=params)
+        self._capture_rate_limit(resp)
+        # Do not occupy the worker for a provider window that can be many
+        # minutes long. The orchestrator persists Retry-After and makes no more
+        # requests until it expires.
+        if resp.status_code == 429:
+            raise FreshserviceRateLimited(self._last_retry_after or 60.0)
         return resp
 
     @staticmethod
@@ -410,6 +480,71 @@ class FreshserviceAdapter(BaseITSMAdapter):
 
     async def fetch_updated_tickets(self, since: datetime) -> List[ExternalTicket]:
         return await self.fetch_new_tickets(since=since)
+
+    async def fetch_ticket_page(
+        self,
+        *,
+        since: Optional[datetime],
+        page: int,
+        workspace_index: int = 0,
+        order_type: str = "asc",
+        include_resources: bool = False,
+    ) -> FreshserviceTicketPage:
+        """Fetch one lightweight, resumable ticket page.
+
+        The sync orchestrator persists this page before requesting another.
+        Ascending order keeps historical page boundaries stable as new tickets
+        arrive at the end of the provider inventory.
+        """
+        self._ensure_provider_configured()
+        page = max(1, int(page))
+        if order_type not in {"asc", "desc"}:
+            raise ValueError("Freshservice ticket order must be asc or desc")
+        workspace_scopes: tuple[Optional[str], ...] = (
+            tuple(self.workspace_ids) if self.workspace_ids else (None,)
+        )
+        if workspace_index < 0 or workspace_index >= len(workspace_scopes):
+            raise ValueError("Freshservice workspace cursor is out of range")
+        params: dict[str, Any] = {
+            "per_page": 100,
+            "page": page,
+            "order_type": order_type,
+        }
+        if since:
+            params["updated_since"] = self._format_datetime(since)
+        workspace_id = workspace_scopes[workspace_index]
+        if workspace_id is not None:
+            params["workspace_id"] = workspace_id
+        if include_resources:
+            includes = self._configured_ticket_includes()
+            if includes:
+                params["include"] = includes
+
+        url = f"{self.base_url}/api/v2/tickets"
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await self._rate_limited_get(client, url, params)
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict):
+            raise RuntimeError("Freshservice ticket response must be an object")
+        raw_tickets = data.get("tickets", [])
+        if not isinstance(raw_tickets, list):
+            raise RuntimeError("Freshservice tickets must be a list")
+        tickets = self._parse_ticket_batch(raw_tickets)
+        if len(tickets) != len(raw_tickets):
+            raise RuntimeError("Freshservice ticket page contained malformed records")
+        ids = [ticket.external_id for ticket in tickets]
+        if len(ids) != len(set(ids)):
+            raise RuntimeError("Freshservice ticket page returned duplicate IDs")
+        return FreshserviceTicketPage(
+            tickets=tickets,
+            page=page,
+            workspace_index=workspace_index,
+            workspace_count=len(workspace_scopes),
+            has_next_page=bool(
+                self._parse_link_next(response.headers.get("link"), self.base_url)
+            ),
+        )
 
     async def fetch_tickets_since(self, since: Optional[datetime], max_pages: Optional[int] = None) -> List[ExternalTicket]:
         """Fetch ALL tickets updated since `since`, walking every page while

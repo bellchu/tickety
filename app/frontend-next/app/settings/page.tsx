@@ -46,7 +46,7 @@ const SSO_PORTAL_KEYS = new Set([
 ]);
 
 type FreshserviceAuthMode = "api" | "oauth";
-const FRESHSERVICE_DEFAULT_SCOPES = "freshservice.tickets.view freshservice.agents.manage freshservice.requesters.view";
+const FRESHSERVICE_DEFAULT_SCOPES = "freshservice.tickets.view freshservice.tickets.conversations.view freshservice.agents.manage freshservice.requesters.view";
 
 function normalizeDomain(value: string) {
   const trimmed = value.trim().replace(/\/+$/, "");
@@ -478,6 +478,7 @@ export default function SettingsPage() {
           </Field>
 
           {itProvider === "freshservice" && (
+            <>
             <ConnectionPanel
               title="Connect Freshservice"
               description="Use a Freshservice domain plus one authentication method. Only ticket and agent reads are implemented."
@@ -551,9 +552,34 @@ export default function SettingsPage() {
                   <Field label="Sync Interval" ready={Boolean(form.SYNC_INTERVAL_SECONDS?.trim())}>
                     <input type="number" min={10} value={form.SYNC_INTERVAL_SECONDS || ""} onChange={(e) => handleChange("SYNC_INTERVAL_SECONDS", e.target.value)} placeholder="60" className="input-base" />
                   </Field>
+                  <Field label="Minimum request spacing" ready={Boolean(form.FRESHSERVICE_MIN_INTERVAL_SECONDS?.trim())}>
+                    <input type="number" min={0.25} step={0.05} value={form.FRESHSERVICE_MIN_INTERVAL_SECONDS || ""} onChange={(e) => handleChange("FRESHSERVICE_MIN_INTERVAL_SECONDS", e.target.value)} placeholder="1.6 seconds" className="input-base" />
+                  </Field>
+                  <Field label="API budget reserve" ready={Boolean(form.FRESHSERVICE_RATE_LIMIT_RESERVE?.trim())}>
+                    <input type="number" min={2} value={form.FRESHSERVICE_RATE_LIMIT_RESERVE || ""} onChange={(e) => handleChange("FRESHSERVICE_RATE_LIMIT_RESERVE", e.target.value)} placeholder="10 credits" className="input-base" />
+                  </Field>
+                  <Field label="Current pages per sync" ready={Boolean(form.FRESHSERVICE_RECENT_PAGES_PER_SYNC?.trim())}>
+                    <input type="number" min={1} max={10} value={form.FRESHSERVICE_RECENT_PAGES_PER_SYNC || ""} onChange={(e) => handleChange("FRESHSERVICE_RECENT_PAGES_PER_SYNC", e.target.value)} placeholder="2" className="input-base" />
+                  </Field>
+                  <Field label="Historical pages per sync" ready={Boolean(form.FRESHSERVICE_HISTORY_PAGES_PER_SYNC?.trim())}>
+                    <input type="number" min={0} max={5} value={form.FRESHSERVICE_HISTORY_PAGES_PER_SYNC || ""} onChange={(e) => handleChange("FRESHSERVICE_HISTORY_PAGES_PER_SYNC", e.target.value)} placeholder="1" className="input-base" />
+                  </Field>
+                  <Field label="Conversation threads per sync" ready={Boolean(form.FRESHSERVICE_CONVERSATIONS_PER_SYNC?.trim())}>
+                    <input type="number" min={0} max={5} value={form.FRESHSERVICE_CONVERSATIONS_PER_SYNC || ""} onChange={(e) => handleChange("FRESHSERVICE_CONVERSATIONS_PER_SYNC", e.target.value)} placeholder="1" className="input-base" />
+                  </Field>
                 </div>
+                <p className="mt-3 text-xs leading-5 text-ink-400">Discovery excludes embedded resources to conserve Freshservice API credits. Current tickets always run before the ascending historical queue.</p>
               </AdvancedPanel>
             </ConnectionPanel>
+
+            <Link href="/settings/sync" className="group flex items-center justify-between gap-4 rounded-xl border border-linen-400 bg-linen-100 p-4 transition-colors hover:border-clay-400 hover:bg-clay-50">
+              <span>
+                <span className="flex items-center gap-2 text-sm font-semibold text-ink-700"><Activity className="h-4 w-4 text-semantic-primary" /> Ticket sync status</span>
+                <span className="mt-1 block text-xs leading-5 text-ink-500">Inspect current, historical, conversation, and provider rate-limit queues.</span>
+              </span>
+              <span className="shrink-0 text-xs font-semibold text-clay-600 group-hover:text-clay-700">Open status →</span>
+            </Link>
+            </>
           )}
 
         </SettingsSection>

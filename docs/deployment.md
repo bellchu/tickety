@@ -41,8 +41,8 @@ POSTGRES_USER=tickety
 POSTGRES_PASSWORD=<unique-password>
 POSTGRES_DB=tickety
 DATABASE_URL=postgresql+psycopg2://tickety:<url-encoded-password>@postgres:5432/tickety
-FRONTEND_URL=https://support.example.com
-CORS_ALLOW_ORIGINS=https://support.example.com
+FRONTEND_URL=https://tickety.nexora.com
+CORS_ALLOW_ORIGINS=https://tickety.nexora.com
 COOKIE_SECURE=true
 COOKIE_SAMESITE=lax
 ```
@@ -136,17 +136,17 @@ file, replace its example origin and cluster settings, and upgrade with
 config:
   appMode: production
   loginRequired: true
-  frontendUrl: https://support.example.com
-  corsAllowOrigins: https://support.example.com
+  frontendUrl: https://tickety.nexora.com
+  corsAllowOrigins: https://tickety.nexora.com
   cookieSecure: true
   cookieSameSite: lax
 
 ingress:
   enabled: true
   className: nginx
-  host: support.example.com
+  host: tickety.nexora.com
   tls:
-    - hosts: [support.example.com]
+    - hosts: [tickety.nexora.com]
       secretName: tickety-tls
 
 postgresql:

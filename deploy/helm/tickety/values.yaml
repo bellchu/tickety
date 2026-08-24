@@ -50,7 +50,7 @@ ingress:
   enabled: false
   className: ""
   annotations: {}
-  host: tickety.example.com
+  host: tickety.nexora.com
   path: /
   tls: []
 
