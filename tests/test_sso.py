@@ -30,6 +30,7 @@ SSO_ENV_KEYS = (
     "COOKIE_SECURE",
     "FRONTEND_URL",
     "SSO_ALLOWED_DOMAINS",
+    "SSO_ALLOWED_GROUP_IDS",
     "SSO_AUTO_PROVISION",
     "SSO_CLIENT_ID",
     "SSO_CLIENT_SECRET",
@@ -102,6 +103,22 @@ class SsoConfigurationTests(unittest.TestCase):
             sso_service.SsoConfigurationError,
             "Directory .* GUID",
         ):
+            sso_service.resolve_sso_config()
+
+    def test_entra_group_allowlist_requires_and_normalizes_object_id_guids(self):
+        os.environ.update({
+            "SSO_PROVIDER": "entra",
+            "SSO_ENTRA_TENANT_ID": TENANT_ID,
+            "SSO_ALLOWED_GROUP_IDS": "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE",
+        })
+
+        self.assertEqual(
+            sso_service.allowed_group_ids("entra"),
+            {"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"},
+        )
+        sso_service.resolve_sso_config()
+        os.environ["SSO_ALLOWED_GROUP_IDS"] = "IT agents"
+        with self.assertRaisesRegex(sso_service.SsoConfigurationError, "object ID"):
             sso_service.resolve_sso_config()
 
     def test_okta_preset_defaults_to_org_and_supports_custom_issuer(self):
@@ -390,6 +407,69 @@ class SsoEndpointTests(unittest.TestCase):
             self.assertEqual(db.query(SessionRecord).count(), 0)
             self.assertEqual(db.query(SsoIdentityRecord).count(), 0)
 
+    def test_group_allowlist_is_fail_closed_before_account_linking(self):
+        allowed_group = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        os.environ["SSO_ALLOWED_GROUP_IDS"] = allowed_group
+        base = dict(
+            issuer=str(self.metadata["issuer"]),
+            subject="group-subject",
+            email="group-user@example.com",
+            name="Group User",
+        )
+        self.assertIsNone(main._sso_group_access(
+            sso_service.OidcIdentity(**base, groups=frozenset({allowed_group})),
+            "entra",
+        ))
+        self.assertEqual(main._sso_group_access(
+            sso_service.OidcIdentity(**base, groups=frozenset()),
+            "entra",
+        ), "group_not_allowed")
+        self.assertEqual(main._sso_group_access(
+            sso_service.OidcIdentity(**base, groups_overage=True),
+            "entra",
+        ), "group_claim_overage")
+
+    def test_callback_rejects_identity_outside_allowed_group(self):
+        os.environ["SSO_ALLOWED_GROUP_IDS"] = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        os.environ["SSO_AUTO_PROVISION"] = "true"
+        _, _, state = self._begin_login("/tickets")
+        identity = sso_service.OidcIdentity(
+            issuer=str(self.metadata["issuer"]),
+            subject="wrong-group-subject",
+            email="wrong-group@example.com",
+            name="Wrong Group",
+            groups=frozenset({"bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"}),
+        )
+        with (
+            patch.object(
+                sso_service,
+                "fetch_oidc_metadata",
+                new=AsyncMock(return_value=self.metadata),
+            ),
+            patch.object(
+                sso_service,
+                "exchange_authorization_code",
+                new=AsyncMock(return_value={"id_token": "signed-token"}),
+            ),
+            patch.object(
+                sso_service,
+                "resolve_oidc_identity",
+                new=AsyncMock(return_value=identity),
+            ),
+        ):
+            response = self.client.get(
+                f"/auth/sso/callback?{urllib.parse.urlencode({'code': 'code-group', 'state': state})}",
+                headers=self._callback_headers(state),
+                follow_redirects=False,
+            )
+
+        self.assertIn("sso_error=group_not_allowed", response.headers["location"])
+        self.assertIn("next=%2Ftickets", response.headers["location"])
+        with self.session_factory() as db:
+            self.assertEqual(db.query(SessionRecord).count(), 0)
+            self.assertEqual(db.query(UserRecord).count(), 0)
+            self.assertEqual(db.query(SsoIdentityRecord).count(), 0)
+
     def test_auto_provisioned_identity_gets_only_agent_role(self):
         os.environ["SSO_AUTO_PROVISION"] = "true"
         identity = sso_service.OidcIdentity(
@@ -452,6 +532,44 @@ class SsoEndpointTests(unittest.TestCase):
         exchange.assert_not_awaited()
         with self.session_factory() as db:
             self.assertEqual(db.query(SsoTransactionRecord).count(), 0)
+
+
+class OidcIdentityGroupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_entra_groups_are_normalized_from_verified_claims(self):
+        config = sso_service.SsoRuntimeConfig(
+            provider_type="entra",
+            provider_name="Microsoft Entra ID",
+            client_id="client-id",
+            client_secret="client-secret",
+            discovery_url="https://issuer.example.com/.well-known/openid-configuration",
+            redirect_uri="http://testserver/api/auth/sso/callback",
+            expected_issuer="https://issuer.example.com",
+        )
+        claims = {
+            "iss": "https://issuer.example.com",
+            "sub": "subject",
+            "email": "agent@example.com",
+            "name": "Agent",
+            "groups": ["AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE", "not-a-guid"],
+            "_claim_names": {"groups": "src1"},
+        }
+        with patch.object(
+            sso_service,
+            "validate_id_token",
+            new=AsyncMock(return_value=claims),
+        ):
+            identity = await sso_service.resolve_oidc_identity(
+                {"id_token": "verified-token"},
+                {"issuer": claims["iss"]},
+                config,
+                nonce="nonce",
+            )
+
+        self.assertEqual(
+            identity.groups,
+            {"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"},
+        )
+        self.assertTrue(identity.groups_overage)
 
 
 class IdTokenValidationTests(unittest.TestCase):

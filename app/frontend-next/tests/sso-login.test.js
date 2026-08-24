@@ -37,6 +37,8 @@ test("SSO login URL carries the intended destination", () => {
 
 test("SSO errors are stable and user-facing", () => {
   assert.match(ssoErrorMessage("?sso_error=account_not_provisioned"), /not been granted/);
+  assert.match(ssoErrorMessage("?sso_error=group_not_allowed"), /not a member/);
+  assert.match(ssoErrorMessage("?sso_error=group_claim_overage"), /could not be verified/);
   assert.match(ssoErrorMessage("?sso_error=unknown"), /could not be completed/);
   assert.equal(ssoErrorMessage(""), "");
 });

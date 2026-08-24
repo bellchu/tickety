@@ -81,6 +81,28 @@ class OidcIdentity:
     subject: str
     email: str
     name: str
+    groups: frozenset[str] = frozenset()
+    groups_overage: bool = False
+
+
+def allowed_group_ids(provider_type: str | None = None) -> frozenset[str]:
+    """Return deployment-owned group identifiers used as a login allowlist."""
+    values = {
+        value.strip()
+        for value in (os.getenv("SSO_ALLOWED_GROUP_IDS") or "").split(",")
+        if value.strip()
+    }
+    if (provider_type or _provider_type()) == "entra":
+        normalized: set[str] = set()
+        for value in values:
+            try:
+                normalized.add(str(uuid.UUID(value)))
+            except ValueError as exc:
+                raise SsoConfigurationError(
+                    "SSO_ALLOWED_GROUP_IDS must contain Entra group object ID GUIDs"
+                ) from exc
+        return frozenset(normalized)
+    return frozenset(values)
 
 
 def _provider_type(raw: str | None = None) -> str:
@@ -202,6 +224,7 @@ def resolve_sso_config() -> SsoRuntimeConfig:
     raw_provider = (os.getenv("SSO_PROVIDER") or "").strip()
     provider_type = _provider_type(raw_provider)
     provider_name = _provider_name(provider_type, raw_provider)
+    allowed_group_ids(provider_type)
     client_id = (os.getenv("SSO_CLIENT_ID") or "").strip()
     client_secret = (os.getenv("SSO_CLIENT_SECRET") or "").strip()
     if not client_id:
@@ -598,9 +621,34 @@ async def resolve_oidc_identity(
         or claims.get("preferred_username")
         or email
     ).strip()[:255]
+    groups: set[str] = set()
+    for source in (claims, userinfo):
+        raw_groups = source.get("groups")
+        if isinstance(raw_groups, list):
+            groups.update(str(value).strip() for value in raw_groups if str(value).strip())
+    if config.provider_type == "entra":
+        groups = {
+            str(uuid.UUID(value))
+            for value in groups
+            if _is_uuid(value)
+        }
+    claim_names = claims.get("_claim_names")
+    groups_overage = (
+        isinstance(claim_names, dict) and "groups" in claim_names
+    ) or bool(claims.get("hasgroups"))
     return OidcIdentity(
         issuer=str(claims.get("iss") or "").strip(),
         subject=subject,
         email=email,
         name=name or email,
+        groups=frozenset(groups),
+        groups_overage=groups_overage,
     )
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(value)
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False

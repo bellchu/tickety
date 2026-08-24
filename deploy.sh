@@ -65,9 +65,16 @@ deploy_docker() {
   fi
 
   docker compose -f "$ROOT_DIR/docker-compose.yml" config --quiet
-  docker compose -f "$ROOT_DIR/docker-compose.yml" up --detach --build --wait
+  local build_sha
+  local build_time
+  build_sha=$(source_sha)
+  build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  docker compose -f "$ROOT_DIR/docker-compose.yml" build \
+    --build-arg "BUILD_SHA=$build_sha" \
+    --build-arg "BUILD_TIME=$build_time"
+  docker compose -f "$ROOT_DIR/docker-compose.yml" up --detach --no-build --wait
   FRONTEND_BINDING=$(docker compose -f "$ROOT_DIR/docker-compose.yml" port frontend 3000)
-  echo "Tickety is ready on $FRONTEND_BINDING"
+  echo "Tickety is ready on $FRONTEND_BINDING (build $build_sha)"
 }
 
 MODE=${1:-}

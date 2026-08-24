@@ -87,6 +87,8 @@ config:
     oktaAuthServerId: org
     discoveryUrl: ""
     allowedDomains: ""
+    # Comma-separated immutable provider group IDs. For Entra, use group Object IDs.
+    allowedGroupIds: ""
     autoProvision: false
   ragV2:
     scopeKey: default

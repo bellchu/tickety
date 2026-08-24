@@ -4,6 +4,7 @@ import sys
 import threading
 import ipaddress
 import socket
+import uuid
 from urllib.parse import urlparse
 from typing import Optional
 
@@ -152,6 +153,7 @@ _ALL_KEYS = [
     "SSO_DISCOVERY_URL",
     "SSO_REDIRECT_URI",
     "SSO_ALLOWED_DOMAINS",
+    "SSO_ALLOWED_GROUP_IDS",
     "SSO_AUTO_PROVISION",
 ]
 
@@ -259,6 +261,7 @@ _PRODUCTION_ENV_ONLY_KEYS = (
     "SSO_DISCOVERY_URL",
     "SSO_REDIRECT_URI",
     "SSO_ALLOWED_DOMAINS",
+    "SSO_ALLOWED_GROUP_IDS",
     "SSO_AUTO_PROVISION",
 }
 
@@ -275,6 +278,12 @@ _PRODUCTION_INFRA_ONLY_KEYS = {
     "JIRA_API_TOKEN",
     "JIRA_PROJECT_KEY",
     "JIRA_ISSUE_TYPE",
+    "SSO_REDIRECT_URI",
+}
+_PRODUCTION_ADMIN_PORTAL_KEYS = (
+    _PRODUCTION_ENV_ONLY_KEYS - _PRODUCTION_INFRA_ONLY_KEYS - _READONLY_KEYS
+)
+_PRODUCTION_SSO_PORTAL_KEYS = {
     "SSO_ENABLED",
     "SSO_PROVIDER",
     "SSO_ENTRA_TENANT_ID",
@@ -283,13 +292,10 @@ _PRODUCTION_INFRA_ONLY_KEYS = {
     "SSO_CLIENT_ID",
     "SSO_CLIENT_SECRET",
     "SSO_DISCOVERY_URL",
-    "SSO_REDIRECT_URI",
     "SSO_ALLOWED_DOMAINS",
+    "SSO_ALLOWED_GROUP_IDS",
     "SSO_AUTO_PROVISION",
 }
-_PRODUCTION_ADMIN_PORTAL_KEYS = (
-    _PRODUCTION_ENV_ONLY_KEYS - _PRODUCTION_INFRA_ONLY_KEYS - _READONLY_KEYS
-)
 _ADMIN_PORTAL_APPROVAL_PREFIX = "__ADMIN_PORTAL_APPROVED__:"
 
 _lock = threading.Lock()
@@ -486,17 +492,23 @@ def load_settings_into_env() -> bool:
         overrides = _read_db_overrides()
         production = is_production_mode()
         portal_enabled = production and admin_settings_portal_enabled()
-        approved_keys = _read_portal_approved_keys() if portal_enabled else set()
+        # SSO is intentionally admin-manageable even when the broader global
+        # settings portal is disabled, so its signed approval markers must be
+        # honored independently at process startup.
+        approved_keys = _read_portal_approved_keys() if production else set()
         changed = False
         for key, value in overrides.items():
             if key not in _ALL_KEYS or key in _READONLY_KEYS:
                 continue
-            if production and key in _PRODUCTION_ENV_ONLY_KEYS and not (
-                portal_enabled
-                and key in _PRODUCTION_ADMIN_PORTAL_KEYS
-                and key in approved_keys
-            ):
-                continue
+            if production and key in _PRODUCTION_ENV_ONLY_KEYS:
+                approved_sso = key in _PRODUCTION_SSO_PORTAL_KEYS and key in approved_keys
+                approved_operational = (
+                    portal_enabled
+                    and key in _PRODUCTION_ADMIN_PORTAL_KEYS
+                    and key in approved_keys
+                )
+                if not (approved_sso or approved_operational):
+                    continue
             if value is not None:
                 if key in _LLM_BASE_URL_KEYS and value:
                     value = _validate_llm_base_url(value)
@@ -579,16 +591,33 @@ def update_settings(payload: dict, *, actor_id: Optional[str] = None) -> dict:
                 raise ValueError(
                     f"Changing {base_key} requires re-entering {credential_key}"
                 )
+        proposed_provider = str(payload.get("SSO_PROVIDER") or os.getenv("SSO_PROVIDER") or "").strip()
+        proposed_client_id = str(payload.get("SSO_CLIENT_ID") or os.getenv("SSO_CLIENT_ID") or "").strip()
+        provider_changed = "SSO_PROVIDER" in payload and proposed_provider != str(os.getenv("SSO_PROVIDER") or "").strip()
+        client_changed = "SSO_CLIENT_ID" in payload and proposed_client_id != str(os.getenv("SSO_CLIENT_ID") or "").strip()
+        if (provider_changed or client_changed) and os.getenv("SSO_CLIENT_SECRET"):
+            replacement = payload.get("SSO_CLIENT_SECRET")
+            if not (
+                isinstance(replacement, str)
+                and replacement.strip()
+                and "****" not in replacement
+            ):
+                raise ValueError(
+                    "Changing the SSO provider or client ID requires re-entering SSO_CLIENT_SECRET"
+                )
         updates = {}
         for key in _ALL_KEYS:
             if key not in payload or key in _READONLY_KEYS:
                 continue
-            if production and key in _PRODUCTION_ENV_ONLY_KEYS and not (
-                portal_enabled
-                and bool(actor_id)
-                and key in _PRODUCTION_ADMIN_PORTAL_KEYS
-            ):
-                continue
+            if production and key in _PRODUCTION_ENV_ONLY_KEYS:
+                authenticated_sso_change = bool(actor_id) and key in _PRODUCTION_SSO_PORTAL_KEYS
+                authenticated_operational_change = (
+                    portal_enabled
+                    and bool(actor_id)
+                    and key in _PRODUCTION_ADMIN_PORTAL_KEYS
+                )
+                if not (authenticated_sso_change or authenticated_operational_change):
+                    continue
             new_val = payload.get(key)
             if new_val is None:
                 continue
@@ -602,7 +631,8 @@ def update_settings(payload: dict, *, actor_id: Optional[str] = None) -> dict:
             if new_val == "":
                 if key in _SENSITIVE_KEYS:
                     continue
-                new_val = os.getenv(key, "")
+                if key not in _PRODUCTION_SSO_PORTAL_KEYS:
+                    new_val = os.getenv(key, "")
             if key in _LLM_BASE_URL_KEYS and new_val:
                 new_val = (
                     _validate_foundry_base_url(new_val)
@@ -615,6 +645,26 @@ def update_settings(payload: dict, *, actor_id: Optional[str] = None) -> dict:
                 resolve_provider(new_val)
             if key == "FOUNDRY_AUTH_METHOD" and new_val not in {"api_key", "entra"}:
                 raise ValueError("FOUNDRY_AUTH_METHOD must be 'api_key' or 'entra'")
+            if key == "SSO_PROVIDER" and new_val not in {"entra", "okta", "oidc"}:
+                raise ValueError("SSO_PROVIDER must be 'entra', 'okta', or 'oidc'")
+            if key == "SSO_ENTRA_TENANT_ID" and new_val:
+                try:
+                    new_val = str(uuid.UUID(new_val))
+                except ValueError as exc:
+                    raise ValueError("SSO_ENTRA_TENANT_ID must be a tenant ID GUID") from exc
+            if key == "SSO_ALLOWED_GROUP_IDS" and new_val:
+                provider = str(payload.get("SSO_PROVIDER") or os.getenv("SSO_PROVIDER") or "entra")
+                if provider == "entra":
+                    try:
+                        new_val = ",".join(
+                            str(uuid.UUID(value.strip()))
+                            for value in new_val.split(",")
+                            if value.strip()
+                        )
+                    except ValueError as exc:
+                        raise ValueError(
+                            "SSO_ALLOWED_GROUP_IDS must contain Entra group object ID GUIDs"
+                        ) from exc
             if key == "FRESHSERVICE_OAUTH_SCOPES" and new_val:
                 from .integrations.freshservice import FreshserviceAdapter
 
@@ -625,7 +675,10 @@ def update_settings(payload: dict, *, actor_id: Optional[str] = None) -> dict:
             approved_keys = {
                 key
                 for key in updates
-                if production and key in _PRODUCTION_ADMIN_PORTAL_KEYS
+                if production and (
+                    key in _PRODUCTION_ADMIN_PORTAL_KEYS
+                    or key in _PRODUCTION_SSO_PORTAL_KEYS
+                )
             }
             if actor_id or approved_keys:
                 _write_db_overrides(

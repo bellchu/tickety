@@ -90,7 +90,7 @@
           "required": [
             "enabled", "provider", "clientId", "entraTenantId",
             "oktaDomain", "oktaAuthServerId", "discoveryUrl",
-            "allowedDomains", "autoProvision"
+            "allowedDomains", "allowedGroupIds", "autoProvision"
           ],
           "properties": {
             "enabled": { "type": "boolean" },
@@ -104,6 +104,7 @@
             "oktaAuthServerId": { "type": "string", "minLength": 1 },
             "discoveryUrl": { "type": "string" },
             "allowedDomains": { "type": "string" },
+            "allowedGroupIds": { "type": "string" },
             "autoProvision": { "type": "boolean" }
           }
         },
@@ -155,6 +156,7 @@
                 "SSO_DISCOVERY_URL",
                 "SSO_REDIRECT_URI",
                 "SSO_ALLOWED_DOMAINS",
+                "SSO_ALLOWED_GROUP_IDS",
                 "SSO_AUTO_PROVISION",
                 "DATABASE_URL",
                 "POSTGRES_PASSWORD"

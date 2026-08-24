@@ -2886,6 +2886,17 @@ def _sso_allowed_email(email: str) -> bool:
     return domain in allowed_domains
 
 
+def _sso_group_access(identity: sso_service.OidcIdentity, provider_type: str) -> str | None:
+    allowed = sso_service.allowed_group_ids(provider_type)
+    if not allowed:
+        return None
+    if identity.groups_overage:
+        return "group_claim_overage"
+    if not allowed.intersection(identity.groups):
+        return "group_not_allowed"
+    return None
+
+
 def _resolve_sso_user(
     db: Session,
     identity: sso_service.OidcIdentity,
@@ -3082,6 +3093,9 @@ async def sso_callback(
 
     if not _sso_allowed_email(identity.email):
         return _sso_failure_response("domain_not_allowed", next_path)
+    group_error = _sso_group_access(identity, config.provider_type)
+    if group_error:
+        return _sso_failure_response(group_error, next_path)
     try:
         user, linked_identity = _resolve_sso_user(
             db,

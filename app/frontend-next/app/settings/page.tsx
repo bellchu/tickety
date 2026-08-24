@@ -129,6 +129,7 @@ const PRODUCTION_DEPLOYMENT_KEYS = new Set([
   "SSO_DISCOVERY_URL",
   "SSO_REDIRECT_URI",
   "SSO_ALLOWED_DOMAINS",
+  "SSO_ALLOWED_GROUP_IDS",
   "SSO_AUTO_PROVISION",
 ]);
 
@@ -145,16 +146,13 @@ const PRODUCTION_INFRASTRUCTURE_KEYS = new Set([
   "JIRA_API_TOKEN",
   "JIRA_PROJECT_KEY",
   "JIRA_ISSUE_TYPE",
-  "SSO_ENABLED",
-  "SSO_PROVIDER",
-  "SSO_ENTRA_TENANT_ID",
-  "SSO_OKTA_DOMAIN",
-  "SSO_OKTA_AUTH_SERVER_ID",
-  "SSO_CLIENT_ID",
-  "SSO_CLIENT_SECRET",
-  "SSO_DISCOVERY_URL",
   "SSO_REDIRECT_URI",
-  "SSO_ALLOWED_DOMAINS",
+]);
+
+const SSO_PORTAL_KEYS = new Set([
+  "SSO_ENABLED", "SSO_PROVIDER", "SSO_ENTRA_TENANT_ID", "SSO_OKTA_DOMAIN",
+  "SSO_OKTA_AUTH_SERVER_ID", "SSO_CLIENT_ID", "SSO_CLIENT_SECRET",
+  "SSO_DISCOVERY_URL", "SSO_ALLOWED_DOMAINS", "SSO_ALLOWED_GROUP_IDS",
   "SSO_AUTO_PROVISION",
 ]);
 
@@ -253,6 +251,7 @@ export default function SettingsPage() {
       : "");
   const isDeploymentManaged = (key: string) => (
     appMode === "production"
+    && !SSO_PORTAL_KEYS.has(key)
     && PRODUCTION_DEPLOYMENT_KEYS.has(key)
     && (PRODUCTION_INFRASTRUCTURE_KEYS.has(key) || !adminPortalEditsEnabled)
   );
@@ -387,7 +386,8 @@ export default function SettingsPage() {
     const payload: Record<string, string> = {};
     for (const key of Object.keys(form)) {
       const v = form[key as keyof SettingsType];
-      if (typeof v !== "string" || v === "") continue;
+      if (typeof v !== "string") continue;
+      if (v === "" && (!SSO_PORTAL_KEYS.has(key) || key === "SSO_CLIENT_SECRET")) continue;
       if (baselineForm && v === baselineForm[key as keyof SettingsType]) continue;
       if (v.includes("****")) continue;
       if (API_READ_ONLY_KEYS.has(key)) continue;
@@ -473,7 +473,7 @@ export default function SettingsPage() {
 
       {appMode === "production" && adminPortalEditsEnabled && (
         <Alert variant="info" title="Global admin settings enabled">
-          Provider credentials and operational settings saved here become admin-approved runtime overrides. Deployment trust boundaries such as runtime mode, database access, CORS, cookies, login enforcement, and SSO remain locked.
+          Provider credentials and operational settings saved here become admin-approved runtime overrides. Deployment trust boundaries such as runtime mode, database access, CORS, cookies, and login enforcement remain locked. SSO can be managed below by administrators.
         </Alert>
       )}
 
@@ -747,7 +747,7 @@ export default function SettingsPage() {
         <SettingsSection id="settings-access" title="Security & Authentication" subtitle="Require login and configure Single Sign-On (OIDC) for production deployments">
           {productionSecuritySettingsReadOnly && (
             <DeploymentManagedNotice>
-              Authentication, SSO, CORS, and cookie controls are read-only here. Their effective values come from the deployment environment/Secret.
+              Runtime mode, login enforcement, CORS, and cookie controls remain deployment-managed. Administrators can configure and switch SSO providers below.
             </DeploymentManagedNotice>
           )}
           <Field label="Runtime Mode">
@@ -835,61 +835,63 @@ export default function SettingsPage() {
               handleChange("SSO_ENABLED", v ? "true" : "false");
               if (v && !form.SSO_PROVIDER) handleChange("SSO_PROVIDER", "entra");
             }}
-            disabled={productionSecuritySettingsReadOnly}
           />
 
           {(form.SSO_ENABLED as string) === "true" && (
             <div className="space-y-4 pt-2">
-              <Field label={<DeploymentManagedLabel label="Identity Provider" managed={productionSecuritySettingsReadOnly} />}>
-                <select value={ssoProviderType} onChange={(e) => handleChange("SSO_PROVIDER", e.target.value)} className="input-base" disabled={productionSecuritySettingsReadOnly}>
+              <Field label="Identity Provider">
+                <select value={ssoProviderType} onChange={(e) => handleChange("SSO_PROVIDER", e.target.value)} className="input-base">
                   <option value="entra">Microsoft Entra ID</option>
                   <option value="okta">Okta</option>
                   <option value="oidc">Generic OpenID Connect</option>
                 </select>
               </Field>
               {ssoProviderType === "entra" && (
-                <Field label={<DeploymentManagedLabel label="Entra Tenant ID" managed={productionSecuritySettingsReadOnly} />}>
-                  <input type="text" value={form.SSO_ENTRA_TENANT_ID || ""} onChange={(e) => handleChange("SSO_ENTRA_TENANT_ID", e.target.value)} placeholder="Directory (tenant) ID" className="input-base" disabled={productionSecuritySettingsReadOnly} />
+                <Field label="Entra Tenant ID">
+                  <input type="text" value={form.SSO_ENTRA_TENANT_ID || ""} onChange={(e) => handleChange("SSO_ENTRA_TENANT_ID", e.target.value)} placeholder="Directory (tenant) ID" className="input-base" />
                   <span className="block text-xs leading-5 text-ink-400">Use the Directory (tenant) ID GUID from the app registration. Multi-tenant authorities are intentionally not accepted.</span>
                 </Field>
               )}
               {ssoProviderType === "okta" && (
                 <div className="grid gap-4 sm:grid-cols-2">
-                  <Field label={<DeploymentManagedLabel label="Okta Domain" managed={productionSecuritySettingsReadOnly} />}>
-                    <input type="text" value={form.SSO_OKTA_DOMAIN || ""} onChange={(e) => handleChange("SSO_OKTA_DOMAIN", e.target.value)} placeholder="company.okta.com" className="input-base" disabled={productionSecuritySettingsReadOnly} />
+                  <Field label="Okta Domain">
+                    <input type="text" value={form.SSO_OKTA_DOMAIN || ""} onChange={(e) => handleChange("SSO_OKTA_DOMAIN", e.target.value)} placeholder="company.okta.com" className="input-base" />
                   </Field>
-                  <Field label={<DeploymentManagedLabel label="Authorization Server" managed={productionSecuritySettingsReadOnly} />}>
-                    <input type="text" value={form.SSO_OKTA_AUTH_SERVER_ID || "org"} onChange={(e) => handleChange("SSO_OKTA_AUTH_SERVER_ID", e.target.value)} placeholder="org" className="input-base" disabled={productionSecuritySettingsReadOnly} />
+                  <Field label="Authorization Server">
+                    <input type="text" value={form.SSO_OKTA_AUTH_SERVER_ID || "org"} onChange={(e) => handleChange("SSO_OKTA_AUTH_SERVER_ID", e.target.value)} placeholder="org" className="input-base" />
                     <span className="block text-xs leading-5 text-ink-400">Use <code>org</code> for standard SSO, or enter a configured custom authorization-server ID.</span>
                   </Field>
                 </div>
               )}
-              <Field label={<DeploymentManagedLabel label="Client ID" managed={productionSecuritySettingsReadOnly} />}>
-                <input type="text" value={form.SSO_CLIENT_ID || ""} onChange={(e) => handleChange("SSO_CLIENT_ID", e.target.value)} placeholder="OIDC client ID" className="input-base" disabled={productionSecuritySettingsReadOnly} />
+              <Field label="Client ID">
+                <input type="text" value={form.SSO_CLIENT_ID || ""} onChange={(e) => handleChange("SSO_CLIENT_ID", e.target.value)} placeholder="OIDC client ID" className="input-base" />
               </Field>
-              <Field label={<DeploymentManagedLabel label="Client Secret" managed={productionSecuritySettingsReadOnly} />}>
-                <SecretInput value={form.SSO_CLIENT_SECRET || ""} onChange={(v) => handleChange("SSO_CLIENT_SECRET", v)} placeholder="OIDC client secret" disabled={productionSecuritySettingsReadOnly} />
+              <Field label="Client Secret">
+                <SecretInput value={form.SSO_CLIENT_SECRET || ""} onChange={(v) => handleChange("SSO_CLIENT_SECRET", v)} placeholder="OIDC client secret" />
               </Field>
               {ssoProviderType === "oidc" && (
-                <Field label={<DeploymentManagedLabel label="Discovery URL" managed={productionSecuritySettingsReadOnly} />}>
-                  <input type="text" value={form.SSO_DISCOVERY_URL || ""} onChange={(e) => handleChange("SSO_DISCOVERY_URL", e.target.value)} placeholder="https://identity.example/.well-known/openid-configuration" className="input-base" disabled={productionSecuritySettingsReadOnly} />
+                <Field label="Discovery URL">
+                  <input type="text" value={form.SSO_DISCOVERY_URL || ""} onChange={(e) => handleChange("SSO_DISCOVERY_URL", e.target.value)} placeholder="https://identity.example/.well-known/openid-configuration" className="input-base" />
                 </Field>
               )}
               <Field label="Sign-in Redirect URI">
                 <input type="text" value={derivedSsoRedirectUri} readOnly className="input-base" aria-describedby="sso-redirect-help" />
                 <span id="sso-redirect-help" className="block text-xs leading-5 text-ink-400">Copy this exact Web sign-in redirect URI into the Entra app registration or Okta app integration. It is derived from Frontend URL.</span>
               </Field>
-              <Field label={<DeploymentManagedLabel label="Allowed Email Domains" managed={productionSecuritySettingsReadOnly} />}>
-                <input type="text" value={form.SSO_ALLOWED_DOMAINS || ""} onChange={(e) => handleChange("SSO_ALLOWED_DOMAINS", e.target.value)} placeholder="company.com,subsidiary.com" className="input-base" disabled={productionSecuritySettingsReadOnly} />
+              <Field label="Allowed Email Domains">
+                <input type="text" value={form.SSO_ALLOWED_DOMAINS || ""} onChange={(e) => handleChange("SSO_ALLOWED_DOMAINS", e.target.value)} placeholder="company.com,subsidiary.com" className="input-base" />
+              </Field>
+              <Field label="Allowed Group IDs">
+                <input type="text" value={form.SSO_ALLOWED_GROUP_IDS || ""} onChange={(e) => handleChange("SSO_ALLOWED_GROUP_IDS", e.target.value)} placeholder={ssoProviderType === "entra" ? "Entra IT agents group Object ID" : "Comma-separated provider group IDs"} className="input-base" />
+                <span className="block text-xs leading-5 text-ink-400">When set, sign-in is allowed only when a verified group claim contains one of these immutable IDs.</span>
               </Field>
               <ToggleRow
                 label="Auto-Provision SSO Users"
                 desc="Create new active agent accounts for trusted SSO domains. Keep disabled when accounts should be pre-approved."
                 value={(form.SSO_AUTO_PROVISION as string) === "true"}
                 onChange={(v) => handleChange("SSO_AUTO_PROVISION", v ? "true" : "false")}
-                disabled={productionSecuritySettingsReadOnly}
               />
-              <p className="text-xs leading-5 text-ink-400">Entra and Okta discovery endpoints are generated automatically from the preset fields. Client secrets remain deployment-managed and are never returned to the browser.</p>
+              <p className="text-xs leading-5 text-ink-400">Entra and Okta discovery endpoints are generated automatically. Client secrets are stored as masked administrator settings and are never returned to the browser.</p>
             </div>
           )}
         </SettingsSection>

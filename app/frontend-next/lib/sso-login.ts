@@ -13,6 +13,8 @@ const SSO_ERROR_MESSAGES: Record<string, string> = {
   configuration_changed: "Single sign-on settings changed during sign-in. Please start again.",
   configuration_error: "Single sign-on is not fully configured. Contact an administrator.",
   domain_not_allowed: "This organization account is not in an allowed email domain.",
+  group_not_allowed: "Your organization account is valid, but it is not a member of a group allowed to use Tickety.",
+  group_claim_overage: "Your group membership could not be verified from the sign-in token. Contact an administrator.",
   expired_request: "That sign-in request expired. Please start again.",
   identity_conflict: "This organization identity cannot be linked automatically. Contact an administrator.",
   invalid_identity: "The identity provider response could not be verified. Please try again or contact an administrator.",

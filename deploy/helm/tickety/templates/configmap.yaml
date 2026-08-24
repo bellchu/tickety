@@ -44,6 +44,7 @@ data:
   SSO_OKTA_AUTH_SERVER_ID: {{ .Values.config.sso.oktaAuthServerId | quote }}
   SSO_DISCOVERY_URL: {{ .Values.config.sso.discoveryUrl | quote }}
   SSO_ALLOWED_DOMAINS: {{ .Values.config.sso.allowedDomains | quote }}
+  SSO_ALLOWED_GROUP_IDS: {{ .Values.config.sso.allowedGroupIds | quote }}
   SSO_AUTO_PROVISION: {{ .Values.config.sso.autoProvision | quote }}
   TICKET_RAG_SCOPE_KEY: {{ .Values.config.ragV2.scopeKey | quote }}
   TICKET_RAG_V2_SCOPE_ALLOWLIST: {{ .Values.config.ragV2.scopeAllowlist | quote }}

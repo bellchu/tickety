@@ -155,12 +155,25 @@ import sys
 
 model = json.load(sys.stdin)
 services = model["services"]
-expected = {"postgres", "migrate", "backend", "worker", "frontend"}
+expected = {"postgres", "migrate", "backend", "worker", "frontend", "tunnel-proxy"}
 if not expected.issubset(services):
     raise SystemExit(f"missing Compose services: {sorted(expected - set(services))}")
 for name, service in services.items():
-    if name != "frontend" and service.get("ports"):
+    if name not in {"frontend", "tunnel-proxy"} and service.get("ports"):
         raise SystemExit(f"{name} must not publish host ports")
+tunnel_ports = services["tunnel-proxy"].get("ports") or []
+expected_tunnel_port = {
+    "mode": "ingress",
+    "target": 443,
+    "published": "443",
+    "protocol": "tcp",
+}
+if tunnel_ports != [expected_tunnel_port]:
+    raise SystemExit(
+        "tunnel-proxy must publish exactly host TCP 443 to container TCP 443"
+    )
+if services["tunnel-proxy"]["depends_on"]["frontend"]["condition"] != "service_healthy":
+    raise SystemExit("tunnel-proxy must wait for the healthy frontend")
 if services["backend"]["depends_on"]["migrate"]["condition"] != "service_completed_successfully":
     raise SystemExit("backend must wait for successful migrations")
 if services["worker"]["depends_on"]["migrate"]["condition"] != "service_completed_successfully":
@@ -169,6 +182,11 @@ if services["worker"]["environment"].get("TICKETY_PROCESS_ROLE") != "worker":
     raise SystemExit("worker process role is missing")
 print("Validated Docker Compose service topology.")
 '
+    if ! grep -Eq '^[[:space:]]*reverse_proxy[[:space:]]+frontend:3000[[:space:]]*$' \
+      "$ROOT_DIR/deploy/local-tunnel/Caddyfile"; then
+      echo "tunnel-proxy must forward to frontend:3000" >&2
+      exit 1
+    fi
   fi
 fi
 

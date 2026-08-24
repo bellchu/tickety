@@ -264,6 +264,7 @@ export interface Settings {
   SSO_DISCOVERY_URL: string;
   SSO_REDIRECT_URI: string;
   SSO_ALLOWED_DOMAINS: string;
+  SSO_ALLOWED_GROUP_IDS: string;
   SSO_AUTO_PROVISION: string;
   [key: string]: string | boolean;
 }

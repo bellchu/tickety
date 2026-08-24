@@ -51,6 +51,7 @@ class SettingsSecurityTests(unittest.TestCase):
     def test_demo_mode_requires_login_for_automatic_ai(self):
         with patch.dict(os.environ, {
             "APP_MODE": "demo",
+            "LOGIN_REQUIRED": "false",
             "AUTO_TRIAGE_ENABLED": "true",
         }, clear=False):
             self.assertFalse(settings.automation_enabled("AUTO_TRIAGE_ENABLED"))
@@ -402,24 +403,110 @@ class SettingsSecurityTests(unittest.TestCase):
                 "APP_MODE": "production",
                 "TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED": "true",
                 "CORS_ALLOW_ORIGINS": "https://tickety.example",
-                "SSO_DISCOVERY_URL": "https://identity.example/.well-known/openid-configuration",
             }, clear=False),
             patch.object(settings, "_write_db_overrides") as write_overrides,
         ):
             settings.update_settings(
                 {
                     "CORS_ALLOW_ORIGINS": "*",
-                    "SSO_DISCOVERY_URL": "http://127.0.0.1/metadata",
                 },
                 actor_id="global-admin",
             )
 
             self.assertEqual(os.environ["CORS_ALLOW_ORIGINS"], "https://tickety.example")
-            self.assertEqual(
-                os.environ["SSO_DISCOVERY_URL"],
-                "https://identity.example/.well-known/openid-configuration",
-            )
             write_overrides.assert_not_called()
+
+    def test_production_admin_can_configure_sso_without_global_portal_toggle(self):
+        tenant_id = "11111111-2222-4333-8444-555555555555"
+        group_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        with (
+            patch.dict(os.environ, {
+                "APP_MODE": "production",
+                "TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED": "false",
+                "SSO_ENABLED": "false",
+            }, clear=False),
+            patch.object(settings, "_write_db_overrides") as write_overrides,
+            patch.object(settings, "_reset_runtime"),
+        ):
+            result = settings.update_settings({
+                "SSO_ENABLED": "true",
+                "SSO_PROVIDER": "entra",
+                "SSO_ENTRA_TENANT_ID": tenant_id,
+                "SSO_CLIENT_ID": "entra-client",
+                "SSO_CLIENT_SECRET": "entra-secret",
+                "SSO_ALLOWED_GROUP_IDS": group_id.upper(),
+                "SSO_AUTO_PROVISION": "true",
+            }, actor_id="production-admin")
+
+            self.assertEqual(result["SSO_CLIENT_SECRET"], "****")
+            self.assertTrue(result["SSO_CLIENT_SECRET__set"])
+            self.assertEqual(os.environ["SSO_ALLOWED_GROUP_IDS"], group_id)
+            saved = write_overrides.call_args.args[0]
+            self.assertEqual(saved["SSO_PROVIDER"], "entra")
+            self.assertEqual(
+                write_overrides.call_args.kwargs["approved_keys"],
+                set(saved),
+            )
+
+    def test_switching_sso_provider_requires_new_client_secret(self):
+        with (
+            patch.dict(os.environ, {
+                "APP_MODE": "production",
+                "SSO_PROVIDER": "entra",
+                "SSO_CLIENT_ID": "entra-client",
+                "SSO_CLIENT_SECRET": "entra-secret",
+            }, clear=False),
+            patch.object(settings, "_write_db_overrides") as write_overrides,
+        ):
+            with self.assertRaisesRegex(ValueError, "re-entering SSO_CLIENT_SECRET"):
+                settings.update_settings({
+                    "SSO_PROVIDER": "okta",
+                    "SSO_CLIENT_ID": "okta-client",
+                }, actor_id="production-admin")
+            write_overrides.assert_not_called()
+
+    def test_admin_can_clear_optional_sso_restrictions(self):
+        with (
+            patch.dict(os.environ, {
+                "APP_MODE": "production",
+                "SSO_ALLOWED_DOMAINS": "company.com",
+                "SSO_ALLOWED_GROUP_IDS": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            }, clear=False),
+            patch.object(settings, "_write_db_overrides") as write_overrides,
+            patch.object(settings, "_reset_runtime"),
+        ):
+            settings.update_settings({
+                "SSO_ALLOWED_DOMAINS": "",
+                "SSO_ALLOWED_GROUP_IDS": "",
+            }, actor_id="production-admin")
+
+            self.assertEqual(os.environ["SSO_ALLOWED_DOMAINS"], "")
+            self.assertEqual(os.environ["SSO_ALLOWED_GROUP_IDS"], "")
+            self.assertEqual(
+                write_overrides.call_args.args[0],
+                {"SSO_ALLOWED_DOMAINS": "", "SSO_ALLOWED_GROUP_IDS": ""},
+            )
+
+    def test_admin_approved_sso_settings_reload_without_global_portal_toggle(self):
+        with (
+            patch.dict(os.environ, {
+                "APP_MODE": "production",
+                "TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED": "false",
+                "SSO_PROVIDER": "entra",
+            }, clear=False),
+            patch.object(settings, "_read_db_overrides", return_value={
+                "SSO_PROVIDER": "okta",
+                "SSO_OKTA_DOMAIN": "company.okta.com",
+            }),
+            patch.object(
+                settings,
+                "_read_portal_approved_keys",
+                return_value={"SSO_PROVIDER", "SSO_OKTA_DOMAIN"},
+            ),
+        ):
+            settings.load_settings_into_env()
+            self.assertEqual(os.environ["SSO_PROVIDER"], "okta")
+            self.assertEqual(os.environ["SSO_OKTA_DOMAIN"], "company.okta.com")
 
     def test_production_loads_only_admin_approved_portal_overrides(self):
         deployment_key = "reviewed-deployment-key"

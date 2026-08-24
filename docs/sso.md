@@ -8,11 +8,27 @@ callback are derived automatically.
 The callback registered with either provider must be exactly:
 
 ```text
-https://<tickety-host>/api/auth/sso/callback
+https://tickety.nexora.com/api/auth/sso/callback
 ```
 
 `FRONTEND_URL` must be the matching HTTPS origin, without a path. Apply database
 migration `0011` before enabling SSO.
+
+## Configure from Tickety Settings
+
+The preferred workflow is **Settings → Access → Security & Authentication**.
+An authenticated Tickety administrator can select Entra or Okta, enter the
+provider values, group allowlist, and client secret, then enable SSO. These
+values are stored as administrator-approved settings and reload after a restart;
+`TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED` is not required for SSO configuration.
+Secrets are masked on every settings response and are never returned to the
+browser. Runtime mode, `FRONTEND_URL`, login enforcement, cookies, CORS, and the
+callback path remain deployment-owned security boundaries.
+
+When switching from Entra to Okta (or changing the client ID), re-enter the new
+provider's client secret in the same save. Tickety deliberately refuses to reuse
+the previous provider's secret. Environment and Helm examples below remain
+available for initial bootstrap and break-glass recovery.
 
 ## Microsoft Entra ID
 
@@ -28,6 +44,11 @@ Create a Microsoft Entra **App registration** for a server-side web application:
    not accept `common`, `organizations`, or `consumers` authorities.
 5. In the corresponding Enterprise application, assign only the users or
    groups that should be able to sign in. Requiring assignment is recommended.
+6. Create the **IT agents** security group and copy its immutable **Object ID**.
+   In the app registration's Token configuration, add the `groups` claim and
+   select **Groups assigned to the application**. Assign IT agents to the
+   enterprise application and configure that Object ID in Tickety. Do not use
+   the editable group display name as an authorization boundary.
 
 Tickety requests only `openid email profile`; it does not call Microsoft Graph.
 The preset follows Microsoft's tenant-specific OIDC discovery and validates the
@@ -40,13 +61,14 @@ Environment configuration:
 ```dotenv
 APP_MODE=production
 LOGIN_REQUIRED=true
-FRONTEND_URL=https://support.example.com
+FRONTEND_URL=https://tickety.nexora.com
 SSO_ENABLED=true
 SSO_PROVIDER=entra
 SSO_ENTRA_TENANT_ID=<directory-tenant-id-guid>
 SSO_CLIENT_ID=<application-client-id>
 SSO_CLIENT_SECRET=<client-secret-value>
 SSO_ALLOWED_DOMAINS=example.com
+SSO_ALLOWED_GROUP_IDS=<it-agents-group-object-id-guid>
 SSO_AUTO_PROVISION=false
 ```
 
@@ -63,13 +85,15 @@ config:
     oktaAuthServerId: org
     discoveryUrl: ""
     allowedDomains: example.com
+    allowedGroupIds: <it-agents-group-object-id-guid>
     autoProvision: false
 
 secrets:
   SSO_CLIENT_SECRET: <client-secret-value>
 ```
 
-When `existingSecret` is used, put `SSO_CLIENT_SECRET` in that Secret and update
+When managing SSO through deployment configuration and `existingSecret` is used,
+put `SSO_CLIENT_SECRET` in that Secret and update
 `existingSecretRolloutToken` whenever the secret is rotated.
 
 ## Okta
@@ -96,7 +120,7 @@ Environment configuration:
 ```dotenv
 APP_MODE=production
 LOGIN_REQUIRED=true
-FRONTEND_URL=https://support.example.com
+FRONTEND_URL=https://tickety.nexora.com
 SSO_ENABLED=true
 SSO_PROVIDER=okta
 SSO_OKTA_DOMAIN=company.okta.com
@@ -104,6 +128,7 @@ SSO_OKTA_AUTH_SERVER_ID=org
 SSO_CLIENT_ID=<okta-client-id>
 SSO_CLIENT_SECRET=<okta-client-secret>
 SSO_ALLOWED_DOMAINS=example.com
+SSO_ALLOWED_GROUP_IDS=<okta-group-id-if-required>
 SSO_AUTO_PROVISION=false
 ```
 
@@ -120,6 +145,7 @@ config:
     oktaAuthServerId: org
     discoveryUrl: ""
     allowedDomains: example.com
+    allowedGroupIds: <okta-group-id-if-required>
     autoProvision: false
 
 secrets:
@@ -136,6 +162,12 @@ secrets:
   administrator or supervisor roles.
 - `SSO_ALLOWED_DOMAINS` is an additional comma-separated restriction. Provider
   application assignment remains the primary access boundary.
+- `SSO_ALLOWED_GROUP_IDS` is a comma-separated, fail-closed group allowlist.
+  Entra values must be group Object ID GUIDs. Okta may use group IDs emitted by
+  its `groups` claim. When configured, at least one signed token/userinfo group
+  must match. Entra group-overage tokens are rejected; keep the recommended
+  “groups assigned to the application” claim mode so the IT agents group is
+  emitted without requiring Microsoft Graph permissions.
 - Later email/name changes do not change the account binding. Deactivating the
   local Tickety user blocks SSO access.
 - The login page makes the configured provider the primary action and keeps
@@ -148,7 +180,7 @@ secrets:
 Before opening traffic, verify the public non-secret status endpoint:
 
 ```sh
-curl --fail --silent https://support.example.com/api/auth/sso/config
+curl --fail --silent https://tickety.nexora.com/api/auth/sso/config
 ```
 
 It should return `"enabled":true`, `"ready":true`, the intended provider, and
