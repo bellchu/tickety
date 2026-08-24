@@ -144,6 +144,13 @@ gap scanner. A scoped authenticated user must explicitly request analysis, or
 an administrator/supervisor must explicitly queue it, before the worker may
 send Portal content to an AI provider.
 
+For an external integration, automatic AI remains an explicit, audited
+binding-level opt-in. Once enabled, authoritative new/updated tickets are
+queued immediately by sync/webhook ingestion, and the worker continuously
+repairs missing enabled AI artifacts for external tickets active during the
+previous seven days. The rolling repair is idempotent and bounded; it never
+turns Portal tickets or a disabled/paused integration into implicit AI input.
+
 Analysis is keyed by ticket input, model, and pipeline version. A durable claim
 prevents API and worker processes from paying for the same analysis, unchanged
 requests reuse the cached result, and bulk repair endpoints queue bounded worker
@@ -158,6 +165,7 @@ LLM_DAILY_TOKEN_BUDGET=500000
 LLM_PROVIDER_REQUESTS_PER_MINUTE=120
 LLM_PROVIDER_TOKENS_PER_MINUTE=250000
 AI_PIPELINE_TIMEOUT_SECONDS=900
+AI_BACKGROUND_TICKETS_PER_SWEEP=5
 TICKET_EMBEDDING_MAX_COMMENTS_PER_REFRESH=50
 AI_USER_REQUESTS_PER_MINUTE=10
 AI_USER_REQUESTS_PER_DAY=200
@@ -176,6 +184,10 @@ AI_ARTIFACT_RETENTION_DAYS=90
 
 Provider concurrency uses expiring database-backed leases shared by API and
 worker replicas; request and token ceilings are reserved before each retry.
+The background worker admits at most `AI_BACKGROUND_TICKETS_PER_SWEEP` tickets
+per scan (default 5, bounded to 1-25). Set the provider RPM/TPM values at or
+below the actual Foundry deployment allocation; 429 retries honor both
+`Retry-After` and Foundry's `retry-after-ms` response hint.
 Provider base URLs must use public HTTPS endpoints unless deployment-owned
 private/insecure endpoint exceptions are deliberately enabled. Foundry URLs
 must use a Microsoft Azure hostname and end in `/openai/v1`. In production,
@@ -280,6 +292,9 @@ to `all`. `TICKETY_SCHEDULER_ENABLED=false` is an emergency kill switch for a
 worker or combined process; setting it to true never grants scheduler ownership
 to an `api` process. Sync intervals are bounded and controlled with
 `SYNC_INTERVAL_SECONDS` and `AUTO_TRIAGE_INTERVAL_SECONDS`.
+Seven-day automatic AI repair shares the same triage schedule and is capped by
+`AI_BACKGROUND_TICKETS_PER_SWEEP`, so startup/backfill work drains gradually
+through the same provider-wide Foundry budgets as realtime work.
 
 ## Modules
 

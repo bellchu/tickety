@@ -2,7 +2,7 @@ import ast
 import asyncio
 import inspect
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi import HTTPException
 
@@ -28,6 +28,7 @@ class FreshserviceReadOnlyContractTests(unittest.TestCase):
             "mode": "read_only",
         })
         self.assertEqual(manifest["requester.read"]["status"], "supported")
+        self.assertEqual(manifest["conversation.read"]["status"], "supported")
         for capability in (
             "ticket.create",
             "ticket.update",
@@ -86,6 +87,60 @@ class FreshserviceReadOnlyContractTests(unittest.TestCase):
             [(user["id"], user["user_type"]) for user in users],
             [(1, "agent"), (2, "requester")],
         )
+
+    def test_conversation_parser_uses_plain_text_and_fails_without_stable_id(self):
+        adapter = FreshserviceAdapter()
+        parsed = adapter._parse_conversation({
+            "id": 1001,
+            "body": "<b>HTML</b>",
+            "body_text": "Plain text",
+            "private": False,
+            "incoming": True,
+            "user_id": 9,
+            "created_at": "2026-08-24T01:00:00Z",
+            "updated_at": "2026-08-24T01:01:00Z",
+        })
+        self.assertEqual(parsed.external_id, "1001")
+        self.assertEqual(parsed.body, "Plain text")
+        self.assertTrue(parsed.incoming)
+        with self.assertRaisesRegex(ValueError, "stable ID"):
+            adapter._parse_conversation({"body_text": "missing identity"})
+
+    def test_ticket_inventory_enumerates_every_configured_workspace(self):
+        adapter = FreshserviceAdapter({
+            "FRESHSERVICE_DOMAIN": "readonly.freshservice.com",
+            "FRESHSERVICE_API_KEY": "test-key",
+            "FRESHSERVICE_WORKSPACE_IDS": "10,20",
+        })
+        responses = []
+        for ticket_id, workspace_id in ((1, 10), (2, 20)):
+            response = MagicMock(status_code=200, headers={})
+            response.json.return_value = {
+                "tickets": [{
+                    "id": ticket_id,
+                    "workspace_id": workspace_id,
+                    "subject": f"Ticket {ticket_id}",
+                    "description_text": "description",
+                    "priority": 2,
+                    "status": 2,
+                }]
+            }
+            responses.append(response)
+        adapter._rate_limited_get = AsyncMock(side_effect=responses)
+        adapter.fetch_ticket_conversations = AsyncMock(return_value=[])
+        client_context = MagicMock()
+        client_context.__aenter__ = AsyncMock(return_value=object())
+        client_context.__aexit__ = AsyncMock(return_value=None)
+
+        with patch.object(freshservice.httpx, "AsyncClient", return_value=client_context):
+            tickets = asyncio.run(adapter.fetch_tickets_since(None))
+
+        self.assertEqual([ticket.external_id for ticket in tickets], ["1", "2"])
+        workspace_params = [
+            call.args[2]["workspace_id"]
+            for call in adapter._rate_limited_get.await_args_list
+        ]
+        self.assertEqual(workspace_params, ["10", "20"])
 
     def test_embedded_ticket_context_route_is_get_only(self):
         methods = set()

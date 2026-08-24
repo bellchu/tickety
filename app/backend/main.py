@@ -41,9 +41,11 @@ from .database import (
     SettingsRecord,
     IntegrationBindingRecord,
     IntegrationCapabilityRecord,
+    IntegrationAuditRecord,
 )
 from .schema import (
     Ticket, User, UserSummary, Recognition, SyncStatus,
+    AutomaticAIEnableRequest, AutomaticAIPauseRequest,
     ExternalUser, ExternalUserSyncResult,
     TriageResult, PointsAwardedNotification, TicketCreate,
     ResolutionPlan, RecommendedSolution,
@@ -72,6 +74,7 @@ from .schema import (
 )
 from .llm_manager import (
     LLMAnalysisError,
+    LLMCapacityError,
     LLMInvalidInputError,
     LLMInvalidOutputError,
     LLMUnavailableError,
@@ -104,7 +107,10 @@ from .prompts import (
 )
 from .integrations.registry import get_adapter
 from .integrations.sync import (
+    AUTOMATIC_AI_LOOKBACK_DAYS,
     async_sync_external_users,
+    enable_automatic_ai,
+    pause_automatic_ai,
     fetch_tickets_by_days,
     handle_webhook_event,
     sync_tickets_from_external,
@@ -119,6 +125,7 @@ from .integrations.bindings import (
     list_capabilities,
     serialize_binding,
     suspend_binding,
+    validate_automatic_ai_rollout_evidence,
     validate_binding,
 )
 from .integrations.embedded import (
@@ -745,18 +752,24 @@ _PUBLIC_DEMO_AI_FIELDS = {
     "ai_synthetic": False,
     "ai_suggested_priority": None,
     "ai_suggested_category": None,
-    "recommended_team": "Service Desk",
-    "recommended_team_basis": "fallback",
+    "recommended_team": "Unrouted / Review",
+    "recommended_team_basis": "unrouted_review",
+    "routing_status": "unrouted_review",
+    "routing_abstention_reason": "untrusted_ai_status",
+    "routing_catalog_validated": False,
 }
 
 
 def _enrich_ticket_team(ticket: TicketRecord) -> None:
-    team, basis = intel.recommended_team(
+    decision = intel.team_routing_decision(
         ticket.ai_suggested_category,
         ticket.ai_status,
     )
-    ticket.__dict__["recommended_team"] = team
-    ticket.__dict__["recommended_team_basis"] = basis
+    ticket.__dict__["recommended_team"] = decision.recommended_team
+    ticket.__dict__["recommended_team_basis"] = decision.basis
+    ticket.__dict__["routing_status"] = decision.status
+    ticket.__dict__["routing_abstention_reason"] = decision.abstention_reason
+    ticket.__dict__["routing_catalog_validated"] = decision.catalog_validated
 
 
 def _ticket_for_request(request: Request, ticket: TicketRecord) -> Ticket | TicketRecord:
@@ -1832,6 +1845,45 @@ def _schedule_ai_retry(
     return True
 
 
+def _defer_ai_capacity(
+    db: Session,
+    ticket_id: str,
+    artifacts: set[str],
+    retry_after_seconds: float,
+    *,
+    expected_claim_id: Optional[str] = None,
+) -> bool:
+    """Release a claim for quota recovery without consuming a failure attempt."""
+    query = db.query(TicketRecord).filter(TicketRecord.id == ticket_id)
+    if expected_claim_id:
+        query = query.filter(TicketRecord.ai_claim_id == expected_claim_id)
+    else:
+        query = query.filter(or_(
+            TicketRecord.ai_status.is_(None),
+            TicketRecord.ai_status != "running",
+        ))
+    ticket = query.with_for_update().first()
+    if not ticket:
+        return False
+    requested = set(artifacts)
+    if ticket.ai_status == "queued":
+        requested.update(
+            item
+            for item in (ticket.ai_requested_artifacts or "").split(",")
+            if item
+        )
+    ticket.ai_status = "queued"
+    ticket.ai_claim_id = None
+    ticket.ai_lease_expires_at = None
+    ticket.ai_error = "provider_capacity"
+    ticket.ai_requested_artifacts = ",".join(sorted(requested))
+    ticket.ai_next_attempt_at = datetime.utcnow() + timedelta(
+        seconds=max(1, min(int(retry_after_seconds), 172_800))
+    )
+    db.commit()
+    return True
+
+
 def _analysis_step_error_code(exc: BaseException) -> str:
     """Reduce an internal exception to a stable, non-sensitive failure class."""
     if isinstance(exc, asyncio.TimeoutError):
@@ -1840,6 +1892,8 @@ def _analysis_step_error_code(exc: BaseException) -> str:
         return "invalid_input"
     if isinstance(exc, LLMInvalidOutputError):
         return "invalid_output"
+    if isinstance(exc, LLMCapacityError):
+        return "provider_capacity"
     if isinstance(exc, LLMUnavailableError):
         return "provider_unavailable"
     if isinstance(exc, LLMAnalysisError):
@@ -1970,6 +2024,7 @@ def _ticket_analysis_hash(ticket: TicketRecord) -> str:
     payload = {
         "subject": ticket.subject or "",
         "description": ticket.description or "",
+        "public_thread": ticket.external_conversation_text or "",
         "model": _llm_cache_identity(),
         "pipeline": AI_PIPELINE_VERSION,
     }
@@ -1993,6 +2048,7 @@ def _artifact_input_hash(ticket: TicketRecord, artifact: str) -> str:
         "artifact": artifact,
         "subject": ticket.subject or "",
         "description": ticket.description or "",
+        "public_thread": ticket.external_conversation_text or "",
         "model": _llm_cache_identity(),
         "pipeline": AI_PIPELINE_VERSION,
     }
@@ -2000,9 +2056,23 @@ def _artifact_input_hash(ticket: TicketRecord, artifact: str) -> str:
         payload["triage_reasoning"] = ticket.ai_reasoning or ""
     if artifact == "resolution":
         payload.update({
+            "provider_source_context_hash": ticket.external_source_context_hash,
             "category": ticket.category or "Other",
             "priority": ticket.priority or "P3",
             "sentiment": ticket.sentiment or "Neutral",
+            "provider_category": ticket.external_category,
+            "provider_subcategory": ticket.external_subcategory,
+            "provider_item_category": ticket.external_item_category,
+        })
+    if artifact == "route":
+        payload.update({
+            "provider_source_context_hash": ticket.external_source_context_hash,
+            "priority": ticket.priority or "P3",
+            "provider_category": ticket.external_category,
+            "provider_subcategory": ticket.external_subcategory,
+            "provider_item_category": ticket.external_item_category,
+            "provider_group_id": ticket.external_group_id,
+            "provider_responder_id": ticket.external_assignee_id,
         })
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -2229,6 +2299,7 @@ async def _run_ticket_analysis(
             await progress(step, status)
 
     errors: List[Dict[str, str]] = []
+    capacity_deferrals: Dict[str, float] = {}
     analysis_data = {
         "sentiment": ticket.sentiment or "Neutral",
         "category": ticket.category or "Other",
@@ -2247,7 +2318,11 @@ async def _run_ticket_analysis(
             db.close()
             analysis_data = await asyncio.wait_for(
                 engine.process_ticket(
-                    {"subject": ticket.subject, "description": ticket.description},
+                    {
+                        "subject": ticket.subject,
+                        "description": ticket.description,
+                        "public_thread": ticket.external_conversation_text or "",
+                    },
                     kb_info=_ticket_kb_context(ticket),
                 ),
                 timeout=_pipeline_remaining(pipeline_deadline),
@@ -2295,13 +2370,22 @@ async def _run_ticket_analysis(
                     f"[analysis] artifact failed ticket={ticket.id[:8]} "
                     f"step=triage code={error_code}"
                 )
-                _schedule_ai_retry(
-                    db,
-                    ticket.id,
-                    requested_artifacts,
-                    error_signature,
-                    expected_claim_id=claim_id,
-                )
+                if isinstance(exc, LLMCapacityError):
+                    _defer_ai_capacity(
+                        db,
+                        ticket.id,
+                        requested_artifacts,
+                        exc.retry_after_seconds,
+                        expected_claim_id=claim_id,
+                    )
+                else:
+                    _schedule_ai_retry(
+                        db,
+                        ticket.id,
+                        requested_artifacts,
+                        error_signature,
+                        expected_claim_id=claim_id,
+                    )
             await emit("triage", "error")
             raise
 
@@ -2366,6 +2450,8 @@ async def _run_ticket_analysis(
             if isinstance(result, Exception):
                 error_code = _analysis_step_error_code(result)
                 errors.append({"step": "summary", "error": error_code})
+                if isinstance(result, LLMCapacityError):
+                    capacity_deferrals["summary"] = result.retry_after_seconds
                 print(
                     f"[analysis] artifact failed ticket={ticket.id[:8]} "
                     f"step=summary code={error_code}"
@@ -2382,6 +2468,8 @@ async def _run_ticket_analysis(
             if isinstance(result, Exception):
                 error_code = _analysis_step_error_code(result)
                 errors.append({"step": "resolution", "error": error_code})
+                if isinstance(result, LLMCapacityError):
+                    capacity_deferrals["resolution"] = result.retry_after_seconds
                 print(
                     f"[analysis] artifact failed ticket={ticket.id[:8]} "
                     f"step=resolution code={error_code}"
@@ -2493,12 +2581,20 @@ async def _run_ticket_analysis(
         error["step"] for error in errors if error["step"] in artifacts
     }
     if failed_artifacts:
-        _schedule_ai_retry(
-            db,
-            ticket.id,
-            failed_artifacts,
-            error_signature,
-        )
+        if failed_artifacts.issubset(capacity_deferrals):
+            _defer_ai_capacity(
+                db,
+                ticket.id,
+                failed_artifacts,
+                max(capacity_deferrals.values()),
+            )
+        else:
+            _schedule_ai_retry(
+                db,
+                ticket.id,
+                failed_artifacts,
+                error_signature,
+            )
 
     if errors and len(requested_artifacts) == 1:
         exc = LLMUnavailableError("AI artifact generation failed")
@@ -4358,6 +4454,128 @@ def trigger_sync(
     return {"status": "completed", "result": result}
 
 
+@app.post("/admin/integrations/bindings/{binding_id}/automatic-ai/enable")
+def enable_integration_automatic_ai(
+    binding_id: str,
+    payload: AutomaticAIEnableRequest,
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(require_protected_ai_role("admin")),
+):
+    """Create the binding's first explicit realtime-only automatic-AI boundary."""
+    binding = _binding_or_404(db, binding_id)
+    if binding.state != "active":
+        raise HTTPException(status_code=409, detail="Integration binding is not active")
+    capabilities = {
+        row.capability: row.status
+        for row in db.query(IntegrationCapabilityRecord).filter(
+            IntegrationCapabilityRecord.binding_id == binding_id
+        ).all()
+    }
+    missing = [
+        capability for capability in ("ticket.read", "conversation.read")
+        if capabilities.get(capability) != "supported"
+    ]
+    if missing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Automatic AI requires supported capabilities: {', '.join(missing)}",
+        )
+    try:
+        validate_automatic_ai_rollout_evidence(db, binding)
+    except BindingValidationError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    try:
+        state = enable_automatic_ai(
+            db,
+            binding_id=binding_id,
+            provider=binding.provider,
+            actor_id=user.id,
+            reason=payload.reason,
+            expected_generation=payload.expected_generation,
+        )
+        db.add(IntegrationAuditRecord(
+            binding_id=binding_id,
+            action="automatic_ai_enabled",
+            actor_id=user.id,
+            details=json.dumps(
+                {
+                    "generation": state.automatic_ai_generation,
+                    "cutover_at": state.automatic_ai_cutover_at.isoformat(),
+                    "lookback_days": AUTOMATIC_AI_LOOKBACK_DAYS,
+                    "reason": payload.reason,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        ))
+        db.commit()
+        db.refresh(state)
+    except (ValueError, IntegrityError) as exc:
+        db.rollback()
+        detail = (
+            str(exc)
+            if isinstance(exc, ValueError)
+            else "automatic_ai_generation_conflict"
+        )
+        raise HTTPException(status_code=409, detail=detail) from exc
+    return {
+        "binding_id": binding_id,
+        "automatic_ai_enabled": state.automatic_ai_enabled,
+        "automatic_ai_generation": state.automatic_ai_generation,
+        "automatic_ai_cutover_at": state.automatic_ai_cutover_at,
+        "automatic_ai_enabled_at": state.automatic_ai_enabled_at,
+        "automatic_ai_lookback_days": AUTOMATIC_AI_LOOKBACK_DAYS,
+    }
+
+
+@app.post("/admin/integrations/bindings/{binding_id}/automatic-ai/pause")
+def pause_integration_automatic_ai(
+    binding_id: str,
+    payload: AutomaticAIPauseRequest,
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(require_protected_ai_role("admin")),
+):
+    """Emergency stop: revoke in-flight claims without moving the cutover."""
+    binding = _binding_or_404(db, binding_id)
+    try:
+        state, revoked = pause_automatic_ai(
+            db,
+            binding_id=binding_id,
+            provider=binding.provider,
+            actor_id=user.id,
+            expected_generation=payload.expected_generation,
+        )
+        db.add(IntegrationAuditRecord(
+            binding_id=binding_id,
+            action="automatic_ai_paused",
+            actor_id=user.id,
+            details=json.dumps(
+                {
+                    "generation": state.automatic_ai_generation,
+                    "cutover_at": state.automatic_ai_cutover_at.isoformat(),
+                    "reason": payload.reason,
+                    "revoked_requests": revoked,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        ))
+        db.commit()
+        db.refresh(state)
+    except (ValueError, IntegrityError) as exc:
+        db.rollback()
+        detail = str(exc) if isinstance(exc, ValueError) else "automatic_ai_pause_conflict"
+        raise HTTPException(status_code=409, detail=detail) from exc
+    return {
+        "binding_id": binding_id,
+        "automatic_ai_enabled": state.automatic_ai_enabled,
+        "automatic_ai_generation": state.automatic_ai_generation,
+        "automatic_ai_cutover_at": state.automatic_ai_cutover_at,
+        "automatic_ai_paused_at": state.automatic_ai_paused_at,
+        "revoked_requests": revoked,
+    }
+
+
 @app.post("/admin/sync/fetch")
 def fetch_sync(
     days: int = Query(7, ge=1, le=365, description="Fetch tickets updated in the last N days"),
@@ -4393,6 +4611,23 @@ async def sync_status(
         provider=s.get("provider", "none"),
         binding_id=s.get("binding_id"),
         last_synced_at=datetime.fromisoformat(s["last_synced_at"]) if s.get("last_synced_at") else None,
+        automatic_ai_enabled=s.get("automatic_ai_enabled", False),
+        automatic_ai_generation=s.get("automatic_ai_generation"),
+        automatic_ai_cutover_at=(
+            datetime.fromisoformat(s["automatic_ai_cutover_at"])
+            if s.get("automatic_ai_cutover_at") else None
+        ),
+        automatic_ai_enabled_at=(
+            datetime.fromisoformat(s["automatic_ai_enabled_at"])
+            if s.get("automatic_ai_enabled_at") else None
+        ),
+        automatic_ai_paused_at=(
+            datetime.fromisoformat(s["automatic_ai_paused_at"])
+            if s.get("automatic_ai_paused_at") else None
+        ),
+        automatic_ai_lookback_days=s.get(
+            "automatic_ai_lookback_days", AUTOMATIC_AI_LOOKBACK_DAYS
+        ),
         last_status=s.get("last_status", "idle"),
         last_error="sync_failed" if s.get("last_error") else None,
         total_synced=s.get("total_synced", 0),
@@ -5157,17 +5392,21 @@ async def _process_freshservice_webhook(
         raise HTTPException(status_code=400, detail="Invalid webhook payload")
     delivery_key = _claim_webhook_delivery(request, raw_body, binding_id)
     try:
-        ticket = handle_webhook_event(event, adapter, binding_id=binding_id)
+        ticket = await asyncio.to_thread(
+            handle_webhook_event,
+            event,
+            adapter,
+            binding_id=binding_id,
+        )
         if not ticket:
             raise RuntimeError("webhook event was not applied")
         db = SessionLocal()
         try:
             current_ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket.id).first()
             if current_ticket:
-                # A valid signature authenticates Freshservice, not the
-                # requester's text. Persist the event, but require an
-                # authenticated Tickety action before any provider-backed AI
-                # work is dispatched for externally sourced content.
+                # The webhook is only a hint. Automatic AI eligibility was
+                # decided from the authoritative refetch and immutable
+                # cutover evidence inside handle_webhook_event.
                 await _check_resolution_and_award(current_ticket, db=db)
         finally:
             db.close()

@@ -12,7 +12,7 @@ from typing import Any, List, Optional
 import httpx
 
 from ..database import SessionLocal, SettingsRecord
-from ..schema import ExternalTicket, WebhookEvent
+from ..schema import ExternalConversation, ExternalTicket, WebhookEvent
 from .base import BaseITSMAdapter
 
 FRESHSERVICE_PRIORITY_MAP = {
@@ -31,7 +31,8 @@ FRESHSERVICE_STATUS_MAP = {
 }
 
 DEFAULT_FRESHSERVICE_OAUTH_SCOPES = (
-    "freshservice.tickets.view freshservice.agents.manage "
+    "freshservice.tickets.view freshservice.tickets.conversations.view "
+    "freshservice.agents.manage "
     "freshservice.requesters.view"
 )
 ALLOWED_FRESHSERVICE_OAUTH_SCOPES = frozenset(
@@ -75,6 +76,12 @@ class FreshserviceAdapter(BaseITSMAdapter):
         self.org_base_url = f"https://{self.org_domain}"
         self.webhook_secret = configured("WEBHOOK_SECRET")
         self.workspace_id = configured("FRESHSERVICE_WORKSPACE_ID").strip()
+        configured_workspace_ids = configured("FRESHSERVICE_WORKSPACE_IDS")
+        self.workspace_ids = tuple(dict.fromkeys(
+            value.strip()
+            for value in configured_workspace_ids.split(",")
+            if value.strip()
+        )) or ((self.workspace_id,) if self.workspace_id else tuple())
         self.ticket_includes = configured(
             "FRESHSERVICE_TICKET_INCLUDES", DEFAULT_TICKET_LIST_INCLUDES
         )
@@ -254,7 +261,10 @@ class FreshserviceAdapter(BaseITSMAdapter):
         if not value:
             return None
         try:
-            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if parsed.tzinfo is not None:
+                parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+            return parsed
         except Exception:
             return None
 
@@ -290,8 +300,22 @@ class FreshserviceAdapter(BaseITSMAdapter):
                 or ""
             ),
             priority=self.map_priority(raw.get("priority", 3)),
+            external_priority_code=(
+                str(raw.get("priority")) if raw.get("priority") is not None else None
+            ),
             status=self.map_status(raw.get("status", 2)),
+            external_status_code=(
+                str(raw.get("status")) if raw.get("status") is not None else None
+            ),
             assignee_id=str(raw.get("responder_id")) if raw.get("responder_id") else None,
+            external_group_id=str(raw.get("group_id")) if raw.get("group_id") else None,
+            external_category=str(raw.get("category")) if raw.get("category") else None,
+            external_subcategory=(
+                str(raw.get("sub_category")) if raw.get("sub_category") else None
+            ),
+            external_item_category=(
+                str(raw.get("item_category")) if raw.get("item_category") else None
+            ),
             updated_at=self._parse_datetime(raw.get("updated_at")),
             created_at=self._parse_datetime(raw.get("created_at")),
             resolved_at=self._parse_datetime(
@@ -300,6 +324,10 @@ class FreshserviceAdapter(BaseITSMAdapter):
             due_by=self._parse_datetime(raw.get("due_by")),
             fr_due_by=self._parse_datetime(raw.get("fr_due_by")),
             ticket_type=str(raw.get("type") or raw.get("ticket_type") or ""),
+            requester_id=(
+                str(raw.get("requester_id") or raw.get("requested_for_id"))
+                if raw.get("requester_id") or raw.get("requested_for_id") else None
+            ),
             requester_email=requester.get("email") or raw.get("email"),
             external_workspace_id=str(raw.get("workspace_id")) if raw.get("workspace_id") is not None else None,
             url=self.build_ticket_url(str(raw.get("id", ""))),
@@ -391,39 +419,140 @@ class FreshserviceAdapter(BaseITSMAdapter):
         self._ensure_provider_configured()
         cap = max_pages if max_pages is not None else self._MAX_PAGES
         out: List[ExternalTicket] = []
-        page = 1
+        pages_used = 0
         url = f"{self.base_url}/api/v2/tickets"
-        params = {"per_page": 100}
+        base_params = {"per_page": 100}
         includes = self._configured_ticket_includes()
         if includes:
-            params["include"] = includes
-        workspace_id = self.workspace_id
-        if workspace_id:
-            params["workspace_id"] = workspace_id
+            base_params["include"] = includes
         if since:
-            params["updated_since"] = self._format_datetime(since)
+            base_params["updated_since"] = self._format_datetime(since)
+        workspace_scopes: tuple[Optional[str], ...] = (
+            tuple(self.workspace_ids) if self.workspace_ids else (None,)
+        )
+        async with httpx.AsyncClient(timeout=30) as client:
+            for workspace_id in workspace_scopes:
+                page = 1
+                while True:
+                    if pages_used >= cap:
+                        raise RuntimeError(
+                            "Freshservice ticket pagination exceeded the safety cap"
+                        )
+                    params = dict(base_params)
+                    params["page"] = page
+                    if workspace_id is not None:
+                        params["workspace_id"] = workspace_id
+                    pages_used += 1
+                    resp = await self._rate_limited_get(client, url, params)
+                    if resp.status_code == 429:
+                        raise RuntimeError(
+                            f"Freshservice still rate-limited on page {page}"
+                        )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    if not isinstance(data, dict):
+                        raise RuntimeError(
+                            "Freshservice ticket response must be an object"
+                        )
+                    tickets = data.get("tickets", [])
+                    if not isinstance(tickets, list):
+                        raise RuntimeError("Freshservice tickets must be a list")
+                    parsed_tickets = self._parse_ticket_batch(tickets)
+                    if len(parsed_tickets) != len(tickets):
+                        raise RuntimeError(
+                            "Freshservice ticket page contained malformed records"
+                        )
+                    out.extend(parsed_tickets)
+                    next_link = self._parse_link_next(
+                        resp.headers.get("link"), self.base_url
+                    )
+                    if not next_link:
+                        break
+                    page += 1
+        out.sort(key=lambda t: (t.updated_at or datetime.min, t.external_id))
+        ticket_ids = [ticket.external_id for ticket in out]
+        if len(ticket_ids) != len(set(ticket_ids)):
+            raise RuntimeError("Freshservice ticket pagination returned duplicate IDs")
+        for ticket in out:
+            ticket.conversations = await self.fetch_ticket_conversations(
+                ticket.external_id
+            )
+            ticket.conversations_loaded = True
+        return out
+
+    def _parse_conversation(self, raw: dict) -> ExternalConversation:
+        if raw.get("id") is None:
+            raise ValueError("Freshservice conversation is missing its stable ID")
+        body = raw.get("body_text", raw.get("body", "")) or ""
+        return ExternalConversation(
+            external_id=str(raw.get("id", "")),
+            body=str(body),
+            author_id=str(raw.get("user_id")) if raw.get("user_id") else None,
+            is_private=bool(raw.get("private", False)),
+            incoming=bool(raw.get("incoming", False)),
+            source=int(raw["source"]) if raw.get("source") is not None else None,
+            created_at=self._parse_datetime(raw.get("created_at")),
+            updated_at=self._parse_datetime(raw.get("updated_at")),
+        )
+
+    def _parse_conversation_batch(
+        self, raw_conversations: list
+    ) -> List[ExternalConversation]:
+        if any(not isinstance(raw, dict) for raw in raw_conversations):
+            raise ValueError("Freshservice conversation must be an object")
+        return [self._parse_conversation(raw) for raw in raw_conversations]
+
+    async def fetch_ticket_conversations(
+        self, external_id: str, max_pages: Optional[int] = None
+    ) -> List[ExternalConversation]:
+        """Fetch the complete reply/note thread for one changed ticket."""
+        self._ensure_provider_configured()
+        if not str(external_id).isdigit():
+            raise ValueError("Freshservice ticket ID must be numeric")
+        cap = max_pages if max_pages is not None else self._MAX_PAGES
+        out: List[ExternalConversation] = []
+        page = 1
+        url = f"{self.base_url}/api/v2/tickets/{external_id}/conversations"
+        params = {"per_page": 100}
         async with httpx.AsyncClient(timeout=30) as client:
             while page <= cap:
                 params["page"] = page
                 resp = await self._rate_limited_get(client, url, params)
                 if resp.status_code == 429:
-                    # _rate_limited_get already retried once; if still 429, fail the sync.
-                    raise RuntimeError(f"Freshservice still rate-limited on page {page}")
+                    raise RuntimeError(
+                        f"Freshservice still rate-limited on conversation page {page}"
+                    )
                 resp.raise_for_status()
                 data = resp.json()
                 if not isinstance(data, dict):
-                    raise RuntimeError("Freshservice ticket response must be an object")
-                tickets = data.get("tickets", [])
-                if not isinstance(tickets, list):
-                    raise RuntimeError("Freshservice tickets must be a list")
-                out.extend(self._parse_ticket_batch(tickets))
-                # No next-page link header => last page reached.
-                if not self._parse_link_next(resp.headers.get("link"), self.base_url):
+                    raise RuntimeError(
+                        "Freshservice conversation response must be an object"
+                    )
+                conversations = data.get("conversations", [])
+                if not isinstance(conversations, list):
+                    raise RuntimeError("Freshservice conversations must be a list")
+                out.extend(self._parse_conversation_batch(conversations))
+                next_link = self._parse_link_next(
+                    resp.headers.get("link"), self.base_url
+                )
+                if not next_link:
                     break
-                if len(tickets) < 100:
-                    break
+                if page >= cap:
+                    raise RuntimeError(
+                        "Freshservice conversation pagination exceeded the safety cap"
+                    )
                 page += 1
-        out.sort(key=lambda t: (t.updated_at or datetime.min, t.external_id))
+        out.sort(
+            key=lambda item: (
+                item.created_at or item.updated_at or datetime.min,
+                item.external_id,
+            )
+        )
+        conversation_ids = [item.external_id for item in out]
+        if len(conversation_ids) != len(set(conversation_ids)):
+            raise RuntimeError(
+                "Freshservice conversation pagination returned duplicate IDs"
+            )
         return out
 
     async def fetch_agents(self, max_pages: Optional[int] = None) -> List[dict]:
@@ -512,6 +641,10 @@ class FreshserviceAdapter(BaseITSMAdapter):
         return {
             "integration.mode": {"status": "supported", "mode": "read_only"},
             "ticket.read": {"status": "supported", "scope": "freshservice.tickets.view"},
+            "conversation.read": {
+                "status": "supported",
+                "scope": "freshservice.tickets.conversations.view",
+            },
             "agent.read": {"status": "supported", "scope": "freshservice.agents.manage"},
             "requester.read": {"status": "supported", "scope": "freshservice.requesters.view"},
             "ticket.create": {"status": "unsupported", "reason": "read_only_sidecar"},
@@ -532,7 +665,12 @@ class FreshserviceAdapter(BaseITSMAdapter):
             self._ensure_provider_configured()
         except Exception as exc:
             detail = type(exc).__name__
-            for key in ("ticket.read", "agent.read", "requester.read"):
+            for key in (
+                "ticket.read",
+                "conversation.read",
+                "agent.read",
+                "requester.read",
+            ):
                 manifest[key] = {**manifest[key], "status": "degraded", "detail": detail}
             return manifest
 
@@ -542,6 +680,7 @@ class FreshserviceAdapter(BaseITSMAdapter):
                 "agent.read": (f"{self.base_url}/api/v2/agents", {"per_page": 1, "active": "true"}),
                 "requester.read": (f"{self.base_url}/api/v2/requesters", {"per_page": 1}),
             }
+            conversation_ticket_id = None
             for capability, (url, params) in probes.items():
                 try:
                     response = await self._rate_limited_get(client, url, params)
@@ -558,12 +697,50 @@ class FreshserviceAdapter(BaseITSMAdapter):
                         "status": status,
                         "http_status": response.status_code,
                     }
+                    if capability == "ticket.read" and response.status_code < 400:
+                        payload = response.json()
+                        rows = payload.get("tickets", []) if isinstance(payload, dict) else []
+                        if rows and isinstance(rows[0], dict) and rows[0].get("id"):
+                            conversation_ticket_id = str(rows[0]["id"])
                 except Exception as exc:
                     manifest[capability] = {
                         **manifest[capability],
                         "status": "degraded",
                         "detail": type(exc).__name__,
                     }
+            if conversation_ticket_id:
+                try:
+                    response = await self._rate_limited_get(
+                        client,
+                        f"{self.base_url}/api/v2/tickets/"
+                        f"{conversation_ticket_id}/conversations",
+                        {"per_page": 1},
+                    )
+                    if response.status_code < 400:
+                        status = "supported"
+                    elif response.status_code in {401, 403}:
+                        status = "restricted"
+                    elif response.status_code == 429:
+                        status = "degraded"
+                    else:
+                        status = "unsupported"
+                    manifest["conversation.read"] = {
+                        **manifest["conversation.read"],
+                        "status": status,
+                        "http_status": response.status_code,
+                    }
+                except Exception as exc:
+                    manifest["conversation.read"] = {
+                        **manifest["conversation.read"],
+                        "status": "degraded",
+                        "detail": type(exc).__name__,
+                    }
+            else:
+                manifest["conversation.read"] = {
+                    **manifest["conversation.read"],
+                    "status": "unknown",
+                    "detail": "no_ticket_available_for_probe",
+                }
         return manifest
 
     def parse_webhook(

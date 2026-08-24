@@ -22,8 +22,9 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from sqlalchemy import case, func, or_
 from sqlalchemy.orm import Session
@@ -208,19 +209,73 @@ AI_CATEGORY_TEAMS = {
     "Hardware": "Workplace Technology",
     "Software": "Application Support",
 }
-_INVALID_AI_PROVENANCE_STATUSES = {"legacy_stale", "provenance_unknown", "stale"}
+UNROUTED_REVIEW_TEAM = "Unrouted / Review"
+_TRUSTED_AI_ROUTING_STATUSES = {"completed", "partial", "triage_completed"}
+
+
+@dataclass(frozen=True)
+class TeamRoutingDecision:
+    """Compatibility projection until catalog-bound group routing is enabled.
+
+    ``ai_category`` is only a legacy team suggestion. It is deliberately not
+    represented as a validated resolver-group route. Every untrusted or
+    unmapped outcome fails closed to an explicit review state.
+    """
+
+    recommended_team: str
+    basis: Literal["ai_category", "unrouted_review"]
+    status: Literal["legacy_ai_category", "unrouted_review"]
+    abstention_reason: Optional[
+        Literal[
+            "missing_ai_category",
+            "unsupported_ai_category",
+            "untrusted_ai_status",
+        ]
+    ]
+    catalog_validated: bool = False
+
+
+def team_routing_decision(
+    ai_suggested_category: Optional[str], ai_status: Optional[str]
+) -> TeamRoutingDecision:
+    """Return a fail-closed routing projection with explicit provenance."""
+    normalized_status = (ai_status or "").strip().lower().replace("-", "_")
+    if normalized_status not in _TRUSTED_AI_ROUTING_STATUSES:
+        return TeamRoutingDecision(
+            recommended_team=UNROUTED_REVIEW_TEAM,
+            basis="unrouted_review",
+            status="unrouted_review",
+            abstention_reason="untrusted_ai_status",
+        )
+    if not ai_suggested_category:
+        return TeamRoutingDecision(
+            recommended_team=UNROUTED_REVIEW_TEAM,
+            basis="unrouted_review",
+            status="unrouted_review",
+            abstention_reason="missing_ai_category",
+        )
+    team = AI_CATEGORY_TEAMS.get(ai_suggested_category)
+    if not team:
+        return TeamRoutingDecision(
+            recommended_team=UNROUTED_REVIEW_TEAM,
+            basis="unrouted_review",
+            status="unrouted_review",
+            abstention_reason="unsupported_ai_category",
+        )
+    return TeamRoutingDecision(
+        recommended_team=team,
+        basis="ai_category",
+        status="legacy_ai_category",
+        abstention_reason=None,
+    )
 
 
 def recommended_team(
     ai_suggested_category: Optional[str], ai_status: Optional[str]
 ) -> tuple[str, str]:
-    """Return a trustworthy team label and its explicit derivation basis."""
-    if ai_status in _INVALID_AI_PROVENANCE_STATUSES:
-        return "Service Desk", "fallback"
-    team = AI_CATEGORY_TEAMS.get(ai_suggested_category or "")
-    if not team:
-        return "Service Desk", "fallback"
-    return team, "ai_category"
+    """Return the legacy tuple shape without restoring an implicit fallback."""
+    decision = team_routing_decision(ai_suggested_category, ai_status)
+    return decision.recommended_team, decision.basis
 
 
 def tier_needed_for(ticket: TicketRecord) -> int:
@@ -313,12 +368,16 @@ async def summarize_ticket(
         {
             "subject": redact_text(ticket.subject),
             "description": redact_text(ticket.description or ""),
+            "public_thread": redact_text(
+                getattr(ticket, "external_conversation_text", "") or ""
+            ),
             "triage_reasoning": redact_text(ticket.ai_reasoning or ""),
         },
         max_chars=prompt_char_limit(llm),
         field_limits={
             "subject": 1_000,
-            "description": 20_000,
+            "description": 10_000,
+            "public_thread": 12_000,
             "triage_reasoning": 4_000,
         },
     )
@@ -359,6 +418,9 @@ async def recommend_resolution(
         {
             "subject": redact_text(ticket.subject),
             "description": redact_text(ticket.description or ""),
+            "public_thread": redact_text(
+                getattr(ticket, "external_conversation_text", "") or ""
+            ),
             "triage_reasoning": redact_text(ticket.ai_reasoning or ""),
         },
         fixed_fields={
@@ -369,7 +431,8 @@ async def recommend_resolution(
         max_chars=prompt_char_limit(llm),
         field_limits={
             "subject": 1_000,
-            "description": 20_000,
+            "description": 10_000,
+            "public_thread": 12_000,
             "triage_reasoning": 4_000,
         },
     )

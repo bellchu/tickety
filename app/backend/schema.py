@@ -39,10 +39,18 @@ class Ticket(BaseModel):
     external_id: Optional[str] = None
     external_url: Optional[str] = None
     external_status: Optional[str] = None
+    external_status_code: Optional[str] = None
+    external_priority_code: Optional[str] = None
+    external_ticket_type_raw: Optional[str] = None
     external_assignee_id: Optional[str] = None
     external_assignee_name: Optional[str] = None
+    external_group_id: Optional[str] = None
+    external_category: Optional[str] = None
+    external_subcategory: Optional[str] = None
+    external_item_category: Optional[str] = None
     external_workspace_id: Optional[str] = None
     external_updated_at: Optional[datetime] = None
+    external_conversation_updated_at: Optional[datetime] = None
     external_created_at: Optional[datetime] = None
     external_resolved_at: Optional[datetime] = None
     external_due_by: Optional[datetime] = None
@@ -74,8 +82,17 @@ class Ticket(BaseModel):
     ai_synthetic: bool = False
     ai_suggested_priority: Optional[str] = None
     ai_suggested_category: Optional[str] = None
-    recommended_team: str = "Service Desk"
-    recommended_team_basis: Literal["ai_category", "fallback"] = "fallback"
+    recommended_team: str = "Unrouted / Review"
+    recommended_team_basis: Literal["ai_category", "unrouted_review"] = "unrouted_review"
+    routing_status: Literal["legacy_ai_category", "unrouted_review"] = "unrouted_review"
+    routing_abstention_reason: Optional[
+        Literal[
+            "missing_ai_category",
+            "unsupported_ai_category",
+            "untrusted_ai_status",
+        ]
+    ] = "untrusted_ai_status"
+    routing_catalog_validated: bool = False
 
 
 class AIAnalysis(BaseModel):
@@ -156,6 +173,12 @@ class SyncStatus(BaseModel):
     provider: str
     binding_id: Optional[str] = None
     last_synced_at: Optional[datetime] = None
+    automatic_ai_enabled: bool = False
+    automatic_ai_generation: Optional[int] = None
+    automatic_ai_cutover_at: Optional[datetime] = None
+    automatic_ai_enabled_at: Optional[datetime] = None
+    automatic_ai_paused_at: Optional[datetime] = None
+    automatic_ai_lookback_days: int = 7
     last_status: str = "idle"
     last_error: Optional[str] = None
     total_synced: int = 0
@@ -228,23 +251,53 @@ class TicketCreate(BaseModel):
     asset_id: Optional[str] = Field(None, max_length=255)
 
 
+class ExternalConversation(BaseModel):
+    external_id: str = Field(..., min_length=1, max_length=255)
+    body: str = Field(..., max_length=50_000)
+    author_id: Optional[str] = Field(None, max_length=255)
+    is_private: bool = False
+    incoming: bool = False
+    source: Optional[int] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class AutomaticAIEnableRequest(BaseModel):
+    reason: str = Field(..., min_length=3, max_length=500)
+    expected_generation: int = Field(..., ge=0)
+
+
+class AutomaticAIPauseRequest(BaseModel):
+    reason: str = Field(..., min_length=3, max_length=500)
+    expected_generation: int = Field(..., ge=1)
+
+
 class ExternalTicket(BaseModel):
     external_id: str = Field(..., min_length=1, max_length=255)
     subject: str = Field(..., min_length=1, max_length=500)
     description: str = Field(..., max_length=100_000)
     reporter: str = Field(..., max_length=320)
     priority: str = Field(..., min_length=1, max_length=32)
+    external_priority_code: Optional[str] = Field(None, max_length=64)
     status: str = Field(..., min_length=1, max_length=120)
+    external_status_code: Optional[str] = Field(None, max_length=64)
     assignee_id: Optional[str] = Field(None, max_length=255)
+    external_group_id: Optional[str] = Field(None, max_length=255)
+    external_category: Optional[str] = Field(None, max_length=255)
+    external_subcategory: Optional[str] = Field(None, max_length=255)
+    external_item_category: Optional[str] = Field(None, max_length=255)
     updated_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
     resolved_at: Optional[datetime] = None
     due_by: Optional[datetime] = None
     fr_due_by: Optional[datetime] = None
     ticket_type: Optional[str] = Field(None, max_length=120)
+    requester_id: Optional[str] = Field(None, max_length=255)
     requester_email: Optional[str] = Field(None, max_length=320)
     external_workspace_id: Optional[str] = Field(None, max_length=255)
     url: Optional[str] = Field(None, max_length=2_048)
+    conversations_loaded: bool = False
+    conversations: List[ExternalConversation] = Field(default_factory=list, max_length=1_000)
 
 
 class WebhookEvent(BaseModel):
@@ -276,6 +329,7 @@ class Settings(BaseModel):
     AI_USER_REQUESTS_PER_DAY: Optional[str] = None
     AI_ANALYSIS_LEASE_SECONDS: Optional[str] = None
     AI_ANALYSIS_MAX_ATTEMPTS: Optional[str] = None
+    AI_BACKGROUND_TICKETS_PER_SWEEP: Optional[str] = None
     TICKET_EMBEDDING_ENABLED: Optional[str] = None
     TICKET_EMBEDDING_MODEL: Optional[str] = None
     TICKET_EMBEDDING_DIMENSIONS: Optional[str] = None
@@ -399,6 +453,10 @@ class TicketComment(BaseModel):
     body: str
     is_private: bool = False
     created_at: datetime
+    external_source: Optional[str] = None
+    external_id: Optional[str] = None
+    external_author_id: Optional[str] = None
+    external_updated_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True

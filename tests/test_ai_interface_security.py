@@ -912,6 +912,40 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
             ["middle", "latest"],
         )
 
+    def test_comment_thread_hides_private_notes_from_agents_but_not_admins(self):
+        with self.session_factory() as db:
+            db.add_all([
+                TicketCommentRecord(
+                    ticket_id="own-ticket",
+                    body="public reply",
+                    is_private=False,
+                    created_at=datetime(2000, 1, 1),
+                ),
+                TicketCommentRecord(
+                    ticket_id="own-ticket",
+                    body="private diagnostic",
+                    is_private=True,
+                    created_at=datetime(2001, 1, 1),
+                ),
+            ])
+            db.commit()
+
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-agent-session")
+        agent_response = self.client.get("/tickets/own-ticket/comments")
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
+        admin_response = self.client.get("/tickets/own-ticket/comments")
+
+        self.assertEqual(agent_response.status_code, 200)
+        self.assertEqual(
+            [comment["body"] for comment in agent_response.json()],
+            ["public reply"],
+        )
+        self.assertEqual(admin_response.status_code, 200)
+        self.assertEqual(
+            [comment["body"] for comment in admin_response.json()],
+            ["public reply", "private diagnostic"],
+        )
+
     def test_kb_page_signals_when_results_are_truncated(self):
         with self.session_factory() as db:
             db.add(KbArticleRecord(

@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from sqlalchemy import (
     create_engine, Column, String, Text, Integer, DateTime, Boolean, Float,
-    ForeignKey, UniqueConstraint, Index,
+    ForeignKey, UniqueConstraint, Index, CheckConstraint,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
 from dotenv import load_dotenv
@@ -79,9 +79,19 @@ class TicketRecord(Base):
     external_id = Column(String, nullable=True, index=True)
     external_url = Column(String, nullable=True)
     external_status = Column(String, nullable=True)
+    external_status_code = Column(String(64), nullable=True)
+    external_priority_code = Column(String(64), nullable=True)
+    external_ticket_type_raw = Column(String(255), nullable=True)
+    external_source_context_hash = Column(String(64), nullable=True)
     external_assignee_id = Column(String, nullable=True)
+    external_group_id = Column(String, nullable=True)
+    external_category = Column(String, nullable=True)
+    external_subcategory = Column(String, nullable=True)
+    external_item_category = Column(String, nullable=True)
     external_workspace_id = Column(String, nullable=True)
     external_updated_at = Column(DateTime, nullable=True)
+    external_conversation_text = Column(Text, nullable=True)
+    external_conversation_updated_at = Column(DateTime, nullable=True)
     external_created_at = Column(DateTime, nullable=True)
     external_resolved_at = Column(DateTime, nullable=True)
     external_due_by = Column(DateTime, nullable=True)
@@ -244,7 +254,16 @@ class SyncStateRecord(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     binding_id = Column(String(36), nullable=False, default="legacy", index=True)
     provider = Column(String, nullable=False)
-    last_synced_at = Column(DateTime, default=datetime.utcnow)
+    # A new binding starts with a full inventory; only a successful pass
+    # advances this cursor.
+    last_synced_at = Column(DateTime, nullable=True)
+    automatic_ai_enabled = Column(Boolean, nullable=False, default=False, index=True)
+    automatic_ai_generation = Column(Integer, nullable=True)
+    automatic_ai_cutover_at = Column(DateTime, nullable=True)
+    automatic_ai_enabled_at = Column(DateTime, nullable=True)
+    automatic_ai_enabled_by = Column(String(255), nullable=True)
+    automatic_ai_paused_at = Column(DateTime, nullable=True)
+    automatic_ai_paused_by = Column(String(255), nullable=True)
     last_status = Column(String, default="idle")
     last_error = Column(Text, nullable=True)
     total_synced = Column(Integer, default=0)
@@ -252,6 +271,13 @@ class SyncStateRecord(Base):
     __table_args__ = (
         UniqueConstraint(
             "binding_id", "provider", name="uix_sync_state_binding_provider"
+        ),
+        CheckConstraint(
+            "automatic_ai_enabled = FALSE OR "
+            "(automatic_ai_generation IS NOT NULL AND "
+            "automatic_ai_cutover_at IS NOT NULL AND "
+            "automatic_ai_enabled_at IS NOT NULL)",
+            name="ck_sync_state_automatic_ai_boundary",
         ),
     )
 
@@ -422,6 +448,128 @@ class TicketCommentRecord(Base):
     body = Column(Text, nullable=False)
     is_private = Column(Boolean, default=False)  # True = internal note, False = public reply
     created_at = Column(DateTime, default=datetime.utcnow)
+    external_source = Column(String(64), nullable=True)
+    external_id = Column(String(255), nullable=True)
+    external_author_id = Column(String(255), nullable=True)
+    external_updated_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "ticket_id", "external_source", "external_id",
+            name="uix_ticket_external_comment",
+        ),
+    )
+
+
+class ExternalConversationRecord(Base):
+    """Binding-scoped provider conversation projection."""
+
+    __tablename__ = "external_conversations"
+
+    id = Column(String(36), primary_key=True)
+    binding_id = Column(String(36), nullable=False, index=True)
+    provider = Column(String(64), nullable=False, index=True)
+    ticket_id = Column(String, ForeignKey("tickets.id"), nullable=False, index=True)
+    provider_ticket_id = Column(String(255), nullable=False, index=True)
+    external_id = Column(String(255), nullable=False)
+    body = Column(Text, nullable=True)
+    body_hash = Column(String(64), nullable=False)
+    is_private = Column(Boolean, nullable=False, default=False, index=True)
+    incoming = Column(Boolean, nullable=False, default=False)
+    source = Column(Integer, nullable=True)
+    author_external_id = Column(String(255), nullable=True)
+    provider_created_at = Column(DateTime, nullable=True)
+    provider_updated_at = Column(DateTime, nullable=True)
+    deleted = Column(Boolean, nullable=False, default=False, index=True)
+    public_tombstone = Column(Boolean, nullable=False, default=False, index=True)
+    revision_hash = Column(String(64), nullable=False, index=True)
+    projection_version = Column(String(32), nullable=False, default="freshservice-v1")
+    received_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "binding_id", "provider", "provider_ticket_id", "external_id",
+            name="uix_external_conversation_identity",
+        ),
+        Index(
+            "ix_external_conversations_ticket_current",
+            "binding_id", "provider", "provider_ticket_id", "deleted", "is_private",
+        ),
+    )
+
+
+class ExternalActivityRecord(Base):
+    """Append-only eligibility evidence for an authoritative provider revision."""
+
+    __tablename__ = "external_activity_ledger"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    binding_id = Column(String(36), nullable=False, index=True)
+    provider = Column(String(64), nullable=False, index=True)
+    ticket_id = Column(String, ForeignKey("tickets.id"), nullable=False, index=True)
+    entity_type = Column(String(32), nullable=False)
+    external_id = Column(String(255), nullable=False)
+    revision_hash = Column(String(64), nullable=False)
+    activity_at = Column(DateTime, nullable=True, index=True)
+    acquisition_mode = Column(String(32), nullable=False)
+    automatic_ai_generation = Column(Integer, nullable=True)
+    automatic_ai_eligible = Column(Boolean, nullable=False, default=False, index=True)
+    eligibility_reason = Column(String(96), nullable=False)
+    affected_artifacts = Column(String(255), nullable=True)
+    projected_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "binding_id", "provider", "ticket_id", "entity_type", "external_id",
+            "revision_hash",
+            name="uix_external_activity_revision",
+        ),
+        CheckConstraint(
+            "automatic_ai_eligible = FALSE OR "
+            "(activity_at IS NOT NULL AND automatic_ai_generation IS NOT NULL)",
+            name="ck_external_activity_eligible_evidence",
+        ),
+    )
+
+
+class ExternalTicketContextRecord(Base):
+    """Provider workflow and assignment context, separate from local/AI state."""
+
+    __tablename__ = "external_ticket_context"
+
+    id = Column(String(36), primary_key=True)
+    binding_id = Column(String(36), nullable=False, index=True)
+    provider = Column(String(64), nullable=False, index=True)
+    ticket_id = Column(String, ForeignKey("tickets.id"), nullable=False, index=True)
+    provider_ticket_id = Column(String(255), nullable=False)
+    status_raw = Column(String(64), nullable=True)
+    status_mapped = Column(String(120), nullable=True)
+    priority_raw = Column(String(64), nullable=True)
+    priority_mapped = Column(String(120), nullable=True)
+    ticket_type_raw = Column(String(255), nullable=True)
+    ticket_type_mapped = Column(String(255), nullable=True)
+    category = Column(String(255), nullable=True)
+    subcategory = Column(String(255), nullable=True)
+    item_category = Column(String(255), nullable=True)
+    group_external_id = Column(String(255), nullable=True)
+    responder_external_id = Column(String(255), nullable=True)
+    requester_external_id = Column(String(255), nullable=True)
+    workspace_external_id = Column(String(255), nullable=True)
+    provider_created_at = Column(DateTime, nullable=True)
+    provider_updated_at = Column(DateTime, nullable=True)
+    provider_resolved_at = Column(DateTime, nullable=True)
+    provider_due_at = Column(DateTime, nullable=True)
+    source_context_hash = Column(String(64), nullable=False)
+    projection_version = Column(String(32), nullable=False, default="freshservice-v1")
+    fetched_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "binding_id", "provider", "provider_ticket_id",
+            name="uix_external_ticket_context_identity",
+        ),
+    )
 
 
 class TicketCategoryRecord(Base):
@@ -898,10 +1046,20 @@ def _ensure_columns():
         "portal_access_token_hash": "VARCHAR(64)",
         "portal_access_expires_at": "TIMESTAMP",
         "external_workspace_id": "VARCHAR",
+        "external_status_code": "VARCHAR(64)",
+        "external_priority_code": "VARCHAR(64)",
+        "external_ticket_type_raw": "VARCHAR(255)",
+        "external_source_context_hash": "VARCHAR(64)",
+        "external_group_id": "VARCHAR",
+        "external_category": "VARCHAR",
+        "external_subcategory": "VARCHAR",
+        "external_item_category": "VARCHAR",
         "external_created_at": "TIMESTAMP",
         "external_resolved_at": "TIMESTAMP",
         "external_due_by": "TIMESTAMP",
         "external_fr_due_by": "TIMESTAMP",
+        "external_conversation_text": "TEXT",
+        "external_conversation_updated_at": "TIMESTAMP",
     }
     with engine.begin() as conn:
         for col, ddl in additions.items():
@@ -913,6 +1071,44 @@ def _ensure_columns():
             "CREATE UNIQUE INDEX IF NOT EXISTS ix_tickets_portal_access_token_hash "
             "ON tickets (portal_access_token_hash)"
         )
+
+    if insp.has_table("sync_state"):
+        sync_cols = {c["name"] for c in insp.get_columns("sync_state")}
+        sync_additions = {
+            "automatic_ai_enabled": "BOOLEAN NOT NULL DEFAULT FALSE",
+            "automatic_ai_generation": "INTEGER",
+            "automatic_ai_cutover_at": "TIMESTAMP",
+            "automatic_ai_enabled_at": "TIMESTAMP",
+            "automatic_ai_enabled_by": "VARCHAR(255)",
+            "automatic_ai_paused_at": "TIMESTAMP",
+            "automatic_ai_paused_by": "VARCHAR(255)",
+        }
+        with engine.begin() as conn:
+            for col, ddl in sync_additions.items():
+                if col in sync_cols:
+                    continue
+                conn.exec_driver_sql(
+                    f"ALTER TABLE sync_state ADD COLUMN IF NOT EXISTS {col} {ddl}"
+                )
+
+    if insp.has_table("ticket_comments"):
+        comment_cols = {c["name"] for c in insp.get_columns("ticket_comments")}
+        comment_additions = {
+            "external_source": "VARCHAR(64)",
+            "external_id": "VARCHAR(255)",
+            "external_author_id": "VARCHAR(255)",
+            "external_updated_at": "TIMESTAMP",
+        }
+        with engine.begin() as conn:
+            for col, ddl in comment_additions.items():
+                if col not in comment_cols:
+                    conn.exec_driver_sql(
+                        f'ALTER TABLE ticket_comments ADD COLUMN IF NOT EXISTS {col} {ddl}'
+                    )
+            conn.exec_driver_sql(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uix_ticket_external_comment "
+                "ON ticket_comments (ticket_id, external_source, external_id)"
+            )
 
     # ── users table additions (auth/roles) ──
     if insp.has_table("users"):

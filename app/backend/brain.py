@@ -47,9 +47,14 @@ class IntelligenceEngine:
             {
                 "subject": redact_text(ticket_data.get("subject") or ""),
                 "description": redact_text(ticket_data.get("description") or ""),
+                "public_thread": redact_text(ticket_data.get("public_thread") or ""),
             },
             max_chars=prompt_char_limit(self.llm),
-            field_limits={"subject": 1_000, "description": 20_000},
+            field_limits={
+                "subject": 1_000,
+                "description": 10_000,
+                "public_thread": 12_000,
+            },
         )
         analysis = await self.llm.analyze(
             triage_prompt,
@@ -75,12 +80,16 @@ class IntelligenceEngine:
                     "ticket_description": redact_text(
                         ticket_data.get("description") or ""
                     ),
+                    "public_thread": redact_text(
+                        ticket_data.get("public_thread") or ""
+                    ),
                     "knowledge_base_evidence": redact_text(kb_info),
                 },
                 max_chars=prompt_char_limit(self.llm),
                 field_limits={
                     "ticket_subject": 1_000,
-                    "ticket_description": 18_000,
+                    "ticket_description": 10_000,
+                    "public_thread": 12_000,
                     "knowledge_base_evidence": 8_000,
                 },
             )

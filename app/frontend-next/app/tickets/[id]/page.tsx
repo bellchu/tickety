@@ -7,6 +7,7 @@ import { canAccessProtectedIntelligence } from "@/lib/auth";
 import type { ResolutionPlan, Ticket, TicketAnalysisResult, TicketAuditEntry, TicketComment, UserOut } from "@/lib/types";
 import { useParams } from "next/navigation";
 import { AIThinkingStream } from "@/components/ticket/AIThinkingStream";
+import { FreshserviceConversationThread } from "@/components/ticket/FreshserviceConversationThread";
 import { TicketSignalStrip } from "@/components/ticket/TicketSignalStrip";
 import {
   ArrowLeft, ArrowUpRight, User, Tag, Flag, MessageSquare,
@@ -114,7 +115,10 @@ export default function TicketDetailPage() {
       />
 
       {ticket.external_source === "freshservice" ? (
-        <FreshserviceSourcePanel ticket={ticket} />
+        <>
+          <FreshserviceConversationThread ticket={ticket} />
+          <FreshserviceSourcePanel ticket={ticket} />
+        </>
       ) : (
         <AgentActionPanel ticket={ticket} />
       )}
@@ -142,8 +146,7 @@ function FreshserviceSourcePanel({ ticket }: { ticket: Ticket }) {
       </summary>
       <div className="mt-4 border-t border-linen-300 pt-4">
         {sourceUrl && <div className="mb-4 flex justify-end"><a href={sourceUrl} target="_blank" rel="noopener noreferrer" className="inline-flex min-h-9 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-linen-400 bg-white px-3 text-xs font-semibold text-ink-700 hover:bg-linen-200">Open in Freshservice <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" /></a></div>}
-        <p className="max-w-5xl whitespace-pre-wrap text-sm leading-6 text-ink-600">{ticket.description || "No description was provided for this ticket."}</p>
-        <div className="mt-4 grid gap-4 text-sm sm:grid-cols-3">
+        <div className="grid gap-4 text-sm sm:grid-cols-3">
           <InfoItem icon={<User className="h-3.5 w-3.5" />} label="Reporter"><span className="break-all">{ticket.reporter || "—"}</span></InfoItem>
           <InfoItem icon={<Tag className="h-3.5 w-3.5" />} label="Source category">{ticket.category || "—"}</InfoItem>
           <InfoItem icon={<Flag className="h-3.5 w-3.5" />} label="Source status">{ticket.external_status || ticket.status}</InfoItem>

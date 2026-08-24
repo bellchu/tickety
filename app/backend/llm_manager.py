@@ -10,7 +10,7 @@ import threading
 import time
 import secrets
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Type
 from litellm import acompletion
 from dotenv import load_dotenv
@@ -138,6 +138,14 @@ class LLMUnavailableError(LLMAnalysisError):
     pass
 
 
+class LLMCapacityError(LLMUnavailableError):
+    """Local Foundry/provider admission was deferred without dispatching."""
+
+    def __init__(self, message: str, retry_after_seconds: float):
+        super().__init__(message)
+        self.retry_after_seconds = max(1.0, float(retry_after_seconds))
+
+
 class LLMInvalidOutputError(LLMAnalysisError):
     pass
 
@@ -146,6 +154,24 @@ class LLMInvalidInputError(LLMAnalysisError):
     """Raised before dispatch when a prompt cannot be safely contained."""
 
     pass
+
+
+def _provider_retry_delay(headers, default: float) -> float:
+    """Honor Foundry's seconds and milliseconds retry hints, with a hard cap."""
+    delay = max(0.0, float(default))
+    for name, divisor in (
+        ("Retry-After", 1.0),
+        ("retry-after", 1.0),
+        ("retry-after-ms", 1000.0),
+    ):
+        value = headers.get(name) if headers else None
+        if value is None:
+            continue
+        try:
+            delay = max(delay, float(value) / divisor)
+        except (TypeError, ValueError):
+            continue
+    return min(30.0, delay)
 
 
 def _metric(**increments: int) -> None:
@@ -340,7 +366,17 @@ def _reserve_provider_capacity(
                 ).returning(AIRequestBucketRecord.request_count)
                 if int(db.execute(statement).scalar_one()) > ceiling:
                     db.rollback()
-                    raise LLMUnavailableError("AI provider capacity exceeded")
+                    retry_at = (
+                        day + timedelta(days=1)
+                        if kind == "reserved_tokens_day"
+                        else minute + timedelta(minutes=1)
+                    )
+                    retry_after = max(
+                        1.0, (retry_at - now).total_seconds() + 1.0
+                    )
+                    raise LLMCapacityError(
+                        "AI provider capacity exceeded", retry_after
+                    )
             db.commit()
             return ProviderCapacityReservation(
                 tokens=int(estimated_tokens),
@@ -1152,9 +1188,12 @@ class LLMManager:
                 status = getattr(e, "status_code", None) or getattr(
                     getattr(e, "response", None), "status_code", None
                 )
-                retryable = not isinstance(e, LLMAnalysisError) and (
-                    status in _RETRYABLE_STATUS or isinstance(
-                    e, (asyncio.TimeoutError, ConnectionError)
+                capacity_wait = isinstance(e, LLMCapacityError)
+                retryable = capacity_wait or (
+                    not isinstance(e, LLMAnalysisError) and (
+                        status in _RETRYABLE_STATUS or isinstance(
+                            e, (asyncio.TimeoutError, ConnectionError)
+                        )
                     )
                 )
                 print(
@@ -1191,12 +1230,9 @@ class LLMManager:
                     _metric(retries=1)
                     delay = (2 ** attempt) + random.uniform(0, 0.25)
                     response_headers = getattr(getattr(e, "response", None), "headers", {}) or {}
-                    retry_after = response_headers.get("Retry-After") or response_headers.get("retry-after")
-                    if retry_after:
-                        try:
-                            delay = min(30.0, max(delay, float(retry_after)))
-                        except (TypeError, ValueError):
-                            pass
+                    delay = _provider_retry_delay(response_headers, delay)
+                    if capacity_wait:
+                        delay = max(delay, e.retry_after_seconds)
                     if time.monotonic() + delay >= deadline:
                         break
                     await asyncio.sleep(delay)
@@ -1206,6 +1242,8 @@ class LLMManager:
         _metric(failures=1, latency_ms_total=int((time.monotonic() - started) * 1000))
         if isinstance(last_err, (json.JSONDecodeError, ValidationError, ValueError)):
             raise LLMInvalidOutputError("AI provider returned invalid structured output") from last_err
+        if isinstance(last_err, LLMCapacityError):
+            raise last_err
         raise LLMUnavailableError("AI provider request failed") from last_err
 
     # ── helpers ────────────────────────────────────────────────

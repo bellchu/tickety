@@ -23,7 +23,7 @@ import {
 } from "lucide-react";
 import { NewTicketModal } from "@/components/ticket/NewTicketModal";
 import { Alert, Badge, Button, EmptyState, ErrorState, Skeleton } from "@/components/ui";
-import { PageFrame, PageHeader, SummaryStrip } from "@/components/layout/PageLayout";
+import { PageFrame, PageHeader } from "@/components/layout/PageLayout";
 import { api } from "@/lib/api";
 import {
   canAccessProtectedIntelligence,
@@ -90,7 +90,7 @@ function exportTickets(tickets: Ticket[]) {
   URL.revokeObjectURL(url);
 }
 
-function MetricCard({
+function ContextMetric({
   label,
   value,
   supporting,
@@ -113,16 +113,16 @@ function MetricCard({
   };
 
   return (
-    <div className="rounded-2xl border border-linen-400 bg-linen-50 p-4 shadow-sm sm:p-5">
-      <div className="flex items-start justify-between gap-3">
-        <p className="text-xs font-semibold uppercase tracking-[0.1em] text-ink-500">{label}</p>
+    <div className="min-w-0 p-4 sm:p-5 xl:p-4">
+      <div className="flex items-center gap-3">
         <span className={cn("grid h-8 w-8 shrink-0 place-items-center rounded-lg", tones[tone])} aria-hidden="true">{icon}</span>
+        <p className="font-mono text-[10px] font-medium uppercase tracking-[0.11em] text-ink-500">{label}</p>
       </div>
       {loading ? (
-        <><Skeleton className="mt-4 h-8 w-20" /><Skeleton className="mt-3 h-3 w-32" /></>
+        <><Skeleton className="mt-3 h-7 w-20" /><Skeleton className="mt-2 h-3 w-32 max-w-full" /></>
       ) : (
         <>
-          <p className="mt-3 text-3xl font-semibold tracking-[-0.04em] text-ink-700 tabular-nums">{value}</p>
+          <p className="mt-3 break-words text-2xl font-semibold tracking-[-0.035em] text-ink-700 tabular-nums [overflow-wrap:anywhere]">{value}</p>
           <p className="mt-1 text-xs leading-5 text-ink-500">{supporting}</p>
         </>
       )}
@@ -351,8 +351,13 @@ export default function DashboardPage() {
         </Alert>
       )}
 
-      <section aria-labelledby="operational-pulse-title" className="overflow-hidden rounded-2xl bg-ink-700 text-linen-50 shadow-[var(--shadow-raised)]">
-        <div className="grid gap-5 p-5 sm:p-6 lg:grid-cols-[1.35fr_0.65fr] lg:items-center">
+      <section
+        aria-labelledby="operational-pulse-title"
+        data-overview-section="operational-pulse"
+        className="relative overflow-hidden rounded-2xl bg-ink-700 text-linen-50 shadow-[var(--shadow-raised)]"
+      >
+        <span aria-hidden="true" className="nexora-spectrum absolute inset-x-0 top-0 h-[3px]" />
+        <div className="grid gap-5 p-5 pt-6 sm:p-6 sm:pt-7 lg:grid-cols-[1.35fr_0.65fr] lg:items-center">
           <div>
             <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.13em] text-linen-400">
               <span className={cn("h-2 w-2 rounded-full", pulse.tone === "danger" ? "bg-rust-400" : pulse.tone === "warning" ? "bg-amber-400" : "bg-moss-400")} aria-hidden="true" />
@@ -367,26 +372,86 @@ export default function DashboardPage() {
               </>
             )}
           </div>
-          <div className="grid grid-cols-3 divide-x divide-white/15 rounded-xl border border-white/10 bg-white/[0.04] px-2 py-4">
-            <div className="px-2 text-center sm:px-3"><p className="text-2xl font-semibold tabular-nums text-white">{ticketsQuery.isLoading ? "—" : activeTickets.length}</p><p className="mt-1 text-[11px] text-linen-400">Active</p></div>
-            <div className="px-2 text-center sm:px-3"><p className="text-2xl font-semibold tabular-nums text-white">{ticketsQuery.isLoading || (canUseIntelligence && slaQuery.isLoading) ? "—" : secondaryPulse.value}</p><p className="mt-1 text-[11px] text-linen-400">{secondaryPulse.label}</p></div>
-            <div className="px-2 text-center sm:px-3"><p className="text-2xl font-semibold tabular-nums text-white">{ticketsQuery.isLoading ? "—" : p1Count}</p><p className="mt-1 text-[11px] text-linen-400">P1 active</p></div>
+          <div className="grid min-w-0 grid-cols-3 divide-x divide-white/15 rounded-xl border border-white/10 bg-white/[0.04] px-1 py-4 sm:px-2">
+            <div className="min-w-0 px-1.5 text-center sm:px-3"><p className="font-mono text-2xl font-medium tabular-nums text-white">{ticketsQuery.isLoading ? "—" : activeTickets.length}</p><p className="mt-1 break-words text-[10px] leading-4 text-linen-400 sm:text-[11px]">Active</p></div>
+            <div className="min-w-0 px-1.5 text-center sm:px-3"><p className="font-mono text-2xl font-medium tabular-nums text-white">{ticketsQuery.isLoading || (canUseIntelligence && slaQuery.isLoading) ? "—" : secondaryPulse.value}</p><p className="mt-1 break-words text-[10px] leading-4 text-linen-400 sm:text-[11px]">{secondaryPulse.label}</p></div>
+            <div className="min-w-0 px-1.5 text-center sm:px-3"><p className="font-mono text-2xl font-medium tabular-nums text-white">{ticketsQuery.isLoading ? "—" : p1Count}</p><p className="mt-1 break-words text-[10px] leading-4 text-linen-400 sm:text-[11px]">P1 active</p></div>
           </div>
         </div>
       </section>
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1.55fr)_minmax(18rem,0.75fr)]">
-        <section aria-labelledby="priority-queue-title" className="min-w-0 overflow-hidden rounded-2xl border border-linen-400 bg-linen-50 shadow-sm">
+      <div
+        data-overview-decision-grid
+        className="grid min-w-0 gap-6 xl:grid-cols-[minmax(0,1.55fr)_minmax(18rem,0.75fr)] xl:items-start"
+      >
+        <aside
+          aria-labelledby="queue-guidance-title"
+          data-overview-section="next-action"
+          className="relative min-w-0 self-start overflow-hidden rounded-2xl border border-linen-400 bg-linen-50 p-5 shadow-sm sm:p-6 xl:col-start-2 xl:row-start-1"
+        >
+          <span aria-hidden="true" className="nexora-spectrum absolute inset-x-0 top-0 h-[3px]" />
+          <div className="flex items-center justify-between gap-3">
+            <span className={cn("grid h-10 w-10 place-items-center rounded-xl", hasIntelligenceRanking ? "bg-semantic-primary text-white" : "bg-linen-300 text-ink-600")} aria-hidden="true">
+              {hasIntelligenceRanking ? <Bot className="h-5 w-5" /> : <ListOrdered className="h-5 w-5" />}
+            </span>
+            <Badge variant={hasIntelligenceRanking ? "info" : "neutral"} dot>
+              {hasIntelligenceRanking ? "Decision support" : demoWorkspace ? "Demo queue" : "Queue policy"}
+            </Badge>
+          </div>
+          <p className="mt-5 font-mono text-[10px] font-medium uppercase tracking-[0.12em] text-ink-400">Priority guidance</p>
+          <h2 id="queue-guidance-title" className="mt-1 text-xl font-semibold tracking-[-0.02em] text-ink-700">Next action</h2>
+          <div id="priority-recommendation-summary" className="mt-4">
+            {queueLoading ? (
+              <div className="space-y-3" aria-busy="true"><Skeleton className="h-5 w-5/6" /><Skeleton className="h-4 w-full" /><Skeleton className="h-4 w-3/4" /><Skeleton className="mt-5 h-10 w-full" /></div>
+            ) : !topTicket ? (
+              <EmptyState title="No action suggested" description="There are no active tickets at this time." icon={<CheckCircle2 className="h-5 w-5" />} className="min-h-40 bg-linen-100" />
+            ) : hasIntelligenceRanking && topRecommendation ? (
+              <>
+                <p className="break-words text-sm font-semibold leading-5 text-ink-700 [overflow-wrap:anywhere]">Review “{topTicket.subject}” first.</p>
+                <p className="mt-2 text-sm leading-6 text-ink-500">It has the highest protected operational score in the active backlog. Review the evidence before acting.</p>
+                <dl className="mt-5 grid grid-cols-2 gap-2.5">
+                  <div className="rounded-xl border border-linen-300 bg-linen-100 p-3"><dt className="flex items-center gap-1.5 text-[11px] font-medium text-ink-500"><Gauge className="h-3.5 w-3.5" aria-hidden="true" />Escalation risk</dt><dd className="mt-1 font-mono text-base font-medium text-ink-700">{Math.round(topRecommendation.escalation_risk)}%</dd></div>
+                  <div className="rounded-xl border border-linen-300 bg-linen-100 p-3"><dt className="flex items-center gap-1.5 text-[11px] font-medium text-ink-500"><Clock3 className="h-3.5 w-3.5" aria-hidden="true" />Age</dt><dd className="mt-1 font-mono text-base font-medium text-ink-700">{formatDurationHours(topRecommendation.age_hours)}</dd></div>
+                  <div className="min-w-0 rounded-xl border border-linen-300 bg-linen-100 p-3"><dt className="flex items-center gap-1.5 text-[11px] font-medium text-ink-500"><AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />Priority</dt><dd className="mt-1 truncate font-mono text-base font-medium text-ink-700" title={topRecommendation.priority}>{topRecommendation.priority}</dd></div>
+                  <div className="rounded-xl border border-linen-300 bg-linen-100 p-3"><dt className="flex items-center gap-1.5 text-[11px] font-medium text-ink-500"><Layers3 className="h-3.5 w-3.5" aria-hidden="true" />Complexity</dt><dd className="mt-1 font-mono text-base font-medium text-ink-700">{topRecommendation.complexity}/5</dd></div>
+                </dl>
+              </>
+            ) : (
+              <>
+                <p className="break-words text-sm font-semibold leading-5 text-ink-700 [overflow-wrap:anywhere]">Review “{topTicket.subject}” first.</p>
+                <p className="mt-2 text-sm leading-6 text-ink-500">Selected by declared priority, then oldest first. AI-generated ticket content is not used for this queue policy.</p>
+                <dl className="mt-5 grid grid-cols-2 gap-2.5">
+                  <div className="min-w-0 rounded-xl border border-linen-300 bg-linen-100 p-3"><dt className="text-[11px] font-medium text-ink-500">Priority</dt><dd className="mt-1 truncate font-mono text-base font-medium text-ink-700" title={topTicket.priority}>{topTicket.priority}</dd></div>
+                  <div className="rounded-xl border border-linen-300 bg-linen-100 p-3"><dt className="text-[11px] font-medium text-ink-500">Age</dt><dd className="mt-1 font-mono text-base font-medium text-ink-700">{formatQueueAge(topTicket.created_at)}</dd></div>
+                  <div className="min-w-0 rounded-xl border border-linen-300 bg-linen-100 p-3"><dt className="text-[11px] font-medium text-ink-500">Status</dt><dd className="mt-1 truncate text-sm font-semibold text-ink-700">{topTicket.status}</dd></div>
+                  <div className="min-w-0 rounded-xl border border-linen-300 bg-linen-100 p-3"><dt className="text-[11px] font-medium text-ink-500">Owner</dt><dd className="mt-1 truncate text-sm font-semibold text-ink-700">{topTicket.assignee_name || topTicket.external_assignee_name || "Unassigned"}</dd></div>
+                </dl>
+              </>
+            )}
+          </div>
+          {topTicket && !queueLoading && (
+            <Link href={`/tickets/${topTicket.id}`} className="mt-5 inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-lg bg-semantic-primary px-4 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-semantic-primary-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2">
+              Review ticket <ArrowUpRight className="h-4 w-4" aria-hidden="true" />
+            </Link>
+          )}
+        </aside>
+
+        <section
+          aria-labelledby="priority-queue-title"
+          data-overview-section="priority-queue"
+          className="min-w-0 self-start overflow-hidden rounded-2xl border border-linen-400 bg-linen-50 shadow-sm xl:col-start-1 xl:row-span-2 xl:row-start-1"
+        >
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-linen-300 px-5 py-4 sm:px-6">
             <div className="min-w-0">
-              <h2 id="priority-queue-title" className="text-base font-semibold text-ink-700">Priority queue</h2>
+              <p className="font-mono text-[10px] font-medium uppercase tracking-[0.12em] text-ink-400">Active work</p>
+              <h2 id="priority-queue-title" className="mt-1 text-base font-semibold text-ink-700">Priority queue</h2>
               <p className="mt-1 text-xs text-ink-500">
                 {usesIntelligenceQueue
                   ? "Ranked by protected operational intelligence."
                   : "Sorted by declared priority, then oldest first."}
               </p>
             </div>
-            <Link href="/tickets" className="inline-flex min-h-9 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold text-semantic-primary transition-colors hover:bg-[var(--color-primary-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]">
+            <Link href="/tickets" className="inline-flex min-h-10 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold text-semantic-primary transition-colors hover:bg-[var(--color-primary-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]">
               View all <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" />
             </Link>
           </div>
@@ -400,24 +465,30 @@ export default function DashboardPage() {
             <EmptyState title="The active queue is clear" description="New and reopened tickets will appear here in operational priority order." icon={<CheckCircle2 className="h-5 w-5" />} className="m-5" />
           ) : (
             <>
-              <div className="divide-y divide-linen-300 md:hidden">
+              <div className="divide-y divide-linen-300 xl:hidden">
                 {queue.map((ticket, index) => {
                   const ranked = rankedById.get(ticket.id);
                   return (
-                    <article key={ticket.id} className="p-4 sm:p-5">
-                      <div className="flex items-center gap-2">
-                        <span className="inline-grid h-7 w-7 shrink-0 place-items-center rounded-full bg-linen-200 text-xs font-semibold text-ink-600">{index + 1}</span>
+                    <article
+                      key={ticket.id}
+                      aria-describedby={index === 0 ? "priority-recommendation-summary" : undefined}
+                      className={cn("relative p-4", index === 0 && "bg-[var(--color-primary-soft)]")}
+                    >
+                      {index === 0 && <span aria-hidden="true" className="nexora-spectrum absolute inset-y-0 left-0 w-[3px]" />}
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span className="inline-grid h-7 w-7 shrink-0 place-items-center rounded-full bg-linen-200 font-mono text-xs font-medium text-ink-600">{index + 1}</span>
                         <TicketPriorityBadge priority={ticket.priority} className="max-w-20 shrink" />
-                        <TicketStatusBadge status={ticket.status} className="ml-auto max-w-[9rem]" />
+                        {index === 0 && <span className="font-mono text-[9px] font-medium uppercase tracking-[0.09em] text-semantic-primary">Recommended</span>}
+                        <TicketStatusBadge status={ticket.status} className="ml-auto max-w-[8rem]" />
                       </div>
-                      <Link href={`/tickets/${ticket.id}`} className="mt-3 block break-words text-sm font-semibold leading-5 text-ink-700 [overflow-wrap:anywhere] hover:text-semantic-primary hover:underline">{ticket.subject}</Link>
+                      <Link href={`/tickets/${ticket.id}`} className="mt-2.5 block break-words text-sm font-semibold leading-5 text-ink-700 [overflow-wrap:anywhere] hover:text-semantic-primary hover:underline">{ticket.subject}</Link>
                       <p className="mt-1 text-xs leading-5 text-ink-500">{ranked ? intelligenceQueueReason(ranked) : deterministicQueueReason(ticket)}</p>
-                      <p className="mt-3 flex min-w-0 items-center gap-1.5 text-xs text-ink-500"><UserRound className="h-3.5 w-3.5 shrink-0" aria-hidden="true" /><span className="truncate">{ticket.assignee_name || ticket.external_assignee_name || "Unassigned"}</span></p>
+                      <p className="mt-2 flex min-w-0 items-center gap-1.5 text-xs text-ink-500"><UserRound className="h-3.5 w-3.5 shrink-0" aria-hidden="true" /><span className="truncate">{ticket.assignee_name || ticket.external_assignee_name || "Unassigned"}</span></p>
                     </article>
                   );
                 })}
               </div>
-              <div className="hidden md:block">
+              <div className="hidden xl:block">
                 <table className="w-full table-fixed text-left">
                   <caption className="sr-only">Highest priority active tickets</caption>
                   <colgroup>
@@ -427,7 +498,7 @@ export default function DashboardPage() {
                     <col className="w-[19%]" />
                     {usesIntelligenceQueue ? <col className="w-20" /> : null}
                   </colgroup>
-                  <thead className="bg-linen-100 text-[11px] font-semibold uppercase tracking-[0.09em] text-ink-500">
+                  <thead className="bg-linen-100 font-mono text-[10px] font-medium uppercase tracking-[0.09em] text-ink-500">
                     <tr>
                       <th scope="col" className="px-3 py-3 text-center">Rank</th>
                       <th scope="col" className="px-3 py-3">Request</th>
@@ -440,19 +511,29 @@ export default function DashboardPage() {
                     {queue.map((ticket, index) => {
                       const ranked = rankedById.get(ticket.id);
                       return (
-                        <tr key={ticket.id} className="group transition-colors hover:bg-linen-100">
-                          <td className="px-3 py-4 text-center"><span className="inline-grid h-7 w-7 place-items-center rounded-full bg-linen-200 text-xs font-semibold text-ink-600">{index + 1}</span></td>
+                        <tr
+                          key={ticket.id}
+                          aria-describedby={index === 0 ? "priority-recommendation-summary" : undefined}
+                          className={cn("group transition-colors hover:bg-linen-100", index === 0 && "bg-[var(--color-primary-soft)]")}
+                        >
+                          <td className="relative px-3 py-4 text-center">
+                            {index === 0 && <span aria-hidden="true" className="nexora-spectrum absolute inset-y-0 left-0 w-[3px]" />}
+                            <span className="inline-grid h-7 w-7 place-items-center rounded-full bg-linen-200 font-mono text-xs font-medium text-ink-600">{index + 1}</span>
+                          </td>
                           <td className="min-w-0 px-3 py-4">
                             <div className="flex min-w-0 items-center gap-2">
                               <TicketPriorityBadge priority={ticket.priority} className="max-w-16 shrink" />
-                              <Link href={`/tickets/${ticket.id}`} className="min-w-0 truncate text-sm font-semibold text-ink-700 hover:text-semantic-primary hover:underline">{ticket.subject}</Link>
+                              <Link href={`/tickets/${ticket.id}`} className="min-w-0 break-words text-sm font-semibold leading-5 text-ink-700 [overflow-wrap:anywhere] hover:text-semantic-primary hover:underline">{ticket.subject}</Link>
                             </div>
-                            <p className="mt-1 truncate text-xs text-ink-500">{ranked ? intelligenceQueueReason(ranked) : deterministicQueueReason(ticket)}</p>
+                            <p className="mt-1 flex min-w-0 items-center gap-2 text-xs text-ink-500">
+                              {index === 0 && <span className="shrink-0 font-mono text-[9px] font-medium uppercase tracking-[0.09em] text-semantic-primary">Recommended</span>}
+                              <span className="truncate">{ranked ? intelligenceQueueReason(ranked) : deterministicQueueReason(ticket)}</span>
+                            </p>
                           </td>
                           <td className="min-w-0 px-3 py-4"><span className="flex min-w-0 items-center gap-1.5 text-xs text-ink-500"><UserRound className="h-3.5 w-3.5 shrink-0" aria-hidden="true" /><span className="truncate">{ticket.assignee_name || ticket.external_assignee_name || "Unassigned"}</span></span></td>
                           <td className="px-3 py-4"><TicketStatusBadge status={ticket.status} /></td>
                           {usesIntelligenceQueue ? (
-                            <td className="px-3 py-4 text-right">{ranked ? <><span className="text-sm font-semibold tabular-nums text-ink-700">{Math.round(ranked.score)}</span><span className="ml-1 text-[10px] uppercase text-ink-500">score</span></> : "—"}</td>
+                            <td className="px-3 py-4 text-right">{ranked ? <><span className="font-mono text-sm font-medium tabular-nums text-ink-700">{Math.round(ranked.score)}</span><span className="ml-1 text-[10px] uppercase text-ink-500">score</span></> : "—"}</td>
                           ) : null}
                         </tr>
                       );
@@ -465,90 +546,53 @@ export default function DashboardPage() {
         </section>
 
         <aside
-          aria-labelledby="queue-guidance-title"
-          className={cn(
-            "self-start rounded-2xl border p-5 shadow-sm sm:p-6",
-            hasIntelligenceRanking ? "border-clay-200 bg-[var(--color-primary-soft)]" : "border-linen-400 bg-linen-50"
-          )}
+          aria-labelledby="workload-context-title"
+          data-overview-section="workload-context"
+          className="min-w-0 self-start overflow-hidden rounded-2xl border border-linen-400 bg-linen-50 shadow-sm xl:col-start-2 xl:row-start-2"
         >
-          <div className="flex items-center justify-between gap-3">
-            <span className={cn("grid h-10 w-10 place-items-center rounded-xl shadow-sm", hasIntelligenceRanking ? "bg-semantic-primary text-white" : "bg-linen-300 text-ink-600")} aria-hidden="true">
-              {hasIntelligenceRanking ? <Bot className="h-5 w-5" /> : <ListOrdered className="h-5 w-5" />}
-            </span>
-            <Badge variant={hasIntelligenceRanking ? "info" : "neutral"} dot>{hasIntelligenceRanking ? "Explainable ranking" : demoWorkspace ? "Demo queue" : "Queue policy"}</Badge>
+          <div className="border-b border-linen-300 px-5 py-4">
+            <p className="font-mono text-[10px] font-medium uppercase tracking-[0.12em] text-ink-400">Operational context</p>
+            <h2 id="workload-context-title" className="mt-1 text-base font-semibold text-ink-700">Workload context</h2>
+            <p className="mt-1 text-xs leading-5 text-ink-500">Supporting signals for the current queue.</p>
           </div>
-          <h2 id="queue-guidance-title" className="mt-5 text-lg font-semibold tracking-[-0.015em] text-ink-700">{hasIntelligenceRanking ? "Recommended next action" : "Suggested next ticket"}</h2>
-          {queueLoading ? (
-            <div className="mt-4 space-y-3"><Skeleton className="h-5 w-5/6" /><Skeleton className="h-4 w-full" /><Skeleton className="h-4 w-3/4" /><Skeleton className="mt-5 h-10 w-full" /></div>
-          ) : !topTicket ? (
-            <div className="mt-4"><EmptyState title="No action suggested" description="There are no active tickets at this time." icon={<CheckCircle2 className="h-5 w-5" />} className="min-h-44 bg-white/60" /></div>
-          ) : hasIntelligenceRanking && topRecommendation ? (
-            <>
-              <p className="mt-4 break-words text-sm font-semibold leading-5 text-ink-700 [overflow-wrap:anywhere]">Review “{topTicket.subject}” first.</p>
-              <p className="mt-2 text-sm leading-6 text-ink-500">It has the highest protected operational score in the active backlog. This supports review; it does not automate a resolution decision.</p>
-              <dl className="mt-5 grid grid-cols-2 gap-3">
-                <div className="rounded-xl border border-clay-200 bg-white/65 p-3"><dt className="flex items-center gap-1.5 text-[11px] font-medium text-ink-500"><Gauge className="h-3.5 w-3.5" aria-hidden="true" />Escalation risk</dt><dd className="mt-1 text-base font-semibold text-ink-700">{Math.round(topRecommendation.escalation_risk)}%</dd></div>
-                <div className="rounded-xl border border-clay-200 bg-white/65 p-3"><dt className="flex items-center gap-1.5 text-[11px] font-medium text-ink-500"><Clock3 className="h-3.5 w-3.5" aria-hidden="true" />Age</dt><dd className="mt-1 text-base font-semibold text-ink-700">{formatDurationHours(topRecommendation.age_hours)}</dd></div>
-                <div className="min-w-0 rounded-xl border border-clay-200 bg-white/65 p-3"><dt className="flex items-center gap-1.5 text-[11px] font-medium text-ink-500"><AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />Priority</dt><dd className="mt-1 truncate text-base font-semibold text-ink-700" title={topRecommendation.priority}>{topRecommendation.priority}</dd></div>
-                <div className="rounded-xl border border-clay-200 bg-white/65 p-3"><dt className="flex items-center gap-1.5 text-[11px] font-medium text-ink-500"><Layers3 className="h-3.5 w-3.5" aria-hidden="true" />Complexity</dt><dd className="mt-1 text-base font-semibold text-ink-700">{topRecommendation.complexity}/5</dd></div>
-              </dl>
-            </>
-          ) : (
-            <>
-              <p className="mt-4 break-words text-sm font-semibold leading-5 text-ink-700 [overflow-wrap:anywhere]">Review “{topTicket.subject}” first.</p>
-              <p className="mt-2 text-sm leading-6 text-ink-500">Selected by declared priority, then oldest first. AI-generated ticket content is not used for this queue policy.</p>
-              <dl className="mt-5 grid grid-cols-2 gap-3">
-                <div className="min-w-0 rounded-xl border border-linen-400 bg-linen-100 p-3"><dt className="text-[11px] font-medium text-ink-500">Priority</dt><dd className="mt-1 truncate text-base font-semibold text-ink-700" title={topTicket.priority}>{topTicket.priority}</dd></div>
-                <div className="rounded-xl border border-linen-400 bg-linen-100 p-3"><dt className="text-[11px] font-medium text-ink-500">Age</dt><dd className="mt-1 text-base font-semibold text-ink-700">{formatQueueAge(topTicket.created_at)}</dd></div>
-                <div className="min-w-0 rounded-xl border border-linen-400 bg-linen-100 p-3"><dt className="text-[11px] font-medium text-ink-500">Status</dt><dd className="mt-1 truncate text-sm font-semibold text-ink-700">{topTicket.status}</dd></div>
-                <div className="min-w-0 rounded-xl border border-linen-400 bg-linen-100 p-3"><dt className="text-[11px] font-medium text-ink-500">Owner</dt><dd className="mt-1 truncate text-sm font-semibold text-ink-700">{topTicket.assignee_name || topTicket.external_assignee_name || "Unassigned"}</dd></div>
-              </dl>
-            </>
-          )}
-          {topTicket && !queueLoading && (
-            <Link href={`/tickets/${topTicket.id}`} className="mt-5 inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-lg bg-semantic-primary px-4 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-semantic-primary-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2">
-              Review ticket <ArrowUpRight className="h-4 w-4" aria-hidden="true" />
-            </Link>
-          )}
+          <div className="grid divide-y divide-linen-300 sm:grid-cols-3 sm:divide-x sm:divide-y-0 xl:grid-cols-1 xl:divide-x-0 xl:divide-y">
+            <ContextMetric
+              label="Ticket volume"
+              value={tickets.length}
+              supporting={`${activeTickets.length} active · ${inactiveCount} inactive`}
+              icon={<TicketIcon className="h-4 w-4" />}
+              loading={ticketsQuery.isLoading}
+            />
+            {canUseIntelligence ? (
+              <ContextMetric
+                label="SLA on track"
+                value={slaQuery.isError ? "Unavailable" : slaHealth == null ? "—" : `${slaHealth}%`}
+                supporting={slaQuery.isError ? "SLA data needs to be refreshed" : slaItems.length ? `${onTrack} of ${slaItems.length} tracked clocks` : "No active SLA clocks"}
+                icon={<ShieldCheck className="h-4 w-4" />}
+                tone={slaQuery.isError ? "danger" : slaHealth != null && slaHealth < 80 ? "warning" : "success"}
+                loading={slaQuery.isLoading}
+              />
+            ) : (
+              <ContextMetric
+                label="Escalated"
+                value={escalatedCount}
+                supporting={escalatedCount ? "Active tickets requiring attention" : "No active escalations"}
+                icon={<AlertTriangle className="h-4 w-4" />}
+                tone={escalatedCount ? "warning" : "success"}
+                loading={ticketsQuery.isLoading || authQuery.isLoading}
+              />
+            )}
+            <ContextMetric
+              label="Active services"
+              value={servicesQuery.isError ? "Unavailable" : activeServices}
+              supporting={serviceRequestsQuery.isError ? "Request status needs to be refreshed" : `${openServiceRequests} open service ${openServiceRequests === 1 ? "request" : "requests"}`}
+              icon={<ServerCog className="h-4 w-4" />}
+              tone={servicesQuery.isError || serviceRequestsQuery.isError ? "danger" : openServiceRequests ? "warning" : "neutral"}
+              loading={servicesQuery.isLoading || serviceRequestsQuery.isLoading}
+            />
+          </div>
         </aside>
       </div>
-
-      <SummaryStrip label="Supporting operations metrics" className="xl:grid-cols-3">
-        <MetricCard
-          label="Ticket volume"
-          value={tickets.length}
-          supporting={`${activeTickets.length} active · ${inactiveCount} inactive`}
-          icon={<TicketIcon className="h-4 w-4" />}
-          loading={ticketsQuery.isLoading}
-        />
-        {canUseIntelligence ? (
-          <MetricCard
-            label="SLA on track"
-            value={slaQuery.isError ? "Unavailable" : slaHealth == null ? "—" : `${slaHealth}%`}
-            supporting={slaQuery.isError ? "SLA data needs to be refreshed" : slaItems.length ? `${onTrack} of ${slaItems.length} tracked clocks` : "No active SLA clocks"}
-            icon={<ShieldCheck className="h-4 w-4" />}
-            tone={slaQuery.isError ? "danger" : slaHealth != null && slaHealth < 80 ? "warning" : "success"}
-            loading={slaQuery.isLoading}
-          />
-        ) : (
-          <MetricCard
-            label="Escalated"
-            value={escalatedCount}
-            supporting={escalatedCount ? "Active tickets requiring attention" : "No active escalations"}
-            icon={<AlertTriangle className="h-4 w-4" />}
-            tone={escalatedCount ? "warning" : "success"}
-            loading={ticketsQuery.isLoading || authQuery.isLoading}
-          />
-        )}
-        <MetricCard
-          label="Active services"
-          value={servicesQuery.isError ? "Unavailable" : activeServices}
-          supporting={serviceRequestsQuery.isError ? "Request status needs to be refreshed" : `${openServiceRequests} open service ${openServiceRequests === 1 ? "request" : "requests"}`}
-          icon={<ServerCog className="h-4 w-4" />}
-          tone={servicesQuery.isError || serviceRequestsQuery.isError ? "danger" : openServiceRequests ? "warning" : "neutral"}
-          loading={servicesQuery.isLoading || serviceRequestsQuery.isLoading}
-        />
-      </SummaryStrip>
 
       {canCreateTicket && <NewTicketModal open={newTicketOpen} onClose={() => setNewTicketOpen(false)} />}
     </PageFrame>

@@ -8,7 +8,11 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy import or_
 
 from .database import SessionLocal, SyncStateRecord, TicketRecord
-from .integrations.sync import sync_tickets_from_external
+from .integrations.sync import (
+    AUTOMATIC_AI_LOOKBACK_DAYS,
+    queue_recent_automatic_ai,
+    sync_tickets_from_external,
+)
 from .integrations.registry import configured_provider, get_adapter
 from .integrations.bindings import expire_due_bindings, get_active_binding
 from . import settings as settings_module
@@ -77,21 +81,35 @@ def _bounded_interval(env_name: str, default: int, minimum: int, maximum: int) -
 
 def _auto_triage_job():
     """Background scanner: pick up tickets with missing AI data and fill
-    the gaps — triage first, then summary, then resolution. Processes up
-    to 10 tickets per 30‑second sweep."""
+    the gaps — triage first, then summary, then resolution. The number of
+    tickets admitted per sweep is bounded independently from provider RPM/TPM
+    enforcement so a seven-day repair window cannot become a traffic burst."""
     _refresh_admin_settings()
     try:
         db = SessionLocal()
+        batch_size = _bounded_interval(
+            "AI_BACKGROUND_TICKETS_PER_SWEEP", 5, 1, 25
+        )
         auto_triage = settings_module.automation_enabled("AUTO_TRIAGE_ENABLED", "AUTO_TRIAGE")
         auto_summary = settings_module.automation_enabled("AUTO_SUMMARIZE_ENABLED")
         auto_resolution = settings_module.automation_enabled("AUTO_RESOLVE_ENABLED")
-        # Only Tickety-owned records are eligible for implicit gap scanning.
-        # A provider-authenticated sync or webhook proves transport integrity,
-        # not that requester-controlled ticket text is safe AI input. External
-        # and Portal tickets must therefore be explicitly queued by an
-        # authenticated workflow before the worker will process them. The
-        # separate queued query above intentionally remains source-agnostic so
-        # those reviewed requests, including expired claims, can make progress.
+        try:
+            recent = queue_recent_automatic_ai(db, batch_size=batch_size)
+        except Exception as exc:
+            db.rollback()
+            recent = {
+                "lookback_days": AUTOMATIC_AI_LOOKBACK_DAYS,
+                "queued": 0,
+            }
+            print(
+                "[auto-triage] recent lookback unavailable "
+                f"kind={type(exc).__name__}"
+            )
+        # Only Tickety-owned records are eligible for the generic gap scan.
+        # External tickets reach the queue only through the audited binding
+        # switch plus realtime/seven-day eligibility; Portal tickets still
+        # require an explicit authenticated request. The queued query remains
+        # source-agnostic so authorized requests and expired claims progress.
         internal_automatic_source = or_(
             TicketRecord.external_source.is_(None),
             TicketRecord.external_source.in_(["manual", "standalone"]),
@@ -108,7 +126,8 @@ def _auto_triage_job():
                 TicketRecord.ai_next_attempt_at.is_(None),
                 TicketRecord.ai_next_attempt_at <= datetime.utcnow(),
             ),
-        ).limit(5).all()
+        ).limit(batch_size).all()
+        remaining = max(0, batch_size - len(queued))
         # Find tickets missing ANY AI data (prioritize untriaged first)
         untriaged = (
             db.query(TicketRecord).filter(
@@ -118,50 +137,71 @@ def _auto_triage_job():
                     TicketRecord.ai_status.is_(None),
                     TicketRecord.ai_status.notin_(["dead_letter", "failed"]),
                 ),
-            ).limit(5).all()
-            if auto_triage else []
+            ).limit(remaining).all()
+            if auto_triage and remaining else []
         )
+        triage_candidates = list(
+            {ticket.id: ticket for ticket in [*queued, *untriaged]}.values()
+        )
+        selected_ids = {ticket.id for ticket in triage_candidates}
+        remaining = max(0, batch_size - len(selected_ids))
+
+        summary_query = db.query(TicketRecord).filter(
+            internal_automatic_source,
+            TicketRecord.ai_reasoning.isnot(None),
+            TicketRecord.summary.is_(None),
+            or_(
+                TicketRecord.ai_status.is_(None),
+                TicketRecord.ai_status.notin_(
+                    ["dead_letter", "failed", "running", "queued"]
+                ),
+            ),
+            or_(
+                TicketRecord.ai_next_attempt_at.is_(None),
+                TicketRecord.ai_next_attempt_at <= datetime.utcnow(),
+            ),
+        )
+        if selected_ids:
+            summary_query = summary_query.filter(TicketRecord.id.notin_(selected_ids))
         no_summary = (
-            db.query(TicketRecord).filter(
-                internal_automatic_source,
-                TicketRecord.ai_reasoning.isnot(None),
-                TicketRecord.summary.is_(None),
-                or_(
-                    TicketRecord.ai_status.is_(None),
-                    TicketRecord.ai_status.notin_(["dead_letter", "failed", "running", "queued"]),
-                ),
-                or_(
-                    TicketRecord.ai_next_attempt_at.is_(None),
-                    TicketRecord.ai_next_attempt_at <= datetime.utcnow(),
-                ),
-            ).limit(5).all()
-            if auto_summary else []
+            summary_query.limit(remaining).all()
+            if auto_summary and remaining else []
         )
+        selected_ids.update(ticket.id for ticket in no_summary)
+        remaining = max(0, batch_size - len(selected_ids))
+
+        resolution_query = db.query(TicketRecord).filter(
+            internal_automatic_source,
+            TicketRecord.ai_reasoning.isnot(None),
+            TicketRecord.summary.isnot(None),
+            TicketRecord.recommended_solution.is_(None),
+            or_(
+                TicketRecord.ai_status.is_(None),
+                TicketRecord.ai_status.notin_(
+                    ["dead_letter", "failed", "running", "queued"]
+                ),
+            ),
+            or_(
+                TicketRecord.ai_next_attempt_at.is_(None),
+                TicketRecord.ai_next_attempt_at <= datetime.utcnow(),
+            ),
+        )
+        if selected_ids:
+            resolution_query = resolution_query.filter(
+                TicketRecord.id.notin_(selected_ids)
+            )
         no_resolution = (
-            db.query(TicketRecord).filter(
-                internal_automatic_source,
-                TicketRecord.ai_reasoning.isnot(None),
-                TicketRecord.summary.isnot(None),
-                TicketRecord.recommended_solution.is_(None),
-                or_(
-                    TicketRecord.ai_status.is_(None),
-                    TicketRecord.ai_status.notin_(["dead_letter", "failed", "running", "queued"]),
-                ),
-                or_(
-                    TicketRecord.ai_next_attempt_at.is_(None),
-                    TicketRecord.ai_next_attempt_at <= datetime.utcnow(),
-                ),
-            ).limit(5).all()
-            if auto_resolution else []
+            resolution_query.limit(remaining).all()
+            if auto_resolution and remaining else []
         )
 
-        if queued or untriaged or no_summary or no_resolution:
+        if recent["queued"] or queued or untriaged or no_summary or no_resolution:
             print(
-                f"[auto-triage] gaps: {len(queued)} queued, {len(untriaged)} untriaged, "
+                f"[auto-triage] recent={recent['queued']}, {len(queued)} queued, "
+                f"{len(untriaged)} untriaged, "
                 f"{len(no_summary)} no-summary, {len(no_resolution)} no-plan"
             )
 
-        triage_candidates = list({ticket.id: ticket for ticket in [*queued, *untriaged]}.values())
         if triage_candidates:
             import asyncio
             from .main import _auto_process
@@ -397,11 +437,32 @@ def get_sync_status() -> dict:
         if not state:
             return {"provider": current_provider, "binding_id": binding_id,
                     "last_synced_at": None, "last_synced": 0,
+                    "automatic_ai_enabled": False,
+                    "automatic_ai_generation": None,
+                    "automatic_ai_cutover_at": None,
+                    "automatic_ai_enabled_at": None,
+                    "automatic_ai_paused_at": None,
+                    "automatic_ai_lookback_days": AUTOMATIC_AI_LOOKBACK_DAYS,
                     "last_status": "idle", "last_error": None, "total_synced": 0}
         return {
             "provider": current_provider,
             "binding_id": binding_id,
             "last_synced_at": state.last_synced_at.isoformat() if state.last_synced_at else None,
+            "automatic_ai_enabled": state.automatic_ai_enabled,
+            "automatic_ai_generation": state.automatic_ai_generation,
+            "automatic_ai_cutover_at": (
+                state.automatic_ai_cutover_at.isoformat()
+                if state.automatic_ai_cutover_at else None
+            ),
+            "automatic_ai_enabled_at": (
+                state.automatic_ai_enabled_at.isoformat()
+                if state.automatic_ai_enabled_at else None
+            ),
+            "automatic_ai_paused_at": (
+                state.automatic_ai_paused_at.isoformat()
+                if state.automatic_ai_paused_at else None
+            ),
+            "automatic_ai_lookback_days": AUTOMATIC_AI_LOOKBACK_DAYS,
             "last_status": state.last_status,
             "last_error": state.last_error,
             "total_synced": state.total_synced,

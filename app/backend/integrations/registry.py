@@ -53,6 +53,9 @@ def _binding_config(binding) -> dict:
     return {
         "FRESHSERVICE_DOMAIN": getattr(binding, "canonical_account_host", ""),
         "FRESHSERVICE_WORKSPACE_ID": str(workspace_ids[0]) if workspace_ids else "",
+        "FRESHSERVICE_WORKSPACE_IDS": ",".join(
+            str(value).strip() for value in workspace_ids if str(value).strip()
+        ),
     }
 
 

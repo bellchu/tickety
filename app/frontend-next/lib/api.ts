@@ -155,8 +155,13 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   deleteTicket: (id: string) => fetchAPI<{ status: string }>(`/tickets/${id}`, { method: "DELETE" }),
-  getComments: (ticketId: string) =>
-    fetchAPI<import("./types").TicketComment[]>(`/tickets/${ticketId}/comments`),
+  getComments: (ticketId: string, pagination?: { limit?: number; offset?: number }) => {
+    const params = new URLSearchParams();
+    if (pagination?.limit !== undefined) params.set("limit", String(pagination.limit));
+    if (pagination?.offset !== undefined) params.set("offset", String(pagination.offset));
+    const query = params.size > 0 ? `?${params.toString()}` : "";
+    return fetchAPI<import("./types").TicketComment[]>(`/tickets/${ticketId}/comments${query}`);
+  },
   addComment: (ticketId: string, body: string, isPrivate = false) =>
     fetchAPI<import("./types").TicketComment>(`/tickets/${ticketId}/comments`, {
       method: "POST",

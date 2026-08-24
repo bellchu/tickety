@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any, List, Optional
 
-from ..schema import ExternalTicket, WebhookEvent
+from ..schema import ExternalConversation, ExternalTicket, WebhookEvent
 
 
 class BaseITSMAdapter(ABC):
@@ -62,6 +62,12 @@ class BaseITSMAdapter(ABC):
         """Return provider identities as read-only directory records."""
         agents = await self.fetch_agents(max_pages=max_pages)
         return [{**agent, "user_type": "agent"} for agent in agents]
+
+    async def fetch_ticket_conversations(
+        self, external_id: str, max_pages: Optional[int] = None
+    ) -> List[ExternalConversation]:
+        """Return a complete provider conversation projection when supported."""
+        return []
 
     @abstractmethod
     def parse_webhook(

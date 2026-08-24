@@ -11,6 +11,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.backend import main, sync_worker, ticket_vectors
 from app.backend.database import (
+    Base,
     SyncStateRecord,
     TicketRecord,
     UserRecord,
@@ -134,9 +135,7 @@ class ExternalPersistenceBoundaryTests(unittest.TestCase):
             connect_args={"check_same_thread": False},
             poolclass=StaticPool,
         )
-        UserRecord.__table__.create(self.engine)
-        TicketRecord.__table__.create(self.engine)
-        SyncStateRecord.__table__.create(self.engine)
+        Base.metadata.create_all(self.engine)
         self.session_factory = sessionmaker(bind=self.engine)
 
     def tearDown(self):

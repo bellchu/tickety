@@ -9,7 +9,11 @@ from sqlalchemy.pool import StaticPool
 
 from app.backend.database import (
     AIArtifactRecord,
+    ExternalActivityRecord,
+    ExternalConversationRecord,
+    ExternalTicketContextRecord,
     SyncStateRecord,
+    TicketCommentRecord,
     TicketRecord,
     UserRecord,
 )
@@ -43,8 +47,12 @@ class TicketSyncFailureIsolationTests(unittest.TestCase):
         )
         UserRecord.__table__.create(self.engine)
         TicketRecord.__table__.create(self.engine)
+        TicketCommentRecord.__table__.create(self.engine)
         SyncStateRecord.__table__.create(self.engine)
         AIArtifactRecord.__table__.create(self.engine)
+        ExternalConversationRecord.__table__.create(self.engine)
+        ExternalActivityRecord.__table__.create(self.engine)
+        ExternalTicketContextRecord.__table__.create(self.engine)
         self.session_factory = sessionmaker(bind=self.engine)
 
         self.initial_cursor = datetime(2026, 7, 1, 12, 0, 0)
@@ -218,7 +226,7 @@ class TicketSyncFailureIsolationTests(unittest.TestCase):
             self.assertEqual(state.last_status, "success")
             self.assertEqual(state.total_synced, 1)
 
-    def test_new_freshservice_ticket_queues_all_enabled_artifacts(self):
+    def test_new_freshservice_ticket_does_not_queue_without_explicit_enable(self):
         with self.session_factory() as db, patch.object(
             sync.settings_module,
             "automation_enabled",
@@ -237,13 +245,10 @@ class TicketSyncFailureIsolationTests(unittest.TestCase):
             )
 
             self.assertEqual(action, "new")
-            self.assertEqual(ticket.ai_status, "queued")
-            self.assertEqual(
-                ticket.ai_requested_artifacts,
-                "resolution,route,summary,triage",
-            )
+            self.assertIsNone(ticket.ai_status)
+            self.assertIsNone(ticket.ai_requested_artifacts)
 
-    def test_freshservice_content_change_invalidates_and_requeues(self):
+    def test_freshservice_content_change_invalidates_without_implicit_requeue(self):
         with self.session_factory() as db:
             db.add(TicketRecord(
                 id="fs-existing",
@@ -288,12 +293,12 @@ class TicketSyncFailureIsolationTests(unittest.TestCase):
                 )
 
             self.assertEqual(action, "updated")
-            self.assertEqual(ticket.ai_status, "queued")
-            self.assertEqual(ticket.ai_requested_artifacts, "summary,triage")
+            self.assertEqual(ticket.ai_status, "stale")
+            self.assertIsNone(ticket.ai_requested_artifacts)
             self.assertIsNone(ticket.ai_reasoning)
             self.assertIsNone(ticket.summary)
 
-    def test_freshservice_priority_change_queues_only_downstream_artifacts(self):
+    def test_freshservice_priority_change_invalidates_only_downstream_artifacts(self):
         with self.session_factory() as db:
             db.add(TicketRecord(
                 id="fs-priority",
@@ -341,8 +346,8 @@ class TicketSyncFailureIsolationTests(unittest.TestCase):
                 )
 
             self.assertEqual(action, "updated")
-            self.assertEqual(ticket.ai_status, "queued")
-            self.assertEqual(ticket.ai_requested_artifacts, "resolution,route")
+            self.assertEqual(ticket.ai_status, "partial")
+            self.assertIsNone(ticket.ai_requested_artifacts)
             self.assertEqual(ticket.ai_reasoning, "still valid")
             self.assertEqual(ticket.summary, "still valid")
 

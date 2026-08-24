@@ -33,6 +33,7 @@ from app.backend.database import (
 )
 from app.backend.schema import TicketIntelligenceAnalysisRequest
 from app.backend.llm_manager import (
+    LLMCapacityError,
     LLMInvalidInputError,
     LLMInvalidOutputError,
     LLMManager,
@@ -327,6 +328,45 @@ class LLMContractTests(unittest.IsolatedAsyncioTestCase):
                 await manager.analyze("ticket", response_model=TriageAnalysis)
         reserve.assert_called_once()
         provider.assert_not_awaited()
+
+    async def test_foundry_429_honors_retry_after_milliseconds(self):
+        rate_limited = RuntimeError("rate limited")
+        rate_limited.status_code = 429
+        rate_limited.response = SimpleNamespace(
+            status_code=429,
+            headers={"retry-after-ms": "2500"},
+        )
+        provider = AsyncMock(side_effect=[
+            rate_limited,
+            _completion(
+                '{"sentiment":"Neutral","category":"Other","priority":"P3",'
+                '"mood":"neutral","action":"respond",'
+                '"reasoning":"scope: single user; routine request"}'
+            ),
+        ])
+        sleep = AsyncMock()
+        with (
+            patch.dict(os.environ, {
+                "APP_MODE": "production",
+                "DEFAULT_MODEL": "foundry/test-deployment",
+                "FOUNDRY_API_BASE": (
+                    "https://example.services.ai.azure.com/openai/v1"
+                ),
+                "FOUNDRY_AUTH_METHOD": "api_key",
+                "FOUNDRY_API_KEY": "configured-key",
+                "LLM_ALLOW_PRIVATE_ENDPOINTS": "true",
+                "LLM_ALLOWED_PROVIDER_HOSTS": "example.services.ai.azure.com",
+            }, clear=False),
+            patch.object(llm_module, "acompletion", new=provider),
+            patch.object(llm_module.asyncio, "sleep", new=sleep),
+        ):
+            result = await LLMManager().analyze(
+                "ticket", response_model=TriageAnalysis
+            )
+
+        self.assertEqual(result["priority"], "P3")
+        self.assertEqual(provider.await_count, 2)
+        self.assertAlmostEqual(sleep.await_args_list[-1].args[0], 2.5)
 
 
 class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
@@ -699,6 +739,51 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(ticket.ai_requested_artifacts, "summary")
             self.assertEqual(ticket.ai_error, "summary:invalid_output")
 
+    async def test_provider_capacity_deferral_does_not_consume_failure_attempt(self):
+        class CapacityLimitedLLM:
+            model_name = "foundry/test"
+            is_mock = False
+            allow_synthetic = False
+
+            async def analyze(self, _prompt, *, response_model=None, **_kwargs):
+                if response_model is TicketSummary:
+                    raise LLMCapacityError("daily budget", 3_600)
+                raise AssertionError(response_model)
+
+        old_llm = main.engine.llm
+        main.engine.llm = CapacityLimitedLLM()
+        try:
+            with (
+                self.session_factory() as db,
+                patch.object(main, "_reserve_ai_request"),
+                patch.object(
+                    ticket_vectors,
+                    "refresh_ticket_documents",
+                    new=AsyncMock(return_value=0),
+                ),
+            ):
+                ticket = db.get(TicketRecord, "ticket-1")
+                ticket.ai_reasoning = "scope: single user; triage is current"
+                ticket.recommended_solution = "{}"
+                ticket.ai_status = "queued"
+                ticket.ai_requested_artifacts = "summary"
+                db.commit()
+                with self.assertRaises(LLMUnavailableError):
+                    await main._auto_process(ticket, db, force=True)
+        finally:
+            main.engine.llm = old_llm
+
+        with self.session_factory() as db:
+            ticket = db.get(TicketRecord, "ticket-1")
+            self.assertEqual(ticket.ai_status, "queued")
+            self.assertEqual(ticket.ai_attempts, 0)
+            self.assertEqual(ticket.ai_error, "provider_capacity")
+            self.assertEqual(ticket.ai_requested_artifacts, "summary")
+            self.assertGreater(
+                ticket.ai_next_attempt_at,
+                datetime.utcnow() + timedelta(minutes=59),
+            )
+
     async def test_changed_forced_triage_invalidates_and_regenerates_downstream(self):
         class ChangingLLM:
             model_name = "custom/test"
@@ -799,8 +884,9 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
             patch.object(database_module, "SessionLocal", self.session_factory),
         ):
             llm_module._reserve_provider_capacity("test-provider", 100)
-            with self.assertRaises(LLMUnavailableError):
+            with self.assertRaises(LLMCapacityError) as raised:
                 llm_module._reserve_provider_capacity("test-provider", 100)
+        self.assertGreater(raised.exception.retry_after_seconds, 0)
         with self.session_factory() as db:
             daily = db.query(AIRequestBucketRecord).filter_by(
                 actor_id="provider:test-provider",
@@ -888,6 +974,34 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
             sync_worker._auto_triage_job()
         process.assert_awaited_once()
         self.assertTrue(process.await_args.kwargs["force"])
+
+    def test_worker_caps_total_ai_tickets_per_sweep(self):
+        with self.session_factory() as db:
+            for index in range(6):
+                db.add(TicketRecord(
+                    id=f"queued-{index}",
+                    subject=f"Queued {index}",
+                    ai_status="queued",
+                    ai_requested_artifacts="triage",
+                ))
+            db.commit()
+        process = AsyncMock()
+        with (
+            patch.dict(
+                os.environ,
+                {"AI_BACKGROUND_TICKETS_PER_SWEEP": "3"},
+                clear=False,
+            ),
+            patch.object(sync_worker, "SessionLocal", self.session_factory),
+            patch.object(
+                sync_worker.settings_module,
+                "automation_enabled",
+                return_value=False,
+            ),
+            patch.object(main, "_auto_process", new=process),
+        ):
+            sync_worker._auto_triage_job()
+        self.assertEqual(process.await_count, 3)
 
     def test_demo_worker_recovers_durable_queued_analysis_when_automation_is_off(self):
         """An admin-approved durable queue must not depend on demo automation."""

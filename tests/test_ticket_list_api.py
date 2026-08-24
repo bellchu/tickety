@@ -53,6 +53,18 @@ class TicketListApiTests(unittest.TestCase):
             target.external_id = "INC_100%"
             target.ai_suggested_category = "Network"
             target.ai_status = "completed"
+            for index, subject in zip(
+                (90, 91, 92, 93),
+                (
+                    "WMS scanner allocation failure",
+                    "AS400 batch job needs development support",
+                    "ERP invoice workflow defect",
+                    "Deployment pipeline build failure",
+                ),
+            ):
+                tickets[index].subject = subject
+                tickets[index].ai_suggested_category = "Other"
+                tickets[index].ai_status = "completed"
             # This value would also match INC_100% if SQL wildcard characters
             # from user input were not escaped.
             tickets[101].external_id = "INCX100A"
@@ -123,14 +135,33 @@ class TicketListApiTests(unittest.TestCase):
         self.assertEqual(response.json()[0]["assignee_name"], "Bob Agent")
         self.assertEqual(response.json()[0]["recommended_team"], "Network Operations")
         self.assertEqual(response.json()[0]["recommended_team_basis"], "ai_category")
+        self.assertEqual(response.json()[0]["routing_status"], "legacy_ai_category")
+        self.assertFalse(response.json()[0]["routing_catalog_validated"])
 
-    def test_team_falls_back_when_ai_category_is_missing_or_stale(self):
+    def test_team_is_unrouted_when_ai_category_is_missing_or_stale(self):
         ready = self.client.get("/tickets/ticket-100").json()
-        fallback = self.client.get("/tickets/ticket-099").json()
+        unrouted = self.client.get("/tickets/ticket-099").json()
 
         self.assertEqual(ready["recommended_team"], "Network Operations")
-        self.assertEqual(fallback["recommended_team"], "Service Desk")
-        self.assertEqual(fallback["recommended_team_basis"], "fallback")
+        self.assertEqual(unrouted["recommended_team"], "Unrouted / Review")
+        self.assertEqual(unrouted["recommended_team_basis"], "unrouted_review")
+        self.assertEqual(unrouted["routing_status"], "unrouted_review")
+        self.assertEqual(
+            unrouted["routing_abstention_reason"],
+            "untrusted_ai_status",
+        )
+
+    def test_enterprise_and_development_tickets_never_default_to_service_desk(self):
+        for index in (90, 91, 92, 93):
+            with self.subTest(ticket=index):
+                ticket = self.client.get(f"/tickets/ticket-{index:03d}").json()
+                self.assertEqual(ticket["recommended_team"], "Unrouted / Review")
+                self.assertEqual(ticket["recommended_team_basis"], "unrouted_review")
+                self.assertEqual(
+                    ticket["routing_abstention_reason"],
+                    "unsupported_ai_category",
+                )
+                self.assertNotEqual(ticket["recommended_team"], "Service Desk")
 
     def test_team_mapping_uses_only_valid_ai_issue_type(self):
         expected = {
@@ -142,8 +173,18 @@ class TicketListApiTests(unittest.TestCase):
         for issue_type, team in expected.items():
             with self.subTest(issue_type=issue_type):
                 self.assertEqual(main.intel.recommended_team(issue_type, "completed"), (team, "ai_category"))
-        self.assertEqual(main.intel.recommended_team("Other", "completed"), ("Service Desk", "fallback"))
-        self.assertEqual(main.intel.recommended_team("Network", "stale"), ("Service Desk", "fallback"))
+        self.assertEqual(
+            main.intel.recommended_team("Other", "completed"),
+            ("Unrouted / Review", "unrouted_review"),
+        )
+        self.assertEqual(
+            main.intel.recommended_team("Network", "stale"),
+            ("Unrouted / Review", "unrouted_review"),
+        )
+        self.assertEqual(
+            main.intel.recommended_team("Network", None),
+            ("Unrouted / Review", "unrouted_review"),
+        )
 
     def test_related_tickets_are_bounded_deduplicated_and_authoritative(self):
         retrieval = {

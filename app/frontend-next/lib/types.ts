@@ -27,7 +27,10 @@ export interface Ticket {
   ai_suggested_priority: string | null;
   ai_suggested_category: string | null;
   recommended_team: string;
-  recommended_team_basis: "ai_category" | "fallback";
+  recommended_team_basis: "ai_category" | "unrouted_review";
+  routing_status: "legacy_ai_category" | "unrouted_review";
+  routing_abstention_reason: "missing_ai_category" | "unsupported_ai_category" | "untrusted_ai_status" | null;
+  routing_catalog_validated: boolean;
   ticket_type: string;
   impact: string | null;
   urgency: string | null;

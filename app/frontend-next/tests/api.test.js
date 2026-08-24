@@ -41,3 +41,24 @@ test("deleteCategory keeps HTTP failures on the API error path", async () => {
     global.fetch = originalFetch;
   }
 });
+
+test("getComments supports bounded history pagination without changing the default route", async () => {
+  const { api } = loadApi();
+  const originalFetch = global.fetch;
+  const calls = [];
+  global.fetch = async (url) => {
+    calls.push(url);
+    return new Response("[]", { status: 200 });
+  };
+
+  try {
+    await api.getComments("ticket-1");
+    await api.getComments("ticket-1", { limit: 500, offset: 1000 });
+    assert.deepEqual(calls, [
+      "/api/tickets/ticket-1/comments",
+      "/api/tickets/ticket-1/comments?limit=500&offset=1000",
+    ]);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});

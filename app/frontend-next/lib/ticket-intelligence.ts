@@ -342,8 +342,8 @@ export function sourceKindLabel(ticket: Pick<Ticket, "external_source" | "ticket
 
 export function routingLabel(ticket: Pick<Ticket, "recommended_team" | "recommended_team_basis">): string {
   return ticket.recommended_team_basis === "ai_category"
-    ? `Recommended team - ${ticket.recommended_team}`
-    : "Default route - Service Desk";
+    ? `Suggested team - ${ticket.recommended_team} (catalog validation pending)`
+    : "Unrouted - review required";
 }
 
 export function relatedStrength(score: number, method: string): "Strong match" | "Related" | "Possible" | "Keyword" {

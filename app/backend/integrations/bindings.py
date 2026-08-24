@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import urllib.parse
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -80,6 +81,81 @@ def _audit(
         actor_id=actor_id,
         details=json.dumps(details or {}, sort_keys=True, separators=(",", ":")),
     ))
+
+
+def validate_automatic_ai_rollout_evidence(
+    db: Session,
+    binding: IntegrationBindingRecord,
+) -> None:
+    """Fail closed unless the latest audited projection gates are complete."""
+    actions = (
+        "automatic_ai.rollout.phase0.approved",
+        "automatic_ai.rollout.phase1.approved",
+        "automatic_ai.rollout.phase2.approved",
+    )
+    rows = db.query(IntegrationAuditRecord).filter(
+        IntegrationAuditRecord.binding_id == binding.id,
+        IntegrationAuditRecord.action.in_(actions),
+    ).order_by(IntegrationAuditRecord.created_at.desc()).all()
+    latest: dict[str, IntegrationAuditRecord] = {}
+    for row in rows:
+        latest.setdefault(row.action, row)
+    if set(latest) != set(actions):
+        raise BindingValidationError("automatic_ai_rollout_evidence_missing")
+    try:
+        evidence = {
+            action: json.loads(latest[action].details or "{}")
+            for action in actions
+        }
+        common_valid = all(
+            latest[action].actor_id
+            and evidence[action].get("status") == "approved"
+            and evidence[action].get("capability_version")
+            == binding.capability_version
+            and re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(evidence[action].get("evidence_digest") or ""),
+            )
+            for action in actions
+        )
+        phase0 = evidence[actions[0]]
+        phase1 = evidence[actions[1]]
+        phase2 = evidence[actions[2]]
+        inventory_completed_at = datetime.fromisoformat(
+            str(phase2["inventory_completed_at"]).replace("Z", "+00:00")
+        )
+        if inventory_completed_at.tzinfo is not None:
+            inventory_completed_at = inventory_completed_at.astimezone(
+                timezone.utc
+            ).replace(tzinfo=None)
+        inventory_age = datetime.utcnow() - inventory_completed_at
+        valid = all((
+            common_valid,
+            phase0.get("schema_verified") is True,
+            phase0.get("retention_verified") is True,
+            phase0.get("read_only_verified") is True,
+            phase0.get("negative_egress_passed") is True,
+            float(phase1.get("duration_hours", 0)) >= 24,
+            bool(phase1.get("all_tickets"))
+            or int(phase1.get("reconciliations", 0)) >= 100,
+            int(phase1.get("critical_errors", -1)) == 0,
+            float(phase1.get("identity_hash_coverage", 0)) == 1.0,
+            float(phase1.get("projection_failure_rate", 1)) <= 0.01,
+            float(phase2.get("duration_hours", 0)) >= 24,
+            bool(phase2.get("all_revisions"))
+            or int(phase2.get("revisions", 0)) >= 100,
+            float(phase2.get("eligibility_agreement", 0)) == 1.0,
+            int(phase2.get("historical_seed_claims", -1)) == 0,
+            phase2.get("two_worker_equal") is True,
+            phase2.get("inventory_complete") is True,
+            timedelta(0) <= inventory_age <= timedelta(minutes=15),
+        ))
+    except (KeyError, TypeError, ValueError, OverflowError):
+        valid = False
+    if not valid:
+        raise BindingValidationError(
+            "automatic_ai_rollout_evidence_invalid_or_stale"
+        )
 
 
 def create_binding(

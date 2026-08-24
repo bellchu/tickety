@@ -1,3 +1,4 @@
+import json
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
@@ -6,16 +7,22 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.backend import main
 from app.backend.database import (
     Base,
     IntegrationAuditRecord,
     IntegrationBindingRecord,
     IntegrationCapabilityRecord,
+    SyncStateRecord,
     TicketRecord,
     UserRecord,
 )
-from app.backend.integrations import bindings, sync
-from app.backend.schema import ExternalTicket
+from app.backend.integrations import bindings, registry, sync
+from app.backend.schema import (
+    AutomaticAIEnableRequest,
+    AutomaticAIPauseRequest,
+    ExternalTicket,
+)
 
 
 class IntegrationBindingTests(unittest.IsolatedAsyncioTestCase):
@@ -57,6 +64,10 @@ class IntegrationBindingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(binding.canonical_account_host, "trial-acme.freshservice.com")
             self.assertEqual(binding.credential_reference, "env://freshservice")
             self.assertEqual(binding.workspace_ids, '["1","2"]')
+            self.assertEqual(
+                registry._binding_config(binding)["FRESHSERVICE_WORKSPACE_IDS"],
+                "1,2",
+            )
             audit = db.query(IntegrationAuditRecord).one()
             self.assertEqual(audit.action, "binding.created")
             self.assertNotIn("API", audit.details)
@@ -189,6 +200,164 @@ class IntegrationBindingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(count, 1)
             self.assertEqual(binding.state, "expired")
             clear.assert_called_once_with(binding.id)
+
+    def test_automatic_ai_enable_is_explicit_atomic_and_audited(self):
+        with self.session_factory() as db:
+            binding = self._create(db)
+            binding.state = "active"
+            db.add_all([
+                IntegrationCapabilityRecord(
+                    binding_id=binding.id,
+                    capability="ticket.read",
+                    status="supported",
+                ),
+                IntegrationCapabilityRecord(
+                    binding_id=binding.id,
+                    capability="conversation.read",
+                    status="supported",
+                ),
+            ])
+            digest = "sha256:" + "a" * 64
+            common = {
+                "status": "approved",
+                "capability_version": binding.capability_version,
+                "evidence_digest": digest,
+            }
+            db.add_all([
+                IntegrationAuditRecord(
+                    binding_id=binding.id,
+                    action="automatic_ai.rollout.phase0.approved",
+                    actor_id="admin",
+                    details=json.dumps({
+                        **common,
+                        "schema_verified": True,
+                        "retention_verified": True,
+                        "read_only_verified": True,
+                        "negative_egress_passed": True,
+                    }),
+                ),
+                IntegrationAuditRecord(
+                    binding_id=binding.id,
+                    action="automatic_ai.rollout.phase1.approved",
+                    actor_id="admin",
+                    details=json.dumps({
+                        **common,
+                        "duration_hours": 24,
+                        "all_tickets": True,
+                        "critical_errors": 0,
+                        "identity_hash_coverage": 1.0,
+                        "projection_failure_rate": 0.0,
+                    }),
+                ),
+                IntegrationAuditRecord(
+                    binding_id=binding.id,
+                    action="automatic_ai.rollout.phase2.approved",
+                    actor_id="admin",
+                    details=json.dumps({
+                        **common,
+                        "duration_hours": 24,
+                        "all_revisions": True,
+                        "eligibility_agreement": 1.0,
+                        "historical_seed_claims": 0,
+                        "two_worker_equal": True,
+                        "inventory_complete": True,
+                        "inventory_completed_at": datetime.utcnow().isoformat(),
+                    }),
+                ),
+            ])
+            db.commit()
+            user = db.query(UserRecord).filter(UserRecord.id == "admin").one()
+
+            response = main.enable_integration_automatic_ai(
+                binding.id,
+                AutomaticAIEnableRequest(
+                    reason="approved realtime canary",
+                    expected_generation=0,
+                ),
+                db,
+                user,
+            )
+
+            self.assertTrue(response["automatic_ai_enabled"])
+            self.assertEqual(response["automatic_ai_lookback_days"], 7)
+            state = db.query(SyncStateRecord).filter(
+                SyncStateRecord.binding_id == binding.id
+            ).one()
+            self.assertEqual(state.automatic_ai_generation, 1)
+            audit = db.query(IntegrationAuditRecord).filter(
+                IntegrationAuditRecord.action == "automatic_ai_enabled"
+            ).one()
+            self.assertIn("approved realtime canary", audit.details)
+            self.assertEqual(json.loads(audit.details)["lookback_days"], 7)
+
+            db.add(TicketRecord(
+                id="queued-external",
+                binding_id=binding.id,
+                external_source="freshservice",
+                external_id="9001",
+                subject="Queued external ticket",
+                ai_status="queued",
+                ai_claim_id="claim-1",
+                ai_requested_artifacts="triage",
+            ))
+            db.commit()
+            paused = main.pause_integration_automatic_ai(
+                binding.id,
+                AutomaticAIPauseRequest(
+                    reason="emergency privacy stop",
+                    expected_generation=1,
+                ),
+                db,
+                user,
+            )
+            self.assertFalse(paused["automatic_ai_enabled"])
+            self.assertEqual(paused["revoked_requests"], 1)
+            queued = db.query(TicketRecord).filter(
+                TicketRecord.id == "queued-external"
+            ).one()
+            self.assertEqual(queued.ai_status, "paused")
+            self.assertIsNone(queued.ai_claim_id)
+            pause_audit = db.query(IntegrationAuditRecord).filter(
+                IntegrationAuditRecord.action == "automatic_ai_paused"
+            ).one()
+            self.assertIn("emergency privacy stop", pause_audit.details)
+
+    def test_automatic_ai_enable_fails_closed_without_rollout_evidence(self):
+        with self.session_factory() as db:
+            binding = self._create(db)
+            binding.state = "active"
+            db.add_all([
+                IntegrationCapabilityRecord(
+                    binding_id=binding.id,
+                    capability="ticket.read",
+                    status="supported",
+                ),
+                IntegrationCapabilityRecord(
+                    binding_id=binding.id,
+                    capability="conversation.read",
+                    status="supported",
+                ),
+            ])
+            db.commit()
+            user = db.query(UserRecord).filter(UserRecord.id == "admin").one()
+
+            with self.assertRaises(main.HTTPException) as raised:
+                main.enable_integration_automatic_ai(
+                    binding.id,
+                    AutomaticAIEnableRequest(
+                        reason="must remain disabled",
+                        expected_generation=0,
+                    ),
+                    db,
+                    user,
+                )
+
+            self.assertEqual(raised.exception.status_code, 409)
+            self.assertEqual(
+                raised.exception.detail,
+                "automatic_ai_rollout_evidence_missing",
+            )
+            self.assertEqual(db.query(SyncStateRecord).count(), 0)
 
 
 if __name__ == "__main__":
