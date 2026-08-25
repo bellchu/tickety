@@ -45,7 +45,7 @@ test("navigation destinations are unique and remain directly reachable", () => {
   const items = navigationSections.flatMap((section) => section.items);
   const hrefs = items.map((item) => item.href);
   assert.equal(new Set(hrefs).size, hrefs.length);
-  assert.equal(items.length, 13);
+  assert.equal(items.length, 14);
   assert.ok(items.every((item) => item.href.startsWith("/")));
 });
 
@@ -58,6 +58,7 @@ test("active navigation matches exact and nested routes without prefix collision
 
 test("mobile context labels cover nested and utility routes", () => {
   assert.equal(getCurrentNavigationItem("/tickets/123")?.label, "Tickets");
+  assert.equal(getCurrentNavigationItem("/email")?.label, "Email");
   assert.equal(getCurrentNavigationItem("/settings/security")?.label, "Settings");
   assert.equal(getCurrentNavigationItem("/settings/status/ai")?.label, "Status");
   assert.equal(getCurrentNavigationItem("/profile")?.label, "My profile");

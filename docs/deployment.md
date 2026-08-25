@@ -50,7 +50,10 @@ COOKIE_SAMESITE=lax
 The username, password, and database in `DATABASE_URL` must match the three
 `POSTGRES_*` values; URL-encode credentials when they contain URL-reserved
 characters. Keep `.env` out of source control. Add only the ITSM, SSO, webhook,
-LLM, or embedding settings that the installation uses. The complete supported
+LLM, embedding, or SendGrid settings that the installation uses. SendGrid can
+also be configured after deployment by an authenticated administrator under
+Settings → SendGrid email; its API key is masked and never returned to the
+browser. The complete supported
 environment-variable template is [`.env.example`](../.env.example).
 Microsoft Entra ID and Okta SSO use provider presets and a callback derived
 from `FRONTEND_URL`; follow the [SSO setup guide](sso.md) instead of copying

@@ -443,6 +443,12 @@ export interface Settings {
   NEXT_PUBLIC_API_URL: string;
   NEXT_PUBLIC_WS_URL: string;
   FRONTEND_URL: string;
+  SENDGRID_API_KEY: string;
+  SENDGRID_FROM_EMAIL: string;
+  SENDGRID_FROM_NAME: string;
+  SENDGRID_REPLY_TO_EMAIL: string;
+  EMAIL_SENDS_PER_MINUTE: string;
+  EMAIL_RECIPIENTS_PER_DAY: string;
   SLA_P1_HOURS: string;
   SLA_P2_HOURS: string;
   SLA_P3_HOURS: string;
@@ -699,6 +705,45 @@ export interface ExternalUserSyncResult {
   errors: number;
   error_details: string[];
   total: number;
+}
+
+export type EmailAudience = "agents" | "users";
+
+export interface EmailRecipient {
+  id: string;
+  name: string;
+  email: string;
+  audience: EmailAudience;
+  source: string;
+  title: string | null;
+}
+
+export interface EmailRecipientList {
+  audience: EmailAudience;
+  recipients: EmailRecipient[];
+  total: number;
+  truncated: boolean;
+}
+
+export interface EmailProviderStatus {
+  provider: "sendgrid";
+  configured: boolean;
+  api_key_set: boolean;
+  from_email_set: boolean;
+  from_name: string;
+}
+
+export interface EmailSendInput {
+  audience: EmailAudience;
+  recipient_ids: string[];
+  subject: string;
+  body: string;
+}
+
+export interface EmailSendResponse {
+  status: "accepted";
+  recipient_count: number;
+  message_id: string | null;
 }
 
 // ── Systemic Issues ───────────────────────────────────────────

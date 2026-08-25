@@ -321,6 +321,7 @@ through the same provider-wide Foundry budgets as realtime work.
 | SLA | Per-priority clocks, breach detection, escalation risk scoring, compliance reports |
 | Engagement | Impact points, tier promotions (T1&ndash;T8), momentum streaks, recognition badges, leaderboard |
 | Auth / RBAC | Cookie-based sessions, admin / supervisor / agent roles, login page, SSO (OIDC) |
+| Email | Private SendGrid delivery to Tickety/synced agents or synced Freshservice requesters, with server-resolved recipients and per-user limits |
 
 ## API
 
@@ -368,6 +369,9 @@ through the same provider-wide Foundry budgets as realtime work.
 | `GET /auth/sso/callback` | OIDC provider callback |
 | `GET /admin/settings` | List configuration keys |
 | `PUT /admin/settings` | Update configuration |
+| `GET /email/status` | Check whether SendGrid delivery is configured (no secret material) |
+| `GET /email/recipients` | Search the authorized agent or requester recipient directory |
+| `POST /email/send` | Send separate private SendGrid deliveries to server-resolved recipients |
 
 ## Settings
 
@@ -381,6 +385,7 @@ through the same provider-wide Foundry budgets as realtime work.
 | Statuses | Custom ticket lifecycle statuses (open/terminal flags, sort order) |
 | Priorities | Custom priority levels with per-priority SLA hours and sort weights |
 | Organisation | Workspace name, logo URL, primary colour |
+| SendGrid email | Masked API key, verified sender, reply-to address, and per-user delivery limits |
 | AI Automation | Toggle: auto-triage, auto-summarisation, auto-routing, auto-resolution, systemic detection |
 | Security & Auth | Require Login (production mode), SSO/OIDC (Microsoft Entra ID, Okta, generic) |
 | Notifications | Enable/disable alert events (new ticket, SLA breach, escalation, assignment, comment) per channel (in-app/email/webhook) |

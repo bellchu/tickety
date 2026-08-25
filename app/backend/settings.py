@@ -11,6 +11,7 @@ from typing import Optional
 from dotenv import load_dotenv
 
 from .database import SessionLocal, SettingsRecord
+from .email_service import normalize_email_address, normalize_sender_name
 
 load_dotenv()
 
@@ -28,6 +29,7 @@ _SENSITIVE_KEYS = {
     "WEBHOOK_SECRET",
     "SSO_CLIENT_SECRET",
     "AZURE_STORAGE_CONNECTION_STRING",
+    "SENDGRID_API_KEY",
 }
 
 _PLACEHOLDER_VALUES = {
@@ -139,6 +141,13 @@ _ALL_KEYS = [
     "NEXT_PUBLIC_API_URL",
     "NEXT_PUBLIC_WS_URL",
     "FRONTEND_URL",
+    # Outbound email
+    "SENDGRID_API_KEY",
+    "SENDGRID_FROM_EMAIL",
+    "SENDGRID_FROM_NAME",
+    "SENDGRID_REPLY_TO_EMAIL",
+    "EMAIL_SENDS_PER_MINUTE",
+    "EMAIL_RECIPIENTS_PER_DAY",
     # AI automation toggles
     "SLA_P1_HOURS",
     "SLA_P2_HOURS",
@@ -276,6 +285,11 @@ _PRODUCTION_ENV_ONLY_KEYS = (
     "JIRA_PROJECT_KEY",
     "JIRA_ISSUE_TYPE",
     "SYNC_INTERVAL_SECONDS",
+    "SENDGRID_FROM_EMAIL",
+    "SENDGRID_FROM_NAME",
+    "SENDGRID_REPLY_TO_EMAIL",
+    "EMAIL_SENDS_PER_MINUTE",
+    "EMAIL_RECIPIENTS_PER_DAY",
     "SSO_ENABLED",
     "SSO_PROVIDER",
     "SSO_ENTRA_TENANT_ID",
@@ -306,6 +320,9 @@ _PRODUCTION_SSO_PORTAL_KEYS = {
     "SSO_ALLOWED_DOMAINS",
     "SSO_ALLOWED_GROUP_IDS",
     "SSO_AUTO_PROVISION",
+}
+_CLEARABLE_PORTAL_KEYS = _PRODUCTION_SSO_PORTAL_KEYS | {
+    "SENDGRID_REPLY_TO_EMAIL",
 }
 _ADMIN_PORTAL_APPROVAL_PREFIX = "__ADMIN_PORTAL_APPROVED__:"
 
@@ -627,7 +644,7 @@ def update_settings(payload: dict, *, actor_id: Optional[str] = None) -> dict:
             if new_val == "":
                 if key in _SENSITIVE_KEYS:
                     continue
-                if key not in _PRODUCTION_SSO_PORTAL_KEYS:
+                if key not in _CLEARABLE_PORTAL_KEYS:
                     new_val = os.getenv(key, "")
             if key in _LLM_BASE_URL_KEYS and new_val:
                 new_val = (
@@ -665,6 +682,18 @@ def update_settings(payload: dict, *, actor_id: Optional[str] = None) -> dict:
                 from .integrations.freshservice import FreshserviceAdapter
 
                 new_val = FreshserviceAdapter._validate_oauth_scopes(new_val)
+            if key in {"SENDGRID_FROM_EMAIL", "SENDGRID_REPLY_TO_EMAIL"} and new_val:
+                try:
+                    new_val = normalize_email_address(new_val)
+                except ValueError as exc:
+                    raise ValueError(f"{key} must be a valid email address") from exc
+            if key == "SENDGRID_FROM_NAME" and new_val:
+                try:
+                    new_val = normalize_sender_name(new_val)
+                except ValueError as exc:
+                    raise ValueError("SENDGRID_FROM_NAME is invalid") from exc
+                if not new_val:
+                    raise ValueError("SENDGRID_FROM_NAME cannot be blank")
             if key == "ATTACHMENT_STORAGE_PROVIDER" and new_val not in {
                 "", "azure_blob",
             }:
@@ -706,6 +735,21 @@ def update_settings(payload: dict, *, actor_id: Optional[str] = None) -> dict:
                     parsed = parser(new_val)
                 except (TypeError, ValueError) as exc:
                     raise ValueError(f"{key} must be numeric") from exc
+                if parsed < minimum or parsed > maximum:
+                    raise ValueError(
+                        f"{key} must be between {minimum} and {maximum}"
+                    )
+                new_val = str(parsed)
+            email_numeric_bounds = {
+                "EMAIL_SENDS_PER_MINUTE": (1, 60),
+                "EMAIL_RECIPIENTS_PER_DAY": (1, 10_000),
+            }
+            if key in email_numeric_bounds and new_val:
+                minimum, maximum = email_numeric_bounds[key]
+                try:
+                    parsed = int(new_val)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"{key} must be an integer") from exc
                 if parsed < minimum or parsed > maximum:
                     raise ValueError(
                         f"{key} must be between {minimum} and {maximum}"

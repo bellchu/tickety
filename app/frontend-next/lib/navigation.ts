@@ -10,6 +10,7 @@ export type NavigationIconKey =
   | "assets"
   | "knowledge"
   | "agents"
+  | "email"
   | "surveys"
   | "leaderboard"
   | "reports"
@@ -54,6 +55,7 @@ export const navigationSections: readonly NavigationSection[] = [
     label: "Team",
     items: [
       { href: "/agents", label: "Agents", icon: "agents", visibility: "admin" },
+      { href: "/email", label: "Email", icon: "email", visibility: "all" },
       { href: "/surveys", label: "Surveys", icon: "surveys", visibility: "all" },
       { href: "/leaderboard", label: "Leaderboard", icon: "leaderboard", visibility: "all" },
     ],

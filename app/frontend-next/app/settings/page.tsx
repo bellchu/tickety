@@ -13,6 +13,7 @@ import {
   Settings as SettingsIcon, Save, RefreshCw, CheckCircle2, AlertCircle,
   Users, Download, Database, Zap, Plus, Trash2, ShieldCheck, Activity,
   Power, KeyRound, Link2, SlidersHorizontal,
+  Mail,
 } from "lucide-react";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import { Alert, Button, DataListCard, DataTable, DataTableViewport, ErrorState, ListText, Skeleton } from "@/components/ui";
@@ -207,10 +208,10 @@ export default function SettingsPage() {
     return false;
   };
   const keyReady = (key: string) => {
-    const setFlag = data?.[`${key}__set`];
-    if (typeof setFlag === "boolean") return setFlag;
     const value = form[key as keyof SettingsType];
-    return typeof value === "string" && value.trim() !== "" && !value.includes("****");
+    if (typeof value === "string" && value.trim() !== "" && !value.includes("****")) return true;
+    const setFlag = data?.[`${key}__set`];
+    return typeof setFlag === "boolean" ? setFlag : false;
   };
   const freshserviceAuthReady = freshserviceAuthMode === "oauth"
     ? keyReady("FRESHSERVICE_OAUTH_ACCESS_TOKEN")
@@ -220,6 +221,7 @@ export default function SettingsPage() {
     freshserviceAuthReady
   );
   const isExternalProvider = true;
+  const sendgridReady = keyReady("SENDGRID_API_KEY") && Boolean(form.SENDGRID_FROM_EMAIL?.trim());
   const baselineForm = useMemo<SettingsType | null>(() => data ? {
     ...data,
     ITSM_PROVIDER: "freshservice",
@@ -266,7 +268,7 @@ export default function SettingsPage() {
     for (const key of Object.keys(form)) {
       const v = form[key as keyof SettingsType];
       if (typeof v !== "string") continue;
-      if (v === "" && (!SSO_PORTAL_KEYS.has(key) || key === "SSO_CLIENT_SECRET")) continue;
+      if (v === "" && ((!SSO_PORTAL_KEYS.has(key) && key !== "SENDGRID_REPLY_TO_EMAIL") || key === "SSO_CLIENT_SECRET")) continue;
       if (baselineForm && v === baselineForm[key as keyof SettingsType]) continue;
       if (v.includes("****")) continue;
       if (API_READ_ONLY_KEYS.has(key)) continue;
@@ -361,6 +363,7 @@ export default function SettingsPage() {
           ["settings-ai", "AI"],
           ["settings-ticketing", "Ticketing & integrations"],
           ["settings-workspace", "Workspace"],
+          ["settings-email", "Email"],
           ["settings-access", "Access"],
           ["settings-system", "System"],
         ].map(([id, label]) => <a key={id} href={`#${id}`} className="inline-flex min-h-10 shrink-0 items-center rounded-lg px-3 text-xs font-semibold text-ink-500 hover:bg-linen-200 hover:text-ink-700">{label}</a>)}
@@ -651,6 +654,46 @@ export default function SettingsPage() {
             <Field label="Primary Color">
               <input type="text" value={form.ORG_PRIMARY_COLOR || ""} onChange={(e) => handleChange("ORG_PRIMARY_COLOR", e.target.value)} placeholder="#6B8E5A" className="input-base" />
             </Field>
+          </div>
+        </SettingsSection>
+
+        {/* ═══ SendGrid Email ═══ */}
+        <SettingsSection id="settings-email" title="SendGrid email" subtitle="Configure verified sender identity, reply routing, and per-user delivery limits">
+          <div className="flex flex-col gap-3 rounded-xl border border-linen-400 bg-linen-100 p-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-start gap-3">
+              <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-white text-semantic-primary shadow-sm"><Mail className="h-5 w-5" aria-hidden="true" /></span>
+              <div>
+                <p className="text-sm font-semibold text-ink-700">Outbound email via SendGrid</p>
+                <p className="mt-1 text-xs leading-5 text-ink-500">The API key remains server-side and is always masked after saving. Use a sender address authenticated in your SendGrid account.</p>
+              </div>
+            </div>
+            {sendgridReady ? <ReadyPill /> : <OffPill />}
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <Field label="SendGrid API key" ready={keyReady("SENDGRID_API_KEY")}>
+              <SecretInput value={form.SENDGRID_API_KEY || ""} onChange={(value) => handleChange("SENDGRID_API_KEY", value)} placeholder="SG.…" />
+            </Field>
+            <Field label="Verified sender email" ready={Boolean(form.SENDGRID_FROM_EMAIL?.trim())}>
+              <input type="email" value={form.SENDGRID_FROM_EMAIL || ""} onChange={(event) => handleChange("SENDGRID_FROM_EMAIL", event.target.value)} placeholder="support@example.com" className="input-base" />
+            </Field>
+            <Field label="Sender name">
+              <input type="text" maxLength={100} value={form.SENDGRID_FROM_NAME || ""} onChange={(event) => handleChange("SENDGRID_FROM_NAME", event.target.value)} placeholder={form.ORG_NAME || "Tickety"} className="input-base" />
+            </Field>
+            <Field label="Reply-to email">
+              <input type="email" value={form.SENDGRID_REPLY_TO_EMAIL || ""} onChange={(event) => handleChange("SENDGRID_REPLY_TO_EMAIL", event.target.value)} placeholder="helpdesk@example.com (optional)" className="input-base" />
+            </Field>
+            <Field label="Sends per user / minute">
+              <input type="number" min={1} max={60} value={form.EMAIL_SENDS_PER_MINUTE || "5"} onChange={(event) => handleChange("EMAIL_SENDS_PER_MINUTE", event.target.value)} className="input-base" />
+            </Field>
+            <Field label="Recipients per user / day">
+              <input type="number" min={1} max={10000} value={form.EMAIL_RECIPIENTS_PER_DAY || "500"} onChange={(event) => handleChange("EMAIL_RECIPIENTS_PER_DAY", event.target.value)} className="input-base" />
+            </Field>
+          </div>
+
+          <div className="flex flex-col gap-3 rounded-xl border border-linen-400 bg-linen-50 p-4 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-xs leading-5 text-ink-500">Once the API key and verified sender are saved, signed-in team members can address separate private deliveries to agents or synced requesters.</p>
+            <Link href="/email" className="inline-flex min-h-10 shrink-0 items-center justify-center rounded-lg bg-semantic-primary px-4 text-sm font-semibold text-white hover:bg-semantic-primary-hover">Open email composer</Link>
           </div>
         </SettingsSection>
 

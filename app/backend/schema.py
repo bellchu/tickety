@@ -379,6 +379,69 @@ class ExternalUserSyncResult(BaseModel):
     error_details: List[str] = Field(default_factory=list)
 
 
+class EmailRecipient(BaseModel):
+    id: str
+    name: str
+    email: str
+    audience: Literal["agents", "users"]
+    source: str
+    title: Optional[str] = None
+
+
+class EmailRecipientList(BaseModel):
+    audience: Literal["agents", "users"]
+    recipients: List[EmailRecipient]
+    total: int
+    truncated: bool = False
+
+
+class EmailProviderStatus(BaseModel):
+    provider: Literal["sendgrid"] = "sendgrid"
+    configured: bool
+    api_key_set: bool
+    from_email_set: bool
+    from_name: str
+
+
+class EmailSendRequest(BaseModel):
+    audience: Literal["agents", "users"]
+    recipient_ids: List[str] = Field(..., min_length=1, max_length=50)
+    subject: str = Field(..., min_length=1, max_length=200)
+    body: str = Field(..., min_length=1, max_length=50_000)
+
+    @field_validator("recipient_ids")
+    @classmethod
+    def validate_recipient_ids(cls, value: List[str]) -> List[str]:
+        normalized = [recipient_id.strip() for recipient_id in value]
+        if any(not recipient_id or len(recipient_id) > 300 for recipient_id in normalized):
+            raise ValueError("Recipient IDs are invalid")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("Recipient IDs must be unique")
+        return normalized
+
+    @field_validator("subject")
+    @classmethod
+    def validate_subject(cls, value: str) -> str:
+        subject = value.strip()
+        if not subject or any(ord(character) < 32 or ord(character) == 127 for character in subject):
+            raise ValueError("Subject contains invalid control characters")
+        return subject
+
+    @field_validator("body")
+    @classmethod
+    def validate_body(cls, value: str) -> str:
+        body = value.strip()
+        if not body or "\x00" in body:
+            raise ValueError("Email body is invalid")
+        return body
+
+
+class EmailSendResponse(BaseModel):
+    status: Literal["accepted"] = "accepted"
+    recipient_count: int
+    message_id: Optional[str] = None
+
+
 class IntegrationBindingCreate(BaseModel):
     provider: Literal["freshservice"] = "freshservice"
     environment: Literal["trial", "sandbox", "production"]
@@ -594,6 +657,12 @@ class Settings(BaseModel):
     NEXT_PUBLIC_API_URL: Optional[str] = None
     NEXT_PUBLIC_WS_URL: Optional[str] = None
     FRONTEND_URL: Optional[str] = None
+    SENDGRID_API_KEY: Optional[str] = None
+    SENDGRID_FROM_EMAIL: Optional[str] = None
+    SENDGRID_FROM_NAME: Optional[str] = None
+    SENDGRID_REPLY_TO_EMAIL: Optional[str] = None
+    EMAIL_SENDS_PER_MINUTE: Optional[str] = None
+    EMAIL_RECIPIENTS_PER_DAY: Optional[str] = None
     # AI automation toggles ("true" / "false" as stored in env-style settings)
     SLA_P1_HOURS: Optional[str] = None
     SLA_P2_HOURS: Optional[str] = None

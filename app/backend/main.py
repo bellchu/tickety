@@ -50,6 +50,8 @@ from .schema import (
     AIStatusResponse, OperationalDiagnosticsResponse,
     AutomaticAIEnableRequest, AutomaticAIPauseRequest,
     ExternalUser, ExternalUserSyncResult,
+    EmailRecipient, EmailRecipientList, EmailProviderStatus,
+    EmailSendRequest, EmailSendResponse,
     TriageResult, PointsAwardedNotification, TicketCreate,
     ResolutionPlan, RecommendedSolution,
     TicketUpdate, TicketComment, TicketCommentCreate,
@@ -77,6 +79,14 @@ from .schema import (
     TicketAttachment,
 )
 from .attachment_storage import AzureBlobAttachmentStore, AttachmentStorageError
+from .email_service import (
+    EmailAddress,
+    EmailConfigurationError,
+    EmailDeliveryError,
+    normalize_email_address,
+    send_email as send_sendgrid_email,
+    sendgrid_status,
+)
 from .llm_manager import (
     LLMAnalysisError,
     LLMCapacityError,
@@ -157,7 +167,7 @@ from .production_security import (
 
 # Single source of truth for the backend version. Bump when shipping user-visible
 # changes. Build SHA/time are injected at image build time (see Dockerfile).
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 BUILD_SHA = os.getenv("TICKETY_BUILD_SHA", "local")
 BUILD_TIME = os.getenv("TICKETY_BUILD_TIME", "")
 
@@ -337,6 +347,8 @@ def _roles_required_for_request(path: str, method: str) -> Optional[set[str]]:
         return {"admin", "supervisor"}
     if path.startswith("/config/"):
         return {"admin", "supervisor"}
+    if path == "/email" or path.startswith("/email/"):
+        return {"admin", "supervisor", "agent"}
     if unsafe and path == "/tickets/bulk":
         return {"admin", "supervisor"}
     if method.upper() == "DELETE" and path.startswith("/tickets/"):
@@ -470,6 +482,21 @@ def require_admin_callback_user(
     """Authenticate admin OAuth callbacks without rejecting provider redirects."""
     if (user.role or "").lower() != "admin":
         raise HTTPException(status_code=403, detail="Insufficient permissions")
+    return user
+
+
+def get_email_user(
+    user: UserRecord = Depends(get_authenticated_user),
+) -> UserRecord:
+    """Require a real operational user for billable outbound delivery."""
+    role = (user.role or "").lower()
+    if role not in {"admin", "supervisor", "agent"}:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    if settings_module.is_demo_mode() and role != "admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Demo email access requires an admin session",
+        )
     return user
 
 
@@ -1350,12 +1377,13 @@ def _increment_request_bucket(
     actor_id: str,
     window_kind: str,
     window_start: datetime,
+    amount: int = 1,
 ) -> int:
     values = {
         "actor_id": actor_id,
         "window_kind": window_kind,
         "window_start": window_start,
-        "request_count": 1,
+        "request_count": amount,
     }
     dialect = db.bind.dialect.name
     if dialect == "postgresql":
@@ -1369,7 +1397,7 @@ def _increment_request_bucket(
             window_start=window_start,
         ).with_for_update().first()
         if row:
-            row.request_count += 1
+            row.request_count += amount
         else:
             row = AIRequestBucketRecord(**values)
             db.add(row)
@@ -1378,7 +1406,7 @@ def _increment_request_bucket(
     statement = insert(AIRequestBucketRecord).values(**values)
     statement = statement.on_conflict_do_update(
         index_elements=["actor_id", "window_kind", "window_start"],
-        set_={"request_count": AIRequestBucketRecord.request_count + 1},
+        set_={"request_count": AIRequestBucketRecord.request_count + amount},
     ).returning(AIRequestBucketRecord.request_count)
     return int(db.execute(statement).scalar_one())
 
@@ -1484,6 +1512,38 @@ def _reserve_index_write_request(db: Session, actor_id: str) -> None:
             detail="ai_index_write_daily_limit_exceeded",
             headers={"Retry-After": "3600"},
         )
+    db.commit()
+
+
+def _reserve_email_request(db: Session, actor_id: str, recipient_count: int) -> None:
+    """Durably bound SendGrid sends and recipients across API replicas."""
+    now = datetime.utcnow()
+    per_minute = _bounded_env_int("EMAIL_SENDS_PER_MINUTE", 5, 1, 60)
+    recipients_per_day = _bounded_env_int(
+        "EMAIL_RECIPIENTS_PER_DAY", 500, 1, 10_000
+    )
+    minute_count = _increment_request_bucket(
+        db,
+        actor_id,
+        "email_send_minute",
+        now.replace(second=0, microsecond=0),
+    )
+    day_count = _increment_request_bucket(
+        db,
+        actor_id,
+        "email_recipient_day",
+        now.replace(hour=0, minute=0, second=0, microsecond=0),
+        amount=recipient_count,
+    )
+    if minute_count > per_minute or day_count > recipients_per_day:
+        db.rollback()
+        raise HTTPException(
+            status_code=429,
+            detail="email_rate_limit_exceeded",
+            headers={"Retry-After": "60" if minute_count > per_minute else "3600"},
+        )
+    # Failed provider requests still consume quota so repeated failures cannot
+    # be used to evade the billable-delivery boundary.
     db.commit()
 
 
@@ -5311,6 +5371,194 @@ async def list_external_agents(
         ExternalUserRecord.active.is_(True),
     ).order_by(ExternalUserRecord.name).all()
     return {"agents": [_external_user_payload(record) for record in records]}
+
+
+# ── SendGrid email ─────────────────────────────────────────────
+
+def _email_directory(db: Session, audience: str) -> list[EmailRecipient]:
+    by_email: dict[str, EmailRecipient] = {}
+
+    def add_recipient(recipient: EmailRecipient) -> None:
+        try:
+            normalized = normalize_email_address(recipient.email)
+        except ValueError:
+            return
+        recipient.email = normalized
+        by_email.setdefault(normalized, recipient)
+
+    if audience == "agents":
+        local_users = db.query(UserRecord).filter(
+            UserRecord.is_active.is_(True),
+            UserRecord.role.in_(("admin", "supervisor", "agent")),
+            UserRecord.email.isnot(None),
+        ).order_by(UserRecord.name, UserRecord.id).all()
+        for record in local_users:
+            add_recipient(EmailRecipient(
+                id=f"local:{record.id}",
+                name=record.name,
+                email=record.email or "",
+                audience="agents",
+                source="tickety",
+                title=record.title or record.role,
+            ))
+
+    external_type = "agent" if audience == "agents" else "requester"
+    external_users = db.query(ExternalUserRecord).filter(
+        ExternalUserRecord.active.is_(True),
+        ExternalUserRecord.user_type == external_type,
+        ExternalUserRecord.email.isnot(None),
+    ).order_by(ExternalUserRecord.name, ExternalUserRecord.id).all()
+    for record in external_users:
+        add_recipient(EmailRecipient(
+            id=f"external:{record.id}",
+            name=record.name,
+            email=record.email or "",
+            audience=audience,
+            source=record.provider,
+            title=record.title,
+        ))
+    return sorted(
+        by_email.values(),
+        key=lambda recipient: (recipient.name.casefold(), recipient.email),
+    )
+
+
+def _resolve_email_recipients(
+    db: Session,
+    *,
+    audience: str,
+    recipient_ids: list[str],
+) -> list[EmailAddress]:
+    local_ids: list[str] = []
+    external_ids: list[str] = []
+    for recipient_id in recipient_ids:
+        prefix, separator, record_id = recipient_id.partition(":")
+        if not separator or not record_id:
+            raise HTTPException(status_code=422, detail="One or more recipients are unavailable")
+        if prefix == "local" and audience == "agents":
+            local_ids.append(record_id)
+        elif prefix == "external":
+            external_ids.append(record_id)
+        else:
+            raise HTTPException(status_code=422, detail="One or more recipients are unavailable")
+
+    local_records = {
+        record.id: record
+        for record in db.query(UserRecord).filter(
+            UserRecord.id.in_(local_ids or [""]),
+            UserRecord.is_active.is_(True),
+            UserRecord.role.in_(("admin", "supervisor", "agent")),
+            UserRecord.email.isnot(None),
+        ).all()
+    }
+    expected_external_type = "agent" if audience == "agents" else "requester"
+    external_records = {
+        record.id: record
+        for record in db.query(ExternalUserRecord).filter(
+            ExternalUserRecord.id.in_(external_ids or [""]),
+            ExternalUserRecord.active.is_(True),
+            ExternalUserRecord.user_type == expected_external_type,
+            ExternalUserRecord.email.isnot(None),
+        ).all()
+    }
+
+    recipients: list[EmailAddress] = []
+    seen: set[str] = set()
+    for recipient_id in recipient_ids:
+        prefix, _, record_id = recipient_id.partition(":")
+        record = local_records.get(record_id) if prefix == "local" else external_records.get(record_id)
+        if not record:
+            raise HTTPException(status_code=422, detail="One or more recipients are unavailable")
+        try:
+            normalized = normalize_email_address(record.email or "")
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail="One or more recipients are unavailable",
+            ) from None
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        recipients.append(EmailAddress(email=normalized, name=record.name))
+    if not recipients:
+        raise HTTPException(status_code=422, detail="No deliverable recipients were selected")
+    return recipients
+
+
+@app.get("/email/status", response_model=EmailProviderStatus)
+async def email_provider_status(
+    response: Response,
+    _user: UserRecord = Depends(get_email_user),
+):
+    response.headers["Cache-Control"] = "no-store"
+    return sendgrid_status()
+
+
+@app.get("/email/recipients", response_model=EmailRecipientList)
+async def list_email_recipients(
+    response: Response,
+    audience: str = Query(..., pattern="^(agents|users)$"),
+    search: str = Query("", max_length=120),
+    limit: int = Query(100, ge=1, le=200),
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(get_email_user),
+):
+    response.headers["Cache-Control"] = "no-store"
+    recipients = _email_directory(db, audience)
+    term = search.strip().casefold()
+    if term:
+        recipients = [
+            recipient
+            for recipient in recipients
+            if term in recipient.name.casefold()
+            or term in recipient.email.casefold()
+            or term in (recipient.title or "").casefold()
+        ]
+    total = len(recipients)
+    return {
+        "audience": audience,
+        "recipients": recipients[:limit],
+        "total": total,
+        "truncated": total > limit,
+    }
+
+
+@app.post("/email/send", response_model=EmailSendResponse, status_code=202)
+async def send_email_message(
+    payload: EmailSendRequest,
+    user: UserRecord = Depends(get_email_user),
+    db: Session = Depends(get_db),
+):
+    status = sendgrid_status()
+    if not status["configured"]:
+        raise HTTPException(status_code=503, detail="SendGrid is not configured")
+    recipients = _resolve_email_recipients(
+        db,
+        audience=payload.audience,
+        recipient_ids=payload.recipient_ids,
+    )
+    _reserve_email_request(db, user.id, len(recipients))
+    delivery_body = f"{payload.body}\n\n—\nSent by {user.name} via Tickety."
+    try:
+        message_id = await send_sendgrid_email(
+            recipients,
+            subject=payload.subject,
+            body=delivery_body,
+        )
+    except EmailConfigurationError:
+        raise HTTPException(status_code=503, detail="SendGrid is not configured") from None
+    except EmailDeliveryError as exc:
+        print(
+            "[email] sendgrid delivery rejected "
+            f"status={exc.provider_status or 'network_error'} actor={user.id} "
+            f"recipients={len(recipients)}"
+        )
+        raise HTTPException(status_code=502, detail="Email provider did not accept the message") from None
+    return {
+        "status": "accepted",
+        "recipient_count": len(recipients),
+        "message_id": message_id,
+    }
 
 
 # ── OAuth 2.0 ──────────────────────────────────────────────────

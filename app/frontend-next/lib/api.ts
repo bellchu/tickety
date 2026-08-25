@@ -118,6 +118,20 @@ export const api = {
     ),
   getExternalUsers: () =>
     fetchAPI<import("./types").ExternalUserListResponse>("/admin/external-users"),
+  getEmailStatus: () =>
+    fetchAPI<import("./types").EmailProviderStatus>("/email/status"),
+  getEmailRecipients: (audience: import("./types").EmailAudience, search = "") => {
+    const params = new URLSearchParams({ audience, limit: "100" });
+    if (search.trim()) params.set("search", search.trim());
+    return fetchAPI<import("./types").EmailRecipientList>(
+      `/email/recipients?${params.toString()}`
+    );
+  },
+  sendEmail: (payload: import("./types").EmailSendInput) =>
+    fetchAPI<import("./types").EmailSendResponse>("/email/send", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   // OAuth 2.0
   getOAuthStatus: () => fetchAPI<{ configured: boolean; connected: boolean; domain: string }>("/oauth/status"),
   getOAuthAuthorizeUrl: () => fetchAPI<{ url: string }>("/oauth/authorize"),

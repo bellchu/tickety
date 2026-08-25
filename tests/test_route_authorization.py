@@ -216,6 +216,10 @@ class RouteAuthorizationTests(unittest.TestCase):
             self.roles_policy("/service-requests/request-1/approval", "PATCH"),
             {"admin", "supervisor"},
         )
+        self.assertEqual(
+            self.roles_policy("/email/send", "POST"),
+            {"admin", "supervisor", "agent"},
+        )
 
 
 if __name__ == "__main__":

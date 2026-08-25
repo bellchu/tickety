@@ -32,6 +32,7 @@ import {
   Clock3,
   ChevronRight,
   Activity,
+  Mail,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -46,6 +47,7 @@ const navigationIcons: Record<NavigationIconKey, typeof LayoutDashboard> = {
   assets: Laptop,
   knowledge: BookOpen,
   agents: Users,
+  email: Mail,
   surveys: MessageSquareHeart,
   leaderboard: TrendingUp,
   reports: BarChart3,
