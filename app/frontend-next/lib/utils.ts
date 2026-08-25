@@ -1,6 +1,6 @@
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
-import { parseApiDateTime } from "./date-time";
+import { formatLocalDateTime, parseApiDateTime } from "./date-time";
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -105,20 +105,38 @@ export function formatTimeAgo(dateStr: string | null): string {
   if (!date) return "Date unavailable";
   const now = new Date();
   const seconds = Math.floor((now.getTime() - date.getTime()) / 1000);
+  let relative: string;
   if (seconds < -60) {
     const futureMinutes = Math.ceil(Math.abs(seconds) / 60);
-    if (futureMinutes < 60) return `in ${futureMinutes}m`;
-    const futureHours = Math.ceil(futureMinutes / 60);
-    if (futureHours < 24) return `in ${futureHours}h`;
-    return `in ${Math.ceil(futureHours / 24)}d`;
+    if (futureMinutes < 60) {
+      relative = `in ${futureMinutes}m`;
+    } else {
+      const futureHours = Math.ceil(futureMinutes / 60);
+      relative = futureHours < 24
+        ? `in ${futureHours}h`
+        : `in ${Math.ceil(futureHours / 24)}d`;
+    }
+  } else if (seconds < 60) {
+    relative = "just now";
+  } else {
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) {
+      relative = `${minutes}m ago`;
+    } else {
+      const hours = Math.floor(minutes / 60);
+      relative = hours < 24 ? `${hours}h ago` : `${Math.floor(hours / 24)}d ago`;
+    }
   }
-  if (seconds < 60) return "just now";
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
+
+  const timestamp = formatLocalDateTime(date, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  });
+  return `${relative} · ${timestamp}`;
 }
 
 export function tierProgress(points: number): { current: number; needed: number; percent: number; tier: number } {
