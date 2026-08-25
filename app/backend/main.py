@@ -1346,8 +1346,20 @@ def _increment_request_bucket(
 def _reserve_ai_request(db: Session, actor_id: str, task: str) -> None:
     """Durable per-user provider-work budget shared by every API replica."""
     now = datetime.utcnow()
-    per_minute = _bounded_env_int("AI_USER_REQUESTS_PER_MINUTE", 10, 1, 120)
-    per_day = _bounded_env_int("AI_USER_REQUESTS_PER_DAY", 200, 1, 10_000)
+    if actor_id == "system-worker":
+        # Background admission is already bounded by the worker batch size and
+        # the provider-wide RPM/TPM/daily-token controls.  A separate durable
+        # ceiling prevents a repair backlog from consuming the much smaller
+        # human-user allowance for the rest of the day.
+        per_minute = _bounded_env_int(
+            "AI_SYSTEM_REQUESTS_PER_MINUTE", 10, 1, 120
+        )
+        per_day = _bounded_env_int(
+            "AI_SYSTEM_REQUESTS_PER_DAY", 2_000, 1, 10_000
+        )
+    else:
+        per_minute = _bounded_env_int("AI_USER_REQUESTS_PER_MINUTE", 10, 1, 120)
+        per_day = _bounded_env_int("AI_USER_REQUESTS_PER_DAY", 200, 1, 10_000)
     minute_start = now.replace(second=0, microsecond=0)
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
 

@@ -525,6 +525,8 @@ class Settings(BaseModel):
     LLM_DAILY_TOKEN_BUDGET: Optional[str] = None
     AI_USER_REQUESTS_PER_MINUTE: Optional[str] = None
     AI_USER_REQUESTS_PER_DAY: Optional[str] = None
+    AI_SYSTEM_REQUESTS_PER_MINUTE: Optional[str] = None
+    AI_SYSTEM_REQUESTS_PER_DAY: Optional[str] = None
     AI_ANALYSIS_LEASE_SECONDS: Optional[str] = None
     AI_ANALYSIS_MAX_ATTEMPTS: Optional[str] = None
     AI_BACKGROUND_TICKETS_PER_SWEEP: Optional[str] = None

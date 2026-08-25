@@ -1284,6 +1284,27 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 main._reserve_ai_request(second_db, "actor-1", "analysis")
         self.assertEqual(raised.exception.status_code, 429)
 
+    def test_system_worker_budget_is_separate_from_human_user_budget(self):
+        with (
+            patch.dict(os.environ, {
+                "AI_USER_REQUESTS_PER_MINUTE": "1",
+                "AI_USER_REQUESTS_PER_DAY": "1",
+                "AI_SYSTEM_REQUESTS_PER_MINUTE": "2",
+                "AI_SYSTEM_REQUESTS_PER_DAY": "2",
+            }, clear=False),
+            self.session_factory() as db,
+        ):
+            main._reserve_ai_request(db, "system-worker", "worker:triage")
+            main._reserve_ai_request(db, "system-worker", "worker:triage")
+            with self.assertRaises(HTTPException) as system_limited:
+                main._reserve_ai_request(db, "system-worker", "worker:triage")
+            main._reserve_ai_request(db, "human-actor", "analysis")
+            with self.assertRaises(HTTPException) as human_limited:
+                main._reserve_ai_request(db, "human-actor", "analysis")
+
+        self.assertEqual(system_limited.exception.status_code, 429)
+        self.assertEqual(human_limited.exception.status_code, 429)
+
     def test_local_analytics_limit_cannot_exhaust_provider_work_budget(self):
         with (
             patch.dict(os.environ, {
