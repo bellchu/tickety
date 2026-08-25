@@ -1,5 +1,6 @@
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
+import { parseApiDateTime } from "./date-time";
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -100,8 +101,8 @@ export function safeExternalUrl(value: string | null | undefined): string | null
 
 export function formatTimeAgo(dateStr: string | null): string {
   if (!dateStr) return "—";
-  const date = new Date(dateStr);
-  if (Number.isNaN(date.getTime())) return "Date unavailable";
+  const date = parseApiDateTime(dateStr);
+  if (!date) return "Date unavailable";
   const now = new Date();
   const seconds = Math.floor((now.getTime() - date.getTime()) / 1000);
   if (seconds < -60) {

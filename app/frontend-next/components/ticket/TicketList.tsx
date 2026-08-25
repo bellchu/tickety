@@ -27,6 +27,7 @@ import { canAccessProtectedIntelligence, isDemoContext } from "@/lib/auth";
 import type { Ticket, TicketListSort } from "@/lib/types";
 import { analysisLifecycleLabel, routingLabel, sourceKindLabel } from "@/lib/ticket-intelligence";
 import { cn, formatTimeAgo } from "@/lib/utils";
+import { localDateKey } from "@/lib/date-time";
 import {
   formatOperationalTimestamp,
   requesterEmail,
@@ -168,7 +169,7 @@ function exportPage(tickets: Ticket[]) {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = `tickety-queue-page-${new Date().toISOString().slice(0, 10)}.csv`;
+  anchor.download = `tickety-queue-page-${localDateKey()}.csv`;
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();

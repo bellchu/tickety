@@ -12,6 +12,21 @@ function loadHelpers() {
     fileName: filename,
   }).outputText;
   const loaded = { exports: {} };
+  const dateTime = loadTypeScriptModule(path.join(__dirname, "..", "lib", "date-time.ts"));
+  new Function("require", "exports", "module", output)(
+    (specifier) => specifier === "@/lib/date-time" ? dateTime : require(specifier),
+    loaded.exports,
+    loaded,
+  );
+  return loaded.exports;
+}
+
+function loadTypeScriptModule(filename) {
+  const output = ts.transpileModule(fs.readFileSync(filename, "utf8"), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021 },
+    fileName: filename,
+  }).outputText;
+  const loaded = { exports: {} };
   new Function("exports", "module", output)(loaded.exports, loaded);
   return loaded.exports;
 }
@@ -38,6 +53,7 @@ test("analysis lifecycle renders every operational state without exposing raw st
   assert.equal(analysisLifecycleLabel(emptyAnalysis, now), "Not analyzed");
   assert.equal(analysisLifecycleLabel({ ...emptyAnalysis, ai_status: "queued" }, now), "Queued");
   assert.equal(analysisLifecycleLabel({ ...emptyAnalysis, ai_status: "queued", ai_next_attempt_at: "2026-08-23T12:01:00Z" }, now), "Retry scheduled");
+  assert.equal(analysisLifecycleLabel({ ...emptyAnalysis, ai_status: "queued", ai_next_attempt_at: "2026-08-23T12:01:00" }, now), "Retry scheduled");
   assert.equal(analysisLifecycleLabel({ ...emptyAnalysis, ai_status: "running", ai_lease_expires_at: "2026-08-23T12:01:00Z" }, now), "Analyzing");
   assert.equal(analysisLifecycleLabel({ ...emptyAnalysis, ai_status: "running", ai_lease_expires_at: "2026-08-23T11:59:00Z" }, now), "Needs refresh");
   assert.equal(analysisLifecycleLabel({ ...emptyAnalysis, ai_status: "completed" }, now), "Ready");

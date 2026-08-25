@@ -10,6 +10,7 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
@@ -7803,12 +7804,44 @@ async def ticket_time_entries(ticket_id: str, db: Session = Depends(get_db)):
     return entries
 
 
+def _utc_bounds_for_local_day(
+    time_zone_name: str,
+    now: Optional[datetime] = None,
+) -> tuple[datetime, datetime]:
+    try:
+        local_zone = ZoneInfo(time_zone_name)
+    except (ValueError, ZoneInfoNotFoundError) as exc:
+        raise ValueError("Unknown time zone") from exc
+
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    local_day = current.astimezone(local_zone).date()
+    local_start = datetime.combine(local_day, datetime.min.time(), tzinfo=local_zone)
+    local_end = datetime.combine(
+        local_day + timedelta(days=1),
+        datetime.min.time(),
+        tzinfo=local_zone,
+    )
+    return (
+        local_start.astimezone(timezone.utc).replace(tzinfo=None),
+        local_end.astimezone(timezone.utc).replace(tzinfo=None),
+    )
+
+
 @app.get("/time-entries/summary")
-async def time_summary(db: Session = Depends(get_db)):
+async def time_summary(
+    time_zone: str = Query("UTC", min_length=1, max_length=64),
+    db: Session = Depends(get_db),
+):
+    try:
+        today_start, tomorrow_start = _utc_bounds_for_local_day(time_zone)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Unknown time zone") from exc
     total_minutes = db.query(func.sum(TimeEntryRecord.minutes)).scalar() or 0
-    today = datetime.utcnow().strftime("%Y-%m-%d")
     today_minutes = db.query(func.sum(TimeEntryRecord.minutes)).filter(
-        TimeEntryRecord.entry_date >= today
+        TimeEntryRecord.entry_date >= today_start,
+        TimeEntryRecord.entry_date < tomorrow_start,
     ).scalar() or 0
     return {"total_hours": round(total_minutes / 60, 1), "today_hours": round(today_minutes / 60, 1)}
 

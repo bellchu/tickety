@@ -5,7 +5,7 @@ import { Download, Image as ImageIcon, LockKeyhole, MessageSquareText, Paperclip
 import { api } from "@/lib/api";
 import type { Ticket, TicketAttachment, TicketComment } from "@/lib/types";
 import { formatTimeAgo } from "@/lib/utils";
-import { requesterEmail, requesterName, safeMailto } from "@/lib/ticket-display";
+import { formatOperationalTimestamp, requesterEmail, requesterName, safeMailto } from "@/lib/ticket-display";
 import { Alert, Button, Skeleton } from "@/components/ui";
 
 const COMMENT_PAGE_SIZE = 500;
@@ -23,10 +23,7 @@ type ThreadTicket = Pick<
 >;
 
 export function formatThreadTimestamp(value: string | null): string {
-  if (!value) return "Date unavailable";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "Date unavailable";
-  return `${date.toISOString().slice(0, 16).replace("T", " ")} UTC`;
+  return formatOperationalTimestamp(value);
 }
 
 export function mergeChronologicalCommentPages(

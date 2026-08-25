@@ -1,4 +1,5 @@
 import type { Ticket, TicketAnalysisResult } from "@/lib/types";
+import { parseApiDateTime } from "@/lib/date-time";
 
 export type TicketSignalKey = "urgency" | "business-impact" | "requester-pressure" | "complexity" | "escalation-risk";
 export type TicketSignalScore = 1 | 2 | 3 | 4 | 5;
@@ -321,11 +322,11 @@ export function analysisLifecycleLabel(
   if (status === "partial") return "Partial results";
   if (["completed", "triage_completed"].includes(status)) return "Ready";
   if (status === "running") {
-    const leaseExpires = ticket.ai_lease_expires_at ? Date.parse(ticket.ai_lease_expires_at) : 0;
+    const leaseExpires = parseApiDateTime(ticket.ai_lease_expires_at)?.getTime() ?? 0;
     return leaseExpires > now ? "Analyzing" : "Needs refresh";
   }
   if (status === "queued") {
-    const nextAttempt = ticket.ai_next_attempt_at ? Date.parse(ticket.ai_next_attempt_at) : 0;
+    const nextAttempt = parseApiDateTime(ticket.ai_next_attempt_at)?.getTime() ?? 0;
     return nextAttempt > now ? "Retry scheduled" : "Queued";
   }
   if (ticket.ai_generated_at || ticket.ai_reasoning || ticket.summary) return "Needs refresh";

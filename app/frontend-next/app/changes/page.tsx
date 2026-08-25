@@ -18,6 +18,7 @@ import {
 import { api } from "@/lib/api";
 import type { ChangeApproval, ChangeRecord, UserOut } from "@/lib/types";
 import { cn, formatTimeAgo, priorityColor } from "@/lib/utils";
+import { formatLocalDateTime } from "@/lib/date-time";
 import { Alert, Button, ConfirmDialog, DataListCard, DataTable, DataTableViewport, Dialog, EmptyState, ErrorState, IconButton, ListText, Skeleton } from "@/components/ui";
 import { PageFrame, PageHeader, SummaryStrip } from "@/components/layout/PageLayout";
 
@@ -47,7 +48,7 @@ const TYPE_STYLES: Record<string, string> = {
 };
 
 function errorMessage(error: unknown) { return error instanceof Error ? error.message : error ? String(error) : "An unexpected error occurred."; }
-function formatDate(value: string | null) { if (!value) return "Not scheduled"; const date = new Date(value); return Number.isNaN(date.getTime()) ? "Invalid date" : date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); }
+function formatDate(value: string | null) { return formatLocalDateTime(value, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }, value ? "Invalid date" : "Not scheduled"); }
 function Pill({ value, styles }: { value: string; styles: Record<string, string> }) { return <span className={cn("inline-flex whitespace-nowrap rounded-full border px-2.5 py-1 text-[11px] font-semibold", styles[value] ?? "border-linen-500 bg-linen-300 text-ink-600")}>{value}</span>; }
 
 export default function ChangesPage() {

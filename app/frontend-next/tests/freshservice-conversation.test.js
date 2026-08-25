@@ -37,6 +37,7 @@ function loadConversationModule() {
     if (specifier === "@/lib/utils") return { formatTimeAgo: () => "recently" };
     if (specifier === "@/lib/ticket-display") {
       return {
+        formatOperationalTimestamp: () => "local timestamp",
         requesterName: (ticket) => ticket.requester_name || ticket.requester_email || "Requester profile pending",
         requesterEmail: (ticket) => ticket.requester_email || null,
         safeMailto: (email) => email ? `mailto:${email}` : null,

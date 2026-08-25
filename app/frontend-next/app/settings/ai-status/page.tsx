@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { api, APIError } from "@/lib/api";
 import { canAccessAdministration } from "@/lib/auth";
+import { formatLocalDateTime } from "@/lib/date-time";
 import {
   aiArtifactLabel,
   aiCallStatusMeta,
@@ -67,8 +68,7 @@ function isAuthError(error: unknown) {
 }
 
 function formatDate(value: string | null) {
-  if (!value) return "Not available";
-  return new Date(value).toLocaleString();
+  return formatLocalDateTime(value, undefined, "Not available");
 }
 
 function viewCount(data: AIStatusResponse, view: AITaskView) {

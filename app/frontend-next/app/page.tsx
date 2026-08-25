@@ -37,6 +37,7 @@ import {
   selectDeterministicQueue,
 } from "@/lib/dashboard";
 import type { PrioritizedTicket, Ticket } from "@/lib/types";
+import { localDateKey } from "@/lib/date-time";
 import { cn, formatTimeAgo } from "@/lib/utils";
 import {
   requesterEmail,
@@ -92,7 +93,7 @@ function exportTickets(tickets: Ticket[]) {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = `tickety-operations-${new Date().toISOString().slice(0, 10)}.csv`;
+  anchor.download = `tickety-operations-${localDateKey()}.csv`;
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();

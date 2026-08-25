@@ -62,3 +62,21 @@ test("getComments supports bounded history pagination without changing the defau
     global.fetch = originalFetch;
   }
 });
+
+test("time summary sends the browser's IANA time zone", async () => {
+  const { api } = loadApi();
+  const originalFetch = global.fetch;
+  global.fetch = async (url) => {
+    assert.equal(url, "/api/time-entries/summary?time_zone=America%2FToronto");
+    return new Response(JSON.stringify({ total_hours: 8, today_hours: 2 }), { status: 200 });
+  };
+
+  try {
+    assert.deepEqual(await api.getTimeSummary("America/Toronto"), {
+      total_hours: 8,
+      today_hours: 2,
+    });
+  } finally {
+    global.fetch = originalFetch;
+  }
+});

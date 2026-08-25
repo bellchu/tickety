@@ -14,7 +14,25 @@ function loadDisplayHelpers() {
     fileName: filename,
   }).outputText;
   const loaded = { exports: {} };
-  new Function("require", "exports", "module", output)(require, loaded.exports, loaded);
+  const dateTime = loadTypeScriptModule(path.join(__dirname, "..", "lib", "date-time.ts"));
+  new Function("require", "exports", "module", output)(
+    (specifier) => specifier === "./date-time" ? dateTime : require(specifier),
+    loaded.exports,
+    loaded,
+  );
+  return loaded.exports;
+}
+
+function loadTypeScriptModule(filename) {
+  const output = ts.transpileModule(fs.readFileSync(filename, "utf8"), {
+    compilerOptions: {
+      module: ts.ModuleKind.CommonJS,
+      target: ts.ScriptTarget.ES2020,
+    },
+    fileName: filename,
+  }).outputText;
+  const loaded = { exports: {} };
+  new Function("exports", "module", output)(loaded.exports, loaded);
   return loaded.exports;
 }
 
@@ -44,4 +62,19 @@ test("ticket timeline uses authoritative source creation and communication times
 
   assert.equal(ticketCreatedAt(ticket), "2026-08-24T09:00:00Z");
   assert.equal(ticketLastCommunicationAt(ticket), "2026-08-24T12:00:00Z");
+});
+
+test("operational timestamps use the runtime user's local time zone", () => {
+  const originalTimeZone = process.env.TZ;
+  process.env.TZ = "America/Toronto";
+  try {
+    const { formatOperationalTimestamp } = loadDisplayHelpers();
+    const formatted = formatOperationalTimestamp("2026-01-01T15:20:00");
+
+    assert.match(formatted, /10:20/);
+    assert.match(formatted, /EST/);
+  } finally {
+    if (originalTimeZone === undefined) delete process.env.TZ;
+    else process.env.TZ = originalTimeZone;
+  }
 });

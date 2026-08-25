@@ -5,13 +5,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { BarChart3, MessageSquareHeart, Send, Star } from "lucide-react";
 import { Alert, Badge, Button, DataListCard, DataTable, DataTableViewport, Dialog, EmptyState, ErrorState, ListText, Skeleton } from "@/components/ui";
 import { api } from "@/lib/api";
+import { formatLocalDateTime } from "@/lib/date-time";
 import type { SurveyTemplate, Ticket } from "@/lib/types";
 import { PageFrame, PageHeader, SummaryStrip } from "@/components/layout/PageLayout";
 
 function formatDate(value: string | null) {
-  if (!value) return "—";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "—" : new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(date);
+  return formatLocalDateTime(value, { dateStyle: "medium" }, "—");
 }
 
 export default function SurveysPage() {

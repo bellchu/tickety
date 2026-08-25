@@ -22,6 +22,7 @@ import { Alert, Button, EmptyState, ErrorState, ListText, Skeleton } from "@/com
 import { PageFrame } from "@/components/layout/PageLayout";
 import { analysisLifecycleLabel, relatedStrength, routingLabel, sourceKindLabel, ticketSignalRatings } from "@/lib/ticket-intelligence";
 import { persistedAnalysisErrorDetails } from "@/lib/analysis-errors";
+import { toLocalDateTimeInput } from "@/lib/date-time";
 import {
   formatOperationalTimestamp,
   requesterEmail,
@@ -176,19 +177,12 @@ function FreshserviceSourcePanel({ ticket }: { ticket: Ticket }) {
   );
 }
 
-function toDateTimeLocal(value: string | null | undefined): string {
-  if (!value) return "";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-}
-
 function AgentActionPanel({ ticket }: { ticket: Ticket }) {
   const queryClient = useQueryClient();
   const [status, setStatus] = useState(ticket.status || "New");
   const [priority, setPriority] = useState(ticket.priority || "P3");
   const [assigneeId, setAssigneeId] = useState(ticket.assignee_id || "");
-  const [dueBy, setDueBy] = useState(toDateTimeLocal(ticket.due_by || ticket.resolution_due_at));
+  const [dueBy, setDueBy] = useState(toLocalDateTimeInput(ticket.due_by || ticket.resolution_due_at));
   const [tags, setTags] = useState(ticket.tags || "");
   const [comment, setComment] = useState("");
   const [isPrivate, setIsPrivate] = useState(false);
@@ -199,7 +193,7 @@ function AgentActionPanel({ ticket }: { ticket: Ticket }) {
     setStatus(ticket.status || "New");
     setPriority(ticket.priority || "P3");
     setAssigneeId(ticket.assignee_id || "");
-    setDueBy(toDateTimeLocal(ticket.due_by || ticket.resolution_due_at));
+    setDueBy(toLocalDateTimeInput(ticket.due_by || ticket.resolution_due_at));
     setTags(ticket.tags || "");
   }, [ticket]);
 

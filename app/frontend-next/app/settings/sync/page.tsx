@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { api, APIError } from "@/lib/api";
 import { canAccessAdministration } from "@/lib/auth";
+import { formatLocalDateTime, parseApiDateTime } from "@/lib/date-time";
 import { formatTimeAgo } from "@/lib/utils";
 import { Alert, Button, ErrorState, Skeleton } from "@/components/ui";
 import { DiagnosticReveal } from "@/components/admin/DiagnosticReveal";
@@ -36,13 +37,17 @@ function isAuthError(error: unknown) {
 }
 
 function formatDate(value: string | null) {
-  if (!value) return "Not yet";
-  return new Date(value).toLocaleString();
+  return formatLocalDateTime(value, undefined, "Not yet");
 }
 
 function formatInclusiveEnd(value: string | null) {
-  if (!value) return "Not set";
-  return new Date(new Date(value).getTime() - 1).toLocaleDateString();
+  const exclusiveEnd = parseApiDateTime(value);
+  if (!exclusiveEnd) return "Not set";
+  return formatLocalDateTime(
+    new Date(exclusiveEnd.getTime() - 1),
+    { dateStyle: "medium" },
+    "Not set",
+  );
 }
 
 function statusLabel(status: string) {

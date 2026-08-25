@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { api, APIError } from "@/lib/api";
 import { canAccessAdministration } from "@/lib/auth";
+import { formatLocalDateTime } from "@/lib/date-time";
 import type { OperationalDiagnosticArea } from "@/lib/types";
 import { formatTimeAgo } from "@/lib/utils";
 import { Alert, Badge, Button, ErrorState, Skeleton } from "@/components/ui";
@@ -184,7 +185,7 @@ export default function AdminStatusPage() {
             facts={[
               { label: "Database", value: readinessQuery.data?.checks.database || "Checking…" },
               { label: "Version", value: version?.version || "Loading…" },
-              { label: "Build time", value: version?.build_time ? new Date(version.build_time).toLocaleString() : "Not recorded" },
+              { label: "Build time", value: formatLocalDateTime(version?.build_time, undefined, "Not recorded") },
             ]}
             diagnosticArea="application"
           />

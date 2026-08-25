@@ -410,7 +410,10 @@ export const api = {
   createTimeEntry: (ticketId: string, description: string, minutes: number) =>
     fetchAPI<import("./types").TimeEntry>("/time-entries", { method: "POST", body: JSON.stringify({ ticket_id: ticketId, description, minutes }) }),
   getTicketTimeEntries: (ticketId: string) => fetchAPI<import("./types").TimeEntry[]>(`/time-entries/ticket/${ticketId}`),
-  getTimeSummary: () => fetchAPI<{ total_hours: number; today_hours: number }>("/time-entries/summary"),
+  getTimeSummary: (timeZone: string) => {
+    const params = new URLSearchParams({ time_zone: timeZone });
+    return fetchAPI<{ total_hours: number; today_hours: number }>(`/time-entries/summary?${params.toString()}`);
+  },
   // Self-Service Portal
   portalCreateTicket: (subject: string, description: string, reporter: string, priority = "P3") =>
     fetchAPI<import("./types").PortalTicketCreated>("/portal/tickets", {

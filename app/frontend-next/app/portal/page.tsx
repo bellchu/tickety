@@ -20,6 +20,7 @@ import { TicketyLogo } from "@/components/layout/TicketyLogo";
 import { LoginLink } from "@/components/layout/LoginLink";
 import { Alert, Badge, Button, Dialog, ErrorState, Skeleton } from "@/components/ui";
 import { api } from "@/lib/api";
+import { formatLocalDateTime } from "@/lib/date-time";
 import type { PortalTicket, PortalTicketCreated } from "@/lib/types";
 
 const PRIORITIES = [
@@ -55,13 +56,10 @@ function extractAccessToken(value: string): string {
 }
 
 function formatDate(value: string | null, options?: Intl.DateTimeFormatOptions) {
-  if (!value) return "Not available";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "Not available";
-  return new Intl.DateTimeFormat(undefined, options ?? {
+  return formatLocalDateTime(value, options ?? {
     dateStyle: "medium",
     timeStyle: "short",
-  }).format(date);
+  }, "Not available");
 }
 
 function TicketResult({ ticket }: { ticket: PortalTicket }) {

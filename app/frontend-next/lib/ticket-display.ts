@@ -1,4 +1,5 @@
 import type { Ticket } from "./types";
+import { formatLocalDateTime } from "./date-time";
 
 type RequesterTicket = Pick<
   Ticket,
@@ -45,10 +46,14 @@ export function ticketLastCommunicationAt(ticket: TimelineTicket): string | null
 }
 
 export function formatOperationalTimestamp(value: string | null | undefined): string {
-  if (!value) return "Date unavailable";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "Date unavailable";
-  return `${date.toISOString().slice(0, 16).replace("T", " ")} UTC`;
+  return formatLocalDateTime(value, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  });
 }
 
 export function safeMailto(value: string | null | undefined): string | null {

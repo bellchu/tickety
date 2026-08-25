@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Clock3, Plus, Ticket as TicketIcon, Timer } from "lucide-react";
 import { Alert, Button, DataListCard, DataTable, DataTableViewport, Dialog, EmptyState, ErrorState, ListText, Skeleton } from "@/components/ui";
 import { api } from "@/lib/api";
+import { formatLocalDateTime, resolvedLocalTimeZone } from "@/lib/date-time";
 import type { Ticket } from "@/lib/types";
 import { PageFrame, PageHeader } from "@/components/layout/PageLayout";
 
@@ -16,9 +17,7 @@ function formatDuration(minutes: number) {
 }
 
 function formatDate(value: string | null) {
-  if (!value) return "Date unavailable";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "Date unavailable" : new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(date);
+  return formatLocalDateTime(value, { dateStyle: "medium" });
 }
 
 export default function TimePage() {
@@ -26,7 +25,8 @@ export default function TimePage() {
   const [ticketFilter, setTicketFilter] = useState("");
   const [formOpen, setFormOpen] = useState(false);
   const [notice, setNotice] = useState(false);
-  const summaryQuery = useQuery({ queryKey: ["timeSummary"], queryFn: api.getTimeSummary });
+  const localTimeZone = resolvedLocalTimeZone();
+  const summaryQuery = useQuery({ queryKey: ["timeSummary", localTimeZone], queryFn: () => api.getTimeSummary(localTimeZone) });
   const entriesQuery = useQuery({ queryKey: ["timeEntries", ticketFilter], queryFn: () => api.getTimeEntries(ticketFilter || undefined) });
   const ticketsQuery = useQuery({ queryKey: ["tickets"], queryFn: api.getTickets });
   const createMutation = useMutation({

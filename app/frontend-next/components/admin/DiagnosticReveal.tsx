@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Eye, EyeOff, ScrollText } from "lucide-react";
 import { api } from "@/lib/api";
+import { formatLocalDateTime } from "@/lib/date-time";
 import type { OperationalDiagnosticArea } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Button, Skeleton } from "@/components/ui";
@@ -59,7 +60,7 @@ export function DiagnosticReveal({
                   <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[10px] uppercase tracking-[0.08em]">
                     <span className={entry.severity === "error" ? "text-red-300" : entry.severity === "warning" ? "text-amber-300" : "text-sky-300"}>{entry.severity}</span>
                     <span className="break-all text-slate-400">{entry.source}</span>
-                    <span className="text-slate-500">{entry.timestamp ? new Date(entry.timestamp).toLocaleString() : "time unavailable"}</span>
+                    <span className="text-slate-500">{formatLocalDateTime(entry.timestamp, undefined, "time unavailable")}</span>
                   </div>
                   <pre className="mt-1 whitespace-pre-wrap break-words font-mono text-[11px] leading-5 text-slate-200">{entry.message}</pre>
                 </div>
