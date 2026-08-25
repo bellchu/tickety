@@ -103,6 +103,37 @@ export const api = {
   getHealth: () => fetchAPI<{ status: string; mode: "demo" | "production" }>("/health"),
   getReadiness: () => fetchAPI<import("./types").ReadinessStatus>("/health/ready"),
   getTickets: () => fetchAPI<import("./types").Ticket[]>("/tickets"),
+  getAgentWorkspaceBootstrap: () =>
+    fetchAPI<import("./types").AgentWorkspaceBootstrap>("/agent-workspace/bootstrap"),
+  getAgentWorkspaceTickets: async (
+    options: import("./types").AgentWorkspaceTicketParams = {},
+  ) => {
+    const params = new URLSearchParams();
+    if (options.scope) params.set("scope", options.scope);
+    if (options.teamId) params.set("team_id", options.teamId);
+    if (options.folder) params.set("folder", options.folder);
+    if (options.search?.trim()) params.set("search", options.search.trim());
+    if (options.limit != null) params.set("limit", String(options.limit));
+    if (options.offset != null) params.set("offset", String(options.offset));
+    const path = `/agent-workspace/tickets${params.size ? `?${params.toString()}` : ""}`;
+    const { data, response } = await fetchAPIResponse<import("./types").AgentWorkspaceTicket[]>(path);
+    return {
+      tickets: data,
+      hasMore: response.headers.get("x-has-more") === "true",
+    };
+  },
+  updateAgentTicketState: (
+    ticketId: string,
+    payload: import("./types").AgentTicketStateUpdate,
+  ) => fetchAPI<{
+    ticket_id: string;
+    last_seen_at: string | null;
+    starred_at: string | null;
+    follow_up_at: string | null;
+  }>(`/agent-workspace/tickets/${encodeURIComponent(ticketId)}/state`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  }),
   getTicketsPage: async (options: import("./types").TicketListParams = {}) => {
     const params = new URLSearchParams();
     if (options.status) params.set("status", options.status);
@@ -168,6 +199,23 @@ export const api = {
       `/admin/external-users${params.size ? `?${params.toString()}` : ""}`
     );
   },
+  getAgentIdentityLinks: (userId?: string) => {
+    const params = new URLSearchParams();
+    if (userId) params.set("user_id", userId);
+    return fetchAPI<import("./types").UserExternalIdentityLink[]>(
+      `/admin/agent-identity-links${params.size ? `?${params.toString()}` : ""}`
+    );
+  },
+  setAgentIdentityLink: (userId: string, externalUserId: string) =>
+    fetchAPI<import("./types").UserExternalIdentityLink>(
+      `/admin/agent-identity-links/${encodeURIComponent(userId)}`,
+      { method: "PUT", body: JSON.stringify({ external_user_id: externalUserId }) },
+    ),
+  deleteAgentIdentityLink: (userId: string, linkId: number) =>
+    fetchAPI<{ status: string; user_id: string; link_id: number }>(
+      `/admin/agent-identity-links/${encodeURIComponent(userId)}/${linkId}`,
+      { method: "DELETE" },
+    ),
   getEmailStatus: () =>
     fetchAPI<import("./types").EmailProviderStatus>("/email/status"),
   getEmailRecipients: (audience: import("./types").EmailAudience, search = "") => {

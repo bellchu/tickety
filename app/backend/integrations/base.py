@@ -58,6 +58,9 @@ class BaseITSMAdapter(ABC):
     async def fetch_agents(self, max_pages: Optional[int] = None) -> List[dict]:
         return []
 
+    async def fetch_groups(self, max_pages: Optional[int] = None) -> List[dict]:
+        return []
+
     async def fetch_external_users(self, max_pages: Optional[int] = None) -> List[dict]:
         """Return provider identities as read-only directory records."""
         agents = await self.fetch_agents(max_pages=max_pages)

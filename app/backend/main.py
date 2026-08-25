@@ -27,7 +27,9 @@ from sqlalchemy.exc import IntegrityError
 from .database import (
     Base, init_db, get_db, SessionLocal,
     TicketRecord, UserRecord, RecognitionRecord,
-    ExternalUserRecord, SyncStateRecord,
+    ExternalUserRecord, ExternalGroupRecord, ExternalGroupMembershipRecord,
+    UserExternalIdentityLinkRecord, UserExternalIdentityAuditRecord,
+    AgentTicketStateRecord, SyncStateRecord,
     TicketCommentRecord, TicketCategoryRecord, TicketAuditLogRecord,
     SessionRecord, KbArticleRecord, TicketLinkRecord,
     TicketStatusConfigRecord, TicketPriorityConfigRecord, NotificationConfigRecord,
@@ -63,6 +65,9 @@ from .schema import (
     OperationalDiagnosticsResponse,
     AutomaticAIEnableRequest, AutomaticAIPauseRequest,
     ExternalUser, ExternalUserSyncResult,
+    AgentWorkspaceBootstrap, AgentWorkspaceIdentity, AgentWorkspaceTeam,
+    AgentWorkspaceTicket, AgentTicketStateUpdate,
+    UserExternalIdentityLinkOut, UserExternalIdentityLinkUpdate,
     EmailRecipient, EmailRecipientList, EmailProviderStatus,
     EmailSendRequest, EmailSendResponse,
     TriageResult, PointsAwardedNotification, TicketCreate,
@@ -129,6 +134,7 @@ from .ai_state import invalidate_ticket_ai, invalidate_ticket_resolution
 from .brain import IntelligenceEngine
 from . import intelligence as intel
 from . import ticket_vectors
+from . import agent_workspace
 from .prompts import (
     RAG_SYSTEM_PROMPT, REPLY_SYSTEM_PROMPT, RESOLUTION_SYSTEM_PROMPT,
     SUMMARY_SYSTEM_PROMPT, TRIAGE_SYSTEM_PROMPT,
@@ -481,6 +487,15 @@ def require_role(*roles: str):
     return checker
 
 
+def require_authenticated_role(*roles: str):
+    """Require a real session and one of the supplied operational roles."""
+    def checker(user: UserRecord = Depends(get_authenticated_user)) -> UserRecord:
+        if (user.role or "").lower() not in roles:
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
+        return user
+    return checker
+
+
 def require_protected_ai_role(*roles: str):
     def checker(user: UserRecord = Depends(get_protected_ai_user)) -> UserRecord:
         if user.role not in roles:
@@ -523,18 +538,33 @@ def _can_access_private_ai_context(user: UserRecord) -> bool:
     return False
 
 
-def _authorize_ticket_analysis(user: UserRecord, ticket: TicketRecord) -> None:
+def _authorize_ticket_analysis(
+    user: UserRecord,
+    ticket: TicketRecord,
+    db: Optional[Session] = None,
+) -> None:
     if (user.role or "").lower() in {"admin", "supervisor"}:
         return
-    if (user.role or "").lower() == "agent" and ticket.assignee_id in {None, user.id}:
+    if (user.role or "").lower() == "agent" and (
+        ticket.assignee_id == user.id
+        or (db is not None and agent_workspace.can_work_ticket(db, user, ticket))
+    ):
         return
     raise HTTPException(status_code=403, detail="Insufficient ticket analysis permission")
+
+
+def _authorize_ticket_view(user: UserRecord, _ticket: Optional[TicketRecord] = None) -> None:
+    """All operational users may browse the complete All Tickets directory."""
+    if (user.role or "").lower() in {"admin", "supervisor", "agent"}:
+        return
+    raise HTTPException(status_code=403, detail="Insufficient ticket view permission")
 
 
 def _authorize_ticket_mutation(
     user: UserRecord,
     ticket: TicketRecord,
     *,
+    db: Optional[Session] = None,
     changed_fields: Optional[set[str]] = None,
     requested_assignee_id: Optional[str] = None,
 ) -> None:
@@ -548,11 +578,13 @@ def _authorize_ticket_mutation(
         return
     if role != "agent":
         raise HTTPException(status_code=403, detail="Insufficient ticket permissions")
-    if ticket.assignee_id == user.id:
+    if ticket.assignee_id == user.id or (
+        db is not None and agent_workspace.can_work_ticket(db, user, ticket)
+    ):
         if (
             changed_fields
             and "assignee_id" in changed_fields
-            and requested_assignee_id != user.id
+            and requested_assignee_id not in {None, user.id, ticket.assignee_id}
         ):
             raise HTTPException(
                 status_code=403,
@@ -1059,9 +1091,14 @@ def _enrich_comments(
         comment.__dict__["author_type"] = author_type
 
 
-def _ticket_for_request(request: Request, ticket: TicketRecord) -> Ticket | TicketRecord:
-    """Remove generated AI artifacts from anonymous demo browsing responses."""
-    if not getattr(request.state, "demo_fallback", False):
+def _ticket_for_request(
+    request: Request,
+    ticket: TicketRecord,
+    *,
+    redact_ai: bool = False,
+) -> Ticket | TicketRecord:
+    """Remove generated AI artifacts outside an authorized work context."""
+    if not getattr(request.state, "demo_fallback", False) and not redact_ai:
         return ticket
     return Ticket.model_validate(ticket, from_attributes=True).model_copy(
         update=_PUBLIC_DEMO_AI_FIELDS
@@ -1082,6 +1119,7 @@ async def list_tickets(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0, le=1_000_000),
 ):
+    _authorize_ticket_view(user)
     if getattr(request.state, "demo_fallback", False):
         # Anonymous demo responses redact these model-generated values. Do not
         # retain them as query or ordering oracles after redaction.
@@ -1090,13 +1128,7 @@ async def list_tickets(
                 status_code=403,
                 detail="AI-derived ticket filters require authentication",
             )
-    allowed_assignee_id = _ticket_scope_assignee_id(user)
     q = db.query(TicketRecord)
-    if allowed_assignee_id is not None:
-        q = q.filter(or_(
-            TicketRecord.assignee_id.is_(None),
-            TicketRecord.assignee_id == allowed_assignee_id,
-        ))
     if status:
         q = q.filter(TicketRecord.status == status)
     if priority:
@@ -1180,7 +1212,473 @@ async def list_tickets(
     response.headers["X-Has-More"] = str(has_more).lower()
 
     _enrich_tickets(db, tickets)
-    return [_ticket_for_request(request, ticket) for ticket in tickets]
+    direct: set[tuple[str, str, str]] = set()
+    groups: dict[tuple[str, str, str], ExternalGroupRecord] = {}
+    if (user.role or "").lower() == "agent":
+        direct, groups = _agent_assignment_context(db, user)
+    return [
+        _ticket_for_request(
+            request,
+            ticket,
+            redact_ai=(
+                (user.role or "").lower() == "agent"
+                and _agent_ticket_scope_from_context(user, ticket, direct, groups)[0] is None
+            ),
+        )
+        for ticket in tickets
+    ]
+
+
+def _agent_conversation_subqueries(db: Session):
+    conversation_at = func.coalesce(
+        ExternalConversationRecord.provider_created_at,
+        ExternalConversationRecord.provider_updated_at,
+        ExternalConversationRecord.received_at,
+    )
+    base = (
+        ExternalConversationRecord.ticket_id == TicketRecord.id,
+        ExternalConversationRecord.is_private.is_(False),
+        ExternalConversationRecord.deleted.is_(False),
+        ExternalConversationRecord.public_tombstone.is_(False),
+    )
+    latest_incoming = db.query(func.max(conversation_at)).filter(
+        *base,
+        ExternalConversationRecord.incoming.is_(True),
+    ).correlate(TicketRecord).scalar_subquery()
+    latest_outgoing = db.query(func.max(conversation_at)).filter(
+        *base,
+        ExternalConversationRecord.incoming.is_(False),
+    ).correlate(TicketRecord).scalar_subquery()
+    requester_activity = func.coalesce(
+        latest_incoming,
+        TicketRecord.external_created_at,
+        TicketRecord.created_at,
+    )
+    needs_reply = and_(
+        requester_activity.isnot(None),
+        or_(latest_outgoing.is_(None), requester_activity > latest_outgoing),
+    )
+    return requester_activity, latest_outgoing, needs_reply
+
+
+def _agent_sla_deadline_expression(needs_reply):
+    response_deadline = func.coalesce(
+        TicketRecord.response_due_at,
+        TicketRecord.external_fr_due_by,
+    )
+    resolution_deadline = func.coalesce(
+        TicketRecord.resolution_due_at,
+        TicketRecord.due_by,
+        TicketRecord.external_due_by,
+    )
+    return case(
+        (needs_reply, func.coalesce(response_deadline, resolution_deadline)),
+        else_=resolution_deadline,
+    )
+
+
+def _agent_next_best_score_expression(needs_reply, now: datetime):
+    """Portable SQL approximation of the score shown in the reading pane."""
+    deadline = _agent_sla_deadline_expression(needs_reply)
+    priority_score = case(
+        {
+            "P1": 40, "Urgent": 40,
+            "P2": 24, "High": 24,
+            "P3": 12, "Medium": 12,
+        },
+        value=TicketRecord.priority,
+        else_=4,
+    )
+    sla_score = case(
+        (deadline <= now, 35),
+        (deadline <= now + timedelta(hours=1), 28),
+        (deadline <= now + timedelta(hours=4), 18),
+        (deadline <= now + timedelta(hours=24), 8),
+        else_=0,
+    )
+    risk_score = case(
+        (TicketRecord.escalation_risk >= 90, 18),
+        (TicketRecord.escalation_risk >= 75, 15),
+        (TicketRecord.escalation_risk >= 60, 12),
+        (TicketRecord.escalation_risk >= 50, 10),
+        else_=0,
+    )
+    created_at = func.coalesce(
+        TicketRecord.external_created_at,
+        TicketRecord.created_at,
+    )
+    aging_score = case(
+        (created_at <= now - timedelta(days=2), 6),
+        else_=0,
+    )
+    return priority_score + case((needs_reply, 18), else_=0) + sla_score + risk_score + aging_score
+
+
+def _agent_sla_deadline(ticket: TicketRecord, *, needs_reply: bool) -> Optional[datetime]:
+    if needs_reply:
+        return ticket.response_due_at or ticket.external_fr_due_by
+    return (
+        ticket.resolution_due_at
+        or ticket.due_by
+        or ticket.external_due_by
+        or ticket.response_due_at
+        or ticket.external_fr_due_by
+    )
+
+
+def _agent_next_best_score(
+    ticket: TicketRecord,
+    *,
+    needs_reply: bool,
+    now: datetime,
+) -> tuple[int, list[str], bool]:
+    score = 0
+    reasons: list[str] = []
+    priority_points = {"P1": 40, "Urgent": 40, "P2": 24, "High": 24, "P3": 12, "Medium": 12}
+    points = priority_points.get(ticket.priority or "", 4)
+    score += points
+    if points >= 24:
+        reasons.append(f"{ticket.priority} priority")
+    if needs_reply:
+        score += 18
+        reasons.append("Requester is waiting for a reply")
+    deadline = _agent_sla_deadline(ticket, needs_reply=needs_reply)
+    sla_at_risk = False
+    if deadline is not None:
+        remaining = (deadline - now).total_seconds()
+        if remaining <= 0:
+            score += 35
+            sla_at_risk = True
+            reasons.append("SLA is overdue")
+        elif remaining <= 3600:
+            score += 28
+            sla_at_risk = True
+            reasons.append("SLA is due within one hour")
+        elif remaining <= 4 * 3600:
+            score += 18
+            sla_at_risk = True
+            reasons.append("SLA is due within four hours")
+        elif remaining <= 24 * 3600:
+            score += 8
+            reasons.append("SLA is due today")
+    risk = max(0, min(100, ticket.escalation_risk or 0))
+    if risk >= 50:
+        score += min(20, risk // 5)
+        reasons.append(f"{risk}% escalation risk")
+    created_at = ticket.external_created_at or ticket.created_at
+    if created_at and now - created_at >= timedelta(days=2):
+        score += 6
+        reasons.append("Aging ticket")
+    return min(100, score), reasons[:4], sla_at_risk
+
+
+def _agent_assignment_context(
+    db: Session,
+    user: UserRecord,
+) -> tuple[set[tuple[str, str, str]], dict[tuple[str, str, str], ExternalGroupRecord]]:
+    direct = {
+        (
+            item.link.binding_id,
+            item.link.provider.lower(),
+            item.external_user.external_id,
+        )
+        for item in agent_workspace.linked_identities(db, user.id)
+    }
+    groups = {
+        (
+            item.group.binding_id,
+            item.group.provider.lower(),
+            item.group.external_id,
+        ): item.group
+        for item in agent_workspace.accessible_groups(db, user.id)
+    }
+    return direct, groups
+
+
+def _agent_ticket_scope_from_context(
+    user: UserRecord,
+    ticket: TicketRecord,
+    direct: set[tuple[str, str, str]],
+    groups: dict[tuple[str, str, str], ExternalGroupRecord],
+) -> tuple[Optional[str], Optional[ExternalGroupRecord]]:
+    if ticket.assignee_id == user.id or (
+        ticket.external_assignee_id
+        and (
+            ticket.binding_id,
+            (ticket.external_source or "").lower(),
+            ticket.external_assignee_id,
+        ) in direct
+    ):
+        return "mine", None
+    group = groups.get((
+        ticket.binding_id,
+        (ticket.external_source or "").lower(),
+        ticket.external_group_id or "",
+    ))
+    return ("team", group) if group is not None else (None, None)
+
+
+def _agent_ticket_payloads(
+    db: Session,
+    user: UserRecord,
+    tickets: list[TicketRecord],
+) -> list[AgentWorkspaceTicket]:
+    if not tickets:
+        return []
+    _enrich_tickets(db, tickets)
+    direct, groups = _agent_assignment_context(db, user)
+    states = {
+        row.ticket_id: row
+        for row in db.query(AgentTicketStateRecord).filter(
+            AgentTicketStateRecord.user_id == user.id,
+            AgentTicketStateRecord.ticket_id.in_([ticket.id for ticket in tickets]),
+        ).all()
+    }
+    latest_conversations: dict[str, ExternalConversationRecord] = {}
+    conversation_rows = db.query(ExternalConversationRecord).filter(
+        ExternalConversationRecord.ticket_id.in_([ticket.id for ticket in tickets]),
+        ExternalConversationRecord.is_private.is_(False),
+        ExternalConversationRecord.deleted.is_(False),
+        ExternalConversationRecord.public_tombstone.is_(False),
+    ).order_by(
+        ExternalConversationRecord.ticket_id,
+        func.coalesce(
+            ExternalConversationRecord.provider_created_at,
+            ExternalConversationRecord.provider_updated_at,
+            ExternalConversationRecord.received_at,
+        ),
+        ExternalConversationRecord.external_id,
+    ).all()
+    for conversation in conversation_rows:
+        latest_conversations[conversation.ticket_id] = conversation
+
+    now = datetime.utcnow()
+    payloads: list[AgentWorkspaceTicket] = []
+    for ticket in tickets:
+        state = states.get(ticket.id)
+        latest = latest_conversations.get(ticket.id)
+        needs_reply = latest is None or bool(latest.incoming)
+        score, reasons, sla_at_risk = _agent_next_best_score(
+            ticket, needs_reply=needs_reply, now=now
+        )
+        scope, group = _agent_ticket_scope_from_context(
+            user, ticket, direct, groups
+        )
+        last_activity = getattr(ticket, "last_communication_at", None) or ticket.updated_at or ticket.created_at
+        is_unread = bool(
+            state is None
+            or state.last_seen_at is None
+            or (last_activity is not None and last_activity > state.last_seen_at)
+        )
+        base_ticket = Ticket.model_validate(ticket, from_attributes=True).model_dump()
+        payloads.append(AgentWorkspaceTicket.model_validate({
+            **base_ticket,
+            "assignment_scope": scope,
+            "team_id": group.id if group else None,
+            "team_name": group.name if group else None,
+            "is_unread": is_unread,
+            "is_starred": bool(state and state.starred_at),
+            "follow_up_at": state.follow_up_at if state else None,
+            "needs_reply": needs_reply,
+            "sla_at_risk": sla_at_risk,
+            "next_best_score": score,
+            "next_best_reasons": reasons,
+        }))
+    return payloads
+
+
+@app.get("/agent-workspace/bootstrap", response_model=AgentWorkspaceBootstrap)
+async def get_agent_workspace_bootstrap(
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(require_authenticated_role("admin", "supervisor", "agent")),
+):
+    identities = agent_workspace.linked_identities(db, user.id)
+    groups = agent_workspace.accessible_groups(db, user.id)
+    mine_filter = agent_workspace.assignment_filter(db, user, scope="mine")
+    team_filter = agent_workspace.assignment_filter(db, user, scope="team")
+    _latest_incoming, _latest_outgoing, needs_reply = _agent_conversation_subqueries(db)
+    now = datetime.utcnow()
+    sla_deadline = _agent_sla_deadline_expression(needs_reply)
+    active = active_ticket_filter(db)
+    counts = {
+        "inbox": db.query(TicketRecord).filter(mine_filter, active).count(),
+        "needs_reply": db.query(TicketRecord).filter(mine_filter, active, needs_reply).count(),
+        "sla_at_risk": db.query(TicketRecord).filter(
+            mine_filter, active, sla_deadline.isnot(None), sla_deadline <= now + timedelta(hours=4)
+        ).count(),
+        "starred": db.query(TicketRecord).join(
+            AgentTicketStateRecord,
+            and_(
+                AgentTicketStateRecord.ticket_id == TicketRecord.id,
+                AgentTicketStateRecord.user_id == user.id,
+            ),
+        ).filter(mine_filter, active, AgentTicketStateRecord.starred_at.isnot(None)).count(),
+        "team_inbox": db.query(TicketRecord).filter(team_filter, active).count(),
+        "team_unassigned": db.query(TicketRecord).filter(
+            team_filter, active, TicketRecord.external_assignee_id.is_(None)
+        ).count(),
+    }
+    team_payloads: list[AgentWorkspaceTeam] = []
+    for item in groups:
+        group = item.group
+        group_filter = and_(
+            TicketRecord.binding_id == group.binding_id,
+            TicketRecord.external_source == group.provider,
+            TicketRecord.external_group_id == group.external_id,
+        )
+        team_payloads.append(AgentWorkspaceTeam(
+            id=group.id,
+            external_id=group.external_id,
+            name=group.name,
+            workspace_id=group.workspace_id,
+            membership_kind="member",
+            ticket_count=db.query(TicketRecord).filter(group_filter, active).count(),
+            unassigned_count=db.query(TicketRecord).filter(
+                group_filter, active, TicketRecord.external_assignee_id.is_(None)
+            ).count(),
+        ))
+    identity = identities[0] if identities else None
+    return AgentWorkspaceBootstrap(
+        identity=(AgentWorkspaceIdentity(
+            link_id=identity.link.id,
+            external_user_id=identity.external_user.id,
+            external_id=identity.external_user.external_id,
+            name=identity.external_user.name,
+            email=identity.external_user.email,
+            binding_id=identity.link.binding_id,
+            provider=identity.link.provider,
+        ) if identity else None),
+        teams=team_payloads,
+        counts=counts,
+    )
+
+
+@app.get("/agent-workspace/tickets", response_model=List[AgentWorkspaceTicket])
+async def list_agent_workspace_tickets(
+    response: Response,
+    scope: str = Query(default="mine", pattern="^(mine|team)$"),
+    team_id: Optional[str] = Query(default=None, max_length=36),
+    folder: str = Query(
+        default="inbox",
+        pattern="^(inbox|needs_reply|sla_at_risk|starred|follow_up|closed|unassigned)$",
+    ),
+    search: Optional[str] = Query(default=None, max_length=200),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(require_authenticated_role("admin", "supervisor", "agent")),
+):
+    q = db.query(TicketRecord).filter(
+        agent_workspace.assignment_filter(
+            db, user, scope=scope, team_id=team_id
+        )
+    )
+    _latest_incoming, _latest_outgoing, needs_reply = _agent_conversation_subqueries(db)
+    now = datetime.utcnow()
+    if folder == "closed":
+        q = q.filter(terminal_ticket_filter(db))
+    else:
+        q = q.filter(active_ticket_filter(db))
+    if folder == "needs_reply":
+        q = q.filter(needs_reply)
+    elif folder == "sla_at_risk":
+        sla_deadline = _agent_sla_deadline_expression(needs_reply)
+        q = q.filter(
+            sla_deadline.isnot(None),
+            sla_deadline <= now + timedelta(hours=4),
+        )
+    elif folder == "starred":
+        q = q.join(
+            AgentTicketStateRecord,
+            and_(
+                AgentTicketStateRecord.ticket_id == TicketRecord.id,
+                AgentTicketStateRecord.user_id == user.id,
+            ),
+        ).filter(AgentTicketStateRecord.starred_at.isnot(None))
+    elif folder == "follow_up":
+        q = q.join(
+            AgentTicketStateRecord,
+            and_(
+                AgentTicketStateRecord.ticket_id == TicketRecord.id,
+                AgentTicketStateRecord.user_id == user.id,
+            ),
+        ).filter(
+            AgentTicketStateRecord.follow_up_at.isnot(None),
+            AgentTicketStateRecord.follow_up_at <= now,
+        )
+    elif folder == "unassigned":
+        if scope != "team":
+            raise HTTPException(status_code=422, detail="Unassigned is a team inbox folder")
+        q = q.filter(TicketRecord.external_assignee_id.is_(None))
+    if search:
+        escaped = search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        if escaped:
+            pattern = f"%{escaped}%"
+            q = q.filter(or_(
+                TicketRecord.subject.ilike(pattern, escape="\\"),
+                TicketRecord.description.ilike(pattern, escape="\\"),
+                TicketRecord.external_requester_name.ilike(pattern, escape="\\"),
+                TicketRecord.external_requester_email.ilike(pattern, escape="\\"),
+                TicketRecord.external_id.ilike(pattern, escape="\\"),
+            ))
+    due_at = _agent_sla_deadline_expression(needs_reply)
+    focus_score = _agent_next_best_score_expression(needs_reply, now)
+    q = q.order_by(
+        focus_score.desc(),
+        due_at.is_(None),
+        due_at.asc(),
+        func.coalesce(TicketRecord.external_updated_at, TicketRecord.updated_at).desc(),
+        TicketRecord.id,
+    )
+    page = q.offset(offset).limit(limit + 1).all()
+    has_more = len(page) > limit
+    tickets = page[:limit]
+    response.headers["X-Page-Limit"] = str(limit)
+    response.headers["X-Page-Offset"] = str(offset)
+    response.headers["X-Has-More"] = str(has_more).lower()
+    return _agent_ticket_payloads(db, user, tickets)
+
+
+@app.put("/agent-workspace/tickets/{ticket_id}/state")
+async def update_agent_ticket_state(
+    ticket_id: str,
+    payload: AgentTicketStateUpdate,
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(require_authenticated_role("admin", "supervisor", "agent")),
+):
+    ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    _authorize_ticket_view(user, ticket)
+    state = db.query(AgentTicketStateRecord).filter(
+        AgentTicketStateRecord.user_id == user.id,
+        AgentTicketStateRecord.ticket_id == ticket_id,
+    ).first()
+    now = datetime.utcnow()
+    if state is None:
+        state = AgentTicketStateRecord(
+            user_id=user.id,
+            ticket_id=ticket_id,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(state)
+    if payload.mark_seen:
+        state.last_seen_at = now
+    if payload.starred is not None:
+        state.starred_at = now if payload.starred else None
+    if payload.clear_follow_up:
+        state.follow_up_at = None
+    elif payload.follow_up_at is not None:
+        state.follow_up_at = payload.follow_up_at.astimezone(timezone.utc).replace(tzinfo=None) if payload.follow_up_at.tzinfo else payload.follow_up_at
+    state.updated_at = now
+    db.commit()
+    return {
+        "ticket_id": ticket_id,
+        "last_seen_at": state.last_seen_at,
+        "starred_at": state.starred_at,
+        "follow_up_at": state.follow_up_at,
+    }
 
 
 @app.get("/tickets/{ticket_id}", response_model=Ticket)
@@ -1193,9 +1691,16 @@ async def get_ticket(
     ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    _authorize_ticket_analysis(user, ticket)
+    _authorize_ticket_view(user, ticket)
     _enrich_tickets(db, [ticket])
-    return _ticket_for_request(request, ticket)
+    return _ticket_for_request(
+        request,
+        ticket,
+        redact_ai=(
+            (user.role or "").lower() == "agent"
+            and not agent_workspace.can_work_ticket(db, user, ticket)
+        ),
+    )
 
 
 @app.get("/tickets/{ticket_id}/related", response_model=RelatedTicketsResponse)
@@ -1208,7 +1713,7 @@ async def get_related_tickets(
     ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    _authorize_ticket_analysis(user, ticket)
+    _authorize_ticket_analysis(user, ticket, db)
     allowed_assignee_id = _ticket_scope_assignee_id(user)
     _reserve_ai_request(db, user.id, "related_tickets")
     query = " ".join(
@@ -1765,6 +2270,7 @@ async def update_ticket(
     _authorize_ticket_mutation(
         user,
         ticket,
+        db=db,
         changed_fields=supplied_changes,
         requested_assignee_id=payload.assignee_id,
     )
@@ -1872,7 +2378,7 @@ async def list_comments(
     ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    _authorize_ticket_analysis(user, ticket)
+    _authorize_ticket_view(user, ticket)
     query = db.query(TicketCommentRecord).filter(
         TicketCommentRecord.ticket_id == ticket_id
     )
@@ -1895,7 +2401,7 @@ async def list_ticket_attachments(
     ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    _authorize_ticket_analysis(user, ticket)
+    _authorize_ticket_view(user, ticket)
     rows = db.query(ExternalAttachmentRecord).filter(
         ExternalAttachmentRecord.ticket_id == ticket_id,
         ExternalAttachmentRecord.storage_status != "superseded",
@@ -1944,7 +2450,7 @@ async def download_ticket_attachment(
     ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    _authorize_ticket_analysis(user, ticket)
+    _authorize_ticket_view(user, ticket)
     row = db.query(ExternalAttachmentRecord).filter(
         ExternalAttachmentRecord.id == attachment_id,
         ExternalAttachmentRecord.ticket_id == ticket_id,
@@ -2001,7 +2507,7 @@ async def add_comment(
     ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    _authorize_ticket_mutation(user, ticket)
+    _authorize_ticket_mutation(user, ticket, db=db)
     _reserve_index_write_request(db, user.id)
     _reject_duplicate_recent_comment(
         db,
@@ -2046,7 +2552,7 @@ async def get_audit_log(
     ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    _authorize_ticket_analysis(user, ticket)
+    _authorize_ticket_analysis(user, ticket, db)
     return db.query(TicketAuditLogRecord).filter(
         TicketAuditLogRecord.ticket_id == ticket_id
     ).order_by(
@@ -3123,7 +3629,7 @@ async def trigger_triage(
     ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    _authorize_ticket_analysis(_user, ticket)
+    _authorize_ticket_analysis(_user, ticket, db)
     _reserve_ai_request(db, _user.id, "triage")
 
     result = await _run_ticket_analysis(
@@ -3142,7 +3648,7 @@ async def run_ticket_analysis(
     ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    _authorize_ticket_analysis(_user, ticket)
+    _authorize_ticket_analysis(_user, ticket, db)
     _reserve_ai_request(db, _user.id, "full_analysis")
     return await _run_ticket_analysis(ticket, db, force=force)
 
@@ -3975,6 +4481,156 @@ async def list_users(
     return db.query(UserRecord).order_by(UserRecord.name).all()
 
 
+def _user_external_identity_link_payload(
+    link: UserExternalIdentityLinkRecord,
+    external_user: ExternalUserRecord,
+) -> UserExternalIdentityLinkOut:
+    return UserExternalIdentityLinkOut(
+        id=link.id,
+        user_id=link.user_id,
+        external_user_id=link.external_user_id,
+        binding_id=link.binding_id,
+        provider=link.provider,
+        external_id=external_user.external_id,
+        external_name=external_user.name,
+        external_email=external_user.email,
+        created_by=link.created_by,
+        created_at=link.created_at,
+        updated_at=link.updated_at,
+    )
+
+
+@app.get(
+    "/admin/agent-identity-links",
+    response_model=List[UserExternalIdentityLinkOut],
+)
+async def list_agent_identity_links(
+    user_id: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(require_authenticated_role("admin")),
+):
+    query = db.query(
+        UserExternalIdentityLinkRecord,
+        ExternalUserRecord,
+    ).join(
+        ExternalUserRecord,
+        ExternalUserRecord.id == UserExternalIdentityLinkRecord.external_user_id,
+    )
+    if user_id:
+        query = query.filter(UserExternalIdentityLinkRecord.user_id == user_id)
+    rows = query.order_by(
+        UserExternalIdentityLinkRecord.user_id,
+        UserExternalIdentityLinkRecord.provider,
+    ).all()
+    return [
+        _user_external_identity_link_payload(link, external_user)
+        for link, external_user in rows
+    ]
+
+
+@app.put(
+    "/admin/agent-identity-links/{user_id}",
+    response_model=UserExternalIdentityLinkOut,
+)
+async def set_agent_identity_link(
+    user_id: str,
+    payload: UserExternalIdentityLinkUpdate,
+    db: Session = Depends(get_db),
+    actor: UserRecord = Depends(require_authenticated_role("admin")),
+):
+    user = db.query(UserRecord).filter(UserRecord.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if (user.role or "").lower() not in {"agent", "supervisor", "admin"}:
+        raise HTTPException(status_code=422, detail="Only operational users can receive work identities")
+    external_user = db.query(ExternalUserRecord).filter(
+        ExternalUserRecord.id == payload.external_user_id,
+        ExternalUserRecord.user_type == "agent",
+        ExternalUserRecord.active.is_(True),
+    ).first()
+    if not external_user:
+        raise HTTPException(status_code=404, detail="Active external agent not found")
+    claimed = db.query(UserExternalIdentityLinkRecord).filter(
+        UserExternalIdentityLinkRecord.external_user_id == external_user.id,
+        UserExternalIdentityLinkRecord.user_id != user.id,
+    ).first()
+    if claimed:
+        raise HTTPException(
+            status_code=409,
+            detail="That external agent is already linked to another Tickety user",
+        )
+    now = datetime.utcnow()
+    link = db.query(UserExternalIdentityLinkRecord).filter(
+        UserExternalIdentityLinkRecord.user_id == user.id,
+        UserExternalIdentityLinkRecord.binding_id == external_user.binding_id,
+        UserExternalIdentityLinkRecord.provider == external_user.provider,
+    ).first()
+    previous_external_user_id = link.external_user_id if link else None
+    if link is None:
+        link = UserExternalIdentityLinkRecord(
+            user_id=user.id,
+            external_user_id=external_user.id,
+            binding_id=external_user.binding_id,
+            provider=external_user.provider,
+            created_by=actor.id,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(link)
+    else:
+        link.external_user_id = external_user.id
+        link.updated_at = now
+    db.add(UserExternalIdentityAuditRecord(
+        user_id=user.id,
+        external_user_id=external_user.id,
+        binding_id=external_user.binding_id,
+        provider=external_user.provider,
+        action="linked" if previous_external_user_id is None else "relinked",
+        actor_id=actor.id,
+        details=json.dumps({
+            "previous_external_user_id": previous_external_user_id,
+            "external_user_id": external_user.id,
+        }),
+        created_at=now,
+    ))
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="External identity link conflicts with an existing mapping") from exc
+    db.refresh(link)
+    return _user_external_identity_link_payload(link, external_user)
+
+
+@app.delete("/admin/agent-identity-links/{user_id}/{link_id}")
+async def delete_agent_identity_link(
+    user_id: str,
+    link_id: int,
+    db: Session = Depends(get_db),
+    actor: UserRecord = Depends(require_authenticated_role("admin")),
+):
+    link = db.query(UserExternalIdentityLinkRecord).filter(
+        UserExternalIdentityLinkRecord.id == link_id,
+        UserExternalIdentityLinkRecord.user_id == user_id,
+    ).first()
+    if not link:
+        raise HTTPException(status_code=404, detail="External identity link not found")
+    now = datetime.utcnow()
+    db.add(UserExternalIdentityAuditRecord(
+        user_id=link.user_id,
+        external_user_id=link.external_user_id,
+        binding_id=link.binding_id,
+        provider=link.provider,
+        action="unlinked",
+        actor_id=actor.id,
+        details=json.dumps({"external_user_id": link.external_user_id}),
+        created_at=now,
+    ))
+    db.delete(link)
+    db.commit()
+    return {"status": "unlinked", "user_id": user_id, "link_id": link_id}
+
+
 @app.post("/users", response_model=UserOut, status_code=201)
 async def create_user(
     payload: UserCreate,
@@ -4459,7 +5115,7 @@ async def get_ticket_kb_links(
     ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    _authorize_ticket_analysis(user, ticket)
+    _authorize_ticket_analysis(user, ticket, db)
     links = db.query(TicketLinkRecord).filter(
         TicketLinkRecord.ticket_id == ticket_id
     ).order_by(TicketLinkRecord.id.asc()).offset(offset).limit(limit).all()
@@ -7321,7 +7977,7 @@ async def intel_route(
     ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    _authorize_ticket_analysis(_user, ticket)
+    _authorize_ticket_analysis(_user, ticket, db)
     _reserve_analytics_request(db, _user.id)
     return intel.recommend_assignee(db, ticket)
 
@@ -7337,7 +7993,7 @@ async def ticket_summary(
     ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    _authorize_ticket_analysis(_user, ticket)
+    _authorize_ticket_analysis(_user, ticket, db)
     _reserve_ai_request(db, _user.id, "summary")
     result = await _run_ticket_analysis(
         ticket, db, force=force, artifacts={"summary"}
@@ -7358,7 +8014,7 @@ async def ticket_resolve(
     ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    _authorize_ticket_analysis(_user, ticket)
+    _authorize_ticket_analysis(_user, ticket, db)
     _reserve_ai_request(db, _user.id, "resolution")
     result = await _run_ticket_analysis(
         ticket, db, force=force, artifacts={"resolution"}
@@ -8615,7 +9271,7 @@ async def ws_ticket_stream(ws: WebSocket, ticket_id: str):
             return
         if ws_user:
             try:
-                _authorize_ticket_analysis(ws_user, ticket)
+                _authorize_ticket_analysis(ws_user, ticket, db)
             except HTTPException:
                 await ws.send_json({"type": "error", "message": "Insufficient ticket analysis permission"})
                 await ws.close(code=1008)

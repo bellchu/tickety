@@ -33,12 +33,14 @@ import {
   ChevronRight,
   Activity,
   Mail,
+  BriefcaseBusiness,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const navigationIcons: Record<NavigationIconKey, typeof LayoutDashboard> = {
   dashboard: LayoutDashboard,
+  agent: BriefcaseBusiness,
   tickets: Inbox,
   time: Clock3,
   services: Package,

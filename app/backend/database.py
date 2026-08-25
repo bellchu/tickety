@@ -281,6 +281,117 @@ class ExternalUserRecord(Base):
     )
 
 
+class ExternalGroupRecord(Base):
+    """Read-only resolver-group projection owned by an ITSM provider."""
+    __tablename__ = "external_groups"
+
+    id = Column(String(36), primary_key=True)
+    binding_id = Column(String(36), nullable=False, default="legacy", index=True)
+    provider = Column(String(64), nullable=False, index=True)
+    external_id = Column(String(255), nullable=False)
+    workspace_id = Column(String(255), nullable=True, index=True)
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    profile_json = Column(Text, nullable=False, default="{}")
+    active = Column(Boolean, nullable=False, default=True, index=True)
+    source_updated_at = Column(DateTime, nullable=True)
+    fetched_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "binding_id", "provider", "external_id",
+            name="uix_external_group_identity",
+        ),
+        Index(
+            "ix_external_groups_lookup",
+            "binding_id", "provider", "external_id",
+        ),
+    )
+
+
+class ExternalGroupMembershipRecord(Base):
+    """Provider-authoritative group membership for an external agent."""
+    __tablename__ = "external_group_memberships"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    external_group_id = Column(
+        String(36), ForeignKey("external_groups.id"), nullable=False, index=True
+    )
+    external_user_id = Column(
+        String(36), ForeignKey("external_users.id"), nullable=False, index=True
+    )
+    membership_kind = Column(String(16), nullable=False, default="member")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "external_group_id", "external_user_id", "membership_kind",
+            name="uix_external_group_membership",
+        ),
+        CheckConstraint(
+            "membership_kind IN ('member', 'observer')",
+            name="ck_external_group_membership_kind",
+        ),
+    )
+
+
+class UserExternalIdentityLinkRecord(Base):
+    """Explicit, administrator-managed bridge used only for work visibility."""
+    __tablename__ = "user_external_identity_links"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    external_user_id = Column(
+        String(36), ForeignKey("external_users.id"), nullable=False, unique=True, index=True
+    )
+    binding_id = Column(String(36), nullable=False, index=True)
+    provider = Column(String(64), nullable=False, index=True)
+    created_by = Column(String, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "binding_id", "provider",
+            name="uix_user_external_identity_binding",
+        ),
+        Index(
+            "ix_user_external_identity_scope",
+            "user_id", "binding_id", "provider",
+        ),
+    )
+
+
+class UserExternalIdentityAuditRecord(Base):
+    __tablename__ = "user_external_identity_audit"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, nullable=False, index=True)
+    external_user_id = Column(String(36), nullable=True)
+    binding_id = Column(String(36), nullable=False, index=True)
+    provider = Column(String(64), nullable=False)
+    action = Column(String(32), nullable=False)
+    actor_id = Column(String, ForeignKey("users.id"), nullable=True)
+    details = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+
+class AgentTicketStateRecord(Base):
+    """Local mailbox state; it never mutates the provider ticket."""
+    __tablename__ = "agent_ticket_state"
+
+    user_id = Column(String, ForeignKey("users.id"), primary_key=True)
+    ticket_id = Column(String, ForeignKey("tickets.id"), primary_key=True)
+    last_seen_at = Column(DateTime, nullable=True)
+    starred_at = Column(DateTime, nullable=True, index=True)
+    follow_up_at = Column(DateTime, nullable=True, index=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class SyncStateRecord(Base):
     __tablename__ = "sync_state"
 

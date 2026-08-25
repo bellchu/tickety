@@ -2,11 +2,11 @@
 
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Search, ShieldCheck, Trash2, UserCog, Users } from "lucide-react";
+import { Link2, Plus, RefreshCw, Search, ShieldCheck, Trash2, Unlink, UserCog, Users } from "lucide-react";
 import { Alert, Badge, Button, ConfirmDialog, DataListCard, DataTable, DataTableViewport, Dialog, EmptyState, ErrorState, IconButton, ListText, Skeleton } from "@/components/ui";
 import { api } from "@/lib/api";
 import { canAccessAdministration, isDemoContext } from "@/lib/auth";
-import type { UserCreateInput, UserOut } from "@/lib/types";
+import type { ExternalUserRecord, UserCreateInput, UserExternalIdentityLink, UserOut } from "@/lib/types";
 import { PageFrame, PageHeader } from "@/components/layout/PageLayout";
 
 const ROLES = [
@@ -32,10 +32,12 @@ export default function AgentsPage() {
   const canManageUsers = canAccessAdministration(authQuery.data);
   const isDemoMode = isDemoContext(authQuery.data);
   const usersQuery = useQuery({ queryKey: ["users"], queryFn: api.getUsers, enabled: canManageUsers });
+  const identityLinksQuery = useQuery({ queryKey: ["agent-identity-links"], queryFn: () => api.getAgentIdentityLinks(), enabled: canManageUsers });
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<UserOut | null>(null);
   const [deactivating, setDeactivating] = useState<UserOut | null>(null);
   const [purging, setPurging] = useState<UserOut | null>(null);
+  const [linking, setLinking] = useState<UserOut | null>(null);
   const [search, setSearch] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -73,6 +75,29 @@ export default function AgentsPage() {
       setNotice("Deactivated account permanently purged.");
     },
   });
+  const setIdentityMutation = useMutation({
+    mutationFn: ({ userId, externalUserId }: { userId: string; externalUserId: string }) => api.setAgentIdentityLink(userId, externalUserId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["agent-identity-links"] });
+      setLinking(null);
+      setNotice("Freshservice work identity linked. Personal and team inboxes will use provider-authoritative assignment.");
+    },
+  });
+  const deleteIdentityMutation = useMutation({
+    mutationFn: ({ userId, linkId }: { userId: string; linkId: number }) => api.deleteAgentIdentityLink(userId, linkId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["agent-identity-links"] });
+      setNotice("Freshservice work identity unlinked.");
+    },
+  });
+
+  const linksByUser = useMemo(() => {
+    const result = new Map<string, UserExternalIdentityLink[]>();
+    for (const link of identityLinksQuery.data || []) {
+      result.set(link.user_id, [...(result.get(link.user_id) || []), link]);
+    }
+    return result;
+  }, [identityLinksQuery.data]);
 
   const activeUsers = useMemo(() => (usersQuery.data ?? []).filter((user) => user.is_active), [usersQuery.data]);
   const inactiveUsers = useMemo(() => (usersQuery.data ?? []).filter((user) => !user.is_active), [usersQuery.data]);
@@ -141,13 +166,13 @@ export default function AgentsPage() {
         ) : (
           <>
             <div className="grid gap-3 bg-linen-100/60 p-3 md:hidden">
-              {filteredUsers.map((user) => <AgentCard key={user.id} user={user} onEdit={() => { updateMutation.reset(); setEditing(user); }} onDeactivate={() => setDeactivating(user)} />)}
+              {filteredUsers.map((user) => <AgentCard key={user.id} user={user} links={linksByUser.get(user.id) || []} onLink={() => { setIdentityMutation.reset(); setLinking(user); }} onEdit={() => { updateMutation.reset(); setEditing(user); }} onDeactivate={() => setDeactivating(user)} />)}
             </div>
             <DataTableViewport label="Active agent roster" className="hidden md:block">
-              <DataTable className="min-w-[680px]">
-                <colgroup><col className="w-[36%]" /><col className="w-[20%]" /><col className="w-[24%]" /><col className="w-[10%]" /><col className="w-[10%]" /></colgroup>
+              <DataTable className="min-w-[840px]">
+                <colgroup><col className="w-[28%]" /><col className="w-[14%]" /><col className="w-[17%]" /><col className="w-[23%]" /><col className="w-[8%]" /><col className="w-[10%]" /></colgroup>
                 <thead className="bg-linen-100 text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-ink-400">
-                  <tr><th className="px-5 py-3" scope="col">Agent</th><th className="px-4 py-3" scope="col">Access</th><th className="px-4 py-3" scope="col">Title</th><th className="px-4 py-3 text-right" scope="col">Impact</th><th className="px-5 py-3 text-right" scope="col"><span className="sr-only">Actions</span></th></tr>
+                  <tr><th className="px-5 py-3" scope="col">Agent</th><th className="px-4 py-3" scope="col">Access</th><th className="px-4 py-3" scope="col">Title</th><th className="px-4 py-3" scope="col">Work identity</th><th className="px-4 py-3 text-right" scope="col">Impact</th><th className="px-5 py-3 text-right" scope="col"><span className="sr-only">Actions</span></th></tr>
                 </thead>
                 <tbody className="divide-y divide-linen-300">
                   {filteredUsers.map((user) => (
@@ -155,8 +180,9 @@ export default function AgentsPage() {
                       <td className="px-5 py-4"><AgentIdentity user={user} /></td>
                       <td className="px-4 py-4"><Badge variant={roleVariant(user.role)} dot>{user.role}</Badge><span className="mt-2 block text-[11px] font-medium text-ink-400">Tier {user.tier}</span></td>
                       <td className="px-4 py-4"><ListText text={user.title || "Not set"} lines={2} className="text-xs text-ink-500" /></td>
+                      <td className="px-4 py-4"><WorkIdentity links={linksByUser.get(user.id) || []} /></td>
                       <td className="px-4 py-4 text-right font-medium tabular-nums text-ink-700">{user.impact_points.toLocaleString()}</td>
-                      <td className="px-5 py-4"><div className="flex justify-end gap-1"><IconButton size="sm" aria-label={`Edit ${user.name}`} icon={<UserCog className="h-4 w-4" />} onClick={() => { updateMutation.reset(); setEditing(user); }} /><IconButton size="sm" aria-label={`Deactivate ${user.name}`} icon={<Trash2 className="h-4 w-4" />} onClick={() => setDeactivating(user)} /></div></td>
+                      <td className="px-5 py-4"><div className="flex justify-end gap-1"><IconButton size="sm" aria-label={`Link work identity for ${user.name}`} icon={<Link2 className="h-4 w-4" />} onClick={() => { setIdentityMutation.reset(); setLinking(user); }} /><IconButton size="sm" aria-label={`Edit ${user.name}`} icon={<UserCog className="h-4 w-4" />} onClick={() => { updateMutation.reset(); setEditing(user); }} /><IconButton size="sm" aria-label={`Deactivate ${user.name}`} icon={<Trash2 className="h-4 w-4" />} onClick={() => setDeactivating(user)} /></div></td>
                     </tr>
                   ))}
                 </tbody>
@@ -192,6 +218,7 @@ export default function AgentsPage() {
       </section>
 
       <UserFormDialog open={formOpen || Boolean(editing)} user={editing} demoMode={isDemoMode} onOpenChange={(open) => { if (!open) { setFormOpen(false); setEditing(null); createMutation.reset(); updateMutation.reset(); } }} onSubmit={(payload) => editing ? updateMutation.mutate({ id: editing.id, payload }) : createMutation.mutate(payload)} pending={createMutation.isPending || updateMutation.isPending} error={createMutation.error || updateMutation.error} />
+      <WorkIdentityDialog user={linking} existingLinks={linking ? linksByUser.get(linking.id) || [] : []} allLinks={identityLinksQuery.data || []} onOpenChange={(open) => { if (!open) { setLinking(null); setIdentityMutation.reset(); } }} onSubmit={(externalUserId) => linking && setIdentityMutation.mutate({ userId: linking.id, externalUserId })} onUnlink={(linkId) => linking && deleteIdentityMutation.mutate({ userId: linking.id, linkId })} pending={setIdentityMutation.isPending || deleteIdentityMutation.isPending} error={setIdentityMutation.error || deleteIdentityMutation.error} />
       <ConfirmDialog open={Boolean(deactivating)} onOpenChange={(open) => { if (!open) { setDeactivating(null); deactivateMutation.reset(); } }} title="Deactivate agent access?" description={`${deactivating?.name ?? "This agent"} will no longer appear in the active roster or receive new assignments. Historical work remains available.`} confirmLabel="Deactivate agent" destructive pending={deactivateMutation.isPending} onConfirm={() => { if (deactivating) deactivateMutation.mutate(deactivating.id); }} />
       {deactivateMutation.isError && <Alert variant="danger" title="Deactivation failed">{deactivateMutation.error instanceof Error ? deactivateMutation.error.message : "Please try again."}</Alert>}
       <ConfirmDialog open={Boolean(purging)} onOpenChange={(open) => { if (!open) { setPurging(null); purgeMutation.reset(); } }} title="Permanently purge this account?" description={`${purging?.name ?? "This user"} and all sign-in data, SSO links, recognitions, approvals, and time entries owned by the account will be permanently removed. Historical records with optional attribution will remain but will no longer identify this user. This cannot be undone.`} confirmLabel="Permanently purge" destructive pending={purgeMutation.isPending} onConfirm={() => { if (purging) purgeMutation.mutate(purging.id); }} />
@@ -204,8 +231,33 @@ function AgentIdentity({ user }: { user: UserOut }) {
   return <div className="flex min-w-0 items-center gap-3"><span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-ink-700 text-xs font-semibold text-white">{initials(user.name)}</span><span className="min-w-0"><ListText text={user.name} lines={1} className="font-semibold text-ink-700" /><ListText text={user.email || "No email"} lines={1} className="text-xs text-ink-400" /></span></div>;
 }
 
-function AgentCard({ user, onEdit, onDeactivate }: { user: UserOut; onEdit: () => void; onDeactivate: () => void }) {
-  return <DataListCard><div className="flex min-w-0 items-start justify-between gap-3"><div className="min-w-0 flex-1"><AgentIdentity user={user} /></div><div className="flex shrink-0 gap-1"><IconButton size="sm" aria-label={`Edit ${user.name}`} icon={<UserCog className="h-4 w-4" />} onClick={onEdit} /><IconButton size="sm" aria-label={`Deactivate ${user.name}`} icon={<Trash2 className="h-4 w-4" />} onClick={onDeactivate} /></div></div><div className="mt-4 flex flex-wrap items-center gap-2 border-t border-linen-300 pt-3"><Badge variant={roleVariant(user.role)} dot>{user.role}</Badge><Badge>T{user.tier}</Badge><span className="text-xs whitespace-nowrap text-ink-500">{user.impact_points.toLocaleString()} impact</span><ListText text={user.title || "Title not set"} lines={2} className="w-full text-xs text-ink-500 xs:w-auto xs:max-w-[15rem]" /></div></DataListCard>;
+function WorkIdentity({ links }: { links: UserExternalIdentityLink[] }) {
+  if (!links.length) return <span className="text-xs text-ink-400">Not linked</span>;
+  return <div className="space-y-1">{links.map((link) => <div key={link.id} className="min-w-0"><ListText text={link.external_name} lines={1} className="text-xs font-semibold text-ink-600" /><ListText text={`${link.provider} · ${link.external_email || link.external_id}`} lines={1} className="text-[10px] text-ink-400" /></div>)}</div>;
+}
+
+function AgentCard({ user, links, onLink, onEdit, onDeactivate }: { user: UserOut; links: UserExternalIdentityLink[]; onLink: () => void; onEdit: () => void; onDeactivate: () => void }) {
+  return <DataListCard><div className="flex min-w-0 items-start justify-between gap-3"><div className="min-w-0 flex-1"><AgentIdentity user={user} /></div><div className="flex shrink-0 gap-1"><IconButton size="sm" aria-label={`Link work identity for ${user.name}`} icon={<Link2 className="h-4 w-4" />} onClick={onLink} /><IconButton size="sm" aria-label={`Edit ${user.name}`} icon={<UserCog className="h-4 w-4" />} onClick={onEdit} /><IconButton size="sm" aria-label={`Deactivate ${user.name}`} icon={<Trash2 className="h-4 w-4" />} onClick={onDeactivate} /></div></div><div className="mt-4 flex flex-wrap items-center gap-2 border-t border-linen-300 pt-3"><Badge variant={roleVariant(user.role)} dot>{user.role}</Badge><Badge>T{user.tier}</Badge><span className="text-xs whitespace-nowrap text-ink-500">{user.impact_points.toLocaleString()} impact</span><ListText text={user.title || "Title not set"} lines={2} className="w-full text-xs text-ink-500 xs:w-auto xs:max-w-[15rem]" /></div><div className="mt-3 border-t border-linen-300 pt-3"><p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-ink-400">Work identity</p><WorkIdentity links={links} /></div></DataListCard>;
+}
+
+function WorkIdentityDialog({ user, existingLinks, allLinks, onOpenChange, onSubmit, onUnlink, pending, error }: { user: UserOut | null; existingLinks: UserExternalIdentityLink[]; allLinks: UserExternalIdentityLink[]; onOpenChange: (open: boolean) => void; onSubmit: (externalUserId: string) => void; onUnlink: (linkId: number) => void; pending: boolean; error: unknown }) {
+  const [selected, setSelected] = useState(existingLinks[0]?.external_user_id || "");
+  const externalQuery = useQuery({ queryKey: ["external-users", "agent-identity-picker"], queryFn: () => api.getExternalUsers({ userType: "agent", limit: 200 }), enabled: Boolean(user) });
+  const syncMutation = useMutation({ mutationFn: api.syncExternalUsers, onSuccess: () => void externalQuery.refetch() });
+  const claimedByOther = new Set(allLinks.filter((link) => link.user_id !== user?.id).map((link) => link.external_user_id));
+  const choices = (externalQuery.data?.users || []).filter((external) => !claimedByOther.has(external.id));
+  const errorMessage = error instanceof Error ? error.message : error ? String(error) : null;
+  return <Dialog key={user?.id || "closed"} open={Boolean(user)} onOpenChange={onOpenChange} title="Link Freshservice work identity" description={`Map ${user?.name || "this user"} to an explicit provider agent identity. Tickety never guesses this mapping from email.`} dismissible={!pending} closeOnBackdrop={!pending} footer={<><Button variant="secondary" disabled={pending} onClick={() => onOpenChange(false)}>Cancel</Button><Button disabled={!selected || pending} pending={pending} pendingLabel="Linking…" onClick={() => onSubmit(selected)}>Link identity</Button></>}>
+    <div className="space-y-4">
+      {errorMessage && <Alert variant="danger" title="Identity was not changed">{errorMessage}</Alert>}
+      {existingLinks.length > 0 && <section><p className="text-xs font-semibold text-ink-600">Current mappings</p><div className="mt-2 space-y-2">{existingLinks.map((link) => <div key={link.id} className="flex items-center justify-between gap-3 rounded-lg border border-linen-300 bg-linen-100 px-3 py-2"><WorkIdentity links={[link]} /><IconButton size="sm" variant="ghost" disabled={pending} aria-label={`Unlink ${link.external_name}`} icon={<Unlink className="h-4 w-4" />} onClick={() => onUnlink(link.id)} /></div>)}</div></section>}
+      <Field label="Freshservice agent" required><select className="input-base" value={selected} onChange={(event) => setSelected(event.target.value)} disabled={externalQuery.isLoading || pending}><option value="">{externalQuery.isLoading ? "Loading provider agents…" : "Select an agent identity"}</option>{choices.map((external: ExternalUserRecord) => <option key={external.id} value={external.id}>{external.name} · {external.email || external.external_id}</option>)}</select></Field>
+      {externalQuery.isError && <Alert variant="warning" title="Provider agents unavailable">Refresh the directory after confirming the Freshservice integration is healthy.</Alert>}
+      {!externalQuery.isLoading && !externalQuery.isError && choices.length === 0 && <Alert variant="info" title="No unlinked provider agents">Refresh the directory to retrieve current Freshservice agents and group memberships.</Alert>}
+      <Button size="sm" variant="secondary" leadingIcon={<RefreshCw className="h-3.5 w-3.5" />} pending={syncMutation.isPending} pendingLabel="Refreshing…" onClick={() => syncMutation.mutate()}>Refresh provider directory</Button>
+      {syncMutation.isError && <p className="text-xs text-semantic-danger">{syncMutation.error instanceof Error ? syncMutation.error.message : "Directory refresh failed."}</p>}
+    </div>
+  </Dialog>;
 }
 
 function UserFormDialog({ open, user, demoMode, onOpenChange, onSubmit, pending, error }: { open: boolean; user: UserOut | null; demoMode: boolean; onOpenChange: (open: boolean) => void; onSubmit: (payload: UserCreateInput) => void; pending: boolean; error: unknown }) {

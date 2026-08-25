@@ -5,7 +5,13 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.backend.database import ExternalUserRecord, TicketRecord, UserRecord
+from app.backend.database import (
+    ExternalGroupMembershipRecord,
+    ExternalGroupRecord,
+    ExternalUserRecord,
+    TicketRecord,
+    UserRecord,
+)
 from app.backend.integrations import sync
 from app.backend.schema import ExternalTicket
 
@@ -23,6 +29,8 @@ class AgentSyncTests(unittest.TestCase):
         )
         UserRecord.__table__.create(self.engine)
         ExternalUserRecord.__table__.create(self.engine)
+        ExternalGroupRecord.__table__.create(self.engine)
+        ExternalGroupMembershipRecord.__table__.create(self.engine)
         TicketRecord.__table__.create(self.engine)
         self.session_factory = sessionmaker(bind=self.engine)
         with self.session_factory() as db:
@@ -106,6 +114,31 @@ class AgentSyncTests(unittest.TestCase):
         with self.session_factory() as db:
             self.assertFalse(db.query(ExternalUserRecord).one().active)
             self.assertTrue(db.query(UserRecord).one().is_active)
+
+    def test_provider_groups_and_member_relationships_are_projected(self):
+        self.external_agent["member_of"] = ["service-desk"]
+        self._sync()
+        groups = [{
+            "id": "service-desk",
+            "name": "Service Desk",
+            "workspace_id": "workspace-one",
+            "members": ["jira-alice"],
+        }]
+        with patch.object(sync, "SessionLocal", self.session_factory):
+            result = sync._import_external_groups(
+                _Adapter(),
+                groups,
+                [self.external_agent],
+            )
+
+        self.assertEqual(result["groups_created"], 1)
+        self.assertEqual(result["memberships"], 1)
+        with self.session_factory() as db:
+            group = db.query(ExternalGroupRecord).one()
+            membership = db.query(ExternalGroupMembershipRecord).one()
+            self.assertEqual(group.name, "Service Desk")
+            self.assertEqual(group.workspace_id, "workspace-one")
+            self.assertEqual(membership.membership_kind, "member")
 
 
 if __name__ == "__main__":

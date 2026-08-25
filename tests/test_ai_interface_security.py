@@ -585,7 +585,12 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
                     id="legacy-role", name="Legacy Role", role="auditor", is_active=True
                 ),
                 TicketRecord(
-                    id="other-ticket", subject="Private case", assignee_id="other-agent"
+                    id="other-ticket",
+                    subject="Private case",
+                    assignee_id="other-agent",
+                    ai_reasoning="private analysis",
+                    suggested_response="private draft",
+                    summary="private summary",
                 ),
                 TicketRecord(
                     id="own-ticket", subject="Assigned case", assignee_id="prod-agent"
@@ -824,18 +829,25 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
                     self.assertEqual(response.status_code, 403)
         reserve.assert_not_called()
 
-    def test_agent_ticket_reads_exclude_other_agents_ai_artifacts(self):
+    def test_all_tickets_browsing_redacts_other_agents_ai_artifacts(self):
         self.client.cookies.set(main.SESSION_COOKIE, "prod-agent-session")
 
         listing = self.client.get("/tickets")
         self.assertEqual(listing.status_code, 200)
         self.assertEqual(
             {ticket["id"] for ticket in listing.json()},
-            {"own-ticket", "unassigned-ticket"},
+            {"own-ticket", "other-ticket", "unassigned-ticket"},
         )
+        other_list_item = next(ticket for ticket in listing.json() if ticket["id"] == "other-ticket")
+        self.assertIsNone(other_list_item["ai_reasoning"])
+        self.assertIsNone(other_list_item["suggested_response"])
+        self.assertIsNone(other_list_item["summary"])
 
         detail = self.client.get("/tickets/other-ticket")
-        self.assertEqual(detail.status_code, 403)
+        self.assertEqual(detail.status_code, 200)
+        self.assertIsNone(detail.json()["ai_reasoning"])
+        self.assertIsNone(detail.json()["suggested_response"])
+        self.assertIsNone(detail.json()["summary"])
 
         problem_tickets = self.client.get("/problems/problem-scope/tickets")
         self.assertEqual(problem_tickets.status_code, 200)
@@ -1046,6 +1058,12 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
             "errors": 0,
             "total": 1,
             "error_details": [],
+            "groups_created": 0,
+            "groups_updated": 0,
+            "groups_unchanged": 0,
+            "groups_deactivated": 0,
+            "memberships": 0,
+            "group_errors": 0,
         }
         with (
             patch.object(main, "_reserve_ai_request") as reserve,

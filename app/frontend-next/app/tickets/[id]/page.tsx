@@ -74,7 +74,7 @@ export default function TicketDetailPage() {
         title="Ticket not found"
         description="This ticket may have been removed or the link may be incorrect."
         icon={<Inbox className="h-5 w-5" />}
-        action={<Link href="/tickets" className="inline-flex min-h-10 items-center rounded-lg border border-linen-500 bg-linen-50 px-4 text-sm font-semibold text-ink-700 hover:bg-linen-200">Back to queue</Link>}
+        action={<Link href="/tickets" className="inline-flex min-h-10 items-center rounded-lg border border-linen-500 bg-linen-50 px-4 text-sm font-semibold text-ink-700 hover:bg-linen-200">Back to All Tickets</Link>}
       />
     );
   }
@@ -86,7 +86,7 @@ export default function TicketDetailPage() {
         className="inline-flex min-h-9 items-center gap-1.5 rounded-lg px-2 text-xs font-semibold text-ink-500 hover:bg-linen-200 hover:text-ink-700"
       >
         <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
-        Back to ticket queue
+        Back to All Tickets
       </Link>
 
       <section className="overflow-hidden rounded-2xl border border-linen-400 bg-linen-50 shadow-sm" aria-labelledby="ticket-title">

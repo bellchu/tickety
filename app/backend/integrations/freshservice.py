@@ -793,6 +793,47 @@ class FreshserviceAdapter(BaseITSMAdapter):
                 page += 1
         return out
 
+    async def fetch_groups(self, max_pages: Optional[int] = None) -> List[dict]:
+        """Fetch resolver groups in every configured Freshservice workspace."""
+        self._ensure_provider_configured()
+        cap = max_pages if max_pages is not None else self._MAX_PAGES
+        workspace_scopes: tuple[Optional[str], ...] = (
+            tuple(self.workspace_ids) if self.workspace_ids else (None,)
+        )
+        by_id: dict[str, dict] = {}
+        async with httpx.AsyncClient(timeout=30) as client:
+            for workspace_id in workspace_scopes:
+                page = 1
+                url = f"{self.base_url}/api/v2/groups"
+                params: dict[str, Any] = {"per_page": 100}
+                if workspace_id is not None:
+                    params["workspace_id"] = workspace_id
+                while page <= cap:
+                    params["page"] = page
+                    resp = await self._rate_limited_get(client, url, params)
+                    if resp.status_code == 429:
+                        raise RuntimeError(
+                            f"Freshservice still rate-limited on group page {page}"
+                        )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    groups = data.get("groups", []) if isinstance(data, dict) else []
+                    if not isinstance(groups, list):
+                        raise RuntimeError("Freshservice group response is invalid")
+                    for group in groups:
+                        if not isinstance(group, dict) or group.get("id") is None:
+                            continue
+                        normalized = dict(group)
+                        if normalized.get("workspace_id") is None and workspace_id is not None:
+                            normalized["workspace_id"] = workspace_id
+                        by_id[str(normalized["id"])] = normalized
+                    if not self._parse_link_next(resp.headers.get("link"), self.base_url):
+                        break
+                    if len(groups) < 100:
+                        break
+                    page += 1
+        return list(by_id.values())
+
     async def fetch_requesters(self, max_pages: Optional[int] = None) -> List[dict]:
         """Fetch requester/contact profiles through the documented read API."""
         self._ensure_provider_configured()
@@ -955,6 +996,7 @@ class FreshserviceAdapter(BaseITSMAdapter):
                 "scope": "freshservice.tickets.view",
             },
             "agent.read": {"status": "supported", "scope": "freshservice.agents.manage"},
+            "group.read": {"status": "supported", "scope": "freshservice.agents.manage"},
             "requester.read": {"status": "supported", "scope": "freshservice.requesters.view"},
             "ticket.create": {"status": "unsupported", "reason": "read_only_sidecar"},
             "ticket.update": {"status": "unsupported", "reason": "read_only_sidecar"},
@@ -978,6 +1020,7 @@ class FreshserviceAdapter(BaseITSMAdapter):
                 "ticket.read",
                 "conversation.read",
                 "agent.read",
+                "group.read",
                 "requester.read",
             ):
                 manifest[key] = {**manifest[key], "status": "degraded", "detail": detail}
@@ -987,6 +1030,7 @@ class FreshserviceAdapter(BaseITSMAdapter):
             probes = {
                 "ticket.read": (f"{self.base_url}/api/v2/tickets", {"per_page": 1}),
                 "agent.read": (f"{self.base_url}/api/v2/agents", {"per_page": 1, "active": "true"}),
+                "group.read": (f"{self.base_url}/api/v2/groups", {"per_page": 1}),
                 "requester.read": (f"{self.base_url}/api/v2/requesters", {"per_page": 1}),
             }
             conversation_ticket_id = None

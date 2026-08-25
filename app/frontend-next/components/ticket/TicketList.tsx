@@ -455,8 +455,8 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
       <PageHeader
         eyebrow="Freshservice sidecar"
         icon={<Inbox className="h-3.5 w-3.5" />}
-        title="Tickets"
-        description="Search synchronized Freshservice tickets and open a record for local intelligence. Source workflow fields remain read-only."
+        title="All Tickets"
+        description="Search the complete synchronized Freshservice directory, including tickets outside your personal and team inboxes. Source workflow fields remain read-only."
         actions={
           <>
           <Button variant="secondary" onClick={() => exportPage(tickets)} disabled={!tickets.length || pageQuery.isLoading || pageTransitioning} leadingIcon={<Download className="h-4 w-4" />}>Export page</Button>

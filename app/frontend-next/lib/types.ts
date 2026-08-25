@@ -109,6 +109,71 @@ export interface TicketPage {
   hasMore: boolean;
 }
 
+export type AgentWorkspaceScope = "mine" | "team";
+export type AgentWorkspaceFolder =
+  | "inbox"
+  | "needs_reply"
+  | "sla_at_risk"
+  | "starred"
+  | "follow_up"
+  | "closed"
+  | "unassigned";
+
+export interface AgentWorkspaceIdentity {
+  link_id: number;
+  external_user_id: string;
+  external_id: string;
+  name: string;
+  email: string | null;
+  binding_id: string;
+  provider: string;
+}
+
+export interface AgentWorkspaceTeam {
+  id: string;
+  external_id: string;
+  name: string;
+  workspace_id: string | null;
+  membership_kind: "member" | "observer";
+  ticket_count: number;
+  unassigned_count: number;
+}
+
+export interface AgentWorkspaceBootstrap {
+  identity: AgentWorkspaceIdentity | null;
+  teams: AgentWorkspaceTeam[];
+  counts: Record<string, number>;
+}
+
+export interface AgentWorkspaceTicket extends Ticket {
+  assignment_scope: AgentWorkspaceScope;
+  team_id: string | null;
+  team_name: string | null;
+  is_unread: boolean;
+  is_starred: boolean;
+  follow_up_at: string | null;
+  needs_reply: boolean;
+  sla_at_risk: boolean;
+  next_best_score: number;
+  next_best_reasons: string[];
+}
+
+export interface AgentWorkspaceTicketParams {
+  scope?: AgentWorkspaceScope;
+  teamId?: string;
+  folder?: AgentWorkspaceFolder;
+  search?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface AgentTicketStateUpdate {
+  mark_seen?: boolean;
+  starred?: boolean;
+  follow_up_at?: string;
+  clear_follow_up?: boolean;
+}
+
 export interface RelatedTicketItem {
   ticket_id: string;
   subject: string;
@@ -736,6 +801,26 @@ export interface ExternalUserSyncResult {
   errors: number;
   error_details: string[];
   total: number;
+  groups_created: number;
+  groups_updated: number;
+  groups_unchanged: number;
+  groups_deactivated: number;
+  memberships: number;
+  group_errors: number;
+}
+
+export interface UserExternalIdentityLink {
+  id: number;
+  user_id: string;
+  external_user_id: string;
+  binding_id: string;
+  provider: string;
+  external_id: string;
+  external_name: string;
+  external_email: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export type EmailAudience = "agents" | "users";

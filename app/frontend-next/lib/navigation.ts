@@ -2,6 +2,7 @@ export type NavigationVisibility = "all" | "admin" | "intelligence";
 
 export type NavigationIconKey =
   | "dashboard"
+  | "agent"
   | "tickets"
   | "time"
   | "services"
@@ -37,7 +38,8 @@ export const navigationSections: readonly NavigationSection[] = [
     label: "Work",
     items: [
       { href: "/", label: "Overview", icon: "dashboard", visibility: "all" },
-      { href: "/tickets", label: "Tickets", icon: "tickets", visibility: "all" },
+      { href: "/agent", label: "Agent", icon: "agent", visibility: "all" },
+      { href: "/tickets", label: "All Tickets", icon: "tickets", visibility: "all" },
       { href: "/time", label: "My time", icon: "time", visibility: "all" },
     ],
   },

@@ -406,6 +406,89 @@ class ExternalUserSyncResult(BaseModel):
     errors: int = 0
     total: int = 0
     error_details: List[str] = Field(default_factory=list)
+    groups_created: int = 0
+    groups_updated: int = 0
+    groups_unchanged: int = 0
+    groups_deactivated: int = 0
+    memberships: int = 0
+    group_errors: int = 0
+
+
+class ExternalGroup(BaseModel):
+    id: str
+    binding_id: str
+    provider: str
+    external_id: str
+    workspace_id: Optional[str] = None
+    name: str
+    description: Optional[str] = None
+    active: bool = True
+    source_updated_at: Optional[datetime] = None
+    fetched_at: datetime
+
+
+class UserExternalIdentityLinkOut(BaseModel):
+    id: int
+    user_id: str
+    external_user_id: str
+    binding_id: str
+    provider: str
+    external_id: str
+    external_name: str
+    external_email: Optional[str] = None
+    created_by: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class UserExternalIdentityLinkUpdate(BaseModel):
+    external_user_id: str = Field(..., min_length=1, max_length=36)
+
+
+class AgentWorkspaceTeam(BaseModel):
+    id: str
+    external_id: str
+    name: str
+    workspace_id: Optional[str] = None
+    membership_kind: Literal["member", "observer"] = "member"
+    ticket_count: int = 0
+    unassigned_count: int = 0
+
+
+class AgentWorkspaceIdentity(BaseModel):
+    link_id: int
+    external_user_id: str
+    external_id: str
+    name: str
+    email: Optional[str] = None
+    binding_id: str
+    provider: str
+
+
+class AgentWorkspaceBootstrap(BaseModel):
+    identity: Optional[AgentWorkspaceIdentity] = None
+    teams: List[AgentWorkspaceTeam] = Field(default_factory=list)
+    counts: dict[str, int] = Field(default_factory=dict)
+
+
+class AgentWorkspaceTicket(Ticket):
+    assignment_scope: Literal["mine", "team"]
+    team_id: Optional[str] = None
+    team_name: Optional[str] = None
+    is_unread: bool = True
+    is_starred: bool = False
+    follow_up_at: Optional[datetime] = None
+    needs_reply: bool = False
+    sla_at_risk: bool = False
+    next_best_score: int = 0
+    next_best_reasons: List[str] = Field(default_factory=list)
+
+
+class AgentTicketStateUpdate(BaseModel):
+    mark_seen: bool = False
+    starred: Optional[bool] = None
+    follow_up_at: Optional[datetime] = None
+    clear_follow_up: bool = False
 
 
 class EmailRecipient(BaseModel):

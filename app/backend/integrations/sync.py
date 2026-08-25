@@ -15,6 +15,8 @@ from ..database import (
     ExternalActivityRecord,
     ExternalAttachmentRecord,
     ExternalConversationRecord,
+    ExternalGroupMembershipRecord,
+    ExternalGroupRecord,
     ExternalTicketContextRecord,
     ExternalUserRecord,
     SessionLocal,
@@ -2626,7 +2628,9 @@ def _external_profile(user: dict) -> dict[str, Any]:
         "department_ids",
         "language",
         "location_id",
+        "member_of",
         "occasional",
+        "observer_of",
         "role_ids",
         "roles",
         "time_zone",
@@ -2688,6 +2692,12 @@ def _empty_external_user_sync_result() -> dict:
         "errors": 0,
         "error_details": [],
         "total": 0,
+        "groups_created": 0,
+        "groups_updated": 0,
+        "groups_unchanged": 0,
+        "groups_deactivated": 0,
+        "memberships": 0,
+        "group_errors": 0,
     }
 
 
@@ -2801,6 +2811,197 @@ def _import_external_users(
     return result
 
 
+def _provider_relation_ids(value: Any) -> set[str]:
+    if value is None:
+        return set()
+    values = value if isinstance(value, (list, tuple, set)) else [value]
+    result: set[str] = set()
+    for item in values:
+        candidate = item.get("id") if isinstance(item, dict) else item
+        text = str(candidate).strip() if candidate is not None else ""
+        if text:
+            result.add(text)
+    return result
+
+
+def _external_group_values(raw_group: dict[str, Any]) -> dict[str, Any]:
+    external_id = _external_user_value(raw_group, "id", "group_id", "groupId")
+    name = _external_user_value(raw_group, "name", "display_name", "displayName")
+    workspace_id = _external_user_value(raw_group, "workspace_id", "workspaceId")
+    description = _external_user_value(raw_group, "description")
+    profile = {
+        key: raw_group[key]
+        for key in ("business_hour_id", "escalate_to", "restricted", "unassigned_for")
+        if raw_group.get(key) is not None
+    }
+    return {
+        "external_id": external_id,
+        "workspace_id": workspace_id or None,
+        "name": name or (f"Group {external_id}" if external_id else "External group"),
+        "description": description or None,
+        "active": _external_user_active(raw_group),
+        "profile_json": json.dumps(profile, sort_keys=True, separators=(",", ":")),
+        "source_updated_at": _external_source_updated_at(raw_group),
+    }
+
+
+def _import_external_groups(
+    adapter,
+    raw_groups: list[dict[str, Any]],
+    raw_users: list[dict[str, Any]],
+    *,
+    binding_id: str = "legacy",
+) -> dict[str, int]:
+    """Persist groups and authoritative member/observer relations.
+
+    Agent membership IDs are also accepted as a bounded fallback because the
+    group directory can be restricted independently from the agent directory.
+    Placeholder group names are replaced on the next successful group read.
+    """
+    db: Session = SessionLocal()
+    result = {
+        "groups_created": 0,
+        "groups_updated": 0,
+        "groups_unchanged": 0,
+        "groups_deactivated": 0,
+        "memberships": 0,
+        "group_errors": 0,
+    }
+    try:
+        normalized_groups: dict[str, dict[str, Any]] = {}
+        desired_memberships: set[tuple[str, str, str]] = set()
+
+        for raw_group in raw_groups:
+            if not isinstance(raw_group, dict):
+                result["group_errors"] += 1
+                continue
+            values = _external_group_values(raw_group)
+            external_id = values["external_id"]
+            if not external_id:
+                result["group_errors"] += 1
+                continue
+            normalized_groups[external_id] = values
+            for membership_kind, field in (("member", "members"), ("observer", "observers")):
+                for external_user_id in _provider_relation_ids(raw_group.get(field)):
+                    desired_memberships.add((external_id, external_user_id, membership_kind))
+
+        normalized_agents: dict[str, dict[str, Any]] = {}
+        for raw_user in raw_users:
+            if not isinstance(raw_user, dict) or _external_user_type(raw_user) != "agent":
+                continue
+            user = _normalize_external_user(raw_user)
+            if not user["id"]:
+                continue
+            normalized_agents[user["id"]] = user
+            for membership_kind, field in (("member", "member_of"), ("observer", "observer_of")):
+                for external_group_id in _provider_relation_ids(raw_user.get(field)):
+                    normalized_groups.setdefault(external_group_id, {
+                        "external_id": external_group_id,
+                        "workspace_id": None,
+                        "name": f"Group {external_group_id}",
+                        "description": None,
+                        "active": True,
+                        "profile_json": '{"source":"agent_membership_projection"}',
+                        "source_updated_at": None,
+                    })
+                    desired_memberships.add((external_group_id, user["id"], membership_kind))
+
+        now = datetime.utcnow()
+        group_records: dict[str, ExternalGroupRecord] = {}
+        for external_id, values in normalized_groups.items():
+            record = db.query(ExternalGroupRecord).filter(
+                ExternalGroupRecord.binding_id == binding_id,
+                ExternalGroupRecord.provider == adapter.provider_name,
+                ExternalGroupRecord.external_id == external_id,
+            ).first()
+            if record is None:
+                record = ExternalGroupRecord(
+                    id=str(uuid.uuid4()),
+                    binding_id=binding_id,
+                    provider=adapter.provider_name,
+                    external_id=external_id,
+                    fetched_at=now,
+                    created_at=now,
+                    updated_at=now,
+                    **{key: values[key] for key in (
+                        "workspace_id", "name", "description", "active",
+                        "profile_json", "source_updated_at",
+                    )},
+                )
+                db.add(record)
+                db.flush()
+                result["groups_created"] += 1
+            else:
+                changed = any(
+                    getattr(record, key) != values[key]
+                    for key in (
+                        "workspace_id", "name", "description", "active",
+                        "profile_json", "source_updated_at",
+                    )
+                )
+                for key in (
+                    "workspace_id", "name", "description", "active",
+                    "profile_json", "source_updated_at",
+                ):
+                    setattr(record, key, values[key])
+                record.fetched_at = now
+                if changed:
+                    record.updated_at = now
+                    result["groups_updated"] += 1
+                else:
+                    result["groups_unchanged"] += 1
+            group_records[external_id] = record
+
+        if not result["group_errors"] and raw_groups:
+            for record in db.query(ExternalGroupRecord).filter(
+                ExternalGroupRecord.binding_id == binding_id,
+                ExternalGroupRecord.provider == adapter.provider_name,
+                ExternalGroupRecord.active.is_(True),
+            ).all():
+                if record.external_id not in normalized_groups:
+                    record.active = False
+                    record.fetched_at = now
+                    record.updated_at = now
+                    result["groups_deactivated"] += 1
+
+        external_users = {
+            row.external_id: row
+            for row in db.query(ExternalUserRecord).filter(
+                ExternalUserRecord.binding_id == binding_id,
+                ExternalUserRecord.provider == adapter.provider_name,
+                ExternalUserRecord.user_type == "agent",
+                ExternalUserRecord.external_id.in_(set(normalized_agents)),
+            ).all()
+        } if normalized_agents else {}
+        scoped_user_ids = [row.id for row in external_users.values()]
+        if scoped_user_ids:
+            db.query(ExternalGroupMembershipRecord).filter(
+                ExternalGroupMembershipRecord.external_user_id.in_(scoped_user_ids)
+            ).delete(synchronize_session=False)
+
+        for external_group_id, external_user_id, membership_kind in sorted(desired_memberships):
+            group = group_records.get(external_group_id)
+            user = external_users.get(external_user_id)
+            if group is None or user is None:
+                continue
+            db.add(ExternalGroupMembershipRecord(
+                external_group_id=group.id,
+                external_user_id=user.id,
+                membership_kind=membership_kind,
+                created_at=now,
+                updated_at=now,
+            ))
+            result["memberships"] += 1
+        db.commit()
+    except Exception as exc:
+        print(f"[external-groups] sync failed kind={type(exc).__name__}")
+        db.rollback()
+        result["group_errors"] += 1
+    finally:
+        db.close()
+    return result
+
+
 async def async_sync_external_users(
     adapter=None,
     *,
@@ -2818,7 +3019,23 @@ async def async_sync_external_users(
             f"external_user_fetch_failed:{type(exc).__name__}"
         )
         return result
-    return _import_external_users(adapter, raw_users, binding_id=binding_id)
+    result = _import_external_users(adapter, raw_users, binding_id=binding_id)
+    try:
+        raw_groups = await adapter.fetch_groups()
+    except Exception as exc:
+        print(f"[external-groups] fetch failed kind={type(exc).__name__}")
+        raw_groups = []
+        result["group_errors"] += 1
+        _limited_append(
+            result["error_details"],
+            f"external_group_fetch_failed:{type(exc).__name__}",
+        )
+    group_result = _import_external_groups(
+        adapter, raw_groups, raw_users, binding_id=binding_id
+    )
+    for key, value in group_result.items():
+        result[key] = result.get(key, 0) + value
+    return result
 
 
 def sync_external_users(
