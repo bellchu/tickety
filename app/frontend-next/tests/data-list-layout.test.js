@@ -95,3 +95,21 @@ test("secondary lists safely wrap external and AI-generated content", () => {
   assert.match(read("app", "portal", "page.tsx"), /\[overflow-wrap:anywhere\]/);
   assert.match(read("app", "settings", "sync", "page.tsx"), /\[overflow-wrap:anywhere\]/);
 });
+
+test("settings use accessible tabs and a server-paginated external directory", () => {
+  const settings = read("app", "settings", "page.tsx");
+
+  assert.match(settings, /role="tablist" aria-label="Settings sections"/);
+  assert.match(settings, /role="tab"/);
+  assert.match(settings, /role="tabpanel"/);
+  assert.match(settings, /aria-controls=\{`settings-panel-/);
+  assert.match(settings, /settingsTabFromHash/);
+  assert.match(settings, /activeTab === "integrations"/);
+
+  assert.match(settings, /api\.getExternalUsers\(\{ search, userType, limit: pageSize, offset \}\)/);
+  assert.match(settings, /Search name, email, title, or provider ID/);
+  assert.match(settings, /All identities/);
+  assert.match(settings, /External ITSM directory pagination/);
+  assert.match(settings, /\[25, 50, 100\]/);
+  assert.doesNotMatch(settings, /users\.slice\(/);
+});

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -13,7 +13,7 @@ import {
   Settings as SettingsIcon, Save, RefreshCw, CheckCircle2, AlertCircle,
   Users, Download, Database, Zap, Plus, Trash2, ShieldCheck, Activity,
   Power, KeyRound, Link2, SlidersHorizontal,
-  Mail,
+  Mail, Search, ChevronLeft, ChevronRight,
 } from "lucide-react";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import { Alert, Button, DataListCard, DataTable, DataTableViewport, ErrorState, ListText, Skeleton } from "@/components/ui";
@@ -24,6 +24,34 @@ const PROVIDER_OPTIONS = [
 ];
 
 const PROVIDER_IDS = ["foundry", "custom"] as const;
+
+const SETTINGS_TABS = [
+  { id: "overview", label: "Overview", hash: "settings-status", description: "Readiness and administration entry points" },
+  { id: "ai", label: "AI", hash: "settings-ai", description: "Models and ambient automation" },
+  { id: "integrations", label: "Integrations", hash: "settings-ticketing", description: "Freshservice, sync, SLA, and provider identities" },
+  { id: "workspace", label: "Workspace", hash: "settings-workspace", description: "Branding and ticket taxonomy" },
+  { id: "email", label: "Email", hash: "settings-email", description: "Outbound delivery and sender identity" },
+  { id: "access", label: "Access", hash: "settings-access", description: "Authentication, SSO, users, and roles" },
+  { id: "system", label: "System", hash: "settings-system", description: "Bounded maintenance operations" },
+] as const;
+
+type SettingsTabId = (typeof SETTINGS_TABS)[number]["id"];
+
+const SETTINGS_TAB_HASHES: Record<string, SettingsTabId> = {
+  "settings-status": "overview",
+  "settings-ai": "ai",
+  "settings-automation": "ai",
+  "settings-ticketing": "integrations",
+  "settings-directory": "integrations",
+  "settings-workspace": "workspace",
+  "settings-email": "email",
+  "settings-access": "access",
+  "settings-system": "system",
+};
+
+function settingsTabFromHash(hash: string): SettingsTabId {
+  return SETTINGS_TAB_HASHES[hash.replace(/^#/, "")] ?? "overview";
+}
 
 const API_READ_ONLY_KEYS = new Set([
   "APP_MODE",
@@ -123,6 +151,8 @@ export default function SettingsPage() {
   const [repairWindowValue, setRepairWindowValue] = useState(7);
   const [triageWindowUnit, setTriageWindowUnit] = useState<MaintenanceWindowUnit>("days");
   const [triageWindowValue, setTriageWindowValue] = useState(7);
+  const [activeTab, setActiveTab] = useState<SettingsTabId>("overview");
+  const pendingHashScrollRef = useRef<string | null>(null);
   const appMode = ((form.APP_MODE || data?.APP_MODE) as string) || "demo";
   const productionOperationalSettingsReadOnly = false;
   const productionSecuritySettingsReadOnly = false;
@@ -149,6 +179,50 @@ export default function SettingsPage() {
       }
     }
   }, [data]);
+
+  useEffect(() => {
+    const syncTabFromHash = () => {
+      const hashId = window.location.hash.replace(/^#/, "");
+      pendingHashScrollRef.current = hashId || null;
+      setActiveTab(settingsTabFromHash(hashId));
+    };
+    syncTabFromHash();
+    window.addEventListener("hashchange", syncTabFromHash);
+    return () => window.removeEventListener("hashchange", syncTabFromHash);
+  }, []);
+
+  useEffect(() => {
+    const hashId = pendingHashScrollRef.current;
+    if (!settingsQuery.isSuccess || !hashId || settingsTabFromHash(hashId) !== activeTab) return;
+    const frame = window.requestAnimationFrame(() => {
+      document.getElementById(hashId)?.scrollIntoView({ block: "start" });
+      pendingHashScrollRef.current = null;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeTab, settingsQuery.isSuccess]);
+
+  const selectSettingsTab = (tab: SettingsTabId) => {
+    setActiveTab(tab);
+    const config = SETTINGS_TABS.find((item) => item.id === tab);
+    if (config) window.history.replaceState(window.history.state, "", `#${config.hash}`);
+    window.requestAnimationFrame(() => document.getElementById(`settings-panel-${tab}`)?.scrollIntoView({ block: "start" }));
+  };
+
+  const handleSettingsTabKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>, index: number) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const lastIndex = SETTINGS_TABS.length - 1;
+    const nextIndex = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? lastIndex
+        : event.key === "ArrowRight"
+          ? (index + 1) % SETTINGS_TABS.length
+          : (index - 1 + SETTINGS_TABS.length) % SETTINGS_TABS.length;
+    const nextTab = SETTINGS_TABS[nextIndex];
+    selectSettingsTab(nextTab.id);
+    document.getElementById(`settings-tab-${nextTab.id}`)?.focus();
+  };
 
   const mutation = useMutation({
     mutationFn: api.updateSettings,
@@ -357,19 +431,65 @@ export default function SettingsPage() {
         </Alert>
       )}
 
-      <nav aria-label="Settings sections" className="sticky top-20 z-20 -mx-1 flex gap-1 overflow-x-auto rounded-xl border border-linen-400 bg-linen-50/95 p-1 shadow-sm backdrop-blur">
-        {[
-          ["settings-status", "Status"],
-          ["settings-ai", "AI"],
-          ["settings-ticketing", "Ticketing & integrations"],
-          ["settings-workspace", "Workspace"],
-          ["settings-email", "Email"],
-          ["settings-access", "Access"],
-          ["settings-system", "System"],
-        ].map(([id, label]) => <a key={id} href={`#${id}`} className="inline-flex min-h-10 shrink-0 items-center rounded-lg px-3 text-xs font-semibold text-ink-500 hover:bg-linen-200 hover:text-ink-700">{label}</a>)}
-      </nav>
+      <div className="sticky top-20 z-20 -mx-1 rounded-xl border border-linen-400 bg-linen-50/95 p-1 shadow-sm backdrop-blur">
+        <div role="tablist" aria-label="Settings sections" className="flex gap-1 overflow-x-auto">
+          {SETTINGS_TABS.map((tab, index) => {
+            const selected = activeTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                id={`settings-tab-${tab.id}`}
+                type="button"
+                role="tab"
+                aria-selected={selected}
+                aria-controls={`settings-panel-${tab.id}`}
+                tabIndex={selected ? 0 : -1}
+                onClick={() => selectSettingsTab(tab.id)}
+                onKeyDown={(event) => handleSettingsTabKeyDown(event, index)}
+                className={cn(
+                  "inline-flex min-h-10 shrink-0 items-center rounded-lg px-3 text-xs font-semibold transition-colors",
+                  selected ? "bg-ink-700 text-white shadow-sm" : "text-ink-500 hover:bg-linen-200 hover:text-ink-700"
+                )}
+              >
+                {tab.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <p className="-mt-5 text-xs text-ink-400" aria-live="polite">
+        {SETTINGS_TABS.find((tab) => tab.id === activeTab)?.description}
+      </p>
 
       <form onSubmit={handleSubmit} className="space-y-8">
+        {SETTINGS_TABS.filter((tab) => tab.id !== activeTab).map((tab) => (
+          <div
+            key={tab.id}
+            id={`settings-panel-${tab.id}`}
+            role="tabpanel"
+            aria-labelledby={`settings-tab-${tab.id}`}
+            hidden
+          />
+        ))}
+        {activeTab === "overview" && (
+        <SettingsTabPanel tab="overview">
+        <SettingsSection title="Configuration areas" subtitle="Open one focused area at a time; unsaved form changes remain available while you move between tabs">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {SETTINGS_TABS.filter((tab) => tab.id !== "overview").map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => selectSettingsTab(tab.id)}
+                className="group min-h-24 rounded-xl border border-linen-400 bg-linen-100 p-4 text-left transition-colors hover:border-clay-300 hover:bg-[var(--color-primary-soft)]"
+              >
+                <span className="block text-sm font-semibold text-ink-700 group-hover:text-semantic-primary">{tab.label}</span>
+                <span className="mt-1 block text-xs leading-5 text-ink-500">{tab.description}</span>
+              </button>
+            ))}
+          </div>
+        </SettingsSection>
+
         {/* ═══ Consolidated Admin Status ═══ */}
         <SettingsSection id="settings-status" title="Status" subtitle="All operational checks are consolidated in one read-only admin view">
           <Link href="/settings/status" className="group flex items-center justify-between gap-4 rounded-xl border border-linen-400 bg-linen-100 p-4 transition-colors hover:border-clay-400 hover:bg-clay-50">
@@ -390,7 +510,11 @@ export default function SettingsPage() {
             <span className="shrink-0 text-xs font-semibold text-semantic-primary group-hover:underline">Open status →</span>
           </Link>
         </SettingsSection>
+        </SettingsTabPanel>
+        )}
 
+        {activeTab === "ai" && (
+        <SettingsTabPanel tab="ai">
         {/* ═══ LLM Configuration ═══ */}
         <SettingsSection id="settings-ai" title="LLM Configuration" subtitle="Use Microsoft Foundry or one simplified custom OpenAI-compatible API">
           <Field label="Provider">
@@ -470,6 +594,31 @@ export default function SettingsPage() {
           ))}
         </SettingsSection>
 
+        {/* ═══ AI Automation Toggles ═══ */}
+        <SettingsSection id="settings-automation" title="AI Automation" subtitle="Toggle which ambient AI agents run automatically on incoming tickets">
+          <div className="space-y-2">
+            {[
+              { key: "AUTO_TRIAGE_ENABLED", label: "Auto-Triage", desc: "Sentiment, category, priority, mood, complexity analysis on every new ticket" },
+              { key: "AUTO_SUMMARIZE_ENABLED", label: "Auto-Summarization", desc: "Generate 2-3 sentence case summaries for support managers" },
+              { key: "AUTO_ROUTE_ENABLED", label: "Auto-Routing", desc: "Recommend the best engineer based on skills, tier, and workload" },
+              { key: "AUTO_RESOLVE_ENABLED", label: "Auto-Resolution", desc: "Generate step-by-step resolution plans with root-cause hypothesis" },
+              { key: "AUTO_SYSTEMIC_ENABLED", label: "Systemic Issue Detection", desc: "Cluster similar tickets to surface broad business-impact patterns" },
+            ].map((t) => (
+              <ToggleRow
+                key={t.key}
+                label={t.label}
+                desc={t.desc}
+                value={automationValue(t.key)}
+                onChange={(v) => handleChange(t.key as keyof SettingsType, v ? "true" : "false")}
+              />
+            ))}
+          </div>
+        </SettingsSection>
+        </SettingsTabPanel>
+        )}
+
+        {activeTab === "integrations" && (
+        <SettingsTabPanel tab="integrations">
         {/* ═══ Ticketing Mode ═══ */}
         <SettingsSection id="settings-ticketing" title="Freshservice sidecar" subtitle="Tickety imports Freshservice records for local intelligence and never writes back to the system of record">
           <Field label="Provider">
@@ -638,7 +787,11 @@ export default function SettingsPage() {
 
         {/* ═══ External OAuth + Agent Sync (conditional) ═══ */}
         {isExternalProvider && <AgentSection />}
+        </SettingsTabPanel>
+        )}
 
+        {activeTab === "workspace" && (
+        <SettingsTabPanel tab="workspace">
         {/* ═══ Category Management ═══ */}
         <CategorySection />
 
@@ -657,6 +810,19 @@ export default function SettingsPage() {
           </div>
         </SettingsSection>
 
+        {/* ═══ Custom Statuses ═══ */}
+        <StatusConfigSection />
+
+        {/* ═══ Custom Priorities ═══ */}
+        <PriorityConfigSection />
+
+        {/* ═══ Notifications ═══ */}
+        <NotificationSection />
+        </SettingsTabPanel>
+        )}
+
+        {activeTab === "email" && (
+        <SettingsTabPanel tab="email">
         {/* ═══ SendGrid Email ═══ */}
         <SettingsSection id="settings-email" title="SendGrid email" subtitle="Configure verified sender identity, reply routing, and per-user delivery limits">
           <div className="flex flex-col gap-3 rounded-xl border border-linen-400 bg-linen-100 p-4 sm:flex-row sm:items-center sm:justify-between">
@@ -696,28 +862,11 @@ export default function SettingsPage() {
             <Link href="/email" className="inline-flex min-h-10 shrink-0 items-center justify-center rounded-lg bg-semantic-primary px-4 text-sm font-semibold text-white hover:bg-semantic-primary-hover">Open email composer</Link>
           </div>
         </SettingsSection>
+        </SettingsTabPanel>
+        )}
 
-        {/* ═══ AI Automation Toggles ═══ */}
-        <SettingsSection id="settings-automation" title="AI Automation" subtitle="Toggle which ambient AI agents run automatically on incoming tickets">
-          <div className="space-y-2">
-            {[
-              { key: "AUTO_TRIAGE_ENABLED", label: "Auto-Triage", desc: "Sentiment, category, priority, mood, complexity analysis on every new ticket" },
-              { key: "AUTO_SUMMARIZE_ENABLED", label: "Auto-Summarization", desc: "Generate 2-3 sentence case summaries for support managers" },
-              { key: "AUTO_ROUTE_ENABLED", label: "Auto-Routing", desc: "Recommend the best engineer based on skills, tier, and workload" },
-              { key: "AUTO_RESOLVE_ENABLED", label: "Auto-Resolution", desc: "Generate step-by-step resolution plans with root-cause hypothesis" },
-              { key: "AUTO_SYSTEMIC_ENABLED", label: "Systemic Issue Detection", desc: "Cluster similar tickets to surface broad business-impact patterns" },
-            ].map((t) => (
-              <ToggleRow
-                key={t.key}
-                label={t.label}
-                desc={t.desc}
-                value={automationValue(t.key)}
-                onChange={(v) => handleChange(t.key as keyof SettingsType, v ? "true" : "false")}
-              />
-            ))}
-          </div>
-        </SettingsSection>
-
+        {activeTab === "access" && (
+        <SettingsTabPanel tab="access">
         {/* ═══ Security & Auth ═══ */}
         <SettingsSection id="settings-access" title="Security & Authentication" subtitle="Require login and configure Single Sign-On (OIDC) for production deployments">
           <Field label="Runtime Mode">
@@ -878,16 +1027,11 @@ export default function SettingsPage() {
             </div>
           </div>
         </SettingsSection>
+        </SettingsTabPanel>
+        )}
 
-        {/* ═══ Custom Statuses ═══ */}
-        <StatusConfigSection />
-
-        {/* ═══ Custom Priorities ═══ */}
-        <PriorityConfigSection />
-
-        {/* ═══ Notifications ═══ */}
-        <NotificationSection />
-
+        {activeTab === "system" && (
+        <SettingsTabPanel tab="system">
         {/* ═══ System Maintenance ═══ */}
         <SettingsSection id="settings-system" title="System Maintenance" subtitle="Run bounded AI maintenance only for tickets created inside the selected recent window">
           <div className="space-y-3">
@@ -917,6 +1061,8 @@ export default function SettingsPage() {
             />
           </div>
         </SettingsSection>
+        </SettingsTabPanel>
+        )}
 
         {/* ═══ Save Bar ═══ */}
         {(isDirty || saved || mutation.isError) && <div className="sticky bottom-4 z-30 flex flex-col gap-3 rounded-xl border border-linen-400 bg-linen-50/95 px-4 py-3 shadow-[var(--shadow-raised)] backdrop-blur sm:flex-row sm:items-center sm:justify-between">
@@ -1132,6 +1278,19 @@ function FreshserviceOAuthSetup({
 
 // ═══ Reusable Section Wrapper ════════════════════════════════
 
+function SettingsTabPanel({ tab, children }: { tab: SettingsTabId; children: React.ReactNode }) {
+  return (
+    <div
+      id={`settings-panel-${tab}`}
+      role="tabpanel"
+      aria-labelledby={`settings-tab-${tab}`}
+      className="scroll-mt-36 space-y-8"
+    >
+      {children}
+    </div>
+  );
+}
+
 function SettingsSection({ id, title, subtitle, children }: { id?: string; title: string; subtitle?: string; children: React.ReactNode }) {
   return (
     <section id={id} className="scroll-mt-36 space-y-5 rounded-2xl border border-linen-400 bg-linen-50 p-5 shadow-sm sm:p-6">
@@ -1340,17 +1499,28 @@ function InfoTile({ label, value, mono }: { label: string; value: string; mono?:
 
 function AgentSection() {
   const queryClient = useQueryClient();
-  const { data: directory, isLoading } = useQuery({
-    queryKey: ["external-users"],
-    queryFn: api.getExternalUsers,
+  const [searchInput, setSearchInput] = useState("");
+  const [search, setSearch] = useState("");
+  const [userType, setUserType] = useState<"" | "agent" | "requester">("");
+  const [pageSize, setPageSize] = useState(25);
+  const [offset, setOffset] = useState(0);
+  const directoryQuery = useQuery({
+    queryKey: ["external-users", search, userType, pageSize, offset],
+    queryFn: () => api.getExternalUsers({ search, userType, limit: pageSize, offset }),
   });
   const syncMut = useMutation({
     mutationFn: api.syncExternalUsers,
     onSuccess: () => {
+      setOffset(0);
       void queryClient.invalidateQueries({ queryKey: ["external-users"] });
     },
   });
+  const directory = directoryQuery.data;
   const users = directory?.users ?? [];
+  const total = directory?.total ?? 0;
+  const firstResult = total > 0 ? offset + 1 : 0;
+  const lastResult = Math.min(offset + users.length, total);
+  const hasFilters = Boolean(search || userType);
   const result = syncMut.data?.result;
   const summary = result
     ? [
@@ -1363,19 +1533,47 @@ function AgentSection() {
       ].filter(Boolean).join(", ")
     : null;
 
+  useEffect(() => {
+    if (directory && directory.total > 0 && directory.users.length === 0 && offset >= directory.total) {
+      setOffset(Math.floor((directory.total - 1) / pageSize) * pageSize);
+    }
+  }, [directory, offset, pageSize]);
+
+  const applySearch = () => {
+    setSearch(searchInput.trim());
+    setOffset(0);
+  };
+
+  const selectUserType = (nextType: "" | "agent" | "requester") => {
+    setUserType(nextType);
+    setOffset(0);
+  };
+
+  const clearFilters = () => {
+    setSearchInput("");
+    setSearch("");
+    setUserType("");
+    setOffset(0);
+  };
+
   return (
     <SettingsSection
+      id="settings-directory"
       title="External ITSM directory"
-      subtitle="Read provider-owned agent and requester profiles without creating, linking, or updating Tickety accounts"
+      subtitle="Browse a large provider-owned directory without loading every agent and requester at once"
     >
-      <div className="flex flex-col gap-3 rounded border border-linen-400 bg-linen-50 p-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <p className="text-sm font-medium text-ink-700">Separate identity domain</p>
+      <div className="flex flex-col gap-4 rounded-xl border border-linen-400 bg-linen-100 p-4 lg:flex-row lg:items-center lg:justify-between">
+        <div className="flex min-w-0 items-start gap-3">
+          <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-white text-semantic-primary shadow-sm"><Users className="h-5 w-5" aria-hidden="true" /></span>
+          <div className="min-w-0">
+          <p className="text-sm font-semibold text-ink-700">Separate identity domain</p>
           <p className="mt-1 max-w-3xl text-xs leading-5 text-ink-500">
             This directory is a read-only snapshot for ticket context. Tickety sign-in, roles, passwords, profiles, and local assignments remain controlled only from the local user roster.
           </p>
+          </div>
         </div>
         <Button
+          type="button"
           onClick={() => syncMut.mutate()}
           disabled={syncMut.isPending}
           leadingIcon={<Download className={cn("h-4 w-4", syncMut.isPending && "animate-pulse")} />}
@@ -1396,8 +1594,86 @@ function AgentSection() {
         </Alert>
       )}
 
-      {isLoading ? (
-        <div className="space-y-2">{[1, 2, 3].map((item) => <Skeleton key={item} className="h-10 w-full" />)}</div>
+      <div className="space-y-3 rounded-xl border border-linen-400 bg-linen-50 p-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="min-w-0 flex-1" role="search" aria-label="Search external ITSM directory">
+            <label className="relative block max-w-xl">
+              <span className="sr-only">Search external ITSM directory</span>
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-400" aria-hidden="true" />
+              <input
+                type="search"
+                value={searchInput}
+                onChange={(event) => setSearchInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    applySearch();
+                  }
+                }}
+                className="input-base input-search pr-24"
+                placeholder="Search name, email, title, or provider ID"
+              />
+              <button type="button" onClick={applySearch} className="absolute right-1.5 top-1/2 min-h-8 -translate-y-1/2 rounded-md bg-ink-700 px-3 text-xs font-semibold text-white hover:bg-ink-600">Search</button>
+            </label>
+          </div>
+          <p className="text-xs text-ink-500" aria-live="polite">
+            {directoryQuery.isLoading
+              ? "Loading directory…"
+              : directoryQuery.isError
+                ? "Directory unavailable"
+                : `${total.toLocaleString()} matching ${total === 1 ? "entry" : "entries"}`}
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-3 border-t border-linen-300 pt-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-wrap gap-2" aria-label="Filter directory by identity type">
+            {([
+              ["", "All identities"],
+              ["agent", "Agents"],
+              ["requester", "Requesters"],
+            ] as const).map(([value, label]) => (
+              <button
+                key={value || "all"}
+                type="button"
+                aria-pressed={userType === value}
+                onClick={() => selectUserType(value)}
+                className={cn(
+                  "min-h-9 rounded-full border px-3 text-xs font-semibold transition-colors",
+                  userType === value
+                    ? "border-clay-300 bg-[var(--color-primary-soft)] text-semantic-primary"
+                    : "border-linen-400 text-ink-500 hover:bg-linen-200 hover:text-ink-700"
+                )}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-3">
+            {hasFilters && <Button type="button" variant="ghost" size="sm" onClick={clearFilters}>Clear filters</Button>}
+            <label className="flex items-center gap-2 text-xs font-medium text-ink-500">
+              Rows
+              <select
+                value={pageSize}
+                onChange={(event) => { setPageSize(Number(event.target.value)); setOffset(0); }}
+                className="input-base min-h-9 w-20 py-1 text-xs"
+              >
+                {[25, 50, 100].map((size) => <option key={size} value={size}>{size}</option>)}
+              </select>
+            </label>
+          </div>
+        </div>
+      </div>
+
+      {directoryQuery.isLoading ? (
+        <div className="space-y-2">{Array.from({ length: 6 }, (_, item) => <Skeleton key={item} className="h-12 w-full" />)}</div>
+      ) : directoryQuery.isError ? (
+        <ErrorState
+          title="External directory could not be loaded"
+          description="No provider identities are being shown. Retry the current filtered page."
+          actionLabel="Retry directory"
+          onRetry={() => void directoryQuery.refetch()}
+          retrying={directoryQuery.isFetching}
+        />
       ) : users.length > 0 ? (
         <>
           <div className="grid gap-3 md:hidden">
@@ -1414,7 +1690,7 @@ function AgentSection() {
               </DataListCard>
             ))}
           </div>
-          <DataTableViewport label="External ITSM directory" className="hidden rounded border border-linen-400 md:block">
+          <DataTableViewport label="External ITSM directory current page" className="hidden rounded-xl border border-linen-400 md:block">
           <DataTable className="min-w-[640px]">
             <colgroup><col className="w-[34%]" /><col className="w-[30%]" /><col className="w-[22%]" /><col className="w-[14%]" /></colgroup>
             <thead>
@@ -1437,9 +1713,25 @@ function AgentSection() {
             </tbody>
           </DataTable>
           </DataTableViewport>
+
+          <nav aria-label="External ITSM directory pagination" className="flex flex-col gap-3 rounded-xl border border-linen-400 bg-linen-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-xs text-ink-500">
+              Showing <span className="font-semibold text-ink-700">{firstResult.toLocaleString()}–{lastResult.toLocaleString()}</span> of <span className="font-semibold text-ink-700">{total.toLocaleString()}</span>
+            </p>
+            <div className="flex items-center gap-2">
+              <Button type="button" variant="secondary" size="sm" disabled={offset === 0 || directoryQuery.isFetching} onClick={() => setOffset(Math.max(0, offset - pageSize))} leadingIcon={<ChevronLeft className="h-3.5 w-3.5" />}>Previous</Button>
+              <span className="min-w-16 text-center text-xs font-semibold text-ink-500">Page {Math.floor(offset / pageSize) + 1}</span>
+              <Button type="button" variant="secondary" size="sm" disabled={!directory?.has_more || directoryQuery.isFetching} onClick={() => setOffset(offset + pageSize)} trailingIcon={<ChevronRight className="h-3.5 w-3.5" />}>Next</Button>
+            </div>
+          </nav>
         </>
       ) : (
-        <p className="py-2 text-sm text-ink-400">Refresh the directory to retrieve provider-owned agents and requesters.</p>
+        <div className="rounded-xl border border-dashed border-linen-400 bg-linen-50 px-5 py-10 text-center">
+          <Users className="mx-auto h-5 w-5 text-ink-400" aria-hidden="true" />
+          <p className="mt-3 text-sm font-semibold text-ink-700">{hasFilters ? "No identities match this view" : "External directory is empty"}</p>
+          <p className="mt-1 text-xs leading-5 text-ink-400">{hasFilters ? "Try a broader search or clear the identity filter." : "Refresh the directory to retrieve provider-owned agents and requesters."}</p>
+          {hasFilters && <Button type="button" variant="secondary" size="sm" className="mt-4" onClick={clearFilters}>Clear filters</Button>}
+        </div>
       )}
     </SettingsSection>
   );

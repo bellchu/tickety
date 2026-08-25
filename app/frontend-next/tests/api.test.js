@@ -63,6 +63,27 @@ test("getComments supports bounded history pagination without changing the defau
   }
 });
 
+test("external directory requests encode server-side search, filters, and pagination", async () => {
+  const { api } = loadApi();
+  const originalFetch = global.fetch;
+  const calls = [];
+  global.fetch = async (url) => {
+    calls.push(url);
+    return new Response(JSON.stringify({ users: [], total: 0, limit: 25, offset: 50, has_more: false }), { status: 200 });
+  };
+
+  try {
+    await api.getExternalUsers();
+    await api.getExternalUsers({ search: "Alex & team", userType: "requester", limit: 25, offset: 50 });
+    assert.deepEqual(calls, [
+      "/api/admin/external-users",
+      "/api/admin/external-users?search=Alex+%26+team&user_type=requester&limit=25&offset=50",
+    ]);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
 test("time summary sends the browser's IANA time zone", async () => {
   const { api } = loadApi();
   const originalFetch = global.fetch;

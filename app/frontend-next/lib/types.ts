@@ -715,6 +715,17 @@ export interface ExternalUserRecord {
 
 export interface ExternalUserListResponse {
   users: ExternalUserRecord[];
+  total: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
+}
+
+export interface ExternalUserListParams {
+  search?: string;
+  userType?: ExternalUserRecord["user_type"] | "";
+  limit?: number;
+  offset?: number;
 }
 
 export interface ExternalUserSyncResult {

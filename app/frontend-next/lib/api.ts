@@ -116,8 +116,16 @@ export const api = {
     fetchAPI<{ status: string; result: import("./types").ExternalUserSyncResult }>(
       "/admin/sync/external-users", { method: "POST" }
     ),
-  getExternalUsers: () =>
-    fetchAPI<import("./types").ExternalUserListResponse>("/admin/external-users"),
+  getExternalUsers: (options: import("./types").ExternalUserListParams = {}) => {
+    const params = new URLSearchParams();
+    if (options.search?.trim()) params.set("search", options.search.trim());
+    if (options.userType) params.set("user_type", options.userType);
+    if (options.limit != null) params.set("limit", String(options.limit));
+    if (options.offset != null) params.set("offset", String(options.offset));
+    return fetchAPI<import("./types").ExternalUserListResponse>(
+      `/admin/external-users${params.size ? `?${params.toString()}` : ""}`
+    );
+  },
   getEmailStatus: () =>
     fetchAPI<import("./types").EmailProviderStatus>("/email/status"),
   getEmailRecipients: (audience: import("./types").EmailAudience, search = "") => {

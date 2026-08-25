@@ -5363,6 +5363,9 @@ async def list_external_users(
     provider: Optional[str] = Query(None, max_length=64),
     user_type: Optional[str] = Query(None, pattern="^(agent|requester)$"),
     active: Optional[bool] = Query(True),
+    search: Optional[str] = Query(None, max_length=200),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=1_000_000),
     db: Session = Depends(get_db),
     _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
@@ -5375,10 +5378,32 @@ async def list_external_users(
         query = query.filter(ExternalUserRecord.user_type == user_type)
     if active is not None:
         query = query.filter(ExternalUserRecord.active.is_(active))
+    if search:
+        escaped_search = (
+            search.strip()
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        if escaped_search:
+            pattern = f"%{escaped_search}%"
+            query = query.filter(or_(
+                ExternalUserRecord.name.ilike(pattern, escape="\\"),
+                ExternalUserRecord.email.ilike(pattern, escape="\\"),
+                ExternalUserRecord.title.ilike(pattern, escape="\\"),
+                ExternalUserRecord.external_id.ilike(pattern, escape="\\"),
+            ))
+    total = query.order_by(None).count()
     records = query.order_by(
         ExternalUserRecord.user_type, ExternalUserRecord.name, ExternalUserRecord.external_id
-    ).all()
-    return {"users": [_external_user_payload(record) for record in records]}
+    ).offset(offset).limit(limit).all()
+    return {
+        "users": [_external_user_payload(record) for record in records],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": offset + len(records) < total,
+    }
 
 
 @app.get("/admin/agents", deprecated=True)

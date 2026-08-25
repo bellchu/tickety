@@ -1136,6 +1136,101 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
         self.assertNotIn("role", external_user)
         self.assertNotIn("password_hash", external_user)
 
+    def test_external_directory_api_searches_filters_and_paginates(self):
+        with self.session_factory() as db:
+            db.add_all([
+                ExternalUserRecord(
+                    id="external-agent-1",
+                    binding_id="legacy",
+                    provider="freshservice",
+                    external_id="agent-100",
+                    user_type="agent",
+                    name="Alex Agent",
+                    email="alex.agent@example.com",
+                    title="Service desk",
+                    active=True,
+                ),
+                ExternalUserRecord(
+                    id="external-requester-2",
+                    binding_id="legacy",
+                    provider="freshservice",
+                    external_id="requester-200",
+                    user_type="requester",
+                    name="Alex Requester",
+                    email="alex.requester@example.com",
+                    title="Finance",
+                    active=True,
+                ),
+                ExternalUserRecord(
+                    id="external-requester-inactive",
+                    binding_id="legacy",
+                    provider="freshservice",
+                    external_id="requester-300",
+                    user_type="requester",
+                    name="Alex Inactive",
+                    active=False,
+                ),
+            ])
+            db.commit()
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
+
+        first_page = self.client.get(
+            "/admin/external-users?search=alex&limit=1&offset=0"
+        )
+        second_page = self.client.get(
+            "/admin/external-users?search=alex&limit=1&offset=1"
+        )
+        requesters = self.client.get(
+            "/admin/external-users?search=alex&user_type=requester&limit=50"
+        )
+
+        self.assertEqual(first_page.status_code, 200, first_page.text)
+        self.assertEqual(first_page.json()["total"], 2)
+        self.assertEqual(first_page.json()["limit"], 1)
+        self.assertEqual(first_page.json()["offset"], 0)
+        self.assertTrue(first_page.json()["has_more"])
+        self.assertEqual(len(first_page.json()["users"]), 1)
+        self.assertEqual(second_page.json()["offset"], 1)
+        self.assertFalse(second_page.json()["has_more"])
+        self.assertEqual(len(second_page.json()["users"]), 1)
+        self.assertEqual(requesters.json()["total"], 1)
+        self.assertEqual(requesters.json()["users"][0]["user_type"], "requester")
+
+    def test_external_directory_api_bounds_thousand_entry_result_sets(self):
+        with self.session_factory() as db:
+            db.add_all([
+                ExternalUserRecord(
+                    id=f"external-scale-{index}",
+                    binding_id="legacy",
+                    provider="freshservice",
+                    external_id=f"scale-{index}",
+                    user_type="requester",
+                    name=f"Directory Person {index:04d}",
+                    email=f"person-{index}@example.com",
+                    active=True,
+                )
+                for index in range(1005)
+            ])
+            db.commit()
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
+
+        default_page = self.client.get("/admin/external-users")
+        final_page = self.client.get(
+            "/admin/external-users?search=Directory+Person&limit=25&offset=1000"
+        )
+        oversized_page = self.client.get("/admin/external-users?limit=201")
+
+        self.assertEqual(default_page.status_code, 200, default_page.text)
+        self.assertEqual(default_page.json()["total"], 1005)
+        self.assertEqual(len(default_page.json()["users"]), 50)
+        self.assertTrue(default_page.json()["has_more"])
+        self.assertEqual(final_page.status_code, 200, final_page.text)
+        self.assertEqual(final_page.json()["total"], 1005)
+        self.assertEqual(final_page.json()["offset"], 1000)
+        self.assertEqual(len(final_page.json()["users"]), 5)
+        self.assertFalse(final_page.json()["has_more"])
+        self.assertEqual(oversized_page.status_code, 422, oversized_page.text)
+
     def test_maintenance_batches_are_bounded_and_never_revive_dead_letters(self):
         now = datetime.utcnow().replace(microsecond=0)
         with self.session_factory() as db:
