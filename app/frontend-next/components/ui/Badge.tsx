@@ -37,16 +37,16 @@ export function Badge({
   return (
     <span
       className={cn(
-        "inline-flex min-h-6 max-w-full items-center gap-1.5 whitespace-nowrap rounded-full border px-2 py-0.5 text-[11px] font-semibold leading-none",
+        "inline-flex min-h-6 max-w-full items-start gap-1.5 whitespace-normal rounded-xl border px-2 py-1 text-[11px] font-semibold leading-4 [overflow-wrap:anywhere]",
         variantClasses[variant],
         className
       )}
       title={title ?? (typeof children === "string" ? children : undefined)}
       {...props}
     >
-      {dot && <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", dotClasses[variant])} aria-hidden="true" />}
+      {dot && <span className={cn("mt-[5px] h-1.5 w-1.5 shrink-0 rounded-full", dotClasses[variant])} aria-hidden="true" />}
       {icon && <span className="shrink-0" aria-hidden="true">{icon}</span>}
-      <span className="min-w-0 truncate">{children}</span>
+      <span className="min-w-0 whitespace-normal break-words [overflow-wrap:anywhere]">{children}</span>
     </span>
   );
 }

@@ -52,10 +52,10 @@ export function PriorityCard({ ticket, index = 0 }: Props) {
             </span>
           </div>
 
-          <h3 className="line-clamp-2 break-words text-sm font-semibold text-ink-700 [overflow-wrap:anywhere]" title={ticket.subject}>
+          <h3 className="break-words text-sm font-semibold text-ink-700 [overflow-wrap:anywhere]" title={ticket.subject}>
             {ticket.subject}
           </h3>
-          <p className="mt-1 line-clamp-2 break-words text-xs leading-relaxed text-ink-500 [overflow-wrap:anywhere]" title={ticket.description || "(no description)"}>
+          <p className="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-ink-500 [overflow-wrap:anywhere]" title={ticket.description || "(no description)"}>
             {ticket.description || "(no description)"}
           </p>
 

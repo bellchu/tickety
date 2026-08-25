@@ -135,7 +135,7 @@ function AttachmentList({ ticketId, attachments }: { ticketId: string; attachmen
               <div className="flex items-center gap-2 p-2.5">
                 {isImage ? <ImageIcon className="h-4 w-4 shrink-0 text-semantic-primary" /> : <Paperclip className="h-4 w-4 shrink-0 text-ink-400" />}
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-xs font-medium text-ink-700" title={attachment.name}>{attachment.name}</p>
+                  <p className="whitespace-normal break-words text-xs font-medium text-ink-700 [overflow-wrap:anywhere]" title={attachment.name}>{attachment.name}</p>
                   <p className="mt-0.5 text-[10px] text-ink-400">{formatBytes(attachment.stored_size ?? attachment.size)}</p>
                 </div>
                 {ready ? (

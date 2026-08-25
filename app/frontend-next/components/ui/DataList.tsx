@@ -8,7 +8,7 @@ export function DataTableViewport({
   ...props
 }: HTMLAttributes<HTMLDivElement> & { label: string }) {
   return (
-    <div className={cn("relative", className)} {...props}>
+    <div className={cn("relative min-w-0 max-w-full", className)} {...props}>
       <div
         role="region"
         aria-label={label}
@@ -25,7 +25,7 @@ export function DataTable({ className, children, ...props }: TableHTMLAttributes
   return (
     <table
       className={cn(
-        "w-full table-fixed text-left text-sm [&_td]:align-top [&_th]:align-bottom",
+        "w-full table-fixed text-left text-sm [&_td]:align-top [&_td]:whitespace-normal [&_td]:[overflow-wrap:anywhere] [&_th]:align-bottom [&_th]:whitespace-normal [&_th]:[overflow-wrap:anywhere]",
         className
       )}
       {...props}
@@ -37,7 +37,7 @@ export function DataTable({ className, children, ...props }: TableHTMLAttributes
 
 export function ListText({
   text,
-  lines = 2,
+  lines = "wrap",
   className,
 }: {
   text: string;
@@ -47,12 +47,9 @@ export function ListText({
   return (
     <span
       title={text}
+      data-preferred-lines={lines}
       className={cn(
-        "block min-w-0 [overflow-wrap:anywhere]",
-        lines === 1 && "truncate",
-        lines === 2 && "line-clamp-2",
-        lines === 3 && "line-clamp-3",
-        lines === "wrap" && "whitespace-normal break-words",
+        "block min-w-0 whitespace-normal break-words [overflow-wrap:anywhere]",
         className
       )}
     >

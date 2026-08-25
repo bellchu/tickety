@@ -182,8 +182,8 @@ export default function EmailPage() {
                     <label key={recipient.id} className={cn("flex cursor-pointer items-start gap-3 px-4 py-3 transition-colors hover:bg-linen-100", checked && "bg-clay-50")}>
                       <input type="checkbox" className="mt-1 h-4 w-4 rounded border-linen-500 text-semantic-primary" checked={checked} disabled={!checked && selected.length >= MAX_RECIPIENTS} onChange={() => toggleRecipient(recipient)} />
                       <span className="min-w-0 flex-1">
-                        <span className="block truncate text-sm font-semibold text-ink-700">{recipient.name}</span>
-                        <span className="mt-0.5 block truncate text-xs text-ink-500">{recipient.email}</span>
+                        <span className="block whitespace-normal break-words text-sm font-semibold text-ink-700 [overflow-wrap:anywhere]">{recipient.name}</span>
+                        <span className="mt-0.5 block whitespace-normal break-words text-xs text-ink-500 [overflow-wrap:anywhere]">{recipient.email}</span>
                         <span className="mt-1 block text-[11px] capitalize text-ink-400">{recipient.title || "No title"} · {recipient.source}</span>
                       </span>
                     </label>
@@ -225,7 +225,7 @@ export default function EmailPage() {
                   <div className="flex flex-wrap gap-1.5">
                     {selected.map((recipient) => (
                       <button key={recipient.id} type="button" onClick={() => toggleRecipient(recipient)} className="inline-flex max-w-full items-center gap-1 rounded-full border border-clay-400/30 bg-clay-50 px-2 py-1 text-xs font-medium text-clay-700" title={`Remove ${recipient.name}`}>
-                        <span className="truncate">{recipient.name}</span><X className="h-3 w-3 shrink-0" />
+                        <span className="min-w-0 whitespace-normal break-words [overflow-wrap:anywhere]">{recipient.name}</span><X className="h-3 w-3 shrink-0" />
                       </button>
                     ))}
                   </div>

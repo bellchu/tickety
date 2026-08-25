@@ -10,7 +10,7 @@ export function PageFrame({
   return (
     <div
       className={cn(
-        "mx-auto w-full space-y-6 sm:space-y-7",
+        "mx-auto min-w-0 w-full space-y-6 sm:space-y-7",
         width === "default" ? "max-w-7xl" : "max-w-[1440px]",
         className
       )}

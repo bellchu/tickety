@@ -135,7 +135,7 @@ export function SearchableSelect({
         disabled={disabled}
       >
         <span
-          className={cn("min-w-0 truncate", !value && "text-ink-400")}
+          className={cn("min-w-0 whitespace-normal break-words [overflow-wrap:anywhere]", !value && "text-ink-400")}
           title={selectedOption?.label || value || placeholder}
         >
           {selectedOption?.label || value || placeholder}
@@ -203,9 +203,9 @@ export function SearchableSelect({
                       : "text-ink-600 hover:bg-linen-200",
                 )}
               >
-                <span className="block truncate" title={option.label}>{option.label}</span>
+                <span className="block whitespace-normal break-words [overflow-wrap:anywhere]" title={option.label}>{option.label}</span>
                 {option.id !== option.label && (
-                  <span className="block truncate text-[11px] font-normal text-ink-400" title={option.id}>
+                  <span className="block whitespace-normal break-words text-[11px] font-normal text-ink-400 [overflow-wrap:anywhere]" title={option.id}>
                     {option.id}
                   </span>
                 )}

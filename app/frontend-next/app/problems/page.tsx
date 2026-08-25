@@ -48,11 +48,11 @@ function errorMessage(error: unknown) {
 }
 
 function StatusPill({ value }: { value: string }) {
-  return <span className={cn("inline-flex whitespace-nowrap rounded-full border px-2.5 py-1 text-[11px] font-semibold", statusColor(value))}>{value}</span>;
+  return <span className={cn("inline-flex max-w-full whitespace-normal rounded-xl border px-2.5 py-1 text-[11px] font-semibold leading-4 [overflow-wrap:anywhere]", statusColor(value))}>{value}</span>;
 }
 
 function PriorityPill({ value }: { value: string }) {
-  return <span className={cn("inline-flex whitespace-nowrap rounded-full border px-2.5 py-1 text-[11px] font-semibold", priorityColor(value))}>{value}</span>;
+  return <span className={cn("inline-flex max-w-full whitespace-normal rounded-xl border px-2.5 py-1 text-[11px] font-semibold leading-4 [overflow-wrap:anywhere]", priorityColor(value))}>{value}</span>;
 }
 
 export default function ProblemsPage() {

@@ -158,16 +158,16 @@ function statusVariant(status: string): "success" | "warning" | "info" | "neutra
 
 function TicketPriorityBadge({ priority, className }: { priority: string; className?: string }) {
   return (
-    <Badge variant={priorityVariant(priority)} className={cn("min-w-0 max-w-full overflow-hidden", className)} title={priority}>
-      <span className="truncate">{priority}</span>
+    <Badge variant={priorityVariant(priority)} className={cn("min-w-0 max-w-full", className)} title={priority}>
+      <span className="whitespace-normal break-words [overflow-wrap:anywhere]">{priority}</span>
     </Badge>
   );
 }
 
 function TicketStatusBadge({ status, className }: { status: string; className?: string }) {
   return (
-    <Badge variant={statusVariant(status)} dot className={cn("min-w-0 max-w-full overflow-hidden [&>span:first-child]:shrink-0", className)} title={status}>
-      <span className="truncate">{status}</span>
+    <Badge variant={statusVariant(status)} dot className={cn("min-w-0 max-w-full [&>span:first-child]:shrink-0", className)} title={status}>
+      <span className="whitespace-normal break-words [overflow-wrap:anywhere]">{status}</span>
     </Badge>
   );
 }
@@ -501,7 +501,7 @@ export default function DashboardPage() {
                 })}
               </div>
               <div className="hidden xl:block">
-                <table className="w-full table-fixed text-left">
+                <table className="w-full table-fixed text-left [&_td]:align-top [&_td]:whitespace-normal [&_td]:[overflow-wrap:anywhere] [&_th]:whitespace-normal">
                   <caption className="sr-only">Highest priority active tickets</caption>
                   <colgroup>
                     <col className="w-16" />

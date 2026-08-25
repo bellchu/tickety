@@ -37,7 +37,7 @@ import {
 } from "@/lib/ticket-display";
 
 const SAVED_VIEWS_KEY = "tickety.ticket-queue.views.v1";
-const COLUMN_WIDTHS_KEY = "tickety.ticket-queue.column-widths.v1";
+const COLUMN_WIDTHS_KEY = "tickety.ticket-queue.column-widths.v2";
 const STATUS_FILTERS = ["Open", "Escalated", "Awaiting Review", "Closed"];
 const PRIORITIES = ["P1", "P2", "P3", "P4"];
 const PAGE_SIZES = [25, 50, 100];
@@ -46,13 +46,13 @@ const TABLE_COLUMN_KEYS = ["ticket", "requester", "priority", "routing", "status
 type TableColumnKey = (typeof TABLE_COLUMN_KEYS)[number];
 type TableColumnWidths = Record<TableColumnKey, number>;
 const DEFAULT_COLUMN_WIDTHS: TableColumnWidths = {
-  ticket: 320,
-  requester: 230,
-  priority: 110,
-  routing: 280,
-  status: 130,
-  created: 130,
-  lastContact: 140,
+  ticket: 220,
+  requester: 170,
+  priority: 90,
+  routing: 190,
+  status: 100,
+  created: 110,
+  lastContact: 120,
 };
 const MIN_COLUMN_WIDTHS: TableColumnWidths = {
   ticket: 220,
@@ -192,10 +192,10 @@ function TimelineValue({ value, label }: { value: string | null; label: string }
     <time
       dateTime={value || undefined}
       title={`${label}: ${formatOperationalTimestamp(value)}`}
-      className="inline-flex items-center gap-1.5 whitespace-nowrap text-xs text-ink-400"
+      className="flex min-w-0 items-start gap-1.5 whitespace-normal text-xs leading-5 text-ink-400"
     >
-      <Clock3 className="h-3.5 w-3.5" aria-hidden="true" />
-      {formatTimeAgo(value)}
+      <Clock3 className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+      <span className="min-w-0 break-words [overflow-wrap:anywhere]">{formatTimeAgo(value)}</span>
     </time>
   );
 }
@@ -555,9 +555,9 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
         <EmptyState title={activeFilterCount || search ? "No tickets match this view" : "No tickets yet"} description={activeFilterCount || search ? "Try removing a filter or changing the search terms." : onCreate ? "Create a ticket to start the support queue." : "No tickets are available in this workspace."} icon={<Inbox className="h-5 w-5" />} action={activeFilterCount || search ? <Button variant="secondary" onClick={clearFilters}>Clear filters</Button> : onCreate ? <Button variant="secondary" onClick={onCreate}>Create ticket</Button> : undefined} />
       ) : (
         <>
-          <div className="hidden overflow-hidden rounded-2xl border border-linen-400 bg-linen-50 shadow-sm md:block">
+          <div className="hidden overflow-hidden rounded-2xl border border-linen-400 bg-linen-50 shadow-sm xl:block">
             <div className="overflow-x-auto">
-	              <table className="table-fixed text-left" style={{ width: tableWidth }}>
+	              <table className="table-fixed text-left [&_td]:align-top [&_td]:whitespace-normal [&_td]:[overflow-wrap:anywhere] [&_th]:whitespace-normal" style={{ width: tableWidth, minWidth: "100%" }}>
                 <caption className="sr-only">Tickets in the current server-filtered page. Drag a column divider or focus it and use the arrow keys to resize columns.</caption>
                 <colgroup>
                   {canBulk && <col style={{ width: 48 }} />}
@@ -587,7 +587,7 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
                       {canBulk && <td className="px-4 py-4"><input type="checkbox" checked={selected.has(ticket.id)} onChange={() => toggleTicket(ticket.id)} aria-label={`Select ${ticket.subject}`} className="h-4 w-4" /></td>}
 	                      <td className="min-w-0 px-4 py-4"><Link href={`/tickets/${ticket.id}`} className="block min-w-0 text-ink-700 hover:text-semantic-primary hover:underline"><ListText text={ticket.subject} lines={2} className="text-sm font-semibold leading-5" /></Link><ListText text={`#${ticket.external_id || ticket.id}`} lines={1} className="mt-1 font-mono text-[11px] text-ink-400" /><div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px] text-ink-400"><span className="whitespace-nowrap">{sourceKindLabel(ticket)}</span>{ticket.ai_suggested_category && <ListText text={`AI issue: ${ticket.ai_suggested_category}`} lines={1} className="max-w-full" />}<span className="whitespace-nowrap">{analysisLifecycleLabel(ticket)}</span></div></td>
 	                      <td className="min-w-0 px-4 py-4"><ListText text={requesterName(ticket)} lines={2} className="text-xs font-semibold text-ink-700" />{requesterEmail(ticket) && <ListText text={requesterEmail(ticket) || ""} lines={2} className="mt-1 text-[11px] text-ink-500" />}<ListText text={ticket.requester_title || "Title not provided"} lines={2} className="mt-0.5 text-[10px] text-ink-400" /></td>
-	                      <td className="px-4 py-4"><Badge variant={badgeForPriority(ticket.priority)}>{ticket.priority}</Badge>{ticket.ai_suggested_priority && ticket.ai_suggested_priority !== ticket.priority && <span className="mt-1 block whitespace-nowrap text-[10px] font-medium text-ink-400">AI suggests {ticket.ai_suggested_priority}</span>}</td>
+	                      <td className="px-4 py-4"><Badge variant={badgeForPriority(ticket.priority)}>{ticket.priority}</Badge>{ticket.ai_suggested_priority && ticket.ai_suggested_priority !== ticket.priority && <span className="mt-1 block whitespace-normal break-words text-[10px] font-medium text-ink-400 [overflow-wrap:anywhere]">AI suggests {ticket.ai_suggested_priority}</span>}</td>
                       <td className="min-w-0 px-4 py-4"><ListText text={routingLabel(ticket)} lines={2} className="text-xs font-semibold leading-5 text-ink-600" /><ListText text={ticket.external_assignee_name || ticket.assignee_name || "Unassigned"} lines={2} className="mt-1 text-[11px] text-ink-400" /></td>
                       <td className="px-4 py-4"><Badge variant={badgeForStatus(ticket.status)} dot>{ticket.status}</Badge></td>
 	                      <td className="px-4 py-4"><TimelineValue value={ticketCreatedAt(ticket)} label="Created" /></td>
@@ -599,16 +599,16 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
             </div>
           </div>
 
-          <div className="grid gap-3 md:hidden">
+          <div className="grid gap-3 xl:hidden">
             {tickets.map((ticket) => (
               <DataListCard key={ticket.id} className={cn("rounded-2xl border-linen-400", selected.has(ticket.id) && "border-clay-300 bg-[var(--color-primary-soft)]/50")}>
                 <div className="flex items-start gap-3">
                   {canBulk && <input type="checkbox" checked={selected.has(ticket.id)} onChange={() => toggleTicket(ticket.id)} aria-label={`Select ${ticket.subject}`} className="mt-1 h-4 w-4 shrink-0" />}
-                  <div className="min-w-0 flex-1"><div className="flex flex-wrap gap-1.5"><Badge variant={badgeForPriority(ticket.priority)}>{ticket.priority}</Badge>{ticket.ai_suggested_priority && ticket.ai_suggested_priority !== ticket.priority && <span className="self-center text-[10px] font-medium text-ink-400">AI suggests {ticket.ai_suggested_priority}</span>}</div><Link href={`/tickets/${ticket.id}`} className="mt-3 block text-ink-700 hover:text-semantic-primary"><ListText text={ticket.subject} lines={2} className="text-sm font-semibold leading-5" /></Link><ListText text={`#${ticket.external_id || ticket.id}`} lines="wrap" className="mt-1 font-mono text-[11px] text-ink-400" /></div>
+                  <div className="min-w-0 flex-1"><div className="flex min-w-0 flex-wrap gap-1.5"><Badge variant={badgeForPriority(ticket.priority)}>{ticket.priority}</Badge>{ticket.ai_suggested_priority && ticket.ai_suggested_priority !== ticket.priority && <span className="min-w-0 max-w-full self-center whitespace-normal break-words text-[10px] font-medium text-ink-400 [overflow-wrap:anywhere]">AI suggests {ticket.ai_suggested_priority}</span>}</div><Link href={`/tickets/${ticket.id}`} className="mt-3 block text-ink-700 hover:text-semantic-primary"><ListText text={ticket.subject} lines={2} className="text-sm font-semibold leading-5" /></Link><ListText text={`#${ticket.external_id || ticket.id}`} lines="wrap" className="mt-1 font-mono text-[11px] text-ink-400" /></div>
                 </div>
                 <div className="mt-3 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px] text-ink-400"><span className="whitespace-nowrap">{sourceKindLabel(ticket)}</span>{ticket.ai_suggested_category && <ListText text={`AI issue: ${ticket.ai_suggested_category}`} lines={2} className="w-full xs:w-auto xs:max-w-[16rem]" />}<span className="whitespace-nowrap">{analysisLifecycleLabel(ticket)}</span></div>
 	                <dl className="mt-4 space-y-3 border-t border-linen-300 pt-3 text-xs"><div className="min-w-0"><dt className="text-ink-400">Requester</dt><dd className="mt-1"><ListText text={requesterName(ticket)} lines={2} className="font-semibold text-ink-600" /></dd>{requesterEmail(ticket) && <dd className="mt-0.5 flex min-w-0 items-start gap-1 text-ink-400"><Mail className="mt-0.5 h-3 w-3 shrink-0" aria-hidden="true" /><ListText text={requesterEmail(ticket) || ""} lines="wrap" className="min-w-0 flex-1" /></dd>}<dd className="mt-0.5"><ListText text={ticket.requester_title || "Title not provided"} lines={2} className="text-ink-400" /></dd></div><div className="min-w-0"><dt className="text-ink-400">Routing</dt><dd className="mt-1"><ListText text={routingLabel(ticket)} lines="wrap" className="font-semibold text-ink-600" /></dd><dd className="mt-0.5"><ListText text={ticket.external_assignee_name || ticket.assignee_name || "Unassigned"} lines="wrap" className="text-ink-400" /></dd></div><div><dt className="text-ink-400">Status</dt><dd className="mt-1"><Badge variant={badgeForStatus(ticket.status)} dot>{ticket.status}</Badge></dd></div></dl>
-	                <div className="mt-3 grid grid-cols-2 gap-2 rounded-xl bg-linen-100 p-3 text-[11px] text-ink-400"><div><span className="mb-1 flex items-center gap-1"><CalendarDays className="h-3 w-3" aria-hidden="true" />Created</span><TimelineValue value={ticketCreatedAt(ticket)} label="Created" /></div><div><span className="mb-1 flex items-center gap-1"><Clock3 className="h-3 w-3" aria-hidden="true" />Last contact</span><TimelineValue value={ticketLastCommunicationAt(ticket)} label="Last contact" /></div></div>
+	                <div className="mt-3 grid grid-cols-1 gap-3 rounded-xl bg-linen-100 p-3 text-[11px] text-ink-400 sm:grid-cols-2"><div className="min-w-0"><span className="mb-1 flex items-center gap-1"><CalendarDays className="h-3 w-3" aria-hidden="true" />Created</span><TimelineValue value={ticketCreatedAt(ticket)} label="Created" /></div><div className="min-w-0"><span className="mb-1 flex items-center gap-1"><Clock3 className="h-3 w-3" aria-hidden="true" />Last contact</span><TimelineValue value={ticketLastCommunicationAt(ticket)} label="Last contact" /></div></div>
               </DataListCard>
             ))}
           </div>
@@ -647,7 +647,7 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
 function FilterChip({ label, onRemove }: { label: string; onRemove: () => void }) {
   return (
     <span className="inline-flex min-h-7 items-center gap-1 rounded-full border border-linen-400 bg-linen-100 pl-2.5 pr-1 text-[11px] font-semibold text-ink-500">
-      <span className="max-w-52 truncate" title={label}>{label}</span>
+      <span className="max-w-52 whitespace-normal break-words [overflow-wrap:anywhere]" title={label}>{label}</span>
       <button type="button" onClick={onRemove} aria-label={`Remove ${label}`} className="grid h-8 w-8 place-items-center rounded-full hover:bg-linen-300 hover:text-ink-700 sm:h-6 sm:w-6">
         <X className="h-3 w-3" aria-hidden="true" />
       </button>

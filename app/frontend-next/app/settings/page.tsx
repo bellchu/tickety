@@ -1018,7 +1018,7 @@ function SetupStep({ label, done }: { label: string; done: boolean }) {
       done ? "border-moss-500/30 bg-moss-500/10 text-moss-600" : "border-linen-400 bg-linen-50 text-ink-400"
     )}>
       {done ? <CheckCircle2 className="w-3.5 h-3.5 shrink-0" /> : <span className="h-3.5 w-3.5 shrink-0 rounded-full border border-linen-500" />}
-      <span className="truncate" title={label}>{label}</span>
+      <span className="min-w-0 whitespace-normal break-words [overflow-wrap:anywhere]" title={label}>{label}</span>
     </div>
   );
 }

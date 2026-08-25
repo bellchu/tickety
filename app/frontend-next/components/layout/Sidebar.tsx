@@ -221,10 +221,10 @@ export function Sidebar({
               {initials(isDemoFallback ? "Demo workspace" : me?.name)}
             </span>
             <span className="min-w-0 flex-1">
-              <span className="block truncate font-medium text-[#F2F5F8]">
+              <span className="block whitespace-normal break-words font-medium text-[#F2F5F8] [overflow-wrap:anywhere]">
                 {isDemoFallback ? "Demo workspace" : me?.name || "My profile"}
               </span>
-              <span className="mt-0.5 block truncate text-[11px] text-slate-500">
+              <span className="mt-0.5 block whitespace-normal break-words text-[11px] text-slate-500 [overflow-wrap:anywhere]">
                 {isDemoFallback ? "View demo profile" : me?.email || "View my profile"}
               </span>
             </span>

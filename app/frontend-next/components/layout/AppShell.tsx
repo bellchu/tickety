@@ -173,7 +173,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               className="min-w-0 rounded-md focus:outline-none focus:ring-2 focus:ring-clay-400"
             >
               <TicketyLogo size="sm" />
-              <span className="mt-1 block max-w-[8.5rem] truncate text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-400">
+              <span className="mt-1 block max-w-[8.5rem] whitespace-normal break-words text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-400 [overflow-wrap:anywhere]">
                 {currentNavigationItem?.label || "Workspace"}
               </span>
             </Link>

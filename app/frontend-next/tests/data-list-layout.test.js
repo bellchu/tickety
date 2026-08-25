@@ -16,12 +16,14 @@ test("shared list primitives keep long values visible and tables navigable", () 
   assert.match(dataList, /w-full table-fixed/);
   assert.match(dataList, /title=\{text\}/);
   assert.match(dataList, /\[overflow-wrap:anywhere\]/);
-  assert.match(dataList, /line-clamp-2/);
+  assert.match(dataList, /whitespace-normal break-words/);
+  assert.doesNotMatch(dataList, /line-clamp|truncate/);
   assert.match(dataList, /min-w-0 rounded-xl/);
 
   assert.match(badge, /max-w-full/);
   assert.match(badge, /title=\{title \?\?/);
-  assert.match(badge, /min-w-0 truncate/);
+  assert.match(badge, /whitespace-normal break-words/);
+  assert.doesNotMatch(badge, /truncate|whitespace-nowrap/);
 });
 
 test("data-heavy pages pair bounded desktop tables with mobile cards", () => {
@@ -52,10 +54,28 @@ test("ticket queues preserve hierarchy without hiding routing or requester value
   assert.match(ticketList, /DataListCard/);
   assert.match(ticketList, /text=\{routingLabel\(ticket\)\} lines="wrap"/);
   assert.match(ticketList, /text=\{requesterName\(ticket\)\} lines=\{2\}/);
-  assert.match(ticketList, /<table className="table-fixed text-left" style=\{\{ width: tableWidth \}\}>/);
-  assert.match(dashboard, /<table className="w-full table-fixed text-left">/);
+  assert.match(ticketList, /<table className="table-fixed text-left \[&_td\]:align-top \[&_td\]:whitespace-normal/);
+  assert.match(ticketList, /style=\{\{ width: tableWidth, minWidth: "100%" \}\}/);
+  assert.match(ticketList, /COLUMN_WIDTHS_KEY = "tickety\.ticket-queue\.column-widths\.v2"/);
+  assert.match(ticketList, /grid grid-cols-1 gap-3[^\n]+sm:grid-cols-2/);
+  assert.doesNotMatch(ticketList, /TimelineValue[\s\S]{0,500}whitespace-nowrap/);
+  assert.match(dashboard, /<table className="w-full table-fixed text-left \[&_td\]:align-top \[&_td\]:whitespace-normal/);
   assert.match(dashboard, /text=\{ticket\.subject\} lines=\{2\}/);
   assert.match(dashboard, /xl:hidden/);
+});
+
+test("report charts allocate multi-line labels outside the plotting area", () => {
+  const reports = read("app", "reports", "page.tsx");
+  const pageLayout = read("components", "layout", "PageLayout.tsx");
+
+  assert.match(reports, /function wrapChartLabel/);
+  assert.match(reports, /function categoryChartHeight/);
+  assert.match(reports, /tick=\{<WrappedYAxisTick \/>\}/);
+  assert.match(reports, /aria-label="Ticket category legend"/);
+  assert.equal((reports.match(/isAnimationActive=\{false\}/g) || []).length, 4);
+  assert.doesNotMatch(reports, /<Legend/);
+  assert.match(reports, /<PageFrame width="wide">/);
+  assert.match(pageLayout, /mx-auto min-w-0 w-full/);
 });
 
 test("secondary lists safely wrap external and AI-generated content", () => {

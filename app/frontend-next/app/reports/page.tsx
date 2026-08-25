@@ -7,7 +7,7 @@ import {
 } from "lucide-react";
 import {
   AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell,
-  XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend,
+  XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
 } from "recharts";
 import { cn } from "@/lib/utils";
 import { Alert, EmptyState, ErrorState, Skeleton } from "@/components/ui";
@@ -15,6 +15,45 @@ import { PageFrame, PageHeader } from "@/components/layout/PageLayout";
 
 const CHART_COLORS = ["#803CE8", "#005EB8", "#03CCB5", "#66FC90", "#E11BCC", "#F6AB3B", "#CF3E54"];
 const PRIORITY_COLORS: Record<string, string> = { P1: "#CF3E54", P2: "#F6AB3B", P3: "#803CE8", P4: "#7E8691" };
+
+function wrapChartLabel(value: unknown, maxCharacters = 18) {
+  const words = String(value ?? "").trim().split(/\s+/).filter(Boolean);
+  const chunks = words.flatMap((word) => {
+    if (word.length <= maxCharacters) return [word];
+    return Array.from({ length: Math.ceil(word.length / maxCharacters) }, (_, index) =>
+      word.slice(index * maxCharacters, (index + 1) * maxCharacters)
+    );
+  });
+
+  const lines = chunks.reduce<string[]>((result, chunk) => {
+    const current = result.at(-1);
+    if (!current || current.length + chunk.length + 1 > maxCharacters) result.push(chunk);
+    else result[result.length - 1] = `${current} ${chunk}`;
+    return result;
+  }, []);
+
+  return lines.length > 0 ? lines : [""];
+}
+
+function categoryChartHeight(data: Array<Record<string, unknown>>, key: string) {
+  const labelRows = data.reduce((total, item) => total + wrapChartLabel(item[key]).length, 0);
+  return Math.max(240, labelRows * 16 + data.length * 18 + 48);
+}
+
+function WrappedYAxisTick({ x = 0, y = 0, payload }: { x?: number; y?: number; payload?: { value?: unknown } }) {
+  const lines = wrapChartLabel(payload?.value);
+  const firstLineOffset = -((lines.length - 1) * 0.55);
+
+  return (
+    <g transform={`translate(${x},${y})`} aria-hidden="true">
+      <text textAnchor="end" fill="#7E8691" fontSize={10}>
+        {lines.map((line, index) => (
+          <tspan key={`${line}-${index}`} x={-8} dy={index === 0 ? `${firstLineOffset}em` : "1.1em"}>{line}</tspan>
+        ))}
+      </text>
+    </g>
+  );
+}
 
 export default function ReportsPage() {
   const summaryQuery = useQuery({ queryKey: ["report-summary"], queryFn: api.getReportSummary });
@@ -41,7 +80,7 @@ export default function ReportsPage() {
   const resolutionData = (resolutionTime?.categories || []).map((c, i) => ({ category: c, hours: resolutionTime?.avg_hours?.[i] ?? 0 }));
 
   return (
-    <PageFrame>
+    <PageFrame width="wide">
       <PageHeader eyebrow="Operational analytics" icon={<BarChart3 className="h-4 w-4" />} title="Reports" description="Understand service demand, delivery speed, and SLA performance across the operating model." />
 
       {failed === queries.length && (
@@ -65,7 +104,7 @@ export default function ReportsPage() {
       </div>
 
       {/* Volume chart */}
-      <div className="card-surface p-5">
+      <div className="card-surface min-w-0 p-4 sm:p-5">
         <h2 className="text-sm font-semibold text-ink-700 mb-4">Ticket Volume (Last 30 Days)</h2>
         {volumeQuery.isLoading ? <ChartSkeleton /> : volumeQuery.isError ? <SectionError onRetry={() => void volumeQuery.refetch()} /> : volumeData.length > 0 ? (
           <><p className="sr-only">Daily ticket volume over the last 30 days. Values range from {Math.min(...volumeData.map((item) => item.count))} to {Math.max(...volumeData.map((item) => item.count))} tickets per day.</p><ResponsiveContainer width="100%" height={240}>
@@ -80,7 +119,7 @@ export default function ReportsPage() {
               <XAxis dataKey="day" tick={{ fontSize: 10, fill: "#7E8691" }} interval="preserveStartEnd" />
               <YAxis tick={{ fontSize: 10, fill: "#7E8691" }} allowDecimals={false} />
               <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #DDE2EA" }} />
-              <Area type="monotone" dataKey="count" stroke="#803CE8" strokeWidth={2} fill="url(#volGrad)" />
+              <Area type="monotone" dataKey="count" stroke="#803CE8" strokeWidth={2} fill="url(#volGrad)" isAnimationActive={false} />
             </AreaChart>
           </ResponsiveContainer></>
         ) : (
@@ -88,37 +127,45 @@ export default function ReportsPage() {
         )}
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="grid min-w-0 grid-cols-1 items-start gap-6 lg:grid-cols-2">
         {/* By category */}
-        <div className="card-surface p-5">
+        <div className="card-surface min-w-0 p-4 sm:p-5">
           <h2 className="text-sm font-semibold text-ink-700 mb-4">Tickets by Category</h2>
           {categoryQuery.isLoading ? <ChartSkeleton /> : categoryQuery.isError ? <SectionError onRetry={() => void categoryQuery.refetch()} /> : categoryData.length > 0 ? (
             <div className="space-y-4">
               {byCategory?.truncated && <Alert variant="warning" title="Category view is limited" className="text-xs">Showing {categoryData.length.toLocaleString()} of {byCategory.total_categories.toLocaleString()} categories. Counts are exact for the categories shown.</Alert>}
-              <ResponsiveContainer width="100%" height={220}>
+              <ResponsiveContainer width="100%" height={210}>
                 <PieChart>
-                  <Pie data={categoryData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={80} innerRadius={40}>
+                  <Pie data={categoryData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={78} innerRadius={40} isAnimationActive={false}>
                     {categoryData.map((_, i) => <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />)}
                   </Pie>
                   <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8 }} />
-                  <Legend wrapperStyle={{ fontSize: 11 }} />
                 </PieChart>
               </ResponsiveContainer>
+              <ul className="grid min-w-0 gap-2 sm:grid-cols-2" aria-label="Ticket category legend">
+                {categoryData.map((item, index) => (
+                  <li key={`${item.name}-${index}`} className="flex min-w-0 items-start gap-2 rounded-lg bg-linen-100 px-3 py-2 text-xs">
+                    <span className="mt-1 h-2.5 w-2.5 shrink-0 rounded-sm" style={{ backgroundColor: CHART_COLORS[index % CHART_COLORS.length] }} aria-hidden="true" />
+                    <span className="min-w-0 flex-1 whitespace-normal break-words leading-5 text-ink-600 [overflow-wrap:anywhere]">{item.name}</span>
+                    <span className="shrink-0 font-semibold tabular-nums text-ink-700">{item.value.toLocaleString()}</span>
+                  </li>
+                ))}
+              </ul>
             </div>
           ) : <EmptyChart />}
         </div>
 
         {/* By status */}
-        <div className="card-surface p-5">
+        <div className="card-surface min-w-0 p-4 sm:p-5">
           <h2 className="text-sm font-semibold text-ink-700 mb-4">Tickets by Status</h2>
           {statusQuery.isLoading ? <ChartSkeleton /> : statusQuery.isError ? <SectionError onRetry={() => void statusQuery.refetch()} /> : statusData.length > 0 ? (
-            <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={statusData} layout="vertical">
+            <ResponsiveContainer width="100%" height={categoryChartHeight(statusData, "name")}>
+              <BarChart data={statusData} layout="vertical" margin={{ left: 8, right: 16 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#DDE2EA" horizontal={false} />
                 <XAxis type="number" tick={{ fontSize: 10, fill: "#7E8691" }} allowDecimals={false} />
-                <YAxis type="category" dataKey="name" tick={{ fontSize: 10, fill: "#7E8691" }} width={90} />
+                <YAxis type="category" dataKey="name" tick={<WrappedYAxisTick />} width={140} interval={0} />
                 <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #DDE2EA" }} />
-                <Bar dataKey="value" radius={[0, 4, 4, 0]}>
+                <Bar dataKey="value" radius={[0, 4, 4, 0]} isAnimationActive={false}>
                   {statusData.map((_, i) => <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />)}
                 </Bar>
               </BarChart>
@@ -128,15 +175,15 @@ export default function ReportsPage() {
       </div>
 
       {/* SLA compliance */}
-      <div className="card-surface p-5">
+      <div className="card-surface min-w-0 p-4 sm:p-5">
         <h2 className="text-sm font-semibold text-ink-700 mb-4">SLA Compliance by Priority</h2>
         {slaQuery.isLoading ? <ChartSkeleton /> : slaQuery.isError ? <SectionError onRetry={() => void slaQuery.refetch()} /> : slaData.length > 0 ? (
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             {slaData.map((s) => (
-              <div key={s.priority} className="rounded border border-linen-400 p-4">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm font-semibold text-ink-700">{s.priority}</span>
-                  <span className={cn("text-lg font-bold", s.compliance >= 90 ? "text-moss-500" : s.compliance >= 70 ? "text-amber-500" : "text-rust-500")}>
+              <div key={s.priority} className="min-w-0 rounded border border-linen-400 p-4">
+                <div className="mb-2 flex min-w-0 flex-wrap items-start justify-between gap-2">
+                  <span className="min-w-0 whitespace-normal break-words text-sm font-semibold text-ink-700 [overflow-wrap:anywhere]">{s.priority}</span>
+                  <span className={cn("shrink-0 text-lg font-bold", s.compliance >= 90 ? "text-moss-500" : s.compliance >= 70 ? "text-amber-500" : "text-rust-500")}>
                     {s.compliance}%
                   </span>
                 </div>
@@ -151,18 +198,18 @@ export default function ReportsPage() {
       </div>
 
       {/* Resolution time by category */}
-      <div className="card-surface p-5">
+      <div className="card-surface min-w-0 p-4 sm:p-5">
         <h2 className="text-sm font-semibold text-ink-700 mb-4">Avg Resolution Time by Category (hours)</h2>
         {resolutionQuery.isLoading ? <ChartSkeleton /> : resolutionQuery.isError ? <SectionError onRetry={() => void resolutionQuery.refetch()} /> : resolutionData.length > 0 ? (
           <div className="space-y-4">
             {resolutionTime?.truncated && <Alert variant="warning" title="Resolution averages are sampled" className="text-xs">Calculated from the latest {resolutionTime.analyzed_tickets.toLocaleString()} of {resolutionTime.total_matching_tickets.toLocaleString()} matching resolved tickets.</Alert>}
-            <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={resolutionData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#DDE2EA" vertical={false} />
-                <XAxis dataKey="category" tick={{ fontSize: 10, fill: "#7E8691" }} />
-                <YAxis tick={{ fontSize: 10, fill: "#7E8691" }} />
+            <ResponsiveContainer width="100%" height={categoryChartHeight(resolutionData, "category")}>
+              <BarChart data={resolutionData} layout="vertical" margin={{ left: 8, right: 16 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#DDE2EA" horizontal={false} />
+                <XAxis type="number" tick={{ fontSize: 10, fill: "#7E8691" }} />
+                <YAxis type="category" dataKey="category" tick={<WrappedYAxisTick />} width={140} interval={0} />
                 <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #DDE2EA" }} />
-                <Bar dataKey="hours" radius={[4, 4, 0, 0]}>
+                <Bar dataKey="hours" radius={[0, 4, 4, 0]} isAnimationActive={false}>
                   {resolutionData.map((_, i) => <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />)}
                 </Bar>
               </BarChart>
@@ -189,9 +236,9 @@ function KpiTile({ label, value, icon: Icon, color, loading }: { label: string; 
 
 function MiniStat({ label, value, loading }: { label: string; value: string; loading: boolean }) {
   return (
-    <div className="card-surface p-4 flex items-center justify-between">
-      <span className="text-sm text-ink-500">{label}</span>
-      {loading ? <Skeleton className="h-6 w-16" /> : <span className="text-lg font-bold text-ink-700 tabular-nums">{value}</span>}
+    <div className="card-surface flex min-w-0 flex-wrap items-center justify-between gap-2 p-4">
+      <span className="min-w-0 whitespace-normal break-words text-sm text-ink-500 [overflow-wrap:anywhere]">{label}</span>
+      {loading ? <Skeleton className="h-6 w-16" /> : <span className="shrink-0 text-lg font-bold text-ink-700 tabular-nums">{value}</span>}
     </div>
   );
 }
