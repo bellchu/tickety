@@ -11,6 +11,7 @@ from app.backend.database import (
     Base,
     ExternalActivityRecord,
     ExternalConversationRecord,
+    ExternalUserRecord,
     SyncStateRecord,
     TicketCommentRecord,
     TicketRecord,
@@ -45,7 +46,9 @@ class FreshserviceRealtimeBoundaryTests(unittest.TestCase):
             poolclass=StaticPool,
         )
         Base.metadata.create_all(self.engine)
-        self.session_factory = sessionmaker(bind=self.engine)
+        # Match production SessionLocal semantics so repeated embedded
+        # identities in one projection exercise the no-autoflush path.
+        self.session_factory = sessionmaker(bind=self.engine, autoflush=False)
         self.cutover = datetime.utcnow().replace(microsecond=0) - timedelta(hours=2)
 
     def tearDown(self):
@@ -130,6 +133,7 @@ class FreshserviceRealtimeBoundaryTests(unittest.TestCase):
         with self.session_factory() as db:
             rendered = db.query(TicketRecord).one().external_conversation_text
             payload = json.loads(rendered)
+            self.assertEqual(db.query(ExternalUserRecord).count(), 1)
             self.assertLessEqual(len(rendered.encode("utf-8")), 12_000)
             self.assertLessEqual(payload["selected_records"], 50)
             self.assertEqual(payload["total_records"], 60)

@@ -403,12 +403,26 @@ def _upsert_embedded_external_user(
     title = _normalize_text(title).strip() if title else ""
     if not external_id or user_type not in {"agent", "requester"}:
         return
-    record = db.query(ExternalUserRecord).filter(
-        ExternalUserRecord.binding_id == binding_id,
-        ExternalUserRecord.provider == provider,
-        ExternalUserRecord.user_type == user_type,
-        ExternalUserRecord.external_id == external_id,
-    ).first()
+    # Production sessions intentionally disable autoflush.  A single ticket
+    # can contain several conversations from the same author, so reuse an
+    # identity already staged in this transaction before querying persisted
+    # rows.  Otherwise each conversation stages a duplicate record and the
+    # commit fails the external-user identity constraint.
+    record = next((
+        pending for pending in db.new
+        if isinstance(pending, ExternalUserRecord)
+        and pending.binding_id == binding_id
+        and pending.provider == provider
+        and pending.user_type == user_type
+        and pending.external_id == external_id
+    ), None)
+    if record is None:
+        record = db.query(ExternalUserRecord).filter(
+            ExternalUserRecord.binding_id == binding_id,
+            ExternalUserRecord.provider == provider,
+            ExternalUserRecord.user_type == user_type,
+            ExternalUserRecord.external_id == external_id,
+        ).first()
     now = datetime.utcnow()
     if record is None:
         record = ExternalUserRecord(
