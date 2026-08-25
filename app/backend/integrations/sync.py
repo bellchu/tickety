@@ -38,6 +38,11 @@ from ..ticket_vectors import (
     refresh_ticket_documents_if_indexed,
 )
 from ..ai_state import invalidate_ticket_ai, invalidate_ticket_resolution
+from ..ai_eligibility import (
+    active_ticket_filter,
+    mark_terminal_ai_not_applicable,
+    ticket_is_terminal,
+)
 from .. import settings as settings_module
 from .registry import get_adapter
 
@@ -57,7 +62,14 @@ def _enabled_analysis_artifacts(*, downstream_only: bool = False) -> set[str]:
     return artifacts
 
 
-def _queue_analysis(ticket: TicketRecord, artifacts: set[str]) -> None:
+def _queue_analysis(
+    db: Session,
+    ticket: TicketRecord,
+    artifacts: set[str],
+) -> None:
+    if ticket_is_terminal(db, ticket):
+        mark_terminal_ai_not_applicable(ticket)
+        return
     if not artifacts:
         return
     if ticket.ai_status == "queued":
@@ -140,11 +152,11 @@ def _missing_automatic_artifacts(
     if "triage" in generated and (
         stale or not ticket.ai_reasoning or not ticket.ai_suggested_team
     ):
-        missing = {"triage"}
-    elif "summary" in generated and (stale or not ticket.summary):
-        missing = {"summary"}
-    elif "resolution" in generated and (stale or not ticket.recommended_solution):
-        missing = {"resolution"}
+        missing.add("triage")
+    if "summary" in generated and (stale or not ticket.summary):
+        missing.add("summary")
+    if "resolution" in generated and (stale or not ticket.recommended_solution):
+        missing.add("resolution")
     if missing and "route" in enabled:
         missing.add("route")
     return missing
@@ -154,7 +166,7 @@ def _staged_automatic_artifacts(
     ticket: TicketRecord,
     eligible: set[str],
 ) -> set[str]:
-    """Admit one provider-backed stage at a time to avoid traffic bursts."""
+    """Admit every missing eligible stage as one durable ticket pipeline."""
     enabled = _enabled_analysis_artifacts()
     requested = eligible & enabled
     if not requested:
@@ -166,11 +178,13 @@ def _staged_automatic_artifacts(
         stale or not ticket.ai_reasoning or not ticket.ai_suggested_team
     ):
         stage = {"triage"}
-    elif "summary" in requested and (stale or not ticket.summary):
-        stage = {"summary"}
-    elif "resolution" in requested and (stale or not ticket.recommended_solution):
-        stage = {"resolution"}
     else:
+        stage = set()
+    if "summary" in requested and (stale or not ticket.summary):
+        stage.add("summary")
+    if "resolution" in requested and (stale or not ticket.recommended_solution):
+        stage.add("resolution")
+    if not stage:
         return set()
     if "route" in requested:
         stage.add("route")
@@ -226,6 +240,7 @@ def queue_recent_automatic_ai(
         tickets = db.query(TicketRecord).filter(
             TicketRecord.binding_id == state.binding_id,
             TicketRecord.external_source == state.provider,
+            active_ticket_filter(db),
             ticket_created_within_filter(cutoff),
             or_(
                 TicketRecord.ai_status.is_(None),
@@ -241,7 +256,7 @@ def queue_recent_automatic_ai(
             artifacts = _missing_automatic_artifacts(ticket, enabled)
             if not artifacts:
                 continue
-            _queue_analysis(ticket, artifacts)
+            _queue_analysis(db, ticket, artifacts)
             result["queued"] += 1
             remaining -= 1
             if remaining <= 0:
@@ -287,10 +302,7 @@ def queue_active_routing_backlog(
         tickets = db.query(TicketRecord).filter(
             TicketRecord.binding_id == state.binding_id,
             TicketRecord.external_source == state.provider,
-            or_(
-                TicketRecord.status.is_(None),
-                func.lower(TicketRecord.status).notin_(("closed", "resolved", "cancelled")),
-            ),
+            active_ticket_filter(db),
             or_(
                 TicketRecord.ai_status.is_(None),
                 TicketRecord.ai_status.notin_(unavailable_statuses),
@@ -306,7 +318,7 @@ def queue_active_routing_backlog(
             TicketRecord.id.asc(),
         ).limit(remaining).all()
         for ticket in tickets:
-            _queue_analysis(ticket, {"triage", "route"})
+            _queue_analysis(db, ticket, {"triage", "route"})
             result["queued"] = int(result["queued"]) + 1
             remaining -= 1
             if remaining <= 0:
@@ -1410,9 +1422,12 @@ def _apply_external_ticket(
                 conversations=ext.conversations,
                 confirmed_absent_ids=confirmed_absent,
             ))
-        requested = _staged_automatic_artifacts(ticket, eligible_artifacts)
-        if requested:
-            _queue_analysis(ticket, requested)
+        if ticket_is_terminal(db, ticket):
+            mark_terminal_ai_not_applicable(ticket)
+        else:
+            requested = _staged_automatic_artifacts(ticket, eligible_artifacts)
+            if requested:
+                _queue_analysis(db, ticket, requested)
     db.commit()
     db.refresh(ticket)
     if action == "updated":
@@ -1700,7 +1715,7 @@ def _hydrate_freshservice_conversations(
                 )
             requested = _staged_automatic_artifacts(ticket, artifacts)
             if requested:
-                _queue_analysis(ticket, requested)
+                _queue_analysis(db, ticket, requested)
             ticket.external_conversations_synced_at = datetime.utcnow()
             db.commit()
             hydrated += 1

@@ -220,6 +220,7 @@ class AIStatusPageApiTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["queue"]["total_tickets"], 11)
         self.assertEqual(payload["queue"]["not_analyzed"], 1)
+        self.assertEqual(payload["queue"]["not_applicable"], 1)
         self.assertEqual(payload["queue"]["queued"], 2)
         self.assertEqual(payload["queue"]["queued_ready"], 1)
         self.assertEqual(payload["queue"]["retry_scheduled"], 1)
@@ -235,6 +236,7 @@ class AIStatusPageApiTests(unittest.TestCase):
         self.assertEqual(tasks["running-active"]["lifecycle"], "running")
         self.assertEqual(tasks["running-expired"]["lifecycle"], "lease_expired")
         self.assertEqual(tasks["triage-complete"]["lifecycle"], "completed")
+        self.assertEqual(tasks["closed-paused"]["lifecycle"], "not_applicable")
         self.assertEqual(
             tasks["queued-ready"]["requested_artifacts"],
             ["summary", "triage"],
@@ -311,6 +313,17 @@ class AIStatusPageApiTests(unittest.TestCase):
         self.assertEqual(active.status_code, 200, active.text)
         self.assertEqual(active.json()["total_tasks"], 1)
         self.assertEqual(active.json()["tasks"][0]["ticket_id"], "queued-retry")
+
+        historical = self.client.get(
+            "/admin/settings/ai-status",
+            params={"view": "not_applicable"},
+            headers=self.headers,
+        )
+        self.assertEqual(historical.status_code, 200, historical.text)
+        self.assertEqual(historical.json()["total_tasks"], 1)
+        self.assertEqual(
+            historical.json()["tasks"][0]["lifecycle"], "not_applicable"
+        )
 
         for params in ({"view": "arbitrary"}, {"limit": 101}, {"offset": -1}):
             with self.subTest(params=params):

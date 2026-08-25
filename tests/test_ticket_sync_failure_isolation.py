@@ -218,7 +218,8 @@ class TicketSyncFailureIsolationTests(unittest.TestCase):
             self.assertEqual(ticket.subject, "Keep local subject")
             self.assertEqual(ticket.description, "Keep local description")
             self.assertEqual(ticket.priority, "P3")
-            self.assertIsNone(ticket.ai_status)
+            self.assertEqual(ticket.ai_status, "not_applicable")
+            self.assertEqual(ticket.ai_error, "terminal_ticket")
             self.assertIsNone(ticket.ai_requested_artifacts)
             state = db.query(SyncStateRecord).filter(
                 SyncStateRecord.provider == "freshservice"

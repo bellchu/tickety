@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Optional
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from sqlalchemy import func, or_
+from sqlalchemy import case, func, or_
 
 from .database import (
     ExternalAttachmentRecord,
@@ -13,6 +13,7 @@ from .database import (
     SyncStateRecord,
     TicketRecord,
 )
+from .ai_eligibility import active_ticket_filter, mark_terminal_ai_not_applicable
 from .attachment_storage import attachment_storage_configured
 from .integrations.sync import (
     AUTOMATIC_FETCH_DAYS,
@@ -93,11 +94,103 @@ def _bounded_interval(env_name: str, default: int, minimum: int, maximum: int) -
     return max(minimum, min(configured, maximum))
 
 
+async def _process_ai_candidates(
+    candidates: list[tuple[str, Optional[str]]],
+) -> Optional[LLMCapacityError]:
+    """Process ticket pipelines concurrently with one session per ticket."""
+    if not candidates:
+        return None
+    from .main import _auto_process
+
+    probe = SessionLocal()
+    try:
+        # SQLite test/dev databases commonly use a single shared connection;
+        # production Postgres gets real concurrent ticket pipelines.
+        concurrency = 1 if probe.bind.dialect.name == "sqlite" else _bounded_interval(
+            "AI_BACKGROUND_CONCURRENCY", 4, 1, 16
+        )
+    finally:
+        probe.close()
+    semaphore = asyncio.Semaphore(concurrency)
+    stop = asyncio.Event()
+
+    async def process_one(
+        ticket_id: str,
+        requested_artifact: Optional[str],
+    ) -> Optional[LLMCapacityError]:
+        async with semaphore:
+            if stop.is_set():
+                return None
+            db = SessionLocal()
+            try:
+                ticket = db.query(TicketRecord).filter(
+                    TicketRecord.id == ticket_id,
+                    active_ticket_filter(db),
+                ).with_for_update().first()
+                now = datetime.utcnow()
+                live_claim = bool(
+                    ticket
+                    and ticket.ai_status == "running"
+                    and ticket.ai_lease_expires_at
+                    and ticket.ai_lease_expires_at >= now
+                )
+                retry_due = bool(
+                    ticket
+                    and (
+                        ticket.ai_next_attempt_at is None
+                        or ticket.ai_next_attempt_at <= now
+                    )
+                )
+                if (
+                    not ticket
+                    or live_claim
+                    or not retry_due
+                    or ticket.ai_status in {"dead_letter", "failed"}
+                ):
+                    db.rollback()
+                    return None
+                if requested_artifact:
+                    missing = (
+                        ticket.summary is None
+                        if requested_artifact == "summary"
+                        else ticket.recommended_solution is None
+                    )
+                    if not missing or ticket.ai_status == "queued":
+                        db.rollback()
+                        return None
+                    ticket.ai_requested_artifacts = requested_artifact
+                    ticket.ai_status = "queued"
+                force = ticket.ai_status in {"queued", "running"}
+                db.commit()
+                db.refresh(ticket)
+                await _auto_process(ticket, db, force=force)
+                return None
+            except LLMCapacityError as exc:
+                db.rollback()
+                stop.set()
+                return exc
+            except Exception as exc:
+                db.rollback()
+                print(f"[auto-triage] error kind={type(exc).__name__}")
+                return None
+            finally:
+                db.close()
+
+    results = await asyncio.gather(*(
+        process_one(ticket_id, artifact)
+        for ticket_id, artifact in candidates
+    ))
+    return next((result for result in results if result is not None), None)
+
+
 def _auto_triage_job():
-    """Background scanner: pick up tickets with missing AI data and fill
-    the gaps — triage first, then summary, then resolution. The number of
-    tickets admitted per sweep is bounded independently from provider RPM/TPM
-    enforcement so a seven-day repair window cannot become a traffic burst."""
+    """Admit prioritized ticket pipelines and process them concurrently.
+
+    Each ticket retains one durable claim while its missing triage, summary,
+    route, and resolution artifacts run. Provider concurrency adapts
+    independently, so the sweep size is a fairness bound rather than a hard
+    provider-rate ceiling.
+    """
     _refresh_admin_settings()
     try:
         db = SessionLocal()
@@ -144,7 +237,25 @@ def _auto_triage_job():
             TicketRecord.external_source.is_(None),
             TicketRecord.external_source.in_(["manual", "standalone"]),
         )
+        priority_order = case(
+            (func.upper(TicketRecord.priority) == "P1", 0),
+            (func.upper(TicketRecord.priority) == "P2", 1),
+            (func.upper(TicketRecord.priority) == "P3", 2),
+            (func.upper(TicketRecord.priority) == "P4", 3),
+            else_=4,
+        )
+        # Cancel legacy queued work that became ineligible after its source
+        # ticket entered a configured terminal state.
+        terminal_pending = db.query(TicketRecord).filter(
+            TicketRecord.ai_status.in_(("queued", "running")),
+            ~active_ticket_filter(db),
+        ).all()
+        for ticket in terminal_pending:
+            mark_terminal_ai_not_applicable(ticket)
+        if terminal_pending:
+            db.commit()
         queued = db.query(TicketRecord).filter(
+            active_ticket_filter(db),
             or_(
                 TicketRecord.ai_status == "queued",
                 (
@@ -156,17 +267,32 @@ def _auto_triage_job():
                 TicketRecord.ai_next_attempt_at.is_(None),
                 TicketRecord.ai_next_attempt_at <= datetime.utcnow(),
             ),
+        ).order_by(
+            priority_order.asc(),
+            TicketRecord.ai_next_attempt_at.asc(),
+            TicketRecord.updated_at.asc(),
+            TicketRecord.id.asc(),
         ).limit(batch_size).all()
         remaining = max(0, batch_size - len(queued))
         # Find tickets missing ANY AI data (prioritize untriaged first)
         untriaged = (
             db.query(TicketRecord).filter(
+                active_ticket_filter(db),
                 internal_automatic_source,
-                TicketRecord.ai_reasoning.is_(None),
+                or_(
+                    TicketRecord.ai_reasoning.is_(None),
+                    TicketRecord.ai_status.in_((
+                        "stale", "legacy_stale", "provenance_unknown",
+                    )),
+                ),
                 or_(
                     TicketRecord.ai_status.is_(None),
                     TicketRecord.ai_status.notin_(["dead_letter", "failed"]),
                 ),
+            ).order_by(
+                priority_order.asc(),
+                TicketRecord.created_at.asc(),
+                TicketRecord.id.asc(),
             ).limit(remaining).all()
             if auto_triage and remaining else []
         )
@@ -181,6 +307,7 @@ def _auto_triage_job():
         remaining = max(0, batch_size - len(selected_ids))
 
         summary_query = db.query(TicketRecord).filter(
+            active_ticket_filter(db),
             internal_automatic_source,
             TicketRecord.ai_reasoning.isnot(None),
             TicketRecord.summary.is_(None),
@@ -194,6 +321,10 @@ def _auto_triage_job():
                 TicketRecord.ai_next_attempt_at.is_(None),
                 TicketRecord.ai_next_attempt_at <= datetime.utcnow(),
             ),
+        ).order_by(
+            priority_order.asc(),
+            TicketRecord.updated_at.asc(),
+            TicketRecord.id.asc(),
         )
         if selected_ids:
             summary_query = summary_query.filter(TicketRecord.id.notin_(selected_ids))
@@ -206,6 +337,7 @@ def _auto_triage_job():
         remaining = max(0, batch_size - len(selected_ids))
 
         resolution_query = db.query(TicketRecord).filter(
+            active_ticket_filter(db),
             internal_automatic_source,
             TicketRecord.ai_reasoning.isnot(None),
             TicketRecord.summary.isnot(None),
@@ -220,6 +352,10 @@ def _auto_triage_job():
                 TicketRecord.ai_next_attempt_at.is_(None),
                 TicketRecord.ai_next_attempt_at <= datetime.utcnow(),
             ),
+        ).order_by(
+            priority_order.asc(),
+            TicketRecord.updated_at.asc(),
+            TicketRecord.id.asc(),
         )
         if selected_ids:
             resolution_query = resolution_query.filter(
@@ -239,134 +375,27 @@ def _auto_triage_job():
                 f"{len(no_summary)} no-summary, {len(no_resolution)} no-plan"
             )
 
-        if triage_candidate_ids:
-            import asyncio
-            from .main import _auto_process
-            for ticket_id in triage_candidate_ids:
-                try:
-                    t2 = db.query(TicketRecord).filter(
-                        TicketRecord.id == ticket_id
-                    ).with_for_update().first()
-                    live_claim = bool(
-                        t2
-                        and t2.ai_status == "running"
-                        and t2.ai_lease_expires_at
-                        and t2.ai_lease_expires_at >= datetime.utcnow()
-                    )
-                    if t2 and not live_claim and t2.ai_status not in {"dead_letter", "failed"}:
-                        db.commit()
-                        asyncio.run(
-                            _auto_process(
-                                t2,
-                                db,
-                                force=t2.ai_status in {"queued", "running"},
-                            )
-                        )
-                except Exception as e:
-                    if isinstance(e, LLMCapacityError):
-                        print("[auto-triage] deferred reason=provider_capacity")
-                        defer_provider_capacity(e.retry_after_seconds)
-                        db.rollback()
-                        db.close()
-                        return
-                    else:
-                        print(f"[auto-triage] error kind={type(e).__name__}")
-                    db.rollback()
-
-        # Fill missing summaries
-        if no_summary_ids:
-            import asyncio
-            from .main import _auto_process
-            for ticket_id in no_summary_ids:
-                try:
-                    t2 = db.query(TicketRecord).filter(
-                        TicketRecord.id == ticket_id
-                    ).with_for_update().first()
-                    live_claim = bool(
-                        t2
-                        and t2.ai_status == "running"
-                        and t2.ai_lease_expires_at
-                        and t2.ai_lease_expires_at >= datetime.utcnow()
-                    )
-                    retry_due = bool(
-                        t2
-                        and (
-                            t2.ai_next_attempt_at is None
-                            or t2.ai_next_attempt_at <= datetime.utcnow()
-                        )
-                    )
-                    if (
-                        t2
-                        and t2.summary is None
-                        and not live_claim
-                        and retry_due
-                        and t2.ai_status not in {"queued", "dead_letter", "failed"}
-                    ):
-                        t2.ai_requested_artifacts = "summary"
-                        t2.ai_status = "queued"
-                        processed_id = t2.id
-                        db.commit()
-                        asyncio.run(_auto_process(t2, db, force=True))
-                        print(f"[auto-triage] summary filled for {processed_id[:8]}")
-                except Exception as e:
-                    if isinstance(e, LLMCapacityError):
-                        print("[auto-triage] summary deferred reason=provider_capacity")
-                        defer_provider_capacity(e.retry_after_seconds)
-                        db.rollback()
-                        db.close()
-                        return
-                    else:
-                        print(f"[auto-triage] summary error kind={type(e).__name__}")
-                    db.rollback()
-
-        # Fill missing resolution plans
-        if no_resolution_ids:
-            import asyncio
-            from .main import _auto_process
-            for ticket_id in no_resolution_ids:
-                try:
-                    t2 = db.query(TicketRecord).filter(
-                        TicketRecord.id == ticket_id
-                    ).with_for_update().first()
-                    live_claim = bool(
-                        t2
-                        and t2.ai_status == "running"
-                        and t2.ai_lease_expires_at
-                        and t2.ai_lease_expires_at >= datetime.utcnow()
-                    )
-                    retry_due = bool(
-                        t2
-                        and (
-                            t2.ai_next_attempt_at is None
-                            or t2.ai_next_attempt_at <= datetime.utcnow()
-                        )
-                    )
-                    if (
-                        t2
-                        and t2.recommended_solution is None
-                        and not live_claim
-                        and retry_due
-                        and t2.ai_status not in {"queued", "dead_letter", "failed"}
-                    ):
-                        t2.ai_requested_artifacts = "resolution"
-                        t2.ai_status = "queued"
-                        processed_id = t2.id
-                        db.commit()
-                        asyncio.run(_auto_process(t2, db, force=True))
-                        print(f"[auto-triage] resolution filled for {processed_id[:8]}")
-                except Exception as e:
-                    if isinstance(e, LLMCapacityError):
-                        print("[auto-triage] resolution deferred reason=provider_capacity")
-                        defer_provider_capacity(e.retry_after_seconds)
-                        db.rollback()
-                        db.close()
-                        return
-                    else:
-                        print(f"[auto-triage] resolution error kind={type(e).__name__}")
-                    db.rollback()
+        candidates = [
+            *((ticket_id, None) for ticket_id in triage_candidate_ids),
+            *((ticket_id, "summary") for ticket_id in no_summary_ids),
+            *((ticket_id, "resolution") for ticket_id in no_resolution_ids),
+        ]
+        capacity_error = asyncio.run(_process_ai_candidates(candidates))
+        if capacity_error:
+            print(
+                "[auto-triage] deferred "
+                f"reason={capacity_error.reason}"
+            )
+            # A dispatched provider 429 already persisted its precise cooldown
+            # inside LLMManager. Only legacy/local callers need this fallback.
+            if capacity_error.reason == "provider_capacity":
+                defer_provider_capacity(capacity_error.retry_after_seconds)
+            db.close()
+            return
 
         # Fix missing escalation risk (column added later, may be NULL)
         no_risk_ids = [row.id for row in db.query(TicketRecord.id).filter(
+            active_ticket_filter(db),
             TicketRecord.ai_reasoning.isnot(None),
             TicketRecord.escalation_risk == 0
         ).all()]

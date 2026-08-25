@@ -248,6 +248,7 @@ class AIAutomationFeatureStatus(BaseModel):
 class AIQueueStatusSummary(BaseModel):
     total_tickets: int = 0
     not_analyzed: int = 0
+    not_applicable: int = 0
     queued: int = 0
     queued_ready: int = 0
     retry_scheduled: int = 0
@@ -274,6 +275,7 @@ class AITaskStatusItem(BaseModel):
     ai_status: Optional[str] = None
     lifecycle: Literal[
         "not_analyzed",
+        "not_applicable",
         "queued",
         "retry_scheduled",
         "running",
@@ -310,6 +312,11 @@ class AILLMCallStatusItem(BaseModel):
     total_tokens: int
     synthetic: bool
     error_code: Optional[str] = None
+    http_status: Optional[int] = None
+    failure_kind: Optional[str] = None
+    retry_after_seconds: Optional[int] = None
+    dispatched: bool = False
+    estimated_tokens: int = 0
     created_at: datetime
 
 
@@ -336,7 +343,9 @@ class AIStatusResponse(BaseModel):
     automatic_ai_bindings: int = 0
     active_routing_backlog_enabled: bool = False
     queue: AIQueueStatusSummary
-    view: Literal["all", "active", "attention", "completed", "not_analyzed"]
+    view: Literal[
+        "all", "active", "attention", "completed", "not_analyzed", "not_applicable"
+    ]
     search: str = ""
     tasks: List[AITaskStatusItem]
     total_tasks: int

@@ -47,6 +47,13 @@ from .database import (
     ExternalAttachmentRecord,
     ExternalConversationRecord,
 )
+from .ai_eligibility import (
+    active_ticket_filter,
+    is_terminal_status as shared_is_terminal_status,
+    mark_terminal_ai_not_applicable,
+    terminal_ticket_filter,
+    terminal_status_names as shared_terminal_status_names,
+)
 from .schema import (
     Ticket, User, UserSummary, Recognition, SyncStatus,
     AIStatusResponse, OperationalDiagnosticsResponse,
@@ -1435,10 +1442,15 @@ def _reserve_ai_request(db: Session, actor_id: str, task: str) -> None:
 
     minute_count = _increment_request_bucket(db, actor_id, "minute", minute_start)
     day_count = _increment_request_bucket(db, actor_id, "day", day_start)
-    if minute_count > per_minute:
+    background_observe = (
+        actor_id == "system-worker"
+        and (os.getenv("AI_BACKGROUND_LIMIT_MODE") or "observe").strip().lower()
+        != "enforce"
+    )
+    if minute_count > per_minute and not background_observe:
         db.rollback()
         raise HTTPException(status_code=429, detail="ai_rate_limit_exceeded", headers={"Retry-After": "60"})
-    if day_count > per_day:
+    if day_count > per_day and not background_observe:
         db.rollback()
         raise HTTPException(status_code=429, detail="ai_daily_budget_exceeded", headers={"Retry-After": "3600"})
     db.add(AIUsageEventRecord(actor_id=actor_id, task=task, created_at=now))
@@ -1704,15 +1716,11 @@ def _apply_sla_targets(ticket: TicketRecord, db: Session):
 
 
 def _terminal_status_names(db: Session) -> set[str]:
-    configured = db.query(TicketStatusConfigRecord).filter(
-        TicketStatusConfigRecord.is_terminal.is_(True)
-    ).all()
-    names = {c.name.lower() for c in configured}
-    return names or {"closed", "resolved", "cancelled"}
+    return shared_terminal_status_names(db)
 
 
 def _is_terminal_status(db: Session, status: Optional[str]) -> bool:
-    return bool(status and status.lower() in _terminal_status_names(db))
+    return shared_is_terminal_status(db, status)
 
 
 def _require_demo_ticketing() -> None:
@@ -1823,6 +1831,7 @@ async def update_ticket(
     if payload.status and _is_terminal_status(db, payload.status):
         if not ticket.resolved_at:
             ticket.resolved_at = datetime.utcnow()
+        mark_terminal_ai_not_applicable(ticket)
     db.commit()
     db.refresh(ticket)
     if document_input_changed:
@@ -2325,6 +2334,10 @@ def _analysis_error_signature(errors: List[Dict[str, str]]) -> str:
 
 async def _auto_process(ticket: TicketRecord, db, force: bool = False):
     """Worker/webhook adapter for the shared claimed artifact orchestrator."""
+    if _is_terminal_status(db, ticket.status):
+        mark_terminal_ai_not_applicable(ticket)
+        db.commit()
+        return
     if not force and not _automation_enabled("AUTO_TRIAGE_ENABLED", "AUTO_TRIAGE"):
         return
     requested = {
@@ -2333,11 +2346,14 @@ async def _auto_process(ticket: TicketRecord, db, force: bool = False):
     artifacts = requested
     if not artifacts:
         artifacts = set()
-        if not ticket.ai_reasoning and _automation_enabled("AUTO_TRIAGE_ENABLED", "AUTO_TRIAGE"):
+        stale = (ticket.ai_status or "").strip().lower() in {
+            "stale", "legacy_stale", "provenance_unknown",
+        }
+        if (stale or not ticket.ai_reasoning) and _automation_enabled("AUTO_TRIAGE_ENABLED", "AUTO_TRIAGE"):
             artifacts.add("triage")
-        if not ticket.summary and _automation_enabled("AUTO_SUMMARIZE_ENABLED"):
+        if (stale or not ticket.summary) and _automation_enabled("AUTO_SUMMARIZE_ENABLED"):
             artifacts.add("summary")
-        if not ticket.recommended_solution and _automation_enabled("AUTO_RESOLVE_ENABLED"):
+        if (stale or not ticket.recommended_solution) and _automation_enabled("AUTO_RESOLVE_ENABLED"):
             artifacts.add("resolution")
         if _automation_enabled("AUTO_ROUTE_ENABLED"):
             artifacts.add("route")
@@ -5744,6 +5760,7 @@ async def triage_all_untriaged(
     )
     _reserve_ai_request(db, user.id, "triage_all")
     untriaged = db.query(TicketRecord).filter(
+        active_ticket_filter(db),
         ticket_created_within_filter(cutoff),
         TicketRecord.ai_reasoning.is_(None),
         or_(
@@ -5787,6 +5804,7 @@ async def repair_ai_gaps(
     )
     _reserve_ai_request(db, user.id, "repair_ai_gaps")
     candidates = db.query(TicketRecord).filter(
+        active_ticket_filter(db),
         ticket_created_within_filter(cutoff),
         or_(
             and_(TicketRecord.ai_reasoning.isnot(None), TicketRecord.summary.is_(None)),
@@ -5863,6 +5881,7 @@ _AI_TASK_STATUSES = {
     "failed",
     "dead_letter",
     "paused",
+    "not_applicable",
 }
 _AI_ATTENTION_STATUSES = {
     "partial",
@@ -5889,8 +5908,21 @@ def _safe_operational_code(value: Optional[str]) -> Optional[str]:
     return "legacy_error"
 
 
-def _ai_task_lifecycle(ticket: TicketRecord, now: datetime) -> str:
+def _ai_task_lifecycle(
+    ticket: TicketRecord,
+    now: datetime,
+    terminal_statuses: Optional[set[str]] = None,
+) -> str:
     status = (ticket.ai_status or "").strip().lower().replace("-", "_")
+    ticket_status = (ticket.status or "").strip().lower()
+    if (
+        terminal_statuses
+        and ticket_status in terminal_statuses
+        and status not in {"completed", "triage_completed"}
+    ):
+        return "not_applicable"
+    if status == "not_applicable":
+        return "not_applicable"
     if not status:
         return "not_analyzed"
     if status == "queued":
@@ -5914,7 +5946,7 @@ def _ai_task_lifecycle(ticket: TicketRecord, now: datetime) -> str:
 async def ai_task_status(
     view: str = Query(
         default="all",
-        pattern="^(all|active|attention|completed|not_analyzed)$",
+        pattern="^(all|active|attention|completed|not_analyzed|not_applicable)$",
     ),
     search: str = Query(default="", max_length=200),
     limit: int = Query(default=25, ge=1, le=100),
@@ -5924,11 +5956,10 @@ async def ai_task_status(
 ):
     """Return bounded, prompt-free operational detail for durable AI work."""
     now = datetime.utcnow()
+    terminal_statuses = _terminal_status_names(db)
     normalized_status = func.lower(func.coalesce(TicketRecord.ai_status, "not_analyzed"))
-    active_ticket = or_(
-        TicketRecord.status.is_(None),
-        func.lower(TicketRecord.status).notin_(("closed", "resolved", "cancelled")),
-    )
+    active_ticket = active_ticket_filter(db)
+    terminal_ticket = terminal_ticket_filter(db)
     status_rows = db.query(
         normalized_status,
         func.count(TicketRecord.id),
@@ -5936,6 +5967,7 @@ async def ai_task_status(
     status_counts = {str(status): int(count) for status, count in status_rows}
 
     queued_ready = db.query(func.count(TicketRecord.id)).filter(
+        active_ticket,
         TicketRecord.ai_status == "queued",
         or_(
             TicketRecord.ai_next_attempt_at.is_(None),
@@ -5943,10 +5975,12 @@ async def ai_task_status(
         ),
     ).scalar() or 0
     retry_scheduled = db.query(func.count(TicketRecord.id)).filter(
+        active_ticket,
         TicketRecord.ai_status == "queued",
         TicketRecord.ai_next_attempt_at > now,
     ).scalar() or 0
     running_active = db.query(func.count(TicketRecord.id)).filter(
+        active_ticket,
         TicketRecord.ai_status == "running",
         TicketRecord.ai_lease_expires_at >= now,
     ).scalar() or 0
@@ -5959,6 +5993,7 @@ async def ai_task_status(
         ),
     ).scalar() or 0
     oldest_queued_at = db.query(func.min(TicketRecord.updated_at)).filter(
+        active_ticket,
         TicketRecord.ai_status == "queued"
     ).scalar()
     completed_count = sum(
@@ -5976,10 +6011,32 @@ async def ai_task_status(
         str(status): int(count) for status, count in attention_rows
     }
     attention_count = sum(attention_status_counts.values()) + int(lease_expired)
+    active_not_analyzed = db.query(func.count(TicketRecord.id)).filter(
+        active_ticket,
+        TicketRecord.ai_status.is_(None),
+    ).scalar() or 0
+    active_queued = db.query(func.count(TicketRecord.id)).filter(
+        active_ticket,
+        TicketRecord.ai_status == "queued",
+    ).scalar() or 0
+    active_running = db.query(func.count(TicketRecord.id)).filter(
+        active_ticket,
+        TicketRecord.ai_status == "running",
+    ).scalar() or 0
+    not_applicable = db.query(func.count(TicketRecord.id)).filter(
+        terminal_ticket,
+        or_(
+            TicketRecord.ai_status.is_(None),
+            TicketRecord.ai_status.notin_(("completed", "triage_completed")),
+        ),
+    ).scalar() or 0
 
     task_query = db.query(TicketRecord)
     if view == "active":
-        task_query = task_query.filter(TicketRecord.ai_status.in_(("queued", "running")))
+        task_query = task_query.filter(
+            active_ticket,
+            TicketRecord.ai_status.in_(("queued", "running")),
+        )
     elif view == "attention":
         task_query = task_query.filter(active_ticket, or_(
             TicketRecord.ai_status.in_(tuple(_AI_ATTENTION_STATUSES)),
@@ -5996,7 +6053,15 @@ async def ai_task_status(
             TicketRecord.ai_status.in_(("completed", "triage_completed"))
         )
     elif view == "not_analyzed":
-        task_query = task_query.filter(TicketRecord.ai_status.is_(None))
+        task_query = task_query.filter(active_ticket, TicketRecord.ai_status.is_(None))
+    elif view == "not_applicable":
+        task_query = task_query.filter(
+            terminal_ticket,
+            or_(
+                TicketRecord.ai_status.is_(None),
+                TicketRecord.ai_status.notin_(("completed", "triage_completed")),
+            ),
+        )
 
     escaped_search = (
         search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -6049,7 +6114,7 @@ async def ai_task_status(
             "source": ticket.external_source or "local",
             "external_id": ticket.external_id,
             "ai_status": status if status in _AI_TASK_STATUSES else None,
-            "lifecycle": _ai_task_lifecycle(ticket, now),
+            "lifecycle": _ai_task_lifecycle(ticket, now, terminal_statuses),
             "requested_artifacts": requested_artifacts,
             "attempts": int(ticket.ai_attempts or 0),
             "model": ticket.ai_model,
@@ -6121,11 +6186,12 @@ async def ai_task_status(
         "active_routing_backlog_enabled": active_routing_backlog_enabled(),
         "queue": {
             "total_tickets": sum(status_counts.values()),
-            "not_analyzed": status_counts.get("not_analyzed", 0),
-            "queued": status_counts.get("queued", 0),
+            "not_analyzed": int(active_not_analyzed),
+            "not_applicable": int(not_applicable),
+            "queued": int(active_queued),
             "queued_ready": int(queued_ready),
             "retry_scheduled": int(retry_scheduled),
-            "running": status_counts.get("running", 0),
+            "running": int(active_running),
             "running_active": int(running_active),
             "lease_expired": int(lease_expired),
             "completed": completed_count,
@@ -6166,6 +6232,11 @@ async def ai_task_status(
                 "total_tokens": call.total_tokens,
                 "synthetic": bool(call.synthetic),
                 "error_code": _safe_operational_code(call.error_code),
+                "http_status": call.http_status,
+                "failure_kind": _safe_operational_code(call.failure_kind),
+                "retry_after_seconds": call.retry_after_seconds,
+                "dispatched": bool(call.dispatched),
+                "estimated_tokens": int(call.estimated_tokens or 0),
                 "created_at": call.created_at,
             }
             for call in recent_call_rows

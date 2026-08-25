@@ -10,7 +10,8 @@ import threading
 import time
 import secrets
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Type
 from litellm import acompletion
 from dotenv import load_dotenv
@@ -108,6 +109,8 @@ _MAX_RETRIES = 3
 _METRICS_LOCK = threading.Lock()
 _SEMAPHORE_LOCK = threading.Lock()
 _PROVIDER_SEMAPHORES: dict[tuple[str, int], threading.BoundedSemaphore] = {}
+_ADAPTIVE_LOCK = threading.Lock()
+_ADAPTIVE_LIMITS: dict[str, tuple[int, int]] = {}
 _LLM_METRICS = {
     "requests": 0,
     "successes": 0,
@@ -142,9 +145,20 @@ class LLMUnavailableError(LLMAnalysisError):
 class LLMCapacityError(LLMUnavailableError):
     """Local Foundry/provider admission was deferred without dispatching."""
 
-    def __init__(self, message: str, retry_after_seconds: float):
+    def __init__(
+        self,
+        message: str,
+        retry_after_seconds: float,
+        *,
+        reason: str = "provider_capacity",
+        http_status: int | None = None,
+        dispatched: bool = False,
+    ):
         super().__init__(message)
         self.retry_after_seconds = max(1.0, float(retry_after_seconds))
+        self.reason = reason
+        self.http_status = http_status
+        self.dispatched = dispatched
 
 
 class LLMProviderRejectedError(LLMAnalysisError):
@@ -170,12 +184,13 @@ class LLMInvalidInputError(LLMAnalysisError):
 
 
 def _provider_retry_delay(headers, default: float) -> float:
-    """Honor Foundry's seconds and milliseconds retry hints, with a hard cap."""
+    """Honor standard and Foundry retry hints, including HTTP-date values."""
     delay = max(0.0, float(default))
     for name, divisor in (
         ("Retry-After", 1.0),
         ("retry-after", 1.0),
         ("retry-after-ms", 1000.0),
+        ("x-ms-retry-after-ms", 1000.0),
     ):
         value = headers.get(name) if headers else None
         if value is None:
@@ -183,8 +198,58 @@ def _provider_retry_delay(headers, default: float) -> float:
         try:
             delay = max(delay, float(value) / divisor)
         except (TypeError, ValueError):
-            continue
-    return min(30.0, delay)
+            if divisor != 1.0 or not isinstance(value, str):
+                continue
+            try:
+                retry_at = parsedate_to_datetime(value)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                delay = max(
+                    delay,
+                    (retry_at - datetime.now(timezone.utc)).total_seconds(),
+                )
+            except (TypeError, ValueError, OverflowError):
+                continue
+    return min(86_400.0, max(0.0, delay))
+
+
+def _exception_http_status(exc: Exception) -> int | None:
+    status = getattr(exc, "status_code", None) or getattr(
+        getattr(exc, "response", None), "status_code", None
+    )
+    return int(status) if isinstance(status, int) else None
+
+
+def _failure_kind(exc: Exception, status: int | None) -> str:
+    if isinstance(exc, LLMCapacityError):
+        return "local_capacity" if not exc.dispatched else "provider_rate_limit"
+    if isinstance(exc, (json.JSONDecodeError, ValidationError, ValueError)):
+        return "invalid_output"
+    if isinstance(exc, (asyncio.TimeoutError, httpx.TimeoutException)):
+        return "timeout"
+    if isinstance(exc, (ConnectionError, httpx.ConnectError, httpx.NetworkError)):
+        return "connection_error"
+    exception_name = type(exc).__name__.lower()
+    if "timeout" in exception_name:
+        return "timeout"
+    if "connection" in exception_name or "network" in exception_name:
+        return "connection_error"
+    if status == 429:
+        return "provider_rate_limit"
+    if status is not None:
+        return "provider_http_error"
+    return "provider_error"
+
+
+def _failure_code(exc: Exception, status: int | None) -> str:
+    kind = _failure_kind(exc, status)
+    if isinstance(exc, LLMCapacityError):
+        return exc.reason
+    if status is not None:
+        return f"http_{status}"
+    if kind in {"invalid_output", "timeout", "connection_error"}:
+        return kind
+    return "provider_unavailable"
 
 
 def _metric(**increments: int) -> None:
@@ -201,6 +266,36 @@ def get_llm_metrics() -> dict:
         round(metrics["latency_ms_total"] / completed, 1) if completed else 0.0
     )
     return metrics
+
+
+def _adaptive_limit(scope: str, initial: int, ceiling: int) -> int:
+    with _ADAPTIVE_LOCK:
+        limit, successes = _ADAPTIVE_LIMITS.get(scope, (initial, 0))
+        limit = max(1, min(limit, ceiling))
+        _ADAPTIVE_LIMITS[scope] = (limit, successes)
+        return limit
+
+
+def _adaptive_success(scope: str, initial: int, ceiling: int) -> int:
+    increase_every = int(
+        _bounded_number(os.getenv("LLM_ADAPTIVE_SUCCESS_WINDOW"), 20, 2, 1000)
+    )
+    with _ADAPTIVE_LOCK:
+        limit, successes = _ADAPTIVE_LIMITS.get(scope, (initial, 0))
+        successes += 1
+        if successes >= increase_every and limit < ceiling:
+            limit += 1
+            successes = 0
+        _ADAPTIVE_LIMITS[scope] = (limit, successes)
+        return limit
+
+
+def _adaptive_backoff(scope: str, initial: int, ceiling: int) -> int:
+    with _ADAPTIVE_LOCK:
+        limit, _ = _ADAPTIVE_LIMITS.get(scope, (initial, 0))
+        limit = max(1, min(ceiling, math.ceil(limit / 2)))
+        _ADAPTIVE_LIMITS[scope] = (limit, 0)
+        return limit
 
 
 def _record_call(**values) -> None:
@@ -294,7 +389,13 @@ def defer_provider_capacity(
             statement = statement.on_conflict_do_update(
                 index_elements=["provider"],
                 set_={
-                    "reason": safe_reason or "provider_capacity",
+                    "reason": case(
+                        (
+                            LLMProviderCooldownRecord.retry_at < retry_at,
+                            safe_reason or "provider_capacity",
+                        ),
+                        else_=LLMProviderCooldownRecord.reason,
+                    ),
                     "retry_at": case(
                         (
                             LLMProviderCooldownRecord.retry_at < retry_at,
@@ -313,103 +414,6 @@ def defer_provider_capacity(
         print(f"[llm] provider cooldown write failed kind={type(exc).__name__}")
 
 
-def _reserve_provider_tokens(provider: str, estimated_tokens: int) -> None:
-    default_enabled = bool((os.getenv("TICKETY_PROCESS_ROLE") or "").strip())
-    configured = os.getenv("LLM_PERSIST_METRICS")
-    if not (_enabled(configured) if configured is not None else default_enabled):
-        return
-    budget = int(
-        _bounded_number(os.getenv("LLM_DAILY_TOKEN_BUDGET"), 500_000, 1_000, 100_000_000)
-    )
-    try:
-        from datetime import datetime
-        from .database import AIRequestBucketRecord, SessionLocal
-
-        db = SessionLocal()
-        try:
-            day_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-            values = {
-                "actor_id": f"provider:{provider}",
-                "window_kind": "reserved_tokens_day",
-                "window_start": day_start,
-                "request_count": int(estimated_tokens),
-            }
-            if db.bind.dialect.name == "postgresql":
-                from sqlalchemy.dialects.postgresql import insert
-            else:
-                from sqlalchemy.dialects.sqlite import insert
-            statement = insert(AIRequestBucketRecord).values(**values)
-            statement = statement.on_conflict_do_update(
-                index_elements=["actor_id", "window_kind", "window_start"],
-                set_={
-                    "request_count": AIRequestBucketRecord.request_count + int(estimated_tokens)
-                },
-            ).returning(AIRequestBucketRecord.request_count)
-            reserved = int(db.execute(statement).scalar_one())
-            if reserved > budget:
-                db.rollback()
-                raise LLMUnavailableError("AI provider daily token budget exceeded")
-            db.commit()
-        finally:
-            db.close()
-    except LLMUnavailableError:
-        raise
-    except Exception as exc:
-        print(f"[llm] token budget reservation failed kind={type(exc).__name__}")
-        raise LLMUnavailableError("AI token budget could not be verified") from exc
-
-
-def _reserve_provider_request(provider: str, estimated_tokens: int) -> None:
-    """Apply provider-wide RPM/TPM admission shared by API and worker processes."""
-    default_enabled = bool((os.getenv("TICKETY_PROCESS_ROLE") or "").strip())
-    configured = os.getenv("LLM_PERSIST_METRICS")
-    if not (_enabled(configured) if configured is not None else default_enabled):
-        return
-    rpm = int(_bounded_number(os.getenv("LLM_PROVIDER_REQUESTS_PER_MINUTE"), 120, 1, 100_000))
-    tpm = int(_bounded_number(os.getenv("LLM_PROVIDER_TOKENS_PER_MINUTE"), 250_000, 1_000, 100_000_000))
-    try:
-        from datetime import datetime
-        from sqlalchemy import func
-        from .database import AIRequestBucketRecord, SessionLocal
-
-        db = SessionLocal()
-        try:
-            minute = datetime.utcnow().replace(second=0, microsecond=0)
-            if db.bind.dialect.name == "postgresql":
-                from sqlalchemy.dialects.postgresql import insert
-            else:
-                from sqlalchemy.dialects.sqlite import insert
-            for kind, increment, ceiling in (
-                ("provider_requests_minute", 1, rpm),
-                ("provider_tokens_minute", int(estimated_tokens), tpm),
-            ):
-                values = {
-                    "actor_id": f"provider:{provider}",
-                    "window_kind": kind,
-                    "window_start": minute,
-                    "request_count": increment,
-                }
-                statement = insert(AIRequestBucketRecord).values(**values)
-                statement = statement.on_conflict_do_update(
-                    index_elements=["actor_id", "window_kind", "window_start"],
-                    set_={
-                        "request_count": AIRequestBucketRecord.request_count + increment
-                    },
-                ).returning(AIRequestBucketRecord.request_count)
-                used = int(db.execute(statement).scalar_one())
-                if used > ceiling:
-                    db.rollback()
-                    raise LLMUnavailableError("AI provider rate budget exceeded")
-            db.commit()
-        finally:
-            db.close()
-    except LLMUnavailableError:
-        raise
-    except Exception as exc:
-        print(f"[llm] provider rate reservation failed kind={type(exc).__name__}")
-        raise LLMUnavailableError("AI provider rate budget could not be verified") from exc
-
-
 def _provider_controls_enabled() -> bool:
     if (os.getenv("APP_MODE") or "production").strip().lower() == "production":
         return True
@@ -420,6 +424,21 @@ def _provider_controls_enabled() -> bool:
     # per-minute budgets on by default there as well; an operator may still
     # explicitly disable them for an isolated local environment.
     return True
+
+
+def _provider_capacity_enforced() -> bool:
+    """Whether local estimates may block a dispatch.
+
+    Production defaults to observation: provider responses and adaptive
+    concurrency remain authoritative. The legacy enforcement flag is retained
+    as an explicit opt-in for installations that require a hard spend ceiling.
+    """
+    mode = (os.getenv("LLM_CAPACITY_MODE") or "").strip().lower()
+    if mode:
+        if mode not in {"observe", "enforce"}:
+            raise ValueError("LLM_CAPACITY_MODE must be observe or enforce")
+        return mode == "enforce"
+    return _enabled(os.getenv("LLM_ENFORCE_PROVIDER_LIMITS"))
 
 
 @dataclass(frozen=True)
@@ -469,7 +488,7 @@ def _reserve_provider_capacity(
                     index_elements=["actor_id", "window_kind", "window_start"],
                     set_={"request_count": AIRequestBucketRecord.request_count + increment},
                 ).returning(AIRequestBucketRecord.request_count)
-                if int(db.execute(statement).scalar_one()) > ceiling:
+                if int(db.execute(statement).scalar_one()) > ceiling and _provider_capacity_enforced():
                     db.rollback()
                     retry_at = (
                         day + timedelta(days=1)
@@ -485,7 +504,9 @@ def _reserve_provider_capacity(
                         reason=f"{kind}_exhausted",
                     )
                     raise LLMCapacityError(
-                        "AI provider capacity exceeded", retry_after
+                        "AI provider capacity exceeded",
+                        retry_after,
+                        reason=f"{kind}_exhausted",
                     )
             db.commit()
             return ProviderCapacityReservation(
@@ -1117,8 +1138,18 @@ class LLMManager:
         concurrency = int(
             _bounded_number(os.getenv("LLM_MAX_CONCURRENCY"), 4, 1, 32)
         )
+        initial_concurrency = int(
+            _bounded_number(
+                os.getenv("LLM_INITIAL_CONCURRENCY"),
+                min(2, concurrency),
+                1,
+                concurrency,
+            )
+        )
         self._semaphore = _provider_semaphore(self.provider, concurrency)
         self.max_concurrency = concurrency
+        self.initial_concurrency = initial_concurrency
+        self.capacity_scope = f"{self.provider}:{self.model_name}"
 
     @property
     def cache_identity(self) -> str:
@@ -1157,6 +1188,8 @@ class LLMManager:
                     status="failed", attempts=0, latency_ms=0, prompt_tokens=0,
                     completion_tokens=0, total_tokens=0, synthetic=False,
                     error_code="provider_not_configured",
+                    failure_kind="local_configuration", dispatched=False,
+                    estimated_tokens=0,
                 )
                 raise LLMUnavailableError("AI provider is not configured")
             result = redact_data(
@@ -1171,6 +1204,7 @@ class LLMManager:
                 status="success", attempts=0,
                 latency_ms=int((time.monotonic() - started) * 1000), prompt_tokens=0,
                 completion_tokens=0, total_tokens=0, synthetic=True, error_code=None,
+                failure_kind=None, dispatched=False, estimated_tokens=0,
             )
             return result
 
@@ -1209,6 +1243,7 @@ class LLMManager:
         last_err = None
         last_status = None
         last_retry_delay = 0.0
+        last_provider_retry_delay = 0.0
         deadline = started + self.overall_timeout
         # UTF-8 bytes are a conservative model-independent upper bound when a
         # provider tokenizer is unavailable; output is bounded by max_tokens.
@@ -1221,6 +1256,7 @@ class LLMManager:
             response = None
             provider_lease = None
             reserved_tokens: ProviderCapacityReservation | int = 0
+            dispatched = False
             try:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -1237,7 +1273,11 @@ class LLMManager:
                             raise asyncio.TimeoutError("AI provider lease wait exceeded deadline")
                         provider_lease = _try_acquire_provider_lease(
                             self.provider,
-                            self.max_concurrency,
+                            _adaptive_limit(
+                                self.capacity_scope,
+                                self.initial_concurrency,
+                                self.max_concurrency,
+                            ),
                             int(min(self.request_timeout, remaining)) + 15,
                         )
                         if provider_lease is None:
@@ -1247,6 +1287,7 @@ class LLMManager:
                     reserved_tokens = _reserve_provider_capacity(
                         self.provider, estimated_tokens
                     )
+                    dispatched = True
                     response = await asyncio.wait_for(
                         acompletion(**kwargs),
                         timeout=min(self.request_timeout, remaining),
@@ -1277,12 +1318,19 @@ class LLMManager:
                     total_tokens=total_tokens,
                     latency_ms_total=latency_ms,
                 )
+                _adaptive_success(
+                    self.capacity_scope,
+                    self.initial_concurrency,
+                    self.max_concurrency,
+                )
                 _record_call(
                     provider=self.provider, model=self.model_name, task=task_name,
                     status="success", attempts=attempt + 1,
                     latency_ms=int((time.monotonic() - attempt_started) * 1000),
                     prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                     total_tokens=total_tokens, synthetic=False, error_code=None,
+                    http_status=None, failure_kind=None, retry_after_seconds=None,
+                    dispatched=True, estimated_tokens=estimated_tokens,
                 )
                 print(
                     f"[llm] success provider={self.provider} model={self.model_name} "
@@ -1295,27 +1343,47 @@ class LLMManager:
                 failed_prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
                 failed_completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
                 failed_total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
-                # Only authoritative usage can reduce a reservation. A timeout
-                # may still have completed and been billed by the provider, so
-                # refunding an unreported attempt would let retries bypass the
-                # deployment's daily spend boundary.
+                status = _exception_http_status(e)
+                last_status = status
+                failure_kind = _failure_kind(e, status)
+                # A timeout may still have completed and been billed, so keep
+                # that conservative reservation. Explicit rejections and
+                # connection failures did not return usage and can be refunded.
                 if failed_total_tokens:
                     _settle_provider_tokens(
                         self.provider, reserved_tokens, failed_total_tokens
                     )
-                status = getattr(e, "status_code", None) or getattr(
-                    getattr(e, "response", None), "status_code", None
-                )
-                last_status = status
+                elif reserved_tokens and failure_kind != "timeout":
+                    _settle_provider_tokens(self.provider, reserved_tokens, 0)
                 capacity_wait = isinstance(e, LLMCapacityError)
                 retryable = capacity_wait or (
                     not isinstance(e, LLMAnalysisError) and (
-                        status in _RETRYABLE_STATUS or isinstance(
-                            e, (asyncio.TimeoutError, ConnectionError)
-                        )
+                        status in _RETRYABLE_STATUS
+                        or failure_kind in {"timeout", "connection_error"}
                     )
                 )
                 event = "deferred" if capacity_wait else "failure"
+                failure_code = _failure_code(e, status)
+                response_headers = getattr(
+                    getattr(e, "response", None), "headers", {}
+                ) or {}
+                hinted_retry_after = (
+                    _provider_retry_delay(response_headers, 0)
+                    if status == 429 else 0
+                )
+                last_provider_retry_delay = max(
+                    last_provider_retry_delay, hinted_retry_after
+                )
+                if (
+                    status == 429
+                    or (status is not None and status >= 500)
+                    or failure_kind in {"timeout", "connection_error"}
+                ):
+                    _adaptive_backoff(
+                        self.capacity_scope,
+                        self.initial_concurrency,
+                        self.max_concurrency,
+                    )
                 print(
                     f"[llm] {event} provider={self.provider} model={self.model_name} "
                     f"attempt={attempt + 1}/{_MAX_RETRIES} status={status} "
@@ -1337,13 +1405,18 @@ class LLMManager:
                     completion_tokens=failed_completion_tokens,
                     total_tokens=failed_total_tokens,
                     synthetic=False,
-                    error_code=(
-                        "provider_capacity"
+                    error_code=failure_code,
+                    http_status=status,
+                    failure_kind=failure_kind,
+                    retry_after_seconds=(
+                        math.ceil(e.retry_after_seconds)
                         if capacity_wait
-                        else "invalid_output"
-                        if isinstance(e, (json.JSONDecodeError, ValidationError, ValueError))
-                        else "provider_unavailable"
+                        else math.ceil(hinted_retry_after)
+                        if hinted_retry_after
+                        else None
                     ),
+                    dispatched=dispatched,
+                    estimated_tokens=estimated_tokens,
                 )
                 invalid_output = isinstance(
                     e, (json.JSONDecodeError, ValidationError, ValueError)
@@ -1351,7 +1424,6 @@ class LLMManager:
                 if attempt < _MAX_RETRIES - 1 and (retryable or invalid_output):
                     _metric(retries=1)
                     delay = (2 ** attempt) + random.uniform(0, 0.25)
-                    response_headers = getattr(getattr(e, "response", None), "headers", {}) or {}
                     delay = _provider_retry_delay(response_headers, delay)
                     last_retry_delay = max(last_retry_delay, delay)
                     if capacity_wait:
@@ -1374,7 +1446,7 @@ class LLMManager:
         if isinstance(last_err, LLMCapacityError):
             raise last_err
         if last_status == 429:
-            retry_after = max(60.0, last_retry_delay)
+            retry_after = last_provider_retry_delay or 60.0
             defer_provider_capacity(
                 retry_after,
                 self.provider,
@@ -1383,6 +1455,9 @@ class LLMManager:
             raise LLMCapacityError(
                 "AI provider capacity is temporarily unavailable",
                 retry_after,
+                reason="provider_rate_limited",
+                http_status=429,
+                dispatched=True,
             ) from last_err
         if isinstance(last_status, int) and 400 <= last_status < 500:
             rejection_parts = [str(last_err or "")]

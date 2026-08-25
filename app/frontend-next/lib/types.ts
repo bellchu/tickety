@@ -203,10 +203,11 @@ export interface SyncStatus {
   attachment_errors: number;
 }
 
-export type AITaskView = "all" | "active" | "attention" | "completed" | "not_analyzed";
+export type AITaskView = "all" | "active" | "attention" | "completed" | "not_analyzed" | "not_applicable";
 
 export type AITaskLifecycle =
   | "not_analyzed"
+  | "not_applicable"
   | "queued"
   | "retry_scheduled"
   | "running"
@@ -228,6 +229,7 @@ export interface AIAutomationFeatureStatus {
 export interface AIQueueStatusSummary {
   total_tickets: number;
   not_analyzed: number;
+  not_applicable: number;
   queued: number;
   queued_ready: number;
   retry_scheduled: number;
@@ -277,6 +279,11 @@ export interface AILLMCallStatusItem {
   total_tokens: number;
   synthetic: boolean;
   error_code: string | null;
+  http_status: number | null;
+  failure_kind: string | null;
+  retry_after_seconds: number | null;
+  dispatched: boolean;
+  estimated_tokens: number;
   created_at: string;
 }
 

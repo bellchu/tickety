@@ -43,7 +43,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             for table_name, table in Base.metadata.tables.items():
                 actual_columns = {column["name"] for column in inspector.get_columns(table_name)}
                 self.assertEqual(actual_columns, set(table.columns.keys()), table_name)
-            self.assertEqual(self._current_revision(engine), "0018")
+            self.assertEqual(self._current_revision(engine), "0019")
             self.assertIn("external_users", inspector.get_table_names())
             self.assertIn("external_conversations", inspector.get_table_names())
             self.assertIn("external_activity_ledger", inspector.get_table_names())
@@ -96,7 +96,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertEqual(user["name"], "Legacy User")
             self.assertEqual(user["role"], "agent")
             self.assertTrue(user["is_active"])
-            self.assertEqual(self._current_revision(engine), "0018")
+            self.assertEqual(self._current_revision(engine), "0019")
         finally:
             engine.dispose()
 
@@ -117,6 +117,51 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertEqual(row["ai_status"], "legacy_stale")
             self.assertEqual(row["ai_error"], "provenance_unknown")
             self.assertIsNone(row["ai_source_hash"])
+        finally:
+            engine.dispose()
+
+    def test_ai_dispatch_recovery_cancels_terminal_work_and_keeps_telemetry(self):
+        command.upgrade(self.config, "0018")
+        engine = create_engine(self.url)
+        try:
+            with engine.begin() as connection:
+                connection.execute(text(
+                    "INSERT INTO tickets "
+                    "(id, subject, status, ai_status, ai_requested_artifacts, ai_attempts) "
+                    "VALUES ('closed-ai', 'Historical', 'Closed', 'queued', 'triage', 2)"
+                ))
+                connection.execute(text(
+                    "INSERT INTO llm_provider_cooldowns "
+                    "(provider, reason, retry_at, updated_at) VALUES "
+                    "('foundry', 'provider_capacity', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                ))
+                connection.execute(text(
+                    "INSERT INTO llm_call_records "
+                    "(provider, model, task, status, attempts, latency_ms, "
+                    "prompt_tokens, completion_tokens, total_tokens, synthetic, created_at) "
+                    "VALUES ('foundry', 'deployment', 'TriageAnalysis', 'success', 1, 10, "
+                    "1, 1, 2, 0, CURRENT_TIMESTAMP)"
+                ))
+
+            command.upgrade(self.config, "head")
+            with engine.connect() as connection:
+                ticket = connection.execute(text(
+                    "SELECT ai_status, ai_error, ai_requested_artifacts, ai_attempts "
+                    "FROM tickets WHERE id = 'closed-ai'"
+                )).mappings().one()
+                cooldowns = connection.execute(text(
+                    "SELECT COUNT(*) FROM llm_provider_cooldowns"
+                )).scalar_one()
+                call = connection.execute(text(
+                    "SELECT dispatched, estimated_tokens FROM llm_call_records"
+                )).mappings().one()
+            self.assertEqual(ticket["ai_status"], "not_applicable")
+            self.assertEqual(ticket["ai_error"], "terminal_ticket")
+            self.assertIsNone(ticket["ai_requested_artifacts"])
+            self.assertEqual(ticket["ai_attempts"], 0)
+            self.assertEqual(cooldowns, 0)
+            self.assertFalse(call["dispatched"])
+            self.assertEqual(call["estimated_tokens"], 0)
         finally:
             engine.dispose()
 
@@ -181,7 +226,7 @@ class DatabaseMigrationTests(unittest.TestCase):
                 scopes,
                 "freshservice.tickets.view freshservice.agents.manage",
             )
-            self.assertEqual(self._current_revision(engine), "0018")
+            self.assertEqual(self._current_revision(engine), "0019")
         finally:
             engine.dispose()
 

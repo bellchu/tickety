@@ -219,7 +219,7 @@ class FreshserviceRealtimeBoundaryTests(unittest.TestCase):
             self.assertEqual(ticket.ai_status, "queued")
             self.assertEqual(
                 set(ticket.ai_requested_artifacts.split(",")),
-                {"triage", "route"},
+                {"triage", "summary", "route", "resolution"},
             )
             activity = db.query(ExternalActivityRecord).filter(
                 ExternalActivityRecord.entity_type == "ticket"
@@ -485,7 +485,7 @@ class FreshserviceRealtimeBoundaryTests(unittest.TestCase):
                 self.assertEqual(ticket.ai_status, "queued")
                 self.assertEqual(
                     set(ticket.ai_requested_artifacts.split(",")),
-                    {"triage", "route"},
+                    {"triage", "summary", "route", "resolution"},
                 )
             self.assertIsNone(db.get(TicketRecord, "too-old").ai_status)
             self.assertIsNone(

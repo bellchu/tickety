@@ -976,6 +976,7 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
             patch.dict(os.environ, {
                 "APP_MODE": "production",
                 "LLM_ENFORCE_PROVIDER_LIMITS": "true",
+                "LLM_CAPACITY_MODE": "enforce",
             }, clear=False),
             patch.object(database_module, "SessionLocal", self.session_factory),
         ):
@@ -993,6 +994,7 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
             patch.dict(os.environ, {
                 "APP_MODE": "production",
                 "LLM_ENFORCE_PROVIDER_LIMITS": "true",
+                "LLM_CAPACITY_MODE": "enforce",
                 "LLM_PROVIDER_REQUESTS_PER_MINUTE": "1",
                 "LLM_PROVIDER_TOKENS_PER_MINUTE": "1000",
                 "LLM_DAILY_TOKEN_BUDGET": "1000",
@@ -1009,6 +1011,26 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 window_kind="reserved_tokens_day",
             ).one()
             self.assertEqual(daily.request_count, 100)
+
+    def test_provider_capacity_observe_mode_records_without_blocking(self):
+        with (
+            patch.dict(os.environ, {
+                "APP_MODE": "production",
+                "LLM_CAPACITY_MODE": "observe",
+                "LLM_PROVIDER_REQUESTS_PER_MINUTE": "1",
+                "LLM_PROVIDER_TOKENS_PER_MINUTE": "1000",
+                "LLM_DAILY_TOKEN_BUDGET": "1000",
+            }, clear=False),
+            patch.object(database_module, "SessionLocal", self.session_factory),
+        ):
+            llm_module._reserve_provider_capacity("observe-provider", 100)
+            llm_module._reserve_provider_capacity("observe-provider", 100)
+        with self.session_factory() as db:
+            daily = db.query(AIRequestBucketRecord).filter_by(
+                actor_id="provider:observe-provider",
+                window_kind="reserved_tokens_day",
+            ).one()
+            self.assertEqual(daily.request_count, 200)
 
     async def test_durable_provider_cooldown_blocks_repeat_dispatch(self):
         provider = AsyncMock()
@@ -1162,6 +1184,27 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         routing.assert_not_called()
         recent.assert_not_called()
         process.assert_not_awaited()
+
+    def test_worker_cancels_terminal_queued_ticket(self):
+        with self.session_factory() as db:
+            ticket = db.get(TicketRecord, "ticket-1")
+            ticket.status = "Closed"
+            ticket.ai_status = "queued"
+            ticket.ai_requested_artifacts = "triage,summary"
+            db.commit()
+        process = AsyncMock()
+        with (
+            patch.object(sync_worker, "SessionLocal", self.session_factory),
+            patch.object(sync_worker.settings_module, "automation_enabled", return_value=False),
+            patch.object(main, "_auto_process", new=process),
+        ):
+            sync_worker._auto_triage_job()
+        process.assert_not_awaited()
+        with self.session_factory() as db:
+            ticket = db.get(TicketRecord, "ticket-1")
+            self.assertEqual(ticket.ai_status, "not_applicable")
+            self.assertEqual(ticket.ai_error, "terminal_ticket")
+            self.assertIsNone(ticket.ai_requested_artifacts)
 
     def test_worker_stops_current_sweep_after_first_capacity_deferral(self):
         with self.session_factory() as db:
@@ -1439,6 +1482,7 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 "AI_USER_REQUESTS_PER_DAY": "1",
                 "AI_SYSTEM_REQUESTS_PER_MINUTE": "2",
                 "AI_SYSTEM_REQUESTS_PER_DAY": "2",
+                "AI_BACKGROUND_LIMIT_MODE": "enforce",
             }, clear=False),
             self.session_factory() as db,
         ):
@@ -1452,6 +1496,18 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(system_limited.exception.status_code, 429)
         self.assertEqual(human_limited.exception.status_code, 429)
+
+    def test_system_worker_budget_is_observational_by_default(self):
+        with (
+            patch.dict(os.environ, {
+                "AI_SYSTEM_REQUESTS_PER_MINUTE": "1",
+                "AI_SYSTEM_REQUESTS_PER_DAY": "1",
+                "AI_BACKGROUND_LIMIT_MODE": "observe",
+            }, clear=False),
+            self.session_factory() as db,
+        ):
+            main._reserve_ai_request(db, "system-worker", "worker:triage")
+            main._reserve_ai_request(db, "system-worker", "worker:triage")
 
     def test_local_analytics_limit_cannot_exhaust_provider_work_budget(self):
         with (

@@ -159,6 +159,11 @@ class LLMCallRecord(Base):
     total_tokens = Column(Integer, nullable=False, default=0)
     synthetic = Column(Boolean, nullable=False, default=False)
     error_code = Column(String, nullable=True)
+    http_status = Column(Integer, nullable=True)
+    failure_kind = Column(String(64), nullable=True)
+    retry_after_seconds = Column(Integer, nullable=True)
+    dispatched = Column(Boolean, nullable=False, default=False)
+    estimated_tokens = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
 

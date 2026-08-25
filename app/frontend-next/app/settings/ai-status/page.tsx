@@ -56,11 +56,12 @@ const DIAGNOSTIC_LIFECYCLES = new Set<AITaskLifecycle>([
 ]);
 
 const views: Array<{ value: AITaskView; label: string }> = [
-  { value: "all", label: "All tickets" },
   { value: "active", label: "Active" },
   { value: "attention", label: "Needs attention" },
   { value: "completed", label: "Completed" },
   { value: "not_analyzed", label: "Not analyzed" },
+  { value: "not_applicable", label: "Historical" },
+  { value: "all", label: "All tickets" },
 ];
 
 function isAuthError(error: unknown) {
@@ -76,7 +77,8 @@ function viewCount(data: AIStatusResponse, view: AITaskView) {
   if (view === "active") return data.queue.queued + data.queue.running;
   if (view === "attention") return data.queue.attention;
   if (view === "completed") return data.queue.completed;
-  return data.queue.not_analyzed;
+  if (view === "not_analyzed") return data.queue.not_analyzed;
+  return data.queue.not_applicable;
 }
 
 function taskTiming(task: AITaskStatusItem) {
@@ -97,7 +99,7 @@ function humanizeTaskName(value: string) {
 
 export default function AIStatusPage() {
   const router = useRouter();
-  const [view, setView] = useState<AITaskView>("all");
+  const [view, setView] = useState<AITaskView>("active");
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [offset, setOffset] = useState(0);
@@ -230,7 +232,7 @@ export default function AIStatusPage() {
         <MetricCard
           label="Completed"
           value={data.queue.completed.toLocaleString()}
-          detail={`${data.queue.not_analyzed.toLocaleString()} of ${data.queue.total_tickets.toLocaleString()} tickets not analyzed`}
+          detail={`${data.queue.not_analyzed.toLocaleString()} active not analyzed · ${data.queue.not_applicable.toLocaleString()} historical`}
           icon={<CheckCircle2 className="h-4 w-4" />}
           tone="success"
         />
@@ -444,7 +446,15 @@ function ProviderCallRow({ call }: { call: AILLMCallStatusItem }) {
         <ListText text={`${call.provider} · ${call.model}`} lines={2} className="mt-1 font-mono text-[11px] text-ink-400" />
       </div>
       <div><Badge variant={status.variant} dot>{status.label}</Badge></div>
-      <p className="break-words text-xs leading-5 text-ink-500 [overflow-wrap:anywhere]">{call.latency_ms.toLocaleString()} ms · {call.total_tokens.toLocaleString()} tokens · {call.attempts} attempt{call.attempts === 1 ? "" : "s"}</p>
+      <p className="break-words text-xs leading-5 text-ink-500 [overflow-wrap:anywhere]">
+        {call.latency_ms.toLocaleString()} ms · {call.total_tokens.toLocaleString()} actual / {call.estimated_tokens.toLocaleString()} estimated tokens · {call.attempts} attempt{call.attempts === 1 ? "" : "s"}
+        <span className="block text-[11px] text-ink-400">
+          {call.dispatched ? "Provider dispatched" : "Deferred before dispatch"}
+          {call.http_status ? ` · HTTP ${call.http_status}` : ""}
+          {call.failure_kind ? ` · ${operationalCodeLabel(call.failure_kind)}` : ""}
+          {call.retry_after_seconds ? ` · retry after ${call.retry_after_seconds}s` : ""}
+        </span>
+      </p>
       <div className="lg:text-right">
         <p className="text-xs text-ink-500">{formatTimeAgo(call.created_at)}</p>
         {call.error_code && <ListText text={operationalCodeLabel(call.error_code)} lines={2} className="mt-1 text-[11px] text-rust-600" />}

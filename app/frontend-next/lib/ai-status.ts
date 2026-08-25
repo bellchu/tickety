@@ -13,6 +13,11 @@ const lifecycleMeta: Record<AITaskLifecycle, AITaskLifecycleMeta> = {
     description: "No AI task has been admitted for this ticket.",
     variant: "neutral",
   },
+  not_applicable: {
+    label: "Historical",
+    description: "This ticket is terminal, so no automatic AI work is pending.",
+    variant: "neutral",
+  },
   queued: {
     label: "Queued",
     description: "Ready for the background worker to claim.",
