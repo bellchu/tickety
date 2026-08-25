@@ -597,12 +597,16 @@ export interface SlaStatusItem {
   sla_target_hours: number;
   elapsed_hours: number;
   remaining_hours: number;
+  overdue_hours: number;
+  due_at: string;
+  target_source: "provider_due_at" | "priority_policy";
   status: "on_track" | "at_risk" | "breached";
   is_open: boolean;
 }
 
 export interface IntelSlaResponse {
   generated_at: string;
+  window_days: number;
   count: number;
   analyzed_tickets: number;
   truncated: boolean;
@@ -623,6 +627,7 @@ export interface PrioritizedTicket {
 
 export interface IntelPrioritizeResponse {
   generated_at: string;
+  window_days: number;
   backlog_size: number;
   analyzed_tickets: number;
   truncated: boolean;
@@ -631,6 +636,7 @@ export interface IntelPrioritizeResponse {
 
 export interface IntelAlertsResponse {
   generated_at: string;
+  window_days: number;
   total_open_tickets: number;
   analyzed_tickets: number;
   truncated: boolean;
@@ -645,6 +651,8 @@ export interface IntelAlertsResponse {
 }
 
 export interface IntelTrendsResponse {
+  generated_at: string;
+  window_days: number;
   total_tickets: number;
   analyzed_tickets: number;
   truncated: boolean;
@@ -655,6 +663,8 @@ export interface IntelTrendsResponse {
 }
 
 export interface AccountHealth {
+  generated_at: string;
+  window_days: number;
   reporter: string;
   health_score: number | null;
   churn_risk: "low" | "medium" | "high" | "unknown";
@@ -691,20 +701,102 @@ export interface RouteRecommendation {
 export interface WorkloadAgent {
   user_id: string;
   name: string;
+  title: string | null;
+  source: "provider" | "tickety";
+  group_names: string[];
   tier: number;
   open_tickets: number;
+  p1_open_tickets: number;
   total_resolved: number;
   avg_resolution_hours: number;
   impact_points: number;
+  load_status: "balanced" | "high" | "overloaded";
 }
 
 export interface IntelWorkloadResponse {
+  generated_at: string;
+  window_days: number;
+  workforce_source: "provider" | "tickety";
+  assigned_users: number;
+  total_open_assignments: number;
+  unmapped_open_assignments: number;
   agents: WorkloadAgent[];
   total_users: number;
   analyzed_users: number;
   users_truncated: boolean;
   duration_rows_analyzed: number;
   duration_rows_truncated: boolean;
+}
+
+export interface IntelligenceAttentionTicket {
+  ticket_id: string;
+  subject: string;
+  priority: string;
+  status: string | null;
+  category: string | null;
+  assignee_id: string | null;
+  is_unassigned: boolean;
+  escalation_risk: number;
+  priority_score: number;
+  age_hours: number;
+  dormant_hours: number;
+  last_activity_at: string | null;
+  sla: SlaStatusItem;
+  reasons: string[];
+}
+
+export interface IntelligenceStaleTicket {
+  ticket_id: string;
+  subject: string;
+  priority: string;
+  status: string | null;
+  is_unassigned: boolean;
+  last_activity_at: string | null;
+  dormant_days: number | null;
+}
+
+export interface IntelligenceOverviewResponse {
+  generated_at: string;
+  posture: "healthy" | "watch" | "critical";
+  scope: {
+    window_days: number;
+    cutoff_at: string;
+    activity_basis: "provider_updated_at_or_created_at";
+    total_open_tickets: number;
+    active_open_tickets: number;
+    excluded_stale_open_tickets: number;
+    analyzed_tickets: number;
+    truncated: boolean;
+  };
+  posture_metrics: {
+    p1_open: number;
+    sla_breached: number;
+    sla_at_risk: number;
+    escalation_prone: number;
+    unassigned_open: number;
+  };
+  flow: {
+    created: number;
+    resolved: number;
+    net_change: number;
+  };
+  age_bands: {
+    under_24h: number;
+    one_to_three_days: number;
+    four_to_seven_days: number;
+    over_seven_days: number;
+  };
+  attention_queue: IntelligenceAttentionTicket[];
+  stale_backlog: {
+    count: number;
+    p1_count: number;
+    unassigned_count: number;
+    oldest_activity_at: string | null;
+    items: IntelligenceStaleTicket[];
+  };
+  freshness: {
+    latest_ticket_activity_at: string | null;
+  };
 }
 
 export interface TicketSummary {
@@ -877,6 +969,8 @@ export interface SystemicCluster {
 }
 
 export interface SystemicIssuesResponse {
+  generated_at: string;
+  window_days: number;
   clusters: SystemicCluster[];
   total_tickets: number;
   analyzed_tickets: number;

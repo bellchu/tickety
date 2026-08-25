@@ -23,6 +23,8 @@ from app.backend import llm_manager, main, ticket_vectors, worker
 from app.backend.database import (
     AIRequestBucketRecord,
     Base,
+    ExternalGroupMembershipRecord,
+    ExternalGroupRecord,
     ExternalUserRecord,
     KbArticleRecord,
     ProblemRecord,
@@ -1012,6 +1014,140 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
             self.assertTrue(response.json()["truncated"])
             self.assertEqual(response.json()["analyzed_tickets"], 1)
 
+    def test_intelligence_cockpit_isolates_legacy_provider_records(self):
+        now = datetime.utcnow()
+        with self.session_factory() as db:
+            db.add_all([
+                TicketRecord(
+                    id="current-provider-ticket",
+                    subject="Current network interruption",
+                    status="Open",
+                    priority="P1",
+                    category="Current operations",
+                    external_source="freshservice",
+                    external_created_at=now - timedelta(days=60),
+                    external_updated_at=now - timedelta(days=2),
+                    created_at=now,
+                    updated_at=now,
+                ),
+                TicketRecord(
+                    id="legacy-provider-ticket",
+                    subject="Twelve year old imported printer case",
+                    status="Open",
+                    priority="P1",
+                    category="Legacy archive",
+                    external_source="freshservice",
+                    external_created_at=now - timedelta(days=12 * 365),
+                    external_updated_at=now - timedelta(days=11 * 365),
+                    # A recent local import must not make the ticket current.
+                    created_at=now,
+                    updated_at=now,
+                ),
+            ])
+            db.commit()
+
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
+        with patch.object(main, "_reserve_analytics_request"):
+            overview = self.client.get("/intelligence/overview?window_days=30")
+            prioritized = self.client.get("/intelligence/prioritize?window_days=30")
+            sla = self.client.get("/intelligence/sla?window_days=30")
+            trends = self.client.get("/intelligence/trends?window_days=30")
+
+        self.assertEqual(overview.status_code, 200, overview.text)
+        payload = overview.json()
+        active_ids = {item["ticket_id"] for item in payload["attention_queue"]}
+        stale_ids = {item["ticket_id"] for item in payload["stale_backlog"]["items"]}
+        self.assertIn("current-provider-ticket", active_ids)
+        self.assertNotIn("legacy-provider-ticket", active_ids)
+        self.assertIn("legacy-provider-ticket", stale_ids)
+        self.assertGreaterEqual(payload["scope"]["excluded_stale_open_tickets"], 1)
+        self.assertEqual(payload["scope"]["activity_basis"], "provider_updated_at_or_created_at")
+
+        self.assertNotIn(
+            "legacy-provider-ticket",
+            {item["ticket_id"] for item in prioritized.json()["ranked"]},
+        )
+        self.assertNotIn(
+            "legacy-provider-ticket",
+            {item["ticket_id"] for item in sla.json()["items"]},
+        )
+        self.assertNotIn("Legacy archive", trends.json()["by_category"])
+        self.assertIn("Current operations", trends.json()["by_category"])
+
+    def test_intelligence_window_is_bounded_and_workload_uses_current_assignee(self):
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
+        with patch.object(main, "_reserve_analytics_request"):
+            too_short = self.client.get("/intelligence/overview?window_days=6")
+            too_long = self.client.get("/intelligence/overview?window_days=366")
+            workload = self.client.get("/intelligence/workload?window_days=30")
+
+        self.assertEqual(too_short.status_code, 422)
+        self.assertEqual(too_long.status_code, 422)
+        self.assertEqual(workload.status_code, 200, workload.text)
+        agent = next(
+            item for item in workload.json()["agents"]
+            if item["user_id"] == "prod-agent"
+        )
+        self.assertGreaterEqual(agent["open_tickets"], 1)
+        self.assertIn(agent["load_status"], {"balanced", "high", "overloaded"})
+
+    def test_intelligence_workload_prefers_authoritative_provider_agents(self):
+        now = datetime.utcnow()
+        with self.session_factory() as db:
+            db.add(ExternalUserRecord(
+                id="provider-agent-record",
+                binding_id="provider-binding",
+                provider="freshservice",
+                external_id="provider-agent-42",
+                user_type="agent",
+                name="Provider Agent",
+                active=True,
+            ))
+            db.add(ExternalGroupRecord(
+                id="provider-group-record",
+                binding_id="provider-binding",
+                provider="freshservice",
+                external_id="provider-group-7",
+                name="Network Operations",
+                active=True,
+            ))
+            db.flush()
+            db.add(ExternalGroupMembershipRecord(
+                external_group_id="provider-group-record",
+                external_user_id="provider-agent-record",
+                membership_kind="member",
+            ))
+            db.add(TicketRecord(
+                id="provider-assigned-current",
+                subject="Provider assigned work",
+                status="Open",
+                priority="P1",
+                binding_id="provider-binding",
+                external_source="freshservice",
+                external_assignee_id="provider-agent-42",
+                external_created_at=now - timedelta(days=3),
+                external_updated_at=now - timedelta(hours=1),
+            ))
+            db.commit()
+
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
+        with patch.object(main, "_reserve_analytics_request"):
+            response = self.client.get("/intelligence/workload?window_days=30")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["workforce_source"], "provider")
+        self.assertEqual(payload["assigned_users"], 1)
+        self.assertEqual(payload["total_open_assignments"], 1)
+        self.assertEqual(payload["unmapped_open_assignments"], 0)
+        agent = next(
+            item for item in payload["agents"]
+            if item["user_id"] == "provider-agent-record"
+        )
+        self.assertEqual(agent["open_tickets"], 1)
+        self.assertEqual(agent["p1_open_tickets"], 1)
+        self.assertEqual(agent["group_names"], ["Network Operations"])
+
     def test_admin_provider_and_maintenance_routes_reserve_user_quota(self):
         self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
         adapter = MagicMock()
@@ -1647,6 +1783,7 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
     def test_agent_cannot_read_global_intelligence_or_workforce_data(self):
         self.client.cookies.set(main.SESSION_COOKIE, "prod-agent-session")
         for path in (
+            "/intelligence/overview",
             "/intelligence/alerts",
             "/intelligence/prioritize",
             "/intelligence/sla",
@@ -1664,6 +1801,7 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
     def test_ambient_intelligence_and_ai_reports_use_separate_local_rate_limit(self):
         self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
         requests = (
+            ("/intelligence/overview", 200),
             ("/intelligence/alerts", 200),
             ("/intelligence/prioritize", 200),
             ("/intelligence/sla", 200),

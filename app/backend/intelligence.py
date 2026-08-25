@@ -94,10 +94,43 @@ _MAX_ANALYTICS_ROWS = 500
 
 # ── helpers ───────────────────────────────────────────────────────────────
 
+def _ticket_activity_expression():
+    """Authoritative last activity for operational analytics.
+
+    Provider timestamps must win over local projection timestamps. Importing a
+    ten-year-old ticket updates the local row today; using ``updated_at`` first
+    would incorrectly make that legacy record look operationally current.
+    """
+    return func.coalesce(
+        TicketRecord.external_updated_at,
+        TicketRecord.external_created_at,
+        TicketRecord.updated_at,
+        TicketRecord.created_at,
+    )
+
+
+def _ticket_activity_at(ticket: TicketRecord) -> Optional[datetime]:
+    return (
+        ticket.external_updated_at
+        or ticket.external_created_at
+        or ticket.updated_at
+        or ticket.created_at
+    )
+
+
+def _ticket_created_expression():
+    return func.coalesce(TicketRecord.external_created_at, TicketRecord.created_at)
+
+
+def _scope_query(query, since: Optional[datetime]):
+    if since is None:
+        return query
+    return query.filter(_ticket_activity_expression() >= since)
+
 def _age_hours(t: TicketRecord, now: Optional[datetime] = None) -> float:
     now = now or datetime.utcnow()
     started = t.external_created_at or t.created_at or now
-    ended = (t.resolved_at or now) if not _open(t) else now
+    ended = (t.external_resolved_at or t.resolved_at or now) if not _open(t) else now
     delta = ended - started
     return max(0.0, delta.total_seconds() / 3600.0)
 
@@ -143,12 +176,21 @@ def escalation_risk(t: TicketRecord, now: Optional[datetime] = None) -> int:
 def sla_status(t: TicketRecord, now: Optional[datetime] = None) -> Dict[str, Any]:
     """Return SLA clock state for a ticket."""
     now = now or datetime.utcnow()
-    sla_h = SLA_HOURS.get(t.priority, DEFAULT_SLA_HOURS)
-    target = timedelta(hours=sla_h)
-    start = t.created_at or now
-    end = t.resolved_at or (now if _open(t) else (t.updated_at or now))
+    configured_sla_h = SLA_HOURS.get(t.priority, DEFAULT_SLA_HOURS)
+    start = t.external_created_at or t.created_at or now
+    due_at = t.resolution_due_at or t.external_due_by or t.due_by
+    if due_at and due_at > start:
+        sla_h = max(0.01, (due_at - start).total_seconds() / 3600.0)
+        target_source = "provider_due_at"
+    else:
+        sla_h = float(configured_sla_h)
+        due_at = start + timedelta(hours=sla_h)
+        target_source = "priority_policy"
+    end = t.external_resolved_at or t.resolved_at or (
+        now if _open(t) else (t.external_updated_at or t.updated_at or now)
+    )
     elapsed = max(0.0, (end - start).total_seconds() / 3600.0)
-    remaining_h = sla_h - elapsed
+    remaining_h = (due_at - end).total_seconds() / 3600.0
     breached = remaining_h <= 0 and _open(t)
     at_risk = (
         not breached
@@ -163,6 +205,9 @@ def sla_status(t: TicketRecord, now: Optional[datetime] = None) -> Dict[str, Any
         "sla_target_hours": sla_h,
         "elapsed_hours": round(elapsed, 2),
         "remaining_hours": round(max(0.0, remaining_h), 2),
+        "overdue_hours": round(max(0.0, -remaining_h), 2),
+        "due_at": due_at.isoformat(),
+        "target_source": target_source,
         "status": "breached" if breached else ("at_risk" if at_risk else "on_track"),
         "is_open": _open(t),
     }
@@ -562,9 +607,16 @@ async def recommend_resolution(
 
 # ── 6. Account Health Agent ────────────────────────────────────────────────
 
-def account_health(db: Session, reporter: str) -> Dict[str, Any]:
-    """Per-reporter health score (churn-risk proxy) from their ticket history."""
-    query = db.query(TicketRecord).filter(TicketRecord.reporter == reporter)
+def account_health(
+    db: Session,
+    reporter: str,
+    since: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """Per-reporter health inside the selected operational activity window."""
+    query = _scope_query(
+        db.query(TicketRecord).filter(TicketRecord.reporter == reporter),
+        since,
+    )
     total = query.count()
     if not total:
         return {"reporter": reporter, "health_score": None, "churn_risk": "unknown",
@@ -630,15 +682,18 @@ def _trusted_text_evidence_query(db: Session):
     ))
 
 
-def trends(db: Session, limit_terms: int = 15) -> Dict[str, Any]:
-    """Aggregate trends across all tickets: category & sentiment distribution,
-    status counts, and top keywords (lightweight VOC)."""
-    aggregate_query = _non_portal_ticket_query(db)
+def trends(
+    db: Session,
+    limit_terms: int = 15,
+    since: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """Aggregate trends inside an explicit operational activity window."""
+    aggregate_query = _scope_query(_non_portal_ticket_query(db), since)
     total_tickets = aggregate_query.count()
     tickets = aggregate_query.order_by(
         TicketRecord.updated_at.desc().nullslast(), TicketRecord.id.asc()
     ).limit(_MAX_ANALYTICS_ROWS).all()
-    text_tickets = _trusted_text_evidence_query(db).order_by(
+    text_tickets = _scope_query(_trusted_text_evidence_query(db), since).order_by(
         TicketRecord.updated_at.desc().nullslast(), TicketRecord.id.asc()
     ).limit(_MAX_ANALYTICS_ROWS).all()
 
@@ -690,10 +745,15 @@ def _jaccard(a: set, b: set) -> float:
     return len(a & b) / len(a | b)
 
 from collections import Counter
-def systemic_issues(db, cluster_threshold: int = 3, similarity_cutoff: float = 0.25) -> dict:
+def systemic_issues(
+    db,
+    cluster_threshold: int = 3,
+    similarity_cutoff: float = 0.25,
+    since: Optional[datetime] = None,
+) -> dict:
     # Pairwise similarity is O(n^2); bound the working set so one request
     # cannot monopolize an API worker on an arbitrarily large installation.
-    trusted_query = _trusted_text_evidence_query(db)
+    trusted_query = _scope_query(_trusted_text_evidence_query(db), since)
     total_tickets = trusted_query.count()
     tickets = trusted_query.order_by(
         TicketRecord.updated_at.desc().nullslast(), TicketRecord.id.asc()
@@ -767,7 +827,11 @@ def systemic_issues(db, cluster_threshold: int = 3, similarity_cutoff: float = 0
         "parameters": {"similarity_cutoff": similarity_cutoff, "min_cluster_size": cluster_threshold},
     }
 
-def proactive_alerts(db: Session, now: Optional[datetime] = None) -> Dict[str, Any]:
+def proactive_alerts(
+    db: Session,
+    now: Optional[datetime] = None,
+    since: Optional[datetime] = None,
+) -> Dict[str, Any]:
     """Unified feed of cases needing human attention right now:
     escalation-prone, SLA at-risk, and SLA-breached tickets."""
     now = now or datetime.utcnow()
@@ -775,6 +839,7 @@ def proactive_alerts(db: Session, now: Optional[datetime] = None) -> Dict[str, A
         TicketRecord.status.is_(None),
         func.lower(TicketRecord.status).notin_(["closed", "resolved", "cancelled"]),
     ))
+    open_query = _scope_query(open_query, since)
     total_open = open_query.count()
     open_tickets = open_query.order_by(
         case(
@@ -782,7 +847,7 @@ def proactive_alerts(db: Session, now: Optional[datetime] = None) -> Dict[str, A
             value=TicketRecord.priority,
             else_=4,
         ).asc(),
-        TicketRecord.created_at.asc().nullsfirst(),
+        _ticket_activity_expression().desc().nullslast(),
         TicketRecord.id.asc(),
     ).limit(_MAX_ANALYTICS_ROWS).all()
 

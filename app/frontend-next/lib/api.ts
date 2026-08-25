@@ -293,17 +293,54 @@ export const api = {
       "/admin/llm/refresh-models", { method: "POST" }
     ),
   // Intelligence agents
-  getIntelAlerts: () => fetchAPI<import("./types").IntelAlertsResponse>("/intelligence/alerts"),
+  getIntelOverview: (windowDays = 30) =>
+    fetchAPI<import("./types").IntelligenceOverviewResponse>(
+      `/intelligence/overview?window_days=${windowDays}`
+    ),
+  getIntelAlerts: () =>
+    fetchAPI<import("./types").IntelAlertsResponse>("/intelligence/alerts?window_days=30"),
+  getIntelAlertsForWindow: (windowDays: number) =>
+    fetchAPI<import("./types").IntelAlertsResponse>(
+      `/intelligence/alerts?window_days=${windowDays}`
+    ),
   getIntelPrioritize: () =>
-    fetchAPI<import("./types").IntelPrioritizeResponse>("/intelligence/prioritize"),
-  getIntelSla: () => fetchAPI<import("./types").IntelSlaResponse>("/intelligence/sla"),
-  getIntelTrends: () => fetchAPI<import("./types").IntelTrendsResponse>("/intelligence/trends"),
+    fetchAPI<import("./types").IntelPrioritizeResponse>("/intelligence/prioritize?window_days=30"),
+  getIntelPrioritizeForWindow: (windowDays: number) =>
+    fetchAPI<import("./types").IntelPrioritizeResponse>(
+      `/intelligence/prioritize?window_days=${windowDays}`
+    ),
+  getIntelSla: () =>
+    fetchAPI<import("./types").IntelSlaResponse>("/intelligence/sla?window_days=30"),
+  getIntelSlaForWindow: (windowDays: number) =>
+    fetchAPI<import("./types").IntelSlaResponse>(
+      `/intelligence/sla?window_days=${windowDays}`
+    ),
+  getIntelTrends: () =>
+    fetchAPI<import("./types").IntelTrendsResponse>("/intelligence/trends?window_days=30"),
+  getIntelTrendsForWindow: (windowDays: number) =>
+    fetchAPI<import("./types").IntelTrendsResponse>(
+      `/intelligence/trends?window_days=${windowDays}`
+    ),
   getIntelSystemic: (minCluster = 2) =>
     fetchAPI<import("./types").SystemicIssuesResponse>(
-      `/intelligence/systemic?min_cluster=${minCluster}`
+      `/intelligence/systemic?min_cluster=${minCluster}&window_days=30`
+    ),
+  getIntelSystemicForWindow: (minCluster: number, windowDays: number) =>
+    fetchAPI<import("./types").SystemicIssuesResponse>(
+      `/intelligence/systemic?min_cluster=${minCluster}&window_days=${windowDays}`
+    ),
+  getIntelWorkload: (windowDays = 30) =>
+    fetchAPI<import("./types").IntelWorkloadResponse>(
+      `/intelligence/workload?window_days=${windowDays}`
     ),
   getIntelHealth: (reporter: string) =>
-    fetchAPI<import("./types").AccountHealth>(`/intelligence/health/${encodeURIComponent(reporter)}`),
+    fetchAPI<import("./types").AccountHealth>(
+      `/intelligence/health/${encodeURIComponent(reporter)}?window_days=30`
+    ),
+  getIntelHealthForWindow: (reporter: string, windowDays: number) =>
+    fetchAPI<import("./types").AccountHealth>(
+      `/intelligence/health/${encodeURIComponent(reporter)}?window_days=${windowDays}`
+    ),
   getIntelRoute: (ticketId: string) =>
     fetchAPI<import("./types").RouteRecommendation>(`/intelligence/route/${ticketId}`),
   generateTicketSummary: (ticketId: string, force = false) =>

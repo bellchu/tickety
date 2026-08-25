@@ -7764,13 +7764,48 @@ async def refresh_models(
 # ── Intelligence (SupportLogic-style ambient agents) ──────────
 
 _INTELLIGENCE_ROW_LIMIT = 500
+_INTELLIGENCE_DEFAULT_WINDOW_DAYS = 30
 
 
-def _open_ticket_query(db: Session):
-    return db.query(TicketRecord).filter(or_(
+def _intelligence_cutoff(now: datetime, window_days: int) -> datetime:
+    return now - timedelta(days=window_days)
+
+
+def _ticket_activity_expression():
+    return intel._ticket_activity_expression()
+
+
+def _ticket_created_expression():
+    return func.coalesce(TicketRecord.external_created_at, TicketRecord.created_at)
+
+
+def _ticket_resolved_expression():
+    return func.coalesce(TicketRecord.external_resolved_at, TicketRecord.resolved_at)
+
+
+def _ticket_is_unassigned(ticket: TicketRecord) -> bool:
+    return not (ticket.assignee_id or ticket.external_assignee_id)
+
+
+def _unassigned_ticket_filter():
+    return and_(
+        func.nullif(TicketRecord.assignee_id, "").is_(None),
+        func.nullif(TicketRecord.external_assignee_id, "").is_(None),
+    )
+
+
+def _active_ticket_status_filter():
+    return or_(
         TicketRecord.status.is_(None),
         func.lower(TicketRecord.status).notin_(["closed", "resolved", "cancelled"]),
-    ))
+    )
+
+
+def _open_ticket_query(db: Session, since: Optional[datetime] = None):
+    query = db.query(TicketRecord).filter(_active_ticket_status_filter())
+    if since is not None:
+        query = query.filter(_ticket_activity_expression() >= since)
+    return query
 
 
 def _intelligence_candidate_order():
@@ -7780,29 +7815,228 @@ def _intelligence_candidate_order():
             value=TicketRecord.priority,
             else_=4,
         ).asc(),
-        TicketRecord.created_at.asc().nullsfirst(),
+        _ticket_activity_expression().desc().nullslast(),
         TicketRecord.id.asc(),
     )
 
+
+def _serialize_attention_ticket(ticket: TicketRecord, now: datetime) -> Dict[str, Any]:
+    sla = intel.sla_status(ticket, now)
+    risk = intel.escalation_risk(ticket, now)
+    priority = (ticket.priority or "").strip() or "Unspecified"
+    reasons: List[str] = []
+    if sla["status"] == "breached":
+        reasons.append("SLA breached")
+    elif sla["status"] == "at_risk":
+        reasons.append("SLA at risk")
+    if priority.lower() in {"p1", "urgent"}:
+        reasons.append("Critical priority")
+    if risk >= 70:
+        reasons.append("Escalation prone")
+    if _ticket_is_unassigned(ticket):
+        reasons.append("Unassigned")
+    activity_at = intel._ticket_activity_at(ticket)
+    dormant_hours = max(
+        0.0,
+        (now - activity_at).total_seconds() / 3600.0 if activity_at else 0.0,
+    )
+    if dormant_hours >= 7 * 24:
+        reasons.append("No activity in 7+ days")
+    return {
+        "ticket_id": ticket.id,
+        "subject": ticket.subject,
+        "priority": priority,
+        "status": ticket.status,
+        "category": ticket.category,
+        "assignee_id": ticket.assignee_id,
+        "is_unassigned": _ticket_is_unassigned(ticket),
+        "escalation_risk": risk,
+        "priority_score": intel.prioritize_score(ticket, now),
+        "age_hours": round(intel._age_hours(ticket, now), 2),
+        "dormant_hours": round(dormant_hours, 2),
+        "last_activity_at": activity_at.isoformat() if activity_at else None,
+        "sla": sla,
+        "reasons": reasons or ["Ranked operational work"],
+    }
+
+
+@app.get("/intelligence/overview")
+async def intel_overview(
+    window_days: int = Query(
+        _INTELLIGENCE_DEFAULT_WINDOW_DAYS,
+        ge=7,
+        le=365,
+        description="Operational activity window in days",
+    ),
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
+):
+    """Decision-first operations cockpit with legacy backlog isolation."""
+    _reserve_analytics_request(db, _user.id)
+    now = datetime.utcnow()
+    cutoff = _intelligence_cutoff(now, window_days)
+    all_open_query = _open_ticket_query(db)
+    active_query = _open_ticket_query(db, cutoff)
+    activity_expression = _ticket_activity_expression()
+    active_condition = activity_expression >= cutoff
+    stale_condition = or_(
+        activity_expression < cutoff,
+        activity_expression.is_(None),
+    )
+    critical_priority = func.lower(
+        func.coalesce(TicketRecord.priority, "")
+    ).in_(["p1", "urgent"])
+    (
+        total_open,
+        active_open,
+        p1_open,
+        unassigned_open,
+        stale_p1,
+        stale_unassigned,
+        latest_activity,
+        oldest_stale_activity,
+    ) = all_open_query.with_entities(
+        func.count(TicketRecord.id),
+        func.sum(case((active_condition, 1), else_=0)),
+        func.sum(case((and_(active_condition, critical_priority), 1), else_=0)),
+        func.sum(case((and_(active_condition, _unassigned_ticket_filter()), 1), else_=0)),
+        func.sum(case((and_(stale_condition, critical_priority), 1), else_=0)),
+        func.sum(case((and_(stale_condition, _unassigned_ticket_filter()), 1), else_=0)),
+        func.max(case((active_condition, activity_expression), else_=None)),
+        func.min(case((stale_condition, activity_expression), else_=None)),
+    ).one()
+    total_open = int(total_open or 0)
+    active_open = int(active_open or 0)
+    p1_open = int(p1_open or 0)
+    unassigned_open = int(unassigned_open or 0)
+    stale_p1 = int(stale_p1 or 0)
+    stale_unassigned = int(stale_unassigned or 0)
+    candidates = active_query.order_by(
+        *_intelligence_candidate_order()
+    ).limit(_INTELLIGENCE_ROW_LIMIT).all()
+
+    attention = [_serialize_attention_ticket(ticket, now) for ticket in candidates]
+    attention.sort(key=lambda item: (
+        item["sla"]["status"] == "breached",
+        item["priority"].lower() in {"p1", "urgent"},
+        item["sla"]["status"] == "at_risk",
+        item["escalation_risk"] >= 70,
+        item["is_unassigned"],
+        item["priority_score"],
+    ), reverse=True)
+
+    sla_breached = sum(item["sla"]["status"] == "breached" for item in attention)
+    sla_at_risk = sum(item["sla"]["status"] == "at_risk" for item in attention)
+    escalation_prone = sum(item["escalation_risk"] >= 70 for item in attention)
+    stale_query = all_open_query.filter(stale_condition)
+    stale_open = max(0, total_open - active_open)
+    stale_candidates = stale_query.order_by(
+        *_intelligence_candidate_order()[:1],
+        _ticket_activity_expression().asc().nullsfirst(),
+        TicketRecord.id.asc(),
+    ).limit(8).all()
+    stale_items = []
+    for ticket in stale_candidates:
+        activity_at = intel._ticket_activity_at(ticket)
+        stale_items.append({
+            "ticket_id": ticket.id,
+            "subject": ticket.subject,
+            "priority": ticket.priority or "Unspecified",
+            "status": ticket.status,
+            "is_unassigned": _ticket_is_unassigned(ticket),
+            "last_activity_at": activity_at.isoformat() if activity_at else None,
+            "dormant_days": round(
+                max(0.0, (now - activity_at).total_seconds() / 86400.0), 1
+            ) if activity_at else None,
+        })
+
+    created_in_window, resolved_in_window = db.query(
+        func.sum(case((_ticket_created_expression() >= cutoff, 1), else_=0)),
+        func.sum(case((_ticket_resolved_expression() >= cutoff, 1), else_=0)),
+    ).one()
+    created_in_window = int(created_in_window or 0)
+    resolved_in_window = int(resolved_in_window or 0)
+
+    age_bands = {"under_24h": 0, "one_to_three_days": 0, "four_to_seven_days": 0, "over_seven_days": 0}
+    for item in attention:
+        age_hours = item["age_hours"]
+        if age_hours < 24:
+            age_bands["under_24h"] += 1
+        elif age_hours < 72:
+            age_bands["one_to_three_days"] += 1
+        elif age_hours < 168:
+            age_bands["four_to_seven_days"] += 1
+        else:
+            age_bands["over_seven_days"] += 1
+
+    posture = "critical" if sla_breached or p1_open else (
+        "watch" if sla_at_risk or escalation_prone or unassigned_open else "healthy"
+    )
+    return {
+        "generated_at": now.isoformat(),
+        "posture": posture,
+        "scope": {
+            "window_days": window_days,
+            "cutoff_at": cutoff.isoformat(),
+            "activity_basis": "provider_updated_at_or_created_at",
+            "total_open_tickets": total_open,
+            "active_open_tickets": active_open,
+            "excluded_stale_open_tickets": stale_open,
+            "analyzed_tickets": len(candidates),
+            "truncated": active_open > len(candidates),
+        },
+        "posture_metrics": {
+            "p1_open": p1_open,
+            "sla_breached": sla_breached,
+            "sla_at_risk": sla_at_risk,
+            "escalation_prone": escalation_prone,
+            "unassigned_open": unassigned_open,
+        },
+        "flow": {
+            "created": int(created_in_window),
+            "resolved": int(resolved_in_window),
+            "net_change": int(created_in_window) - int(resolved_in_window),
+        },
+        "age_bands": age_bands,
+        "attention_queue": attention[:15],
+        "stale_backlog": {
+            "count": stale_open,
+            "p1_count": stale_p1,
+            "unassigned_count": stale_unassigned,
+            "oldest_activity_at": oldest_stale_activity.isoformat() if oldest_stale_activity else None,
+            "items": stale_items,
+        },
+        "freshness": {
+            "latest_ticket_activity_at": latest_activity.isoformat() if latest_activity else None,
+        },
+    }
+
 @app.get("/intelligence/alerts")
 async def intel_alerts(
+    window_days: int = Query(_INTELLIGENCE_DEFAULT_WINDOW_DAYS, ge=7, le=365),
     db: Session = Depends(get_db),
     _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
     """Proactive Alert Agent: unified feed of cases needing attention now."""
     _reserve_analytics_request(db, _user.id)
-    return intel.proactive_alerts(db)
+    now = datetime.utcnow()
+    result = intel.proactive_alerts(
+        db, now=now, since=_intelligence_cutoff(now, window_days)
+    )
+    result["window_days"] = window_days
+    return result
 
 
 @app.get("/intelligence/prioritize")
 async def intel_prioritize(
+    window_days: int = Query(_INTELLIGENCE_DEFAULT_WINDOW_DAYS, ge=7, le=365),
     db: Session = Depends(get_db),
     _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
     """Prioritization Agent: open backlog ranked by composite urgency/impact/risk."""
     _reserve_analytics_request(db, _user.id)
     now = datetime.utcnow()
-    open_query = _open_ticket_query(db)
+    open_query = _open_ticket_query(db, _intelligence_cutoff(now, window_days))
     total_open = open_query.count()
     open_tickets = open_query.order_by(
         *_intelligence_candidate_order()
@@ -7823,6 +8057,7 @@ async def intel_prioritize(
     ranked.sort(key=lambda r: r["score"], reverse=True)
     return {
         "generated_at": now.isoformat(),
+        "window_days": window_days,
         "backlog_size": total_open,
         "analyzed_tickets": len(open_tickets),
         "truncated": total_open > len(open_tickets),
@@ -7832,13 +8067,14 @@ async def intel_prioritize(
 
 @app.get("/intelligence/sla")
 async def intel_sla(
+    window_days: int = Query(_INTELLIGENCE_DEFAULT_WINDOW_DAYS, ge=7, le=365),
     db: Session = Depends(get_db),
     _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
     """SLA Agent: SLA clock state for every open ticket."""
     _reserve_analytics_request(db, _user.id)
     now = datetime.utcnow()
-    open_query = _open_ticket_query(db)
+    open_query = _open_ticket_query(db, _intelligence_cutoff(now, window_days))
     total_open = open_query.count()
     candidates = open_query.order_by(
         *_intelligence_candidate_order()
@@ -7847,6 +8083,7 @@ async def intel_sla(
     rows.sort(key=lambda r: r["remaining_hours"])
     return {
         "generated_at": now.isoformat(),
+        "window_days": window_days,
         "count": total_open,
         "analyzed_tickets": len(candidates),
         "truncated": total_open > len(candidates),
@@ -7856,97 +8093,274 @@ async def intel_sla(
 
 @app.get("/intelligence/trends")
 async def intel_trends(
+    window_days: int = Query(_INTELLIGENCE_DEFAULT_WINDOW_DAYS, ge=7, le=365),
     db: Session = Depends(get_db),
     _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
     """Text Analytics Agent: category/sentiment distribution + top terms."""
     _reserve_analytics_request(db, _user.id)
-    return intel.trends(db)
+    now = datetime.utcnow()
+    result = intel.trends(db, since=_intelligence_cutoff(now, window_days))
+    result["generated_at"] = now.isoformat()
+    result["window_days"] = window_days
+    return result
 
 
 @app.get("/intelligence/systemic")
 async def intel_systemic(
     db: Session = Depends(get_db),
     min_cluster: int = Query(2, ge=2, le=20, description="Minimum tickets to flag as a systemic issue"),
+    window_days: int = Query(_INTELLIGENCE_DEFAULT_WINDOW_DAYS, ge=7, le=365),
     _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
     """Systemic Issue Detection: cluster similar tickets and surface broad
     business‑impact patterns. Returns clusters ranked by impact score, each
     with shared keywords, sample tickets, and priority/risk stats."""
     _reserve_analytics_request(db, _user.id)
-    return intel.systemic_issues(db, cluster_threshold=min_cluster)
+    now = datetime.utcnow()
+    result = intel.systemic_issues(
+        db,
+        cluster_threshold=min_cluster,
+        since=_intelligence_cutoff(now, window_days),
+    )
+    result["generated_at"] = now.isoformat()
+    result["window_days"] = window_days
+    return result
 
 
 @app.get("/intelligence/workload")
 async def agent_workload(
+    window_days: int = Query(_INTELLIGENCE_DEFAULT_WINDOW_DAYS, ge=7, le=365),
     db: Session = Depends(get_db),
     _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
     """Agent workload: open tickets per agent + resolution metrics."""
     _reserve_analytics_request(db, _user.id)
-    total_users = db.query(UserRecord).count()
-    users = db.query(UserRecord).order_by(
-        UserRecord.tier.desc(),
-        UserRecord.impact_points.desc(),
-        UserRecord.id.asc(),
-    ).limit(
-        _INTELLIGENCE_ROW_LIMIT
-    ).all()
-    user_ids = [user.id for user in users]
-    open_counts = dict(db.query(
-        TicketRecord.resolved_by,
-        func.count(TicketRecord.id),
-    ).filter(
-        TicketRecord.resolved_by.in_(user_ids),
-        TicketRecord.status.notin_(["Closed", "Resolved"]),
-    ).group_by(TicketRecord.resolved_by).all()) if user_ids else {}
-    resolved_counts = dict(db.query(
-        TicketRecord.resolved_by,
-        func.count(TicketRecord.id),
-    ).filter(
-        TicketRecord.resolved_by.in_(user_ids),
-    ).group_by(TicketRecord.resolved_by).all()) if user_ids else {}
-    duration_query = db.query(
-        TicketRecord.resolved_by,
-        TicketRecord.resolved_at,
-        TicketRecord.created_at,
-    ).filter(
-        TicketRecord.resolved_by.in_(user_ids),
-        TicketRecord.resolved_at.isnot(None),
-        TicketRecord.created_at.isnot(None),
+    now = datetime.utcnow()
+    cutoff = _intelligence_cutoff(now, window_days)
+    external_user_query = db.query(ExternalUserRecord).filter(
+        ExternalUserRecord.active.is_(True),
+        func.lower(ExternalUserRecord.user_type) == "agent",
     )
-    total_duration_rows = duration_query.count() if user_ids else 0
-    resolved_rows = duration_query.order_by(
-        TicketRecord.resolved_at.desc()
-    ).limit(5_000).all() if user_ids else []
-    duration_totals: dict[str, tuple[float, int]] = {}
-    for resolved_by, resolved_at, created_at in resolved_rows:
-        total_seconds, count = duration_totals.get(resolved_by, (0.0, 0))
-        duration_totals[resolved_by] = (
-            total_seconds + (resolved_at - created_at).total_seconds(),
-            count + 1,
+    external_total = external_user_query.count()
+    external_users = external_user_query.order_by(
+        ExternalUserRecord.name.asc(),
+        ExternalUserRecord.id.asc(),
+    ).limit(_INTELLIGENCE_ROW_LIMIT).all()
+
+    if external_users:
+        total_users = external_total
+        analyzed_users = len(external_users)
+        users_truncated = external_total > len(external_users)
+        external_ids = [user.external_id for user in external_users]
+        internal_ids = [user.id for user in external_users]
+        assignment_rows = db.query(
+            TicketRecord.binding_id,
+            TicketRecord.external_assignee_id,
+            func.count(TicketRecord.id),
+            func.sum(case((
+                func.lower(func.coalesce(TicketRecord.priority, "")).in_(["p1", "urgent"]),
+                1,
+            ), else_=0)),
+        ).filter(
+            TicketRecord.external_assignee_id.isnot(None),
+            TicketRecord.external_assignee_id != "",
+            _ticket_activity_expression() >= cutoff,
+            _active_ticket_status_filter(),
+        ).group_by(
+            TicketRecord.binding_id,
+            TicketRecord.external_assignee_id,
+        ).all()
+        open_counts = {
+            (binding_id, external_id): int(count)
+            for binding_id, external_id, count, _p1_count in assignment_rows
+        }
+        p1_counts = {
+            (binding_id, external_id): int(p1_count or 0)
+            for binding_id, external_id, _count, p1_count in assignment_rows
+        }
+        known_external_keys = {
+            (user.binding_id, user.external_id) for user in external_users
+        }
+        total_open_assignments = sum(open_counts.values())
+        unmapped_open_assignments = sum(
+            count for key, count in open_counts.items()
+            if key not in known_external_keys
         )
-    result = []
-    for u in users:
-        avg_hours = 0.0
-        if u.id in duration_totals:
-            total_seconds, duration_count = duration_totals[u.id]
-            avg_hours = round(total_seconds / duration_count / 3600, 1)
-        result.append({
-            "user_id": u.id,
-            "name": u.name,
-            "open_tickets": int(open_counts.get(u.id, 0)),
-            "total_resolved": int(resolved_counts.get(u.id, 0)),
-            "avg_resolution_hours": avg_hours,
-            "impact_points": u.impact_points,
-            "tier": u.tier,
-        })
-    result.sort(key=lambda r: r["open_tickets"], reverse=True)
+        resolved_counts = {
+            (binding_id, external_id): int(count)
+            for binding_id, external_id, count in db.query(
+                TicketRecord.binding_id,
+                TicketRecord.external_assignee_id,
+                func.count(TicketRecord.id),
+            ).filter(
+                TicketRecord.external_assignee_id.in_(external_ids),
+                _ticket_resolved_expression() >= cutoff,
+            ).group_by(
+                TicketRecord.binding_id,
+                TicketRecord.external_assignee_id,
+            ).all()
+        }
+        duration_query = db.query(
+            TicketRecord.binding_id,
+            TicketRecord.external_assignee_id,
+            _ticket_resolved_expression(),
+            _ticket_created_expression(),
+        ).filter(
+            TicketRecord.external_assignee_id.in_(external_ids),
+            _ticket_resolved_expression().isnot(None),
+            _ticket_created_expression().isnot(None),
+            _ticket_resolved_expression() >= cutoff,
+        )
+        total_duration_rows = duration_query.count()
+        resolved_rows = duration_query.order_by(
+            _ticket_resolved_expression().desc()
+        ).limit(5_000).all()
+        duration_totals: dict[tuple[str, str], tuple[float, int]] = {}
+        for binding_id, external_id, resolved_at, created_at in resolved_rows:
+            key = (binding_id, external_id)
+            total_seconds, count = duration_totals.get(key, (0.0, 0))
+            duration_totals[key] = (
+                total_seconds + max(0.0, (resolved_at - created_at).total_seconds()),
+                count + 1,
+            )
+        group_names: dict[str, List[str]] = {}
+        for external_user_id, group_name in db.query(
+            ExternalGroupMembershipRecord.external_user_id,
+            ExternalGroupRecord.name,
+        ).join(
+            ExternalGroupRecord,
+            ExternalGroupRecord.id == ExternalGroupMembershipRecord.external_group_id,
+        ).filter(
+            ExternalGroupMembershipRecord.external_user_id.in_(internal_ids),
+            ExternalGroupMembershipRecord.membership_kind == "member",
+            ExternalGroupRecord.active.is_(True),
+        ).order_by(ExternalGroupRecord.name.asc()).all():
+            group_names.setdefault(external_user_id, []).append(group_name)
+
+        result = []
+        for user in external_users:
+            key = (user.binding_id, user.external_id)
+            open_count = open_counts.get(key, 0)
+            total_seconds, duration_count = duration_totals.get(key, (0.0, 0))
+            result.append({
+                "user_id": user.id,
+                "name": user.name,
+                "title": user.title,
+                "source": "provider",
+                "group_names": group_names.get(user.id, []),
+                "open_tickets": open_count,
+                "p1_open_tickets": p1_counts.get(key, 0),
+                "total_resolved": resolved_counts.get(key, 0),
+                "avg_resolution_hours": round(
+                    total_seconds / duration_count / 3600, 1
+                ) if duration_count else 0.0,
+                "impact_points": 0,
+                "tier": 1,
+                "load_status": "overloaded" if open_count >= 9 else (
+                    "high" if open_count >= 6 else "balanced"
+                ),
+            })
+        workforce_source = "provider"
+    else:
+        user_query = db.query(UserRecord).filter(
+            UserRecord.is_active.is_(True),
+            func.lower(func.coalesce(UserRecord.role, "agent")).in_(["agent", "supervisor"]),
+        )
+        total_users = user_query.count()
+        users = user_query.order_by(
+            UserRecord.tier.desc(),
+            UserRecord.impact_points.desc(),
+            UserRecord.id.asc(),
+        ).limit(_INTELLIGENCE_ROW_LIMIT).all()
+        analyzed_users = len(users)
+        users_truncated = total_users > len(users)
+        user_ids = [user.id for user in users]
+        open_counts = dict(db.query(
+            TicketRecord.assignee_id,
+            func.count(TicketRecord.id),
+        ).filter(
+            TicketRecord.assignee_id.in_(user_ids),
+            _ticket_activity_expression() >= cutoff,
+            _active_ticket_status_filter(),
+        ).group_by(TicketRecord.assignee_id).all()) if user_ids else {}
+        p1_counts = dict(db.query(
+            TicketRecord.assignee_id,
+            func.count(TicketRecord.id),
+        ).filter(
+            TicketRecord.assignee_id.in_(user_ids),
+            _ticket_activity_expression() >= cutoff,
+            _active_ticket_status_filter(),
+            func.lower(func.coalesce(TicketRecord.priority, "")).in_(["p1", "urgent"]),
+        ).group_by(TicketRecord.assignee_id).all()) if user_ids else {}
+        resolved_counts = dict(db.query(
+            TicketRecord.resolved_by,
+            func.count(TicketRecord.id),
+        ).filter(
+            TicketRecord.resolved_by.in_(user_ids),
+            _ticket_resolved_expression() >= cutoff,
+        ).group_by(TicketRecord.resolved_by).all()) if user_ids else {}
+        duration_query = db.query(
+            TicketRecord.resolved_by,
+            _ticket_resolved_expression(),
+            _ticket_created_expression(),
+        ).filter(
+            TicketRecord.resolved_by.in_(user_ids),
+            _ticket_resolved_expression().isnot(None),
+            _ticket_created_expression().isnot(None),
+            _ticket_resolved_expression() >= cutoff,
+        )
+        total_duration_rows = duration_query.count() if user_ids else 0
+        resolved_rows = duration_query.order_by(
+            _ticket_resolved_expression().desc()
+        ).limit(5_000).all() if user_ids else []
+        duration_totals: dict[str, tuple[float, int]] = {}
+        for resolved_by, resolved_at, created_at in resolved_rows:
+            total_seconds, count = duration_totals.get(resolved_by, (0.0, 0))
+            duration_totals[resolved_by] = (
+                total_seconds + max(0.0, (resolved_at - created_at).total_seconds()),
+                count + 1,
+            )
+        result = []
+        for user in users:
+            open_count = int(open_counts.get(user.id, 0))
+            total_seconds, duration_count = duration_totals.get(user.id, (0.0, 0))
+            result.append({
+                "user_id": user.id,
+                "name": user.name,
+                "title": user.title,
+                "source": "tickety",
+                "group_names": [],
+                "open_tickets": open_count,
+                "p1_open_tickets": int(p1_counts.get(user.id, 0)),
+                "total_resolved": int(resolved_counts.get(user.id, 0)),
+                "avg_resolution_hours": round(
+                    total_seconds / duration_count / 3600, 1
+                ) if duration_count else 0.0,
+                "impact_points": user.impact_points,
+                "tier": user.tier,
+                "load_status": "overloaded" if open_count >= 9 else (
+                    "high" if open_count >= 6 else "balanced"
+                ),
+            })
+        workforce_source = "tickety"
+        total_open_assignments = sum(int(value) for value in open_counts.values())
+        unmapped_open_assignments = 0
+
+    result.sort(key=lambda row: (
+        -row["open_tickets"], -row["p1_open_tickets"], row["name"].lower()
+    ))
     return {
+        "generated_at": now.isoformat(),
+        "window_days": window_days,
+        "workforce_source": workforce_source,
+        "assigned_users": sum(row["open_tickets"] > 0 for row in result),
+        "total_open_assignments": total_open_assignments,
+        "unmapped_open_assignments": unmapped_open_assignments,
         "agents": result,
         "total_users": total_users,
-        "analyzed_users": len(users),
-        "users_truncated": total_users > len(users),
+        "analyzed_users": analyzed_users,
+        "users_truncated": users_truncated,
         "duration_rows_analyzed": len(resolved_rows),
         "duration_rows_truncated": total_duration_rows > len(resolved_rows),
     }
@@ -7954,6 +8368,7 @@ async def agent_workload(
 @app.get("/intelligence/health/{reporter}")
 async def intel_health(
     reporter: str,
+    window_days: int = Query(_INTELLIGENCE_DEFAULT_WINDOW_DAYS, ge=7, le=365),
     db: Session = Depends(get_db),
     _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
@@ -7961,9 +8376,17 @@ async def intel_health(
     if len(reporter) > 320:
         raise HTTPException(status_code=422, detail="Reporter identifier is too long")
     _reserve_analytics_request(db, _user.id)
-    result = intel.account_health(db, reporter)
+    now = datetime.utcnow()
+    result = intel.account_health(
+        db, reporter, since=_intelligence_cutoff(now, window_days)
+    )
     if result["health_score"] is None:
-        raise HTTPException(status_code=404, detail="No tickets for that reporter")
+        raise HTTPException(
+            status_code=404,
+            detail="No tickets for that reporter in the selected activity window",
+        )
+    result["generated_at"] = now.isoformat()
+    result["window_days"] = window_days
     return result
 
 
