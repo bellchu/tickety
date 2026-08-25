@@ -376,7 +376,7 @@ export default function AIStatusPage() {
               onClick={() => openBulkAction("clear")}
               leadingIcon={<Trash2 className="h-4 w-4" />}
             >
-              Clear scheduled queue
+              Pause scheduled retries
             </Button>
           </div>
         </div>
@@ -536,11 +536,11 @@ export default function AIStatusPage() {
         onOpenChange={(open) => {
           if (!open) setBulkAction(null);
         }}
-        title={bulkAction === "clear" ? "Clear all scheduled retries?" : "Retry all scheduled tasks now?"}
+        title={bulkAction === "clear" ? "Pause all scheduled retries?" : "Retry all scheduled tasks now?"}
         description={bulkAction === "clear"
           ? `${data.queue.retry_scheduled.toLocaleString()} delayed task${data.queue.retry_scheduled === 1 ? "" : "s"} will move to Paused and no longer count as needing attention. Tickets, requested artifacts, attempt counts, and existing AI results are retained.`
           : `${data.queue.retry_scheduled.toLocaleString()} delayed task${data.queue.retry_scheduled === 1 ? "" : "s"} will become ready for worker claims. The provider safety pause, if active, still controls actual dispatch.`}
-        confirmLabel={bulkAction === "clear" ? "Clear queue" : "Retry all now"}
+        confirmLabel={bulkAction === "clear" ? "Pause retries" : "Retry all now"}
         destructive={bulkAction === "clear"}
         pending={bulkMutation.isPending}
         onConfirm={() => {

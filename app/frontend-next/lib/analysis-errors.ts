@@ -47,6 +47,7 @@ export function analysisErrorDetails(errors: readonly AnalysisStepError[]): stri
 
 export function persistedAnalysisErrorDetails(value: string | null | undefined): string | null {
   if (!value?.trim()) return null;
+  if (normalize(value) === "operator_retry_queue_cleared") return null;
   const parsed = value
     .split(",")
     .map((item) => item.trim())

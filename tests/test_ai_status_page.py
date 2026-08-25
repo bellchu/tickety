@@ -432,6 +432,32 @@ class AIStatusPageApiTests(unittest.TestCase):
         self.assertEqual(status_after_clear.json()["queue"]["retry_scheduled"], 0)
         self.assertEqual(status_after_clear.json()["queue"]["paused"], 1)
         self.assertEqual(status_after_clear.json()["queue"]["attention"], 5)
+        cleared_task = next(
+            task
+            for task in status_after_clear.json()["tasks"]
+            if task["ticket_id"] == "queued-retry"
+        )
+        self.assertIsNone(cleared_task["error_code"])
+
+        cleared_diagnostics = self.client.get(
+            "/admin/settings/ai-status/queued-retry/diagnostics",
+            headers=self.headers,
+        )
+        self.assertEqual(cleared_diagnostics.status_code, 200, cleared_diagnostics.text)
+        self.assertEqual(cleared_diagnostics.json()["entries"], [])
+
+        global_diagnostics = self.client.get(
+            "/admin/settings/status/diagnostics",
+            params={"area": "ai"},
+            headers=self.headers,
+        )
+        self.assertEqual(global_diagnostics.status_code, 200, global_diagnostics.text)
+        diagnostic_sources = {
+            entry["source"] for entry in global_diagnostics.json()["entries"]
+        }
+        self.assertNotIn("ticket:queued-retry", diagnostic_sources)
+        self.assertIn("ticket:paused-needs-attention", diagnostic_sources)
+        self.assertNotIn("ticket:closed-paused", diagnostic_sources)
 
         attention_after_clear = self.client.get(
             "/admin/settings/ai-status",

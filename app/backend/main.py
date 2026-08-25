@@ -6857,6 +6857,14 @@ def _safe_operational_code(value: Optional[str]) -> Optional[str]:
     return "legacy_error"
 
 
+def _is_operator_cleared_retry(ticket: TicketRecord) -> bool:
+    """Distinguish an intentional queue control from an analysis failure."""
+    return (
+        (ticket.ai_status or "").strip().lower().replace("-", "_") == "paused"
+        and (ticket.ai_error or "").strip().lower() == _AI_RETRY_QUEUE_CLEARED_ERROR
+    )
+
+
 def _ai_task_lifecycle(
     ticket: TicketRecord,
     now: datetime,
@@ -7168,7 +7176,11 @@ async def ai_task_status(
             "generated_at": ticket.ai_generated_at,
             "next_attempt_at": ticket.ai_next_attempt_at,
             "lease_expires_at": ticket.ai_lease_expires_at,
-            "error_code": _safe_operational_code(ticket.ai_error),
+            "error_code": (
+                None
+                if _is_operator_cleared_retry(ticket)
+                else _safe_operational_code(ticket.ai_error)
+            ),
             "created_at": ticket.created_at,
             "updated_at": ticket.updated_at,
         })
@@ -7497,7 +7509,8 @@ async def ai_ticket_diagnostics(
     response.headers["Cache-Control"] = "no-store"
     status = _ai_task_lifecycle(ticket, datetime.utcnow())
     entries = []
-    if ticket.ai_error:
+    operator_cleared_retry = _is_operator_cleared_retry(ticket)
+    if ticket.ai_error and not operator_cleared_retry:
         entries.append({
             "severity": _diagnostic_severity(status),
             "source": "ticket.ai_error",
@@ -7522,7 +7535,7 @@ async def ai_ticket_diagnostics(
             ),
             "timestamp": ticket.ai_next_attempt_at,
         })
-    if not entries and status in {
+    if not entries and not operator_cleared_retry and status in {
         "partial", "stale", "failed", "dead_letter", "paused", "unknown"
     }:
         entries.append({
@@ -7559,16 +7572,19 @@ async def operational_status_diagnostics(
 
     if area == "ai":
         now = datetime.utcnow()
-        rows = db.query(TicketRecord).filter(or_(
-            TicketRecord.ai_status.in_(tuple(_AI_ATTENTION_STATUSES)),
-            and_(
-                TicketRecord.ai_status == "running",
-                or_(
-                    TicketRecord.ai_lease_expires_at.is_(None),
-                    TicketRecord.ai_lease_expires_at < now,
+        rows = db.query(TicketRecord).filter(
+            active_ticket_filter(db),
+            or_(
+                _ai_attention_filter(),
+                and_(
+                    TicketRecord.ai_status == "running",
+                    or_(
+                        TicketRecord.ai_lease_expires_at.is_(None),
+                        TicketRecord.ai_lease_expires_at < now,
+                    ),
                 ),
             ),
-        )).order_by(TicketRecord.updated_at.desc(), TicketRecord.id.asc()).limit(51).all()
+        ).order_by(TicketRecord.updated_at.desc(), TicketRecord.id.asc()).limit(51).all()
         truncated = len(rows) > 50
         for ticket in rows[:50]:
             lifecycle = _ai_task_lifecycle(ticket, now)

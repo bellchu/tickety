@@ -468,8 +468,8 @@ function TicketBriefPanel({
   const risk = Math.min(100, Math.max(0, ticket.escalation_risk || 0));
   const riskLabel = risk >= 70 ? "High" : risk >= 40 ? "Medium" : "Low";
   const lifecycle = analysisLifecycleLabel(ticket);
-  const detailOpen = Boolean(ticket.ai_error) || ["partial", "failed", "dead_letter"].includes(ticket.ai_status || "");
   const failureDetail = persistedAnalysisErrorDetails(ticket.ai_error);
+  const detailOpen = Boolean(failureDetail) || ["partial", "failed", "dead_letter"].includes(ticket.ai_status || "");
 
   return (
     <section className="space-y-4 rounded-2xl border border-linen-400 bg-linen-50 p-4 shadow-sm sm:p-5" aria-labelledby="ticket-brief-title">

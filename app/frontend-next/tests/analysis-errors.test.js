@@ -49,5 +49,6 @@ test("persisted failure signatures support new and legacy records without exposi
     persistedAnalysisErrorDetails("unknown-secret-bearing-value"),
     "AI pipeline: processing failed",
   );
+  assert.equal(persistedAnalysisErrorDetails("operator_retry_queue_cleared"), null);
   assert.equal(persistedAnalysisErrorDetails(null), null);
 });
