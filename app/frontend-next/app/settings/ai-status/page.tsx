@@ -89,7 +89,7 @@ function viewCount(data: AIStatusResponse, view: AITaskView) {
 function retryActionNotice(result: AIRetryQueueActionResponse) {
   const count = result.affected.toLocaleString();
   const message = {
-    clear: `${count} scheduled retr${result.affected === 1 ? "y was" : "ies were"} paused and removed from the active queue.`,
+    clear: `${count} scheduled retr${result.affected === 1 ? "y was" : "ies were"} paused, removed from the active queue, and cleared from attention.`,
     retry_all_now: `${count} scheduled retr${result.affected === 1 ? "y is" : "ies are"} ready for worker claims.`,
     retry_now: "The retry is ready for a worker claim.",
     reschedule: `The retry was rescheduled for ${formatDate(result.scheduled_at)}.`,
@@ -303,7 +303,7 @@ export default function AIStatusPage() {
       )}
       {data.queue.attention > 0 && (
         <Alert variant="warning" title={`${data.queue.attention.toLocaleString()} task${data.queue.attention === 1 ? "" : "s"} need attention`}>
-          This includes exhausted retries, partial or stale results, paused work, and expired worker leases. Use the task detail below to identify the affected artifact and safe error code.
+          This includes exhausted retries, partial or stale results, unplanned paused work, and expired worker leases. Retries deliberately cleared by an administrator are excluded.
         </Alert>
       )}
       {enabledFeatures.length === 0 && (
@@ -353,7 +353,7 @@ export default function AIStatusPage() {
           <div className="min-w-0">
             <p className="text-sm font-semibold text-ink-700">Queue-wide actions</p>
             <p className="mt-1 max-w-3xl text-xs leading-5 text-ink-500">
-              Retry all makes every delayed task ready now. Clear queue moves delayed tasks to Paused so an administrator can reschedule or resume them individually later.
+              Retry all makes every delayed task ready now. Clear queue moves delayed tasks to Paused and removes them from attention; an administrator can still reschedule or resume them later.
             </p>
             {data.provider_cooldown && (
               <p className="mt-2 text-xs font-medium text-semantic-info">
@@ -538,7 +538,7 @@ export default function AIStatusPage() {
         }}
         title={bulkAction === "clear" ? "Clear all scheduled retries?" : "Retry all scheduled tasks now?"}
         description={bulkAction === "clear"
-          ? `${data.queue.retry_scheduled.toLocaleString()} delayed task${data.queue.retry_scheduled === 1 ? "" : "s"} will move to Paused. Tickets, requested artifacts, attempt counts, and existing AI results are retained.`
+          ? `${data.queue.retry_scheduled.toLocaleString()} delayed task${data.queue.retry_scheduled === 1 ? "" : "s"} will move to Paused and no longer count as needing attention. Tickets, requested artifacts, attempt counts, and existing AI results are retained.`
           : `${data.queue.retry_scheduled.toLocaleString()} delayed task${data.queue.retry_scheduled === 1 ? "" : "s"} will become ready for worker claims. The provider safety pause, if active, still controls actual dispatch.`}
         confirmLabel={bulkAction === "clear" ? "Clear queue" : "Retry all now"}
         destructive={bulkAction === "clear"}

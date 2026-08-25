@@ -393,6 +393,15 @@ class AIStatusPageApiTests(unittest.TestCase):
                 )
 
     def test_admin_can_clear_reschedule_and_resume_a_scheduled_retry(self):
+        with self.session_factory() as db:
+            db.add(TicketRecord(
+                id="paused-needs-attention",
+                subject="Unexpected paused task",
+                ai_status="paused",
+                ai_error="automatic_scope_excluded",
+            ))
+            db.commit()
+
         cleared = self.client.post(
             "/admin/settings/ai-status/retries/clear",
             headers=self.headers,
@@ -414,6 +423,27 @@ class AIStatusPageApiTests(unittest.TestCase):
             ).one()
             self.assertEqual(audit.changed_by, "Status Admin")
             self.assertEqual(audit.new_value, "paused:queue_cleared")
+
+        status_after_clear = self.client.get(
+            "/admin/settings/ai-status",
+            headers=self.headers,
+        )
+        self.assertEqual(status_after_clear.status_code, 200, status_after_clear.text)
+        self.assertEqual(status_after_clear.json()["queue"]["retry_scheduled"], 0)
+        self.assertEqual(status_after_clear.json()["queue"]["paused"], 1)
+        self.assertEqual(status_after_clear.json()["queue"]["attention"], 5)
+
+        attention_after_clear = self.client.get(
+            "/admin/settings/ai-status",
+            params={"view": "attention"},
+            headers=self.headers,
+        )
+        self.assertEqual(attention_after_clear.status_code, 200, attention_after_clear.text)
+        attention_ids = {
+            task["ticket_id"] for task in attention_after_clear.json()["tasks"]
+        }
+        self.assertNotIn("queued-retry", attention_ids)
+        self.assertIn("paused-needs-attention", attention_ids)
 
         scheduled_at = (self.now + timedelta(hours=4)).replace(tzinfo=timezone.utc)
         rescheduled = self.client.put(

@@ -5895,6 +5895,7 @@ _AI_ATTENTION_STATUSES = {
 }
 _AI_ARTIFACT_NAMES = {"triage", "summary", "route", "resolution", "refresh"}
 _AI_RETRY_CONTROL_STATUSES = {"queued", "paused"}
+_AI_RETRY_QUEUE_CLEARED_ERROR = "operator_retry_queue_cleared"
 _SAFE_OPERATIONAL_CODE = re.compile(
     r"^[a-z0-9_]+(?::[a-z0-9_]+)?(?:,[a-z0-9_]+(?::[a-z0-9_]+)?)*$"
 )
@@ -5948,6 +5949,17 @@ def _utc_naive_datetime(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value
     return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _ai_attention_filter():
+    """Exclude retries an administrator deliberately removed from the queue."""
+    return or_(
+        TicketRecord.ai_status.in_(tuple(_AI_ATTENTION_STATUSES - {"paused"})),
+        and_(
+            TicketRecord.ai_status == "paused",
+            func.coalesce(TicketRecord.ai_error, "") != _AI_RETRY_QUEUE_CLEARED_ERROR,
+        ),
+    )
 
 
 def _active_provider_cooldown_until(
@@ -6079,7 +6091,7 @@ async def ai_task_status(
         func.count(TicketRecord.id),
     ).filter(
         active_ticket,
-        TicketRecord.ai_status.in_(tuple(_AI_ATTENTION_STATUSES)),
+        _ai_attention_filter(),
     ).group_by(normalized_status).all()
     attention_status_counts = {
         str(status): int(count) for status, count in attention_rows
@@ -6119,7 +6131,7 @@ async def ai_task_status(
         )
     elif view == "attention":
         task_query = task_query.filter(active_ticket, or_(
-            TicketRecord.ai_status.in_(tuple(_AI_ATTENTION_STATUSES)),
+            _ai_attention_filter(),
             and_(
                 TicketRecord.ai_status == "running",
                 or_(
@@ -6368,7 +6380,7 @@ def clear_scheduled_ai_retries(
         ticket.ai_claim_id = None
         ticket.ai_lease_expires_at = None
         ticket.ai_next_attempt_at = None
-        ticket.ai_error = "operator_retry_queue_cleared"
+        ticket.ai_error = _AI_RETRY_QUEUE_CLEARED_ERROR
     db.commit()
     return {
         "action": "clear",
