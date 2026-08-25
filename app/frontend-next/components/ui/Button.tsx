@@ -59,7 +59,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       aria-disabled={isDisabled || undefined}
       aria-busy={pending || undefined}
       className={cn(
-        "relative inline-flex items-center justify-center gap-2 rounded-md border font-semibold leading-none",
+        "relative inline-flex min-w-0 max-w-full items-center justify-center gap-2 rounded-md border font-semibold leading-none",
         "transition-[background-color,border-color,color,box-shadow,filter,transform] duration-150",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-linen-50",
         "active:translate-y-px disabled:pointer-events-none disabled:opacity-45 disabled:shadow-none disabled:transform-none",
@@ -74,7 +74,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       ) : (
         leadingIcon && <span className="shrink-0" aria-hidden="true">{leadingIcon}</span>
       )}
-      <span>{pending ? pendingLabel : children}</span>
+      <span className="min-w-0 whitespace-normal break-words text-center [overflow-wrap:anywhere]">{pending ? pendingLabel : children}</span>
       {!pending && trailingIcon && (
         <span className="shrink-0" aria-hidden="true">{trailingIcon}</span>
       )}

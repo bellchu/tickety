@@ -29,6 +29,7 @@ PRIORITY_COMPLEXITY = {
     "P1": 3,
     "P2": 2,
     "P3": 1,
+    "P4": 1,
 }
 
 

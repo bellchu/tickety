@@ -52,6 +52,13 @@ class RoutingContractTests(unittest.TestCase):
         result = TriageAnalysis.model_validate(payload)
         self.assertEqual(result.recommended_team, "Application Support")
 
+        routine = TriageAnalysis.model_validate({
+            **payload,
+            "priority": "P4",
+            "reasoning": "scope: single user; routine request with no current disruption",
+        })
+        self.assertEqual(routine.priority, "P4")
+
         with self.assertRaises(ValidationError):
             TriageAnalysis.model_validate({
                 **payload,

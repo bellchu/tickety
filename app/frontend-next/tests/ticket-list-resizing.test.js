@@ -15,6 +15,8 @@ test("desktop ticket columns expose persistent pointer and keyboard resizing", (
   assert.match(source, /COLUMN_WIDTHS_KEY/);
   assert.match(source, /localStorage\.setItem\(COLUMN_WIDTHS_KEY/);
   assert.match(source, /<col style=\{\{ width: columnWidths\.routing \}\} \/>/);
+  assert.match(source, /priority: 150/);
+  assert.match(source, /label="Priority signal"/);
 });
 
 test("routing content remains discoverable when space is constrained", () => {

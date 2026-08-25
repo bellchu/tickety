@@ -52,13 +52,13 @@ export function PageHeader({
             <span>{eyebrow}</span>
           </div>
         )}
-        <h1 className={cn("text-3xl font-medium tracking-[-0.035em] text-ink-700 sm:text-4xl", eyebrow && "mt-2")}>
+        <h1 className={cn("break-words text-3xl font-medium tracking-[-0.035em] text-ink-700 [overflow-wrap:anywhere] sm:text-4xl", eyebrow && "mt-2")}>
           {title}
         </h1>
         {description && <div className="mt-2 text-sm leading-6 text-ink-500">{description}</div>}
         {meta && <div className="mt-2 text-xs text-ink-400">{meta}</div>}
       </div>
-      {actions && <div className="flex shrink-0 flex-col gap-2 xs:flex-row sm:flex-row">{actions}</div>}
+      {actions && <div className="flex min-w-0 max-w-full shrink-0 flex-col gap-2 xs:flex-row xs:flex-wrap sm:flex-row">{actions}</div>}
       <span aria-hidden="true" className="nexora-spectrum absolute -bottom-px left-0 h-[2px] w-36" />
     </header>
   );
@@ -112,7 +112,7 @@ export function DataToolbar({
   return (
     <section
       aria-label={label}
-      className={cn("rounded-xl border border-linen-400 bg-linen-50 p-4 shadow-sm sm:p-5", className)}
+      className={cn("rounded-xl border border-linen-400 bg-linen-50 p-4 shadow-[var(--shadow-card)] sm:p-5", className)}
       {...props}
     >
       {children}
@@ -127,7 +127,7 @@ export function ContentSurface({
 }: HTMLAttributes<HTMLElement>) {
   return (
     <section
-      className={cn("overflow-hidden rounded-xl border border-linen-400 bg-linen-50 shadow-sm", className)}
+      className={cn("overflow-hidden rounded-xl border border-linen-400 bg-linen-50 shadow-[var(--shadow-card)]", className)}
       {...props}
     >
       {children}

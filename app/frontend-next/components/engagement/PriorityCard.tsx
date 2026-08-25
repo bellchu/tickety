@@ -3,9 +3,9 @@
 import Link from "next/link";
 import { motion } from "framer-motion";
 import { Clock } from "lucide-react";
+import { TicketPriorityIndicator } from "@/components/ticket/TicketPriorityIndicator";
 import type { Ticket } from "@/lib/types";
 import {
-  priorityColor,
   statusColor,
   complexityDots,
   formatTimeAgo,
@@ -30,9 +30,7 @@ export function PriorityCard({ ticket, index = 0 }: Props) {
         <div className="card-surface p-4 cursor-pointer hover:border-linen-400 transition-colors">
           {/* Badge + complexity row */}
           <div className="mb-2.5 flex min-w-0 flex-wrap items-center gap-2">
-            <span className={cn("badge max-w-full", priorityColor(ticket.priority))} title={ticket.priority}>
-              {ticket.priority}
-            </span>
+            <TicketPriorityIndicator ticket={ticket} compact />
             <span className={cn("badge max-w-full", statusColor(ticket.status))} title={ticket.status}>
               {ticket.status}
             </span>
@@ -67,7 +65,7 @@ export function PriorityCard({ ticket, index = 0 }: Props) {
             {ticket.sentiment && (
               <span
                 className={cn(
-                  "text-[10px] font-semibold",
+                  "break-words text-right text-[10px] font-semibold [overflow-wrap:anywhere]",
                   ticket.sentiment === "Negative"
                     ? "text-rust-500"
                     : ticket.sentiment === "Positive"
@@ -75,7 +73,7 @@ export function PriorityCard({ ticket, index = 0 }: Props) {
                     : "text-ink-500"
                 )}
               >
-                {ticket.sentiment}
+                Impact · {ticket.sentiment}
               </span>
             )}
           </div>

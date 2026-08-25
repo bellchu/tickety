@@ -1,8 +1,9 @@
 import type { Ticket, TicketAnalysisResult } from "@/lib/types";
 import { parseApiDateTime } from "@/lib/date-time";
 
-export type TicketSignalKey = "urgency" | "business-impact" | "requester-pressure" | "complexity" | "escalation-risk";
+export type TicketSignalKey = "content-priority" | "business-impact" | "customer-sentiment" | "complexity" | "escalation-risk";
 export type TicketSignalScore = 1 | 2 | 3 | 4 | 5;
+export type TicketSignalVisual = "stars" | "emoji" | "meter" | "risk";
 
 export interface TicketSignalRating {
   key: TicketSignalKey;
@@ -14,11 +15,14 @@ export interface TicketSignalRating {
   unavailableReason: string | null;
   accessibleLabel: string;
   colorClass: string;
+  visual: TicketSignalVisual;
+  visualValue: string | null;
+  highlighted: boolean;
 }
 
 type TicketSignalSource = Pick<
   Ticket,
-  "id" | "urgency" | "priority" | "sentiment" | "mood" | "complexity" | "escalation_risk" | "ai_status" | "ai_reasoning" | "ai_requested_artifacts"
+  "id" | "priority" | "ai_suggested_priority" | "sentiment" | "mood" | "complexity" | "escalation_risk" | "ai_status" | "ai_reasoning" | "ai_requested_artifacts"
 >;
 
 const TRUSTED_TRIAGE_STATUSES = new Set(["completed", "triage-completed", "partial"]);
@@ -56,6 +60,8 @@ function unavailableSignal(
   sourceLabel: string,
   colorClass: string,
   unavailableReason: string,
+  visual: TicketSignalVisual = "meter",
+  highlighted = false,
 ): TicketSignalRating {
   return {
     key,
@@ -67,6 +73,9 @@ function unavailableSignal(
     unavailableReason,
     accessibleLabel: `${label}, Not rated, ${unavailableReason}`,
     colorClass,
+    visual,
+    visualValue: null,
+    highlighted,
   };
 }
 
@@ -79,7 +88,14 @@ function ratedSignal({
   detail,
   accessibleLabel,
   colorClass,
-}: Omit<TicketSignalRating, "unavailableReason"> & { score: TicketSignalScore }): TicketSignalRating {
+  visual,
+  visualValue = null,
+  highlighted = false,
+}: Omit<TicketSignalRating, "unavailableReason" | "visualValue" | "highlighted"> & {
+  score: TicketSignalScore;
+  visualValue?: string | null;
+  highlighted?: boolean;
+}): TicketSignalRating {
   return {
     key,
     label,
@@ -90,60 +106,62 @@ function ratedSignal({
     unavailableReason: null,
     accessibleLabel,
     colorClass,
+    visual,
+    visualValue,
+    highlighted,
   };
 }
 
-const URGENCY_LEVELS: Record<string, { score: TicketSignalScore; label: string }> = {
-  critical: { score: 5, label: "Critical" },
-  high: { score: 4, label: "High" },
-  medium: { score: 3, label: "Medium" },
-  low: { score: 2, label: "Low" },
+const CONTENT_PRIORITY_LEVELS: Record<string, { score: TicketSignalScore; label: string }> = {
+  p1: { score: 5, label: "Critical response" },
+  p2: { score: 4, label: "High response" },
+  p3: { score: 3, label: "Standard response" },
+  p4: { score: 2, label: "Planned response" },
 };
 
-const PRIORITY_URGENCY: Record<string, { score: TicketSignalScore; label: string }> = {
-  p1: { score: 5, label: "Critical" },
-  p2: { score: 4, label: "High" },
-  p3: { score: 3, label: "Medium" },
-  p4: { score: 2, label: "Low" },
-};
-
-function urgencySignal(ticket: Pick<Ticket, "urgency" | "priority">): TicketSignalRating {
-  const declared = URGENCY_LEVELS[normalizeSignalValue(ticket.urgency)];
-  if (declared) {
+function contentPrioritySignal(
+  reportedPriority: unknown,
+  analyzedPriority: unknown,
+  trusted: boolean,
+  unavailableReason: string,
+): TicketSignalRating {
+  const reported = originalSignalValue(reportedPriority).toUpperCase();
+  const normalizedAnalyzed = trusted ? normalizeSignalValue(analyzedPriority) : "";
+  const assessed = CONTENT_PRIORITY_LEVELS[normalizedAnalyzed];
+  if (assessed) {
+    const priority = originalSignalValue(analyzedPriority).toUpperCase();
+    const differs = Boolean(reported) && reported !== priority;
+    const detail = differs
+      ? `Content supports ${priority}; requester reported ${reported}`
+      : reported
+        ? `Content assessment aligns with reported ${reported}`
+        : "Assessed from the ticket narrative and affected scope";
     return ratedSignal({
-      key: "urgency",
-      label: "Urgency",
-      score: declared.score,
-      displayValue: `${declared.label} - ${declared.score}/5 attention`,
-      sourceLabel: "Declared",
-      detail: "Declared urgency",
-      accessibleLabel: `Urgency, ${declared.label}, ${declared.score} out of 5 attention, declared urgency`,
-      colorClass: "text-rust-600",
+      key: "content-priority",
+      label: "Content priority",
+      score: assessed.score,
+      displayValue: `${priority} · ${assessed.label}`,
+      sourceLabel: "AI-assessed",
+      detail,
+      accessibleLabel: `Content priority ${priority}, ${assessed.label}, ${assessed.score} out of 5 attention. ${detail}`,
+      colorClass: assessed.score >= 5 ? "text-rust-600" : assessed.score >= 4 ? "text-amber-600" : "text-clay-600",
+      visual: "stars",
+      visualValue: priority,
+      highlighted: true,
     });
   }
 
-  const normalizedPriority = normalizeSignalValue(ticket.priority);
-  const fallback = PRIORITY_URGENCY[normalizedPriority];
-  if (fallback) {
-    const priority = originalSignalValue(ticket.priority).toUpperCase();
-    return ratedSignal({
-      key: "urgency",
-      label: "Urgency",
-      score: fallback.score,
-      displayValue: `${fallback.label} - ${fallback.score}/5 attention`,
-      sourceLabel: `From priority ${priority}`,
-      detail: `Derived from current priority ${priority}`,
-      accessibleLabel: `Urgency, ${fallback.label}, ${fallback.score} out of 5 attention, from priority ${priority}`,
-      colorClass: "text-rust-600",
-    });
-  }
-
+  const detail = reported
+    ? `${unavailableReason}; reported priority is ${reported}`
+    : unavailableReason;
   return unavailableSignal(
-    "urgency",
-    "Urgency",
-    "Declared",
-    "text-rust-600",
-    "Urgency and priority unavailable",
+    "content-priority",
+    "Content priority",
+    "AI-assessed",
+    "text-clay-600",
+    detail,
+    "stars",
+    true,
   );
 }
 
@@ -177,6 +195,7 @@ function businessImpactSignal(value: unknown, trusted: boolean, unavailableReaso
     detail,
     accessibleLabel: `Business impact, ${impact.label}, ${impact.score} out of 5 impact, classification ${sourceValue}, AI-assisted`,
     colorClass: "text-amber-600",
+    visual: "meter",
   });
 }
 
@@ -188,26 +207,39 @@ const REQUESTER_PRESSURE_LEVELS: Record<string, { score: TicketSignalScore; labe
   satisfied: { score: 1, label: "Satisfied requester" },
 };
 
-function requesterPressureSignal(value: unknown, trusted: boolean, unavailableReason: string): TicketSignalRating {
+const CUSTOMER_SENTIMENT_EMOJI: Record<string, string> = {
+  critical: "😡",
+  urgent: "😣",
+  concerned: "😟",
+  neutral: "😐",
+  satisfied: "😊",
+};
+
+function customerSentimentSignal(value: unknown, trusted: boolean, unavailableReason: string): TicketSignalRating {
+  const normalized = normalizeSignalValue(value);
   const pressure = trusted ? REQUESTER_PRESSURE_LEVELS[normalizeSignalValue(value)] : undefined;
   if (!pressure) {
     return unavailableSignal(
-      "requester-pressure",
-      "Requester pressure",
-      "AI-assisted",
+      "customer-sentiment",
+      "Sentiment sensor",
+      "AI sentiment",
       "text-clay-600",
       unavailableReason,
+      "emoji",
     );
   }
+  const emoji = CUSTOMER_SENTIMENT_EMOJI[normalized] || "😐";
   return ratedSignal({
-    key: "requester-pressure",
-    label: "Requester pressure",
+    key: "customer-sentiment",
+    label: "Sentiment sensor",
     score: pressure.score,
-    displayValue: `${pressure.label} - ${pressure.score}/5 pressure`,
-    sourceLabel: "AI-assisted",
-    detail: "Requester intensity, separate from business impact",
-    accessibleLabel: `Requester pressure, ${pressure.label}, ${pressure.score} out of 5 pressure, AI-assisted`,
+    displayValue: `${emoji} ${pressure.label}`,
+    sourceLabel: "AI sentiment",
+    detail: "Emotional pressure, kept separate from business impact",
+    accessibleLabel: `Customer sentiment, ${pressure.label}, ${pressure.score} out of 5 pressure, AI-assisted`,
     colorClass: "text-clay-600",
+    visual: "emoji",
+    visualValue: emoji,
   });
 }
 
@@ -240,6 +272,7 @@ function complexitySignal(value: unknown, trusted: boolean, unavailableReason: s
     detail: "Estimated handling effort",
     accessibleLabel: `Complexity, ${label}, ${score} out of 5 effort, AI-assisted`,
     colorClass: "text-semantic-info",
+    visual: "meter",
   });
 }
 
@@ -268,6 +301,8 @@ function escalationRiskSignal(value: unknown, trusted: boolean, unavailableReaso
     detail: "Derived escalation outcome",
     accessibleLabel: `Escalation risk, ${percent} percent, ${score} out of 5 attention, AI-assisted`,
     colorClass: "text-[var(--brand-pink)]",
+    visual: "risk",
+    visualValue: percent,
   });
 }
 
@@ -292,9 +327,14 @@ export function ticketSignalRatings(
       : "Awaiting a completed AI analysis";
 
   return [
-    urgencySignal(ticket),
+    contentPrioritySignal(
+      ticket.priority,
+      matchingFresh ? triage?.priority : ticket.ai_suggested_priority,
+      aiTrusted,
+      unavailableReason,
+    ),
     businessImpactSignal(matchingFresh ? triage?.sentiment : ticket.sentiment, aiTrusted, unavailableReason),
-    requesterPressureSignal(matchingFresh ? triage?.mood : ticket.mood, aiTrusted, unavailableReason),
+    customerSentimentSignal(matchingFresh ? triage?.mood : ticket.mood, aiTrusted, unavailableReason),
     complexitySignal(matchingFresh ? triage?.complexity : ticket.complexity, aiTrusted, unavailableReason),
     escalationRiskSignal(matchingFresh ? triage?.escalation_risk : ticket.escalation_risk, aiTrusted, unavailableReason),
   ];

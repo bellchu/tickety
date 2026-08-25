@@ -1605,20 +1605,20 @@ class LLMManager:
                 return {
                     "sentiment": "Neutral",
                     "category": "Access Request",
-                    "priority": "P3",
+                    "priority": "P4",
                     "mood": "concerned",
                     "action": "respond",
                     "recommended_team": "Identity and Access",
-                    "reasoning": "scope: single user; this is a standard access request.",
+                    "reasoning": "scope: single user; this is a routine access request with no wider operational impact.",
                 }
             return {
                 "sentiment": "Neutral",
                 "category": "Other",
-                "priority": "P3",
+                "priority": "P4",
                 "mood": "neutral",
                 "action": "respond",
                 "recommended_team": "Application Support",
-                "reasoning": "scope: single user; this is a routine support request.",
+                "reasoning": "scope: single user; this is a routine request with little present operational impact.",
             }
         elif (
             response_name == "SuggestedReply"

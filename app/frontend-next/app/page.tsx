@@ -22,6 +22,7 @@ import {
   UserRound,
 } from "lucide-react";
 import { NewTicketModal } from "@/components/ticket/NewTicketModal";
+import { TicketPriorityIndicator } from "@/components/ticket/TicketPriorityIndicator";
 import { Alert, Badge, Button, EmptyState, ErrorState, ListText, Skeleton } from "@/components/ui";
 import { PageFrame, PageHeader } from "@/components/layout/PageLayout";
 import { api } from "@/lib/api";
@@ -45,6 +46,7 @@ import {
   ticketCreatedAt,
   ticketLastCommunicationAt,
 } from "@/lib/ticket-display";
+import { ticketSignalRatings } from "@/lib/ticket-intelligence";
 
 const CLOSED_STATUSES = new Set(["canceled", "cancelled", "closed", "resolved", "completed"]);
 const EMPTY_TICKETS: Ticket[] = [];
@@ -75,7 +77,9 @@ function exportTickets(tickets: Ticket[]) {
     ["Ticket ID", (ticket) => ticket.id],
     ["Subject", (ticket) => ticket.subject],
     ["Status", (ticket) => ticket.status],
-    ["Priority", (ticket) => ticket.priority],
+    ["Reported priority", (ticket) => ticket.priority],
+    ["AI content priority", (ticket) => ticketSignalRatings(ticket)[0].visualValue],
+    ["Customer sentiment", (ticket) => ticketSignalRatings(ticket)[2].score === null ? null : ticket.mood],
     ["Reporter", (ticket) => ticket.reporter],
     ["Requester name", (ticket) => requesterName(ticket)],
     ["Requester email", (ticket) => requesterEmail(ticket)],
@@ -140,28 +144,12 @@ function ContextMetric({
   );
 }
 
-function priorityVariant(priority: string): "danger" | "warning" | "info" | "neutral" {
-  const normalized = priority.trim().toUpperCase();
-  if (normalized === "P1") return "danger";
-  if (normalized === "P2") return "warning";
-  if (normalized === "P3") return "info";
-  return "neutral";
-}
-
 function statusVariant(status: string): "success" | "warning" | "info" | "neutral" {
   const normalized = status.trim().toLowerCase();
   if (CLOSED_STATUSES.has(normalized)) return "success";
   if (["escalated", "pending", "awaiting review"].includes(normalized)) return "warning";
   if (["new", "open", "in progress"].includes(normalized)) return "info";
   return "neutral";
-}
-
-function TicketPriorityBadge({ priority, className }: { priority: string; className?: string }) {
-  return (
-    <Badge variant={priorityVariant(priority)} className={cn("min-w-0 max-w-full", className)} title={priority}>
-      <span className="whitespace-normal break-words [overflow-wrap:anywhere]">{priority}</span>
-    </Badge>
-  );
 }
 
 function TicketStatusBadge({ status, className }: { status: string; className?: string }) {
@@ -457,8 +445,8 @@ export default function DashboardPage() {
               <h2 id="priority-queue-title" className="mt-1 text-base font-semibold text-ink-700">Priority queue</h2>
               <p className="mt-1 text-xs text-ink-500">
                 {usesIntelligenceQueue
-                  ? "Ranked by protected operational intelligence."
-                  : "Sorted by declared priority, then oldest first."}
+                  ? "Ranked by protected operational intelligence; content-assessed priority is shown beside each request."
+                  : "Sorted by reported priority until protected ranking is available; content assessment remains visible when ready."}
               </p>
             </div>
             <Link href="/tickets" className="inline-flex min-h-10 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold text-semantic-primary transition-colors hover:bg-[var(--color-primary-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]">
@@ -487,7 +475,7 @@ export default function DashboardPage() {
                       {index === 0 && <span aria-hidden="true" className="nexora-spectrum absolute inset-y-0 left-0 w-[3px]" />}
                       <div className="flex min-w-0 items-center gap-2">
                         <span className="inline-grid h-7 w-7 shrink-0 place-items-center rounded-full bg-linen-200 font-mono text-xs font-medium text-ink-600">{index + 1}</span>
-                        <TicketPriorityBadge priority={ticket.priority} className="max-w-20 shrink" />
+                        <TicketPriorityIndicator ticket={ticket} compact className="max-w-28 shrink" />
                         {index === 0 && <span className="font-mono text-[9px] font-medium uppercase tracking-[0.09em] text-semantic-primary">Recommended</span>}
                         <TicketStatusBadge status={ticket.status} className="ml-auto max-w-[8rem]" />
                       </div>
@@ -534,7 +522,7 @@ export default function DashboardPage() {
                           </td>
                           <td className="min-w-0 px-3 py-4">
                             <div className="flex min-w-0 items-center gap-2">
-                              <TicketPriorityBadge priority={ticket.priority} className="max-w-16 shrink" />
+                              <TicketPriorityIndicator ticket={ticket} compact className="max-w-28" />
                               <Link href={`/tickets/${ticket.id}`} className="min-w-0 flex-1 text-ink-700 hover:text-semantic-primary hover:underline"><ListText text={ticket.subject} lines={2} className="text-sm font-semibold leading-5" /></Link>
                             </div>
                             <p className="mt-1 flex min-w-0 items-center gap-2 text-xs text-ink-500">

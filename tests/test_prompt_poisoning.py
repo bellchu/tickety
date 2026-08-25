@@ -149,6 +149,8 @@ class PromptContainmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(triage_data["freshservice_subcategory"], "Order entry")
         self.assertEqual(triage_data["freshservice_item_category"], "Desktop client")
         self.assertEqual(triage_kwargs["system_prompt"], TRIAGE_SYSTEM_PROMPT)
+        self.assertIn("P4: routine request", triage_kwargs["system_prompt"])
+        self.assertIn("never from how urgently the requester", triage_kwargs["system_prompt"])
         self.assertNotIn(_ATTACK, triage_kwargs["system_prompt"])
         self.assertNotIn("Return exactly", triage_prompt)
 

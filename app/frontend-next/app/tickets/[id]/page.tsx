@@ -96,8 +96,8 @@ export default function TicketDetailPage() {
             <span>· {sourceKindLabel(ticket)}</span>
             <time dateTime={ticketCreatedAt(ticket) || undefined} title={formatOperationalTimestamp(ticketCreatedAt(ticket))}>· Created {formatTimeAgo(ticketCreatedAt(ticket))}</time>
             <time dateTime={ticketLastCommunicationAt(ticket) || undefined} title={formatOperationalTimestamp(ticketLastCommunicationAt(ticket))}>· Last contact {formatTimeAgo(ticketLastCommunicationAt(ticket))}</time>
-            <span className={cn("badge ml-1", priorityColor(ticket.priority))}>
-              {ticket.priority}
+            <span className={cn("badge ml-1", priorityColor(ticket.priority))} title="Requester-reported priority">
+              Reported {ticket.priority}
             </span>
             <span className={cn("badge", statusColor(ticket.status))}>
               {ticket.status}
@@ -106,7 +106,10 @@ export default function TicketDetailPage() {
           <h1 id="ticket-title" title={ticket.subject} className="mt-3 max-w-5xl break-words text-2xl font-semibold tracking-[-0.025em] text-ink-700 [overflow-wrap:anywhere] sm:text-3xl">
             {ticket.subject}
           </h1>
-          <TicketSignalStrip ratings={ticketSignalRatings(ticket, latestAnalysis)} />
+          <TicketSignalStrip
+            ratings={ticketSignalRatings(ticket, latestAnalysis)}
+            reasoning={latestAnalysis?.ticket_id === ticket.id ? latestAnalysis.triage.reasoning : ticket.ai_reasoning}
+          />
         </div>
       </section>
 
@@ -462,9 +465,7 @@ function TicketBriefPanel({
   const issueType = latestAnalysis?.ticket_id === ticket.id
     ? latestAnalysis.triage.category
     : ticket.ai_suggested_category;
-  const suggestedPriority = latestAnalysis?.ticket_id === ticket.id
-    ? latestAnalysis.triage.priority
-    : ticket.ai_suggested_priority;
+  const priorityRating = ticketSignalRatings(ticket, latestAnalysis)[0];
   const risk = Math.min(100, Math.max(0, ticket.escalation_risk || 0));
   const riskLabel = risk >= 70 ? "High" : risk >= 40 ? "Medium" : "Low";
   const lifecycle = analysisLifecycleLabel(ticket);
@@ -495,7 +496,7 @@ function TicketBriefPanel({
 
       <dl className="grid overflow-hidden rounded-xl border border-linen-300 bg-white sm:grid-cols-2 xl:grid-cols-5">
         <DecisionItem label="Issue" value={issueType || "Not available"} />
-        <DecisionItem label="Suggested priority" value={suggestedPriority || "Not available"} />
+        <DecisionItem label="Content priority" value={priorityRating.score === null ? "Analysis pending" : priorityRating.displayValue} />
         <DecisionItem label="Routing" value={routingLabel(ticket)} />
         <DecisionItem label="Escalation risk" value={`${risk}/100 · ${riskLabel}`} />
         <DecisionItem label="Analysis" value={ticket.ai_generated_at ? `${lifecycle} · ${formatTimeAgo(ticket.ai_generated_at)}` : lifecycle} />
@@ -541,7 +542,7 @@ function TicketBriefPanel({
             <div><dt className="text-ink-400">Generated</dt><dd className="mt-1 font-medium text-ink-600">{ticket.ai_generated_at ? formatTimeAgo(ticket.ai_generated_at) : "Not available"}</dd></div>
             {failureDetail && <div><dt className="text-ink-400">Last failure</dt><dd className="mt-1 font-medium text-ink-600">{failureDetail}</dd></div>}
           </dl>
-          {ticket.ai_reasoning && <div><p className="font-semibold text-ink-600">Reasoning</p><p className="mt-1 whitespace-pre-wrap leading-5">{ticket.ai_reasoning}</p></div>}
+          {ticket.ai_reasoning && <div className="min-w-0"><p className="font-semibold text-ink-600">Reasoning</p><p className="mt-1 whitespace-pre-wrap break-words leading-5 [overflow-wrap:anywhere]">{ticket.ai_reasoning}</p></div>}
           <div>
             <div className="flex items-center justify-between gap-3"><p className="font-semibold text-ink-600">Recommended solution</p><Button size="sm" variant="secondary" onClick={() => resolveMut.mutate()} pending={resolveMut.isPending} pendingLabel="Generating…" leadingIcon={<Wrench className="h-3.5 w-3.5" />}>{plan ? "Regenerate" : "Generate"}</Button></div>
             {resolveMut.isError && <Alert className="mt-2" variant="danger" title="Solution generation failed">{resolveMut.error.message}</Alert>}
@@ -554,7 +555,7 @@ function TicketBriefPanel({
 }
 
 function DecisionItem({ label, value }: { label: string; value: string }) {
-  return <div className="min-w-0 border-b border-linen-300 px-3 py-3 last:border-b-0 sm:[&:nth-last-child(-n+1)]:border-b-0 sm:border-r sm:[&:nth-child(2n)]:border-r-0 xl:border-b-0 xl:[&:nth-child(2n)]:border-r xl:last:border-r-0"><dt className="text-[10px] font-semibold uppercase tracking-wide text-ink-400">{label}</dt><dd className="mt-1 break-words text-xs font-semibold leading-4 text-ink-700">{value}</dd></div>;
+  return <div className="min-w-0 border-b border-linen-300 px-3 py-3 last:border-b-0 sm:[&:nth-last-child(-n+1)]:border-b-0 sm:border-r sm:[&:nth-child(2n)]:border-r-0 xl:border-b-0 xl:[&:nth-child(2n)]:border-r xl:last:border-r-0"><dt className="break-words text-[10px] font-semibold uppercase tracking-wide text-ink-400 [overflow-wrap:anywhere]">{label}</dt><dd className="mt-1 break-words text-xs font-semibold leading-4 text-ink-700 [overflow-wrap:anywhere]">{value}</dd></div>;
 }
 
 function ResolutionDetails({ plan }: { plan: ResolutionPlan }) {

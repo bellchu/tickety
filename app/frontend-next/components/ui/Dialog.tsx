@@ -140,11 +140,11 @@ export function Dialog({
       >
         <div className="flex items-start gap-4 border-b border-linen-400 px-5 py-4 sm:px-6">
           <div className="min-w-0 flex-1">
-            <h2 id={titleId} className="text-base font-semibold tracking-[-0.01em] text-ink-700">
+            <h2 id={titleId} className="break-words text-base font-semibold tracking-[-0.01em] text-ink-700 [overflow-wrap:anywhere]">
               {title}
             </h2>
             {description && (
-              <div id={descriptionId} className="mt-1 text-sm leading-5 text-ink-500">
+              <div id={descriptionId} className="mt-1 break-words text-sm leading-5 text-ink-500 [overflow-wrap:anywhere]">
                 {description}
               </div>
             )}
@@ -160,7 +160,7 @@ export function Dialog({
         </div>
         {children && <div className="min-h-0 overflow-y-auto px-5 py-5 sm:px-6">{children}</div>}
         {footer && (
-          <div className="flex flex-col-reverse gap-2 border-t border-linen-400 bg-linen-100 px-5 py-4 sm:flex-row sm:justify-end sm:px-6">
+          <div className="flex flex-col-reverse gap-2 border-t border-linen-400 bg-linen-100 px-5 py-4 [&>*]:w-full sm:flex-row sm:justify-end sm:px-6 sm:[&>*]:w-auto">
             {footer}
           </div>
         )}

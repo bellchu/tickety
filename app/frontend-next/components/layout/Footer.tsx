@@ -13,10 +13,10 @@ export function Footer() {
   });
 
   return (
-    <footer className="relative flex items-center justify-between overflow-hidden border-t border-white/10 bg-[#010D1B] px-6 py-4 text-xs text-[#979DA5]">
+    <footer className="relative flex min-w-0 flex-wrap items-center justify-between gap-3 overflow-hidden border-t border-white/10 bg-[#010D1B] px-4 py-4 text-xs text-[#979DA5] sm:px-6">
       <span aria-hidden="true" className="nexora-spectrum absolute inset-x-0 top-0 h-[2px]" />
       <TicketyLogo inverse showDescriptor={false} size="sm" />
-      <span className="flex items-center gap-3">
+      <span className="flex min-w-0 items-center gap-2 sm:gap-3">
         {version && (
           <>
             <span>v{version.version}</span>

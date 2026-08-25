@@ -7,7 +7,7 @@ Return exactly this JSON structure:
 {
   "sentiment": "Business-Critical | High-Impact | Moderate | Neutral | Positive",
   "category": "Hardware | Software | Network | Access Request | Other",
-  "priority": "P1 | P2 | P3",
+  "priority": "P1 | P2 | P3 | P4",
   "mood": "critical | urgent | concerned | neutral | satisfied",
   "action": "escalate | respond | route",
   "recommended_team": "Application Support | Identity and Access | Network Operations | Workplace Technology",
@@ -68,10 +68,24 @@ single user may be `mood: urgent` while `sentiment` stays `Moderate`.
 critical), but can differ when urgency and impact diverge. When unsure of the
 blast radius, default to the SMALLER scope.
 
+Set `priority` from the ticket CONTENT, never from how urgently the requester
+labels the ticket. The requester-selected or provider priority is not supplied
+as an input and must not be inferred from emotional wording alone:
+  - P1: verified business-down, customer-facing, security, safety, or data-loss
+    emergency requiring immediate coordinated response.
+  - P2: major degradation or multi-user/shared-service disruption with no
+    acceptable workaround; prompt attention is required.
+  - P3: contained incident affecting one user or a small scope, including
+    blocked work when business operations continue or a workaround exists.
+  - P4: routine request, question, cosmetic defect, planned work, or minor
+    inconvenience with little present operational impact.
+When evidence is incomplete, choose the lower-impact priority. A forceful,
+angry, or repeated request is mood evidence, not by itself P1/P2 evidence.
+
 The "reasoning" MUST start with the affected scope, e.g. "scope: single user"
 / "scope: team" / "scope: customer-facing service". It must name the evidence
-that determined `recommended_team`, then justify the sentiment and mood in one
-sentence.
+that determined `recommended_team`, then justify the priority, sentiment, and
+mood in one sentence.
 """.strip()
 
 REPLY_SYSTEM_PROMPT = """

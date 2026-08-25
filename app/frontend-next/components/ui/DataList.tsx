@@ -62,7 +62,7 @@ export function DataListCard({ className, children, ...props }: HTMLAttributes<H
   return (
     <article
       className={cn(
-        "min-w-0 rounded-xl border border-linen-300 bg-linen-50 p-4 shadow-[0_1px_2px_rgba(1,13,27,0.03)] transition-colors hover:border-linen-500",
+        "min-w-0 rounded-xl border border-linen-300 bg-linen-50 p-4 shadow-[var(--shadow-card)] transition-[border-color,box-shadow,transform] hover:border-linen-500 hover:shadow-[0_10px_28px_rgba(1,13,27,0.07)]",
         className
       )}
       {...props}

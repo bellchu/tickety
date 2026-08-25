@@ -21,11 +21,12 @@ import {
 } from "lucide-react";
 import { Alert, Badge, Button, DataListCard, Dialog, EmptyState, ErrorState, IconButton, ListText, Skeleton } from "@/components/ui";
 import { DataToolbar, PageFrame, PageHeader } from "@/components/layout/PageLayout";
+import { TicketPriorityIndicator } from "@/components/ticket/TicketPriorityIndicator";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { canAccessProtectedIntelligence, isDemoContext } from "@/lib/auth";
 import type { Ticket, TicketListSort } from "@/lib/types";
-import { analysisLifecycleLabel, routingLabel, sourceKindLabel } from "@/lib/ticket-intelligence";
+import { analysisLifecycleLabel, routingLabel, sourceKindLabel, ticketSignalRatings } from "@/lib/ticket-intelligence";
 import { cn, formatTimeAgo } from "@/lib/utils";
 import { localDateKey } from "@/lib/date-time";
 import {
@@ -37,7 +38,7 @@ import {
 } from "@/lib/ticket-display";
 
 const SAVED_VIEWS_KEY = "tickety.ticket-queue.views.v1";
-const COLUMN_WIDTHS_KEY = "tickety.ticket-queue.column-widths.v2";
+const COLUMN_WIDTHS_KEY = "tickety.ticket-queue.column-widths.v3";
 const STATUS_FILTERS = ["Open", "Escalated", "Awaiting Review", "Closed"];
 const PRIORITIES = ["P1", "P2", "P3", "P4"];
 const PAGE_SIZES = [25, 50, 100];
@@ -48,7 +49,7 @@ type TableColumnWidths = Record<TableColumnKey, number>;
 const DEFAULT_COLUMN_WIDTHS: TableColumnWidths = {
   ticket: 220,
   requester: 170,
-  priority: 90,
+  priority: 150,
   routing: 190,
   status: 100,
   created: 110,
@@ -57,7 +58,7 @@ const DEFAULT_COLUMN_WIDTHS: TableColumnWidths = {
 const MIN_COLUMN_WIDTHS: TableColumnWidths = {
   ticket: 220,
   requester: 170,
-  priority: 90,
+  priority: 136,
   routing: 190,
   status: 100,
   created: 110,
@@ -67,7 +68,7 @@ const MAX_COLUMN_WIDTH = 720;
 const SORT_OPTIONS: Array<{ value: TicketListSort; label: string }> = [
   { value: "newest", label: "Newest created" },
   { value: "updated", label: "Recently communicated" },
-  { value: "priority", label: "Highest priority" },
+  { value: "priority", label: "Highest reported priority" },
   { value: "complexity", label: "Most complex" },
   { value: "oldest", label: "Oldest created" },
 ];
@@ -124,13 +125,6 @@ const BUILT_IN_VIEWS: SavedView[] = [
   { id: "escalated", name: "Escalations", status: "Escalated", priority: "", assigneeId: "", category: "", sort: "updated", limit: 25, builtIn: true },
 ];
 
-function badgeForPriority(priority: string): "danger" | "warning" | "info" | "neutral" {
-  if (priority === "P1") return "danger";
-  if (priority === "P2") return "warning";
-  if (priority === "P3") return "info";
-  return "neutral";
-}
-
 function badgeForStatus(status: string): "success" | "warning" | "info" | "neutral" {
   const normalized = status.toLowerCase();
   if (["closed", "resolved", "completed"].includes(normalized)) return "success";
@@ -151,7 +145,9 @@ function exportPage(tickets: Ticket[]) {
     ["Subject", (ticket) => ticket.subject],
     ["Description", (ticket) => ticket.description],
     ["Status", (ticket) => ticket.status],
-    ["Priority", (ticket) => ticket.priority],
+    ["Reported priority", (ticket) => ticket.priority],
+    ["AI content priority", (ticket) => ticketSignalRatings(ticket)[0].visualValue],
+    ["Customer sentiment", (ticket) => ticketSignalRatings(ticket)[2].score === null ? null : ticket.mood],
     ["Reporter", (ticket) => ticket.reporter],
     ["Requester name", (ticket) => requesterName(ticket)],
     ["Requester email", (ticket) => requesterEmail(ticket)],
@@ -574,7 +570,7 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
                     {canBulk && <th scope="col" className="w-12 px-4 py-3"><input ref={selectAllRef} type="checkbox" checked={allOnPageSelected} onChange={togglePage} aria-label="Select all tickets on this page" className="h-4 w-4" /></th>}
                     <ResizableColumnHeader column="ticket" label="Ticket" onResizeStart={beginColumnResize} onNudge={(column, delta) => resizeColumn(column, columnWidths[column] + delta)} />
                     <ResizableColumnHeader column="requester" label="Requester" onResizeStart={beginColumnResize} onNudge={(column, delta) => resizeColumn(column, columnWidths[column] + delta)} />
-                    <ResizableColumnHeader column="priority" label="Priority" onResizeStart={beginColumnResize} onNudge={(column, delta) => resizeColumn(column, columnWidths[column] + delta)} />
+                    <ResizableColumnHeader column="priority" label="Priority signal" onResizeStart={beginColumnResize} onNudge={(column, delta) => resizeColumn(column, columnWidths[column] + delta)} />
                     <ResizableColumnHeader column="routing" label="Routing" onResizeStart={beginColumnResize} onNudge={(column, delta) => resizeColumn(column, columnWidths[column] + delta)} />
                     <ResizableColumnHeader column="status" label="Status" onResizeStart={beginColumnResize} onNudge={(column, delta) => resizeColumn(column, columnWidths[column] + delta)} />
                     <ResizableColumnHeader column="created" label="Created" onResizeStart={beginColumnResize} onNudge={(column, delta) => resizeColumn(column, columnWidths[column] + delta)} />
@@ -587,7 +583,7 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
                       {canBulk && <td className="px-4 py-4"><input type="checkbox" checked={selected.has(ticket.id)} onChange={() => toggleTicket(ticket.id)} aria-label={`Select ${ticket.subject}`} className="h-4 w-4" /></td>}
 	                      <td className="min-w-0 px-4 py-4"><Link href={`/tickets/${ticket.id}`} className="block min-w-0 text-ink-700 hover:text-semantic-primary hover:underline"><ListText text={ticket.subject} lines={2} className="text-sm font-semibold leading-5" /></Link><ListText text={`#${ticket.external_id || ticket.id}`} lines={1} className="mt-1 font-mono text-[11px] text-ink-400" /><div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px] text-ink-400"><span className="whitespace-nowrap">{sourceKindLabel(ticket)}</span>{ticket.ai_suggested_category && <ListText text={`AI issue: ${ticket.ai_suggested_category}`} lines={1} className="max-w-full" />}<span className="whitespace-nowrap">{analysisLifecycleLabel(ticket)}</span></div></td>
 	                      <td className="min-w-0 px-4 py-4"><ListText text={requesterName(ticket)} lines={2} className="text-xs font-semibold text-ink-700" />{requesterEmail(ticket) && <ListText text={requesterEmail(ticket) || ""} lines={2} className="mt-1 text-[11px] text-ink-500" />}<ListText text={ticket.requester_title || "Title not provided"} lines={2} className="mt-0.5 text-[10px] text-ink-400" /></td>
-	                      <td className="px-4 py-4"><Badge variant={badgeForPriority(ticket.priority)}>{ticket.priority}</Badge>{ticket.ai_suggested_priority && ticket.ai_suggested_priority !== ticket.priority && <span className="mt-1 block whitespace-normal break-words text-[10px] font-medium text-ink-400 [overflow-wrap:anywhere]">AI suggests {ticket.ai_suggested_priority}</span>}</td>
+	                      <td className="min-w-0 px-4 py-4"><TicketPriorityIndicator ticket={ticket} /></td>
                       <td className="min-w-0 px-4 py-4"><ListText text={routingLabel(ticket)} lines={2} className="text-xs font-semibold leading-5 text-ink-600" /><ListText text={ticket.external_assignee_name || ticket.assignee_name || "Unassigned"} lines={2} className="mt-1 text-[11px] text-ink-400" /></td>
                       <td className="px-4 py-4"><Badge variant={badgeForStatus(ticket.status)} dot>{ticket.status}</Badge></td>
 	                      <td className="px-4 py-4"><TimelineValue value={ticketCreatedAt(ticket)} label="Created" /></td>
@@ -604,7 +600,7 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
               <DataListCard key={ticket.id} className={cn("rounded-2xl border-linen-400", selected.has(ticket.id) && "border-clay-300 bg-[var(--color-primary-soft)]/50")}>
                 <div className="flex items-start gap-3">
                   {canBulk && <input type="checkbox" checked={selected.has(ticket.id)} onChange={() => toggleTicket(ticket.id)} aria-label={`Select ${ticket.subject}`} className="mt-1 h-4 w-4 shrink-0" />}
-                  <div className="min-w-0 flex-1"><div className="flex min-w-0 flex-wrap gap-1.5"><Badge variant={badgeForPriority(ticket.priority)}>{ticket.priority}</Badge>{ticket.ai_suggested_priority && ticket.ai_suggested_priority !== ticket.priority && <span className="min-w-0 max-w-full self-center whitespace-normal break-words text-[10px] font-medium text-ink-400 [overflow-wrap:anywhere]">AI suggests {ticket.ai_suggested_priority}</span>}</div><Link href={`/tickets/${ticket.id}`} className="mt-3 block text-ink-700 hover:text-semantic-primary"><ListText text={ticket.subject} lines={2} className="text-sm font-semibold leading-5" /></Link><ListText text={`#${ticket.external_id || ticket.id}`} lines="wrap" className="mt-1 font-mono text-[11px] text-ink-400" /></div>
+                  <div className="min-w-0 flex-1"><TicketPriorityIndicator ticket={ticket} /><Link href={`/tickets/${ticket.id}`} className="mt-3 block text-ink-700 hover:text-semantic-primary"><ListText text={ticket.subject} lines={2} className="text-sm font-semibold leading-5" /></Link><ListText text={`#${ticket.external_id || ticket.id}`} lines="wrap" className="mt-1 font-mono text-[11px] text-ink-400" /></div>
                 </div>
                 <div className="mt-3 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px] text-ink-400"><span className="whitespace-nowrap">{sourceKindLabel(ticket)}</span>{ticket.ai_suggested_category && <ListText text={`AI issue: ${ticket.ai_suggested_category}`} lines={2} className="w-full xs:w-auto xs:max-w-[16rem]" />}<span className="whitespace-nowrap">{analysisLifecycleLabel(ticket)}</span></div>
 	                <dl className="mt-4 space-y-3 border-t border-linen-300 pt-3 text-xs"><div className="min-w-0"><dt className="text-ink-400">Requester</dt><dd className="mt-1"><ListText text={requesterName(ticket)} lines={2} className="font-semibold text-ink-600" /></dd>{requesterEmail(ticket) && <dd className="mt-0.5 flex min-w-0 items-start gap-1 text-ink-400"><Mail className="mt-0.5 h-3 w-3 shrink-0" aria-hidden="true" /><ListText text={requesterEmail(ticket) || ""} lines="wrap" className="min-w-0 flex-1" /></dd>}<dd className="mt-0.5"><ListText text={ticket.requester_title || "Title not provided"} lines={2} className="text-ink-400" /></dd></div><div className="min-w-0"><dt className="text-ink-400">Routing</dt><dd className="mt-1"><ListText text={routingLabel(ticket)} lines="wrap" className="font-semibold text-ink-600" /></dd><dd className="mt-0.5"><ListText text={ticket.external_assignee_name || ticket.assignee_name || "Unassigned"} lines="wrap" className="text-ink-400" /></dd></div><div><dt className="text-ink-400">Status</dt><dd className="mt-1"><Badge variant={badgeForStatus(ticket.status)} dot>{ticket.status}</Badge></dd></div></dl>

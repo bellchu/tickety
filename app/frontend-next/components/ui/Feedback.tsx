@@ -23,15 +23,15 @@ export function Alert({ variant = "info", title, action, className, children, ..
   return (
     <div
       role={variant === "danger" ? "alert" : "status"}
-      className={cn("flex items-start gap-3 rounded-xl border px-4 py-3 text-sm", alertStyles[variant].container, className)}
+      className={cn("flex min-w-0 flex-col items-start gap-3 rounded-xl border px-4 py-3 text-sm xs:flex-row", alertStyles[variant].container, className)}
       {...props}
     >
       <Icon className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
       <div className="min-w-0 flex-1">
         {title && <div className="font-semibold">{title}</div>}
-        {children && <div className={cn("leading-5", title && "mt-0.5 opacity-90")}>{children}</div>}
+        {children && <div className={cn("break-words leading-5 [overflow-wrap:anywhere]", title && "mt-0.5 opacity-90")}>{children}</div>}
       </div>
-      {action && <div className="shrink-0">{action}</div>}
+      {action && <div className="max-w-full shrink-0 self-end xs:self-auto">{action}</div>}
     </div>
   );
 }

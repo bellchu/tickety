@@ -34,7 +34,6 @@ import type {
 import {
   cn,
   formatTimeAgo,
-  priorityColor,
   safeExternalUrl,
   statusColor,
 } from "@/lib/utils";
@@ -44,6 +43,7 @@ import {
   ticketLastCommunicationAt,
 } from "@/lib/ticket-display";
 import { FreshserviceConversationThread } from "@/components/ticket/FreshserviceConversationThread";
+import { TicketPriorityIndicator } from "@/components/ticket/TicketPriorityIndicator";
 import { Alert, Badge, Button, EmptyState, ErrorState, IconButton, Skeleton } from "@/components/ui";
 import { PageFrame } from "@/components/layout/PageLayout";
 
@@ -221,8 +221,8 @@ export function AgentWorkspace() {
         <aside className="min-w-0 border-b border-linen-400 bg-linen-100 lg:overflow-y-auto lg:border-b-0 lg:border-r" aria-label="Mailbox folders">
           <div className="border-b border-linen-300 p-4">
             <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-400">My work</p>
-            <p className="mt-1 truncate text-sm font-semibold text-ink-700">{bootstrapQuery.data?.identity?.name || "Tickety assignments"}</p>
-            {bootstrapQuery.data?.identity?.email && <p className="mt-0.5 truncate text-[11px] text-ink-400">{bootstrapQuery.data.identity.email}</p>}
+            <p className="mt-1 break-words text-sm font-semibold text-ink-700 [overflow-wrap:anywhere]">{bootstrapQuery.data?.identity?.name || "Tickety assignments"}</p>
+            {bootstrapQuery.data?.identity?.email && <p className="mt-0.5 break-words text-[11px] text-ink-400 [overflow-wrap:anywhere]">{bootstrapQuery.data.identity.email}</p>}
           </div>
           <nav className="grid grid-cols-2 gap-1 p-2 sm:grid-cols-3 lg:block" aria-label="Personal ticket folders">
             {MY_FOLDERS.map((item) => {
@@ -241,7 +241,7 @@ export function AgentWorkspace() {
                   )}
                 >
                   <Icon className={cn("h-3.5 w-3.5 shrink-0", active && "text-semantic-primary")} aria-hidden="true" />
-                  <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                  <span className="min-w-0 flex-1 break-words [overflow-wrap:anywhere]">{item.label}</span>
                   {count != null && <span className="font-mono text-[10px] text-ink-400">{count}</span>}
                 </button>
               );
@@ -261,7 +261,7 @@ export function AgentWorkspace() {
                     <div key={team.id} className={cn("rounded-lg", active && "bg-white shadow-sm ring-1 ring-linen-300")}>
                       <button type="button" onClick={() => selectTeam(team.id)} className="flex min-h-10 w-full items-center gap-2 rounded-lg px-2.5 text-left text-xs font-medium text-ink-600 hover:text-ink-700">
                         <Circle className={cn("h-2.5 w-2.5 shrink-0 fill-current", active ? "text-semantic-primary" : "text-ink-300")} aria-hidden="true" />
-                        <span className="min-w-0 flex-1 truncate">{team.name}</span>
+                        <span className="min-w-0 flex-1 break-words [overflow-wrap:anywhere]">{team.name}</span>
                         <span className="font-mono text-[10px] text-ink-400">{team.ticket_count}</span>
                       </button>
                       {active && team.unassigned_count > 0 && (
@@ -282,7 +282,7 @@ export function AgentWorkspace() {
             <div className="flex items-center justify-between gap-2">
               <div className="min-w-0">
                 <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-semantic-primary">{scope === "mine" ? "Personal" : bootstrapQuery.data?.teams.find((team) => team.id === teamId)?.name || "Team"}</p>
-                <h2 id="agent-ticket-list-title" className="truncate text-base font-semibold text-ink-700">{folderLabel(folder, scope)}</h2>
+                <h2 id="agent-ticket-list-title" className="break-words text-base font-semibold text-ink-700 [overflow-wrap:anywhere]">{folderLabel(folder, scope)}</h2>
               </div>
               <Badge variant="neutral">{tickets.length}{ticketsQuery.data?.hasMore ? "+" : ""}</Badge>
             </div>
@@ -341,17 +341,17 @@ function TicketRow({ ticket, selected, onSelect, onStar }: { ticket: AgentWorksp
       <button type="button" onClick={onSelect} className="w-full px-4 py-3.5 pr-11 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-clay-400" aria-current={selected ? "true" : undefined}>
         <div className="flex items-center gap-2 text-[10px] text-ink-400">
           <span className={cn("h-2 w-2 shrink-0 rounded-full", ticket.is_unread ? "bg-semantic-primary" : "bg-transparent ring-1 ring-ink-300")} aria-label={ticket.is_unread ? "Unread" : "Read"} />
-          <span className="min-w-0 flex-1 truncate font-semibold text-ink-500">{requesterName(ticket)}</span>
+          <span className="min-w-0 flex-1 break-words font-semibold text-ink-500 [overflow-wrap:anywhere]">{requesterName(ticket)}</span>
           <time dateTime={ticketLastCommunicationAt(ticket) || undefined}>{formatTimeAgo(ticketLastCommunicationAt(ticket))}</time>
         </div>
-        <h3 className={cn("mt-1.5 line-clamp-2 break-words text-sm leading-5 text-ink-700", ticket.is_unread ? "font-semibold" : "font-medium")}>{ticket.subject}</h3>
+        <h3 className={cn("mt-1.5 break-words text-sm leading-5 text-ink-700 [overflow-wrap:anywhere]", ticket.is_unread ? "font-semibold" : "font-medium")}>{ticket.subject}</h3>
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
-          <span className={cn("badge", priorityColor(ticket.priority))}>{ticket.priority}</span>
+          <TicketPriorityIndicator ticket={ticket} compact />
           {ticket.needs_reply && <span className="badge border-clay-200 bg-[var(--color-info-soft)] text-clay-700">Needs reply</span>}
           {ticket.sla_at_risk && <span className="badge border-rust-400/40 bg-[var(--color-danger-soft)] text-rust-600">SLA risk</span>}
           {deadline && <time className="ml-auto font-mono text-[10px] text-ink-400" dateTime={deadline}>{formatTimeAgo(deadline)}</time>}
         </div>
-        {ticket.next_best_reasons[0] && <p className="mt-2 line-clamp-1 text-[11px] text-ink-400">{ticket.next_best_reasons[0]}</p>}
+        {ticket.next_best_reasons[0] && <p className="mt-2 break-words text-[11px] leading-4 text-ink-400 [overflow-wrap:anywhere]">{ticket.next_best_reasons[0]}</p>}
       </button>
       <button type="button" onClick={onStar} aria-label={ticket.is_starred ? `Unstar ${ticket.subject}` : `Star ${ticket.subject}`} className={cn("absolute right-3 top-3 rounded-md p-1.5 transition-colors hover:bg-white", ticket.is_starred ? "text-amber-500" : "text-ink-300 opacity-70 group-hover:opacity-100")}>
         <Star className={cn("h-3.5 w-3.5", ticket.is_starred && "fill-current")} aria-hidden="true" />
@@ -388,7 +388,7 @@ function TicketReadingPane({ ticket, copied, onCopy, onStar, onFollowUp, onClear
       </div>
 
       <div className="flex flex-wrap gap-2">
-        <span className={cn("badge", priorityColor(ticket.priority))}>{ticket.priority}</span>
+        <TicketPriorityIndicator ticket={ticket} />
         <span className={cn("badge", statusColor(ticket.status))}>{ticket.status}</span>
         {ticket.needs_reply && <Badge variant="info" icon={<MessageCircleReply className="h-3 w-3" />}>Requester waiting</Badge>}
         {ticket.sla_at_risk && <Badge variant="danger" icon={<BellRing className="h-3 w-3" />}>SLA at risk</Badge>}

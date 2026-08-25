@@ -82,6 +82,7 @@ function signalTicket(overrides = {}) {
     id: "ticket-1",
     urgency: null,
     priority: "P3",
+    ai_suggested_priority: null,
     sentiment: null,
     mood: null,
     complexity: 1,
@@ -122,38 +123,47 @@ function byKey(ratings, key) {
   return ratings.find((rating) => rating.key === key);
 }
 
-test("operational signals keep a stable five-item order and do not trust persisted defaults", () => {
+test("content signals keep a stable five-item order and do not trust reported priority as analysis", () => {
   const ratings = ticketSignalRatings(signalTicket());
   assert.deepEqual(ratings.map((rating) => rating.key), [
-    "urgency",
+    "content-priority",
     "business-impact",
-    "requester-pressure",
+    "customer-sentiment",
     "complexity",
     "escalation-risk",
   ]);
-  assert.equal(byKey(ratings, "urgency").score, 3);
-  assert.equal(byKey(ratings, "urgency").sourceLabel, "From priority P3");
-  for (const key of ["business-impact", "requester-pressure", "complexity", "escalation-risk"]) {
+  assert.equal(byKey(ratings, "content-priority").score, null);
+  assert.equal(byKey(ratings, "content-priority").sourceLabel, "AI-assessed");
+  assert.match(byKey(ratings, "content-priority").detail, /reported priority is P3/);
+  for (const key of ["business-impact", "customer-sentiment", "complexity", "escalation-risk"]) {
     assert.equal(byKey(ratings, key).score, null);
     assert.equal(byKey(ratings, key).detail, "Awaiting a completed AI analysis");
   }
 });
 
-test("urgency uses every declared level before P1-P4 fallback and never invents one star", () => {
+test("content priority uses trusted AI P1-P4 values and never lets reported urgency override them", () => {
   const cases = [
-    ["Critical", "P4", 5],
-    [" high ", "P4", 4],
-    ["MEDIUM", "P1", 3],
-    ["low", "P1", 2],
-    [null, "P1", 5],
-    [null, "P2", 4],
-    [null, "P3", 3],
-    [null, "P4", 2],
+    ["P1", "P4", 5],
+    [" p2 ", "P4", 4],
+    ["p3", "P1", 3],
+    ["P4", "P1", 2],
   ];
-  for (const [urgency, priority, expected] of cases) {
-    assert.equal(byKey(ticketSignalRatings(signalTicket({ urgency, priority })), "urgency").score, expected);
+  for (const [ai_suggested_priority, priority, expected] of cases) {
+    const rating = byKey(ticketSignalRatings(signalTicket({
+      ai_status: "completed",
+      ai_reasoning: "scope and impact evidence",
+      ai_suggested_priority,
+      priority,
+    })), "content-priority");
+    assert.equal(rating.score, expected);
+    assert.match(rating.detail, new RegExp(`Content supports ${ai_suggested_priority.trim().toUpperCase()}`));
   }
-  assert.equal(byKey(ticketSignalRatings(signalTicket({ urgency: "planned", priority: "unknown" })), "urgency").score, null);
+  assert.equal(byKey(ticketSignalRatings(signalTicket({
+    ai_status: "completed",
+    ai_reasoning: "evidence",
+    ai_suggested_priority: "urgent",
+    priority: "P1",
+  })), "content-priority").score, null);
   assert.equal(cases.some(([, , score]) => score === 1), false);
 });
 
@@ -182,7 +192,7 @@ test("persisted AI ratings require a completed-compatible status and nonblank re
   }), false);
 });
 
-test("business impact and requester pressure normalize their complete taxonomies", () => {
+test("business impact and sentiment sensor normalize their complete taxonomies", () => {
   const impacts = [
     ["Business Critical", 5],
     [" high_impact ", 4],
@@ -203,7 +213,10 @@ test("business impact and requester pressure normalize their complete taxonomies
     assert.match(rating.detail, /^Classification: /);
   }
   for (const [mood, expected] of moods) {
-    assert.equal(byKey(ticketSignalRatings(signalTicket({ ai_status: "completed", ai_reasoning: "evidence", mood })), "requester-pressure").score, expected);
+    const rating = byKey(ticketSignalRatings(signalTicket({ ai_status: "completed", ai_reasoning: "evidence", mood })), "customer-sentiment");
+    assert.equal(rating.score, expected);
+    assert.match(rating.displayValue, /^(😡|😣|😟|😐|😊) /u);
+    assert.equal(rating.visual, "emoji");
   }
   assert.equal(byKey(ticketSignalRatings(signalTicket({ ai_status: "completed", ai_reasoning: "evidence", sentiment: "unknown", mood: "unknown" })), "business-impact").score, null);
 });
@@ -243,8 +256,10 @@ test("matching fresh analysis overrides persisted data and fails closed without 
     escalation_risk: 0,
   });
   const fresh = ticketSignalRatings(persisted, freshAnalysis());
+  assert.equal(byKey(fresh, "content-priority").score, 4);
+  assert.match(byKey(fresh, "content-priority").detail, /Content supports P2; requester reported P3/);
   assert.equal(byKey(fresh, "business-impact").score, 3);
-  assert.equal(byKey(fresh, "requester-pressure").score, 3);
+  assert.equal(byKey(fresh, "customer-sentiment").score, 3);
   assert.equal(byKey(fresh, "complexity").score, 3);
   assert.equal(byKey(fresh, "escalation-risk").score, 3);
 
@@ -252,9 +267,13 @@ test("matching fresh analysis overrides persisted data and fails closed without 
   assert.equal(byKey(wrongTicket, "business-impact").score, 1);
 
   const blankReasoning = ticketSignalRatings(persisted, freshAnalysis({ reasoning: "" }));
-  for (const key of ["business-impact", "requester-pressure", "complexity", "escalation-risk"]) {
+  for (const key of ["content-priority", "business-impact", "customer-sentiment", "complexity", "escalation-risk"]) {
     assert.equal(byKey(blankReasoning, key).score, null);
-    assert.equal(byKey(blankReasoning, key).detail, "Analysis value unavailable");
+    if (key === "content-priority") {
+      assert.match(byKey(blankReasoning, key).detail, /^Analysis value unavailable; reported priority is P3$/);
+    } else {
+      assert.equal(byKey(blankReasoning, key).detail, "Analysis value unavailable");
+    }
   }
 
   const malformedFresh = ticketSignalRatings(persisted, freshAnalysis({ sentiment: "unknown", complexity: 99 }));

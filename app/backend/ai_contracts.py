@@ -57,7 +57,7 @@ class StrictAIModel(BaseModel):
 class TriageAnalysis(StrictAIModel):
     sentiment: Literal["Business-Critical", "High-Impact", "Moderate", "Neutral", "Positive"]
     category: Literal["Hardware", "Software", "Network", "Access Request", "Other"]
-    priority: Literal["P1", "P2", "P3"]
+    priority: Literal["P1", "P2", "P3", "P4"]
     mood: Literal["critical", "urgent", "concerned", "neutral", "satisfied"]
     action: Literal["escalate", "respond", "route"]
     recommended_team: ResolverTeam
