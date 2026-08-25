@@ -133,6 +133,15 @@ _UNSAFE_DIRECT_URI_RE = re.compile(
     r"\b(?:javascript|data|file|vbscript|gopher|smb|ftp|ldap):",
     re.IGNORECASE,
 )
+_GENERATED_AUTHORITY_URI_RE = re.compile(
+    r"\b[a-z][a-z0-9+.-]{1,31}://[^\s<>{}\[\]\"']+",
+    re.IGNORECASE,
+)
+_GENERATED_UNSAFE_DIRECT_URI_RE = re.compile(
+    r"\b(?:javascript|data|file|vbscript|gopher|smb|ftp|ldap):"
+    r"[^\s<>{}\[\]\"']+",
+    re.IGNORECASE,
+)
 _DESTRUCTIVE_COMMANDS = (
     re.compile(
         r"\b(?:sudo\s+)?rm\s+-(?=[a-z]*r)(?=[a-z]*f)[a-z]+\b",
@@ -173,6 +182,30 @@ def _text_values(value: Any) -> Iterable[str]:
     elif isinstance(value, (list, tuple, set, frozenset)):
         for nested in value:
             yield from _text_values(nested)
+
+
+def neutralize_generated_uris(value: Any) -> Any:
+    """Remove generated URI targets without weakening semantic validation.
+
+    Ticket evidence can legitimately contain a site address. Models often
+    repeat it in an otherwise valid summary or resolution plan, but generated
+    artifacts must not turn untrusted evidence into a clickable instruction.
+    Replacing the target keeps the useful explanation while the remaining
+    credential, command, and security-control checks continue to fail closed.
+    """
+    if isinstance(value, str):
+        sanitized = _GENERATED_AUTHORITY_URI_RE.sub("[link omitted]", value)
+        return _GENERATED_UNSAFE_DIRECT_URI_RE.sub("[link omitted]", sanitized)
+    if isinstance(value, Mapping):
+        return {
+            key: neutralize_generated_uris(nested)
+            for key, nested in value.items()
+        }
+    if isinstance(value, list):
+        return [neutralize_generated_uris(nested) for nested in value]
+    if isinstance(value, tuple):
+        return tuple(neutralize_generated_uris(nested) for nested in value)
+    return value
 
 
 def semantic_advice_violations(value: Any) -> tuple[str, ...]:

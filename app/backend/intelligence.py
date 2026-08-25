@@ -35,6 +35,7 @@ from .ai_contracts import AI_RESOLVER_TEAMS, ResolutionAnalysis, TicketSummary
 from .ai_input import (
     UnsafeAIAdviceError,
     canonical_bounded_json,
+    neutralize_generated_uris,
     prompt_char_limit,
     validate_semantic_advice,
 )
@@ -464,7 +465,9 @@ async def summarize_ticket(
         system_prompt=SUMMARY_SYSTEM_PROMPT,
         max_tokens=500,
     )
-    summary = (result.get("summary") or "").strip()
+    summary = neutralize_generated_uris(
+        (result.get("summary") or "").strip()
+    )
     try:
         validate_semantic_advice(summary)
     except UnsafeAIAdviceError as exc:
@@ -519,6 +522,7 @@ async def recommend_resolution(
         system_prompt=RESOLUTION_SYSTEM_PROMPT,
         max_tokens=1_200,
     )
+    plan = neutralize_generated_uris(plan)
     try:
         validate_semantic_advice(plan)
     except UnsafeAIAdviceError as exc:

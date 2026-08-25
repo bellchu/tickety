@@ -11,6 +11,7 @@ from app.backend.ai_contracts import (
 from app.backend.ai_input import (
     UnsafeAIAdviceError,
     canonical_bounded_json,
+    neutralize_generated_uris,
     semantic_advice_violations,
     validate_semantic_advice,
 )
@@ -75,6 +76,29 @@ class _UnsafeAdviceLLM(_RecordingLLM):
             return {
                 **response,
                 "resolution_steps": ["Run sudo rm -rf /var/lib/tickety."],
+            }
+        return response
+
+
+class _URLRepeatingLLM(_RecordingLLM):
+    async def analyze(self, prompt, **kwargs):
+        response = await super().analyze(prompt, **kwargs)
+        if kwargs.get("response_model") is TicketSummary:
+            return {
+                "summary": (
+                    "The customer cannot access https://www.beamitnts.com/ "
+                    "and requested a review."
+                )
+            }
+        if kwargs.get("response_model") is ResolutionAnalysis:
+            return {
+                **response,
+                "root_cause_hypothesis": (
+                    "Filtering may block https://www.beamitnts.com/."
+                ),
+                "resolution_steps": [
+                    "Review the approved policy without opening javascript:alert(1)."
+                ],
             }
         return response
 
@@ -184,6 +208,29 @@ class PromptContainmentTests(unittest.IsolatedAsyncioTestCase):
         ):
             await recommend_resolution(resolution_llm, ticket)
 
+    async def test_summary_and_resolution_neutralize_repeated_ticket_uris(self):
+        llm = _URLRepeatingLLM()
+        ticket = SimpleNamespace(
+            subject="Website access",
+            description="Please review https://www.beamitnts.com/",
+            external_conversation_text="",
+            ai_reasoning="scope: single user",
+            summary=None,
+            category="Network",
+            priority="P3",
+            sentiment="Moderate",
+        )
+
+        summary = await summarize_ticket(llm, ticket, force=True)
+        resolution = await recommend_resolution(llm, ticket)
+
+        self.assertNotIn("https://", summary)
+        self.assertIn("[link omitted]", summary)
+        serialized_resolution = json.dumps(resolution)
+        self.assertNotIn("https://", serialized_resolution)
+        self.assertNotIn("javascript:", serialized_resolution)
+        self.assertIn("[link omitted]", serialized_resolution)
+
 
 class SemanticAdviceValidationTests(unittest.TestCase):
     def test_validator_rejects_credentials_unsafe_schemes_and_destructive_commands(self):
@@ -225,6 +272,25 @@ class SemanticAdviceValidationTests(unittest.TestCase):
         for advice, expected in cases.items():
             with self.subTest(advice=advice):
                 self.assertEqual(semantic_advice_violations(advice), expected)
+
+    def test_uri_neutralization_preserves_non_uri_advice(self):
+        advice = {
+            "steps": [
+                "Review https://example.test/path.",
+                "Inspect the local policy without changing it.",
+            ]
+        }
+        sanitized = neutralize_generated_uris(advice)
+        self.assertEqual(
+            sanitized,
+            {
+                "steps": [
+                    "Review [link omitted]",
+                    "Inspect the local policy without changing it.",
+                ]
+            },
+        )
+        self.assertEqual(semantic_advice_violations(sanitized), ())
 
 
 if __name__ == "__main__":

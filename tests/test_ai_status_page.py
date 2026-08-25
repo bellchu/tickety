@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -294,6 +295,51 @@ class AIStatusPageApiTests(unittest.TestCase):
         self.assertTrue(ai.json()["entries"])
         self.assertNotIn("sk-proj-abcdefghijklmnopqrst", ai.text)
         self.assertNotIn("capacity_deferred", ai.text)
+
+    def test_ai_diagnostics_only_show_current_unresolved_provider_outcomes(self):
+        with self.session_factory() as db:
+            db.add_all([
+                LLMCallRecord(
+                    provider="foundry",
+                    model="deployment-a",
+                    task="TicketSummary",
+                    status="success",
+                    attempts=3,
+                    created_at=self.now - timedelta(minutes=1),
+                ),
+                LLMCallRecord(
+                    provider="custom",
+                    model="retired-model",
+                    task="TriageAnalysis",
+                    status="attempt_failed",
+                    attempts=1,
+                    error_code="provider_unavailable",
+                    created_at=self.now,
+                ),
+                LLMCallRecord(
+                    provider="foundry",
+                    model="deployment-a",
+                    task="ResolutionAnalysis",
+                    status="attempt_failed",
+                    attempts=1,
+                    error_code="timeout",
+                    created_at=self.now,
+                ),
+            ])
+            db.commit()
+
+        with patch.object(main.engine, "llm", SimpleNamespace(provider="foundry")):
+            response = self.client.get(
+                "/admin/settings/status/diagnostics",
+                params={"area": "ai"},
+                headers=self.headers,
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        sources = [entry["source"] for entry in response.json()["entries"]]
+        self.assertIn("llm:foundry:ResolutionAnalysis", sources)
+        self.assertNotIn("llm:foundry:TicketSummary", sources)
+        self.assertFalse(any(source.startswith("llm:custom:") for source in sources))
 
     def test_operational_views_and_search_are_bounded_server_side(self):
         attention = self.client.get(

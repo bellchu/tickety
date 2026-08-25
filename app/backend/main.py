@@ -6373,7 +6373,27 @@ async def operational_status_diagnostics(
             })
         remaining = max(0, 50 - len(entries))
         if remaining:
-            call_rows = db.query(LLMCallRecord).filter(
+            calls_since = now - timedelta(days=1)
+            latest_calls = db.query(
+                LLMCallRecord.provider.label("provider"),
+                LLMCallRecord.task.label("task"),
+                func.max(LLMCallRecord.id).label("id"),
+            ).filter(
+                LLMCallRecord.created_at >= calls_since,
+            )
+            provider_name = getattr(engine.llm, "provider", None)
+            if provider_name:
+                latest_calls = latest_calls.filter(
+                    LLMCallRecord.provider == provider_name
+                )
+            latest_calls = latest_calls.group_by(
+                LLMCallRecord.provider,
+                LLMCallRecord.task,
+            ).subquery()
+            call_rows = db.query(LLMCallRecord).join(
+                latest_calls,
+                LLMCallRecord.id == latest_calls.c.id,
+            ).filter(
                 LLMCallRecord.status.notin_(("success", "capacity_deferred"))
             ).order_by(
                 LLMCallRecord.created_at.desc(), LLMCallRecord.id.desc()
