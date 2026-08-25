@@ -9,6 +9,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.backend import main
 from app.backend.database import (
+    AIArtifactRecord,
     Base,
     ExternalUserRecord,
     TicketCommentRecord,
@@ -186,6 +187,33 @@ class TicketListApiTests(unittest.TestCase):
             "untrusted_ai_status",
         )
 
+    def test_current_triage_keeps_route_while_later_artifact_is_queued(self):
+        with self.session_factory() as db:
+            ticket = db.get(TicketRecord, "ticket-099")
+            ticket.ai_suggested_category = "Hardware"
+            ticket.ai_reasoning = "scope: one user; workplace device issue"
+            ticket.ai_status = "queued"
+            ticket.ai_requested_artifacts = "summary"
+            db.flush()
+            db.add(AIArtifactRecord(
+                ticket_id=ticket.id,
+                artifact="triage",
+                input_hash=main._artifact_input_hash(ticket, "triage"),
+                pipeline_version=main.AI_PIPELINE_VERSION,
+                provider="custom",
+                model=main._llm_cache_identity(),
+                synthetic=False,
+                content_hash="current-triage",
+                active=True,
+            ))
+            db.commit()
+
+        routed = self.client.get("/tickets/ticket-099").json()
+
+        self.assertEqual(routed["recommended_team"], "Workplace Technology")
+        self.assertEqual(routed["recommended_team_basis"], "ai_category")
+        self.assertEqual(routed["routing_status"], "legacy_ai_category")
+
     def test_enterprise_and_development_tickets_never_default_to_service_desk(self):
         for index in (90, 91, 92, 93):
             with self.subTest(ticket=index):
@@ -324,7 +352,7 @@ class TicketListApiTests(unittest.TestCase):
         ranks = {"P1": 1, "P2": 2, "P3": 3, "P4": 4}
         self.assertEqual([ranks[value] for value in priorities], sorted(ranks[value] for value in priorities))
 
-    def test_assignee_enrichment_uses_one_batched_query(self):
+    def test_ticket_enrichment_uses_only_batched_queries(self):
         select_statements = []
 
         def track_selects(_connection, _cursor, statement, _parameters, _context, _many):
@@ -338,9 +366,9 @@ class TicketListApiTests(unittest.TestCase):
             event.remove(self.engine, "before_cursor_execute", track_selects)
 
         self.assertEqual(response.status_code, 200)
-        # Ticket page, local owners, provider profiles, and one batched
-        # public-comment timestamp aggregation. No row causes an N+1 query.
-        self.assertEqual(len(select_statements), 4)
+        # Ticket page, local owners, provider profiles, public-comment times,
+        # and current triage provenance. No row causes an N+1 query.
+        self.assertEqual(len(select_statements), 5)
         self.assertTrue(all(ticket["assignee_name"] for ticket in response.json()))
 
 

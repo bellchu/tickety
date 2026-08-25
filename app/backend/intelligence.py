@@ -264,6 +264,7 @@ def team_routing_decision(
     *,
     source_category: Optional[str] = None,
     ticket_status: Optional[str] = None,
+    ai_evidence_current: bool = False,
 ) -> TeamRoutingDecision:
     """Return a fail-closed routing projection with explicit provenance."""
     if (ticket_status or "").strip().lower() in {"closed", "resolved", "cancelled"}:
@@ -274,7 +275,11 @@ def team_routing_decision(
             abstention_reason=None,
         )
     normalized_status = (ai_status or "").strip().lower().replace("-", "_")
-    if normalized_status in _TRUSTED_AI_ROUTING_STATUSES and ai_suggested_category:
+    ai_routing_trusted = (
+        normalized_status in _TRUSTED_AI_ROUTING_STATUSES
+        or ai_evidence_current
+    )
+    if ai_routing_trusted and ai_suggested_category:
         team = AI_CATEGORY_TEAMS.get(ai_suggested_category)
         if team:
             return TeamRoutingDecision(
@@ -293,7 +298,7 @@ def team_routing_decision(
             abstention_reason=None,
         )
 
-    if normalized_status not in _TRUSTED_AI_ROUTING_STATUSES:
+    if not ai_routing_trusted:
         reason = "untrusted_ai_status"
     elif not ai_suggested_category:
         reason = "missing_ai_category"

@@ -770,12 +770,15 @@ _PUBLIC_DEMO_AI_FIELDS = {
 }
 
 
-def _enrich_ticket_team(ticket: TicketRecord) -> None:
+def _enrich_ticket_team(
+    ticket: TicketRecord, *, ai_evidence_current: bool = False
+) -> None:
     decision = intel.team_routing_decision(
         ticket.ai_suggested_category,
         ticket.ai_status,
         source_category=ticket.external_category,
         ticket_status=ticket.workflow_status or ticket.status,
+        ai_evidence_current=ai_evidence_current,
     )
     ticket.__dict__["recommended_team"] = decision.recommended_team
     ticket.__dict__["recommended_team_basis"] = decision.basis
@@ -841,6 +844,37 @@ def _enrich_tickets(db: Session, tickets: list[TicketRecord]) -> None:
         ).group_by(TicketCommentRecord.ticket_id).all()
     )
 
+    # Aggregate AI lifecycle can be ``queued`` while a later summary or
+    # resolution artifact is pending. Preserve a current, non-synthetic triage
+    # classification as routing evidence instead of temporarily reverting the
+    # ticket to "Unrouted / Review". The exact input hash and model/pipeline
+    # checks keep stale classifications fail-closed.
+    triage_rows = db.query(AIArtifactRecord).filter(
+        AIArtifactRecord.ticket_id.in_(ticket_ids),
+        AIArtifactRecord.artifact == "triage",
+        AIArtifactRecord.active.is_(True),
+    )
+    if settings_module.is_production_mode() or not bool(
+        getattr(engine.llm, "allow_synthetic", False)
+    ):
+        triage_rows = triage_rows.filter(AIArtifactRecord.synthetic.is_(False))
+    triage_rows = triage_rows.all()
+    tickets_by_id = {ticket.id: ticket for ticket in tickets}
+    current_triage_ids: set[str] = set()
+    if triage_rows:
+        current_model = _llm_cache_identity()
+        for artifact in triage_rows:
+            artifact_ticket = tickets_by_id.get(artifact.ticket_id)
+            if (
+                artifact_ticket is not None
+                and bool(artifact_ticket.ai_reasoning)
+                and artifact.pipeline_version == AI_PIPELINE_VERSION
+                and artifact.model == current_model
+                and artifact.input_hash
+                == _artifact_input_hash(artifact_ticket, "triage")
+            ):
+                current_triage_ids.add(artifact.ticket_id)
+
     for ticket in tickets:
         ticket.__dict__["assignee_name"] = assignee_names.get(ticket.assignee_id)
         assignee_profile = external_profiles.get((
@@ -887,7 +921,10 @@ def _enrich_tickets(db: Session, tickets: list[TicketRecord]) -> None:
         ticket.__dict__["last_communication_at"] = (
             max(communication_times) if communication_times else None
         )
-        _enrich_ticket_team(ticket)
+        _enrich_ticket_team(
+            ticket,
+            ai_evidence_current=ticket.id in current_triage_ids,
+        )
 
 
 def _useful_external_name(value: Optional[str], external_id: Optional[str]) -> Optional[str]:
