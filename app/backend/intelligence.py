@@ -241,8 +241,15 @@ class TeamRoutingDecision:
     """
 
     recommended_team: str
-    basis: Literal["ai_category", "source_category", "not_applicable", "unrouted_review"]
+    basis: Literal[
+        "source_group",
+        "ai_category",
+        "source_category",
+        "not_applicable",
+        "unrouted_review",
+    ]
     status: Literal[
+        "source_group_assignment",
         "legacy_ai_category",
         "source_category_suggestion",
         "not_applicable",
@@ -262,6 +269,7 @@ def team_routing_decision(
     ai_suggested_category: Optional[str],
     ai_status: Optional[str],
     *,
+    source_group_id: Optional[str] = None,
     source_category: Optional[str] = None,
     ticket_status: Optional[str] = None,
     ai_evidence_current: bool = False,
@@ -272,6 +280,18 @@ def team_routing_decision(
             recommended_team=NO_ACTIVE_ROUTING_TEAM,
             basis="not_applicable",
             status="not_applicable",
+            abstention_reason=None,
+        )
+    # An assigned provider group is the authoritative current route in this
+    # read-only Freshservice sidecar. Group-directory access is a separate
+    # permission and may be unavailable, so retain the exact provider ID
+    # instead of guessing a friendly name or falling back to AI.
+    normalized_group_id = (source_group_id or "").strip()
+    if normalized_group_id:
+        return TeamRoutingDecision(
+            recommended_team=f"Freshservice group {normalized_group_id}",
+            basis="source_group",
+            status="source_group_assignment",
             abstention_reason=None,
         )
     normalized_status = (ai_status or "").strip().lower().replace("-", "_")

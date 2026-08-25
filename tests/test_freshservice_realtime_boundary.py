@@ -536,6 +536,17 @@ class FreshserviceRealtimeBoundaryTests(unittest.TestCase):
                     external_created_at=now - timedelta(days=90),
                     external_updated_at=now - timedelta(days=1),
                 ),
+                TicketRecord(
+                    id="old-group-routed",
+                    binding_id="binding-1",
+                    external_source="freshservice",
+                    external_id="old-group-routed",
+                    external_group_id="group-42",
+                    subject="Old ticket already assigned to a provider group",
+                    status="Open",
+                    external_created_at=now - timedelta(days=90),
+                    external_updated_at=now - timedelta(days=1),
+                ),
             ])
             db.commit()
 
@@ -574,6 +585,9 @@ class FreshserviceRealtimeBoundaryTests(unittest.TestCase):
             self.assertIsNone(db.get(TicketRecord, "old-closed").ai_status)
             self.assertIsNone(
                 db.get(TicketRecord, "old-source-routed").ai_status
+            )
+            self.assertIsNone(
+                db.get(TicketRecord, "old-group-routed").ai_status
             )
 
     def test_worker_processes_recent_external_gap_without_manual_queueing(self):

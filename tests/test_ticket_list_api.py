@@ -250,6 +250,18 @@ class TicketListApiTests(unittest.TestCase):
         )
 
     def test_routing_uses_exact_source_fallback_and_skips_closed_tickets(self):
+        assigned = main.intel.team_routing_decision(
+            "Network",
+            "completed",
+            source_group_id="2000241178",
+            source_category="Hardware - Printers",
+            ticket_status="Open",
+        )
+        self.assertEqual(assigned.recommended_team, "Freshservice group 2000241178")
+        self.assertEqual(assigned.basis, "source_group")
+        self.assertEqual(assigned.status, "source_group_assignment")
+        self.assertIsNone(assigned.abstention_reason)
+
         source = main.intel.team_routing_decision(
             None,
             None,
@@ -272,6 +284,7 @@ class TicketListApiTests(unittest.TestCase):
         closed = main.intel.team_routing_decision(
             None,
             None,
+            source_group_id="2000241178",
             source_category=None,
             ticket_status="Closed",
         )

@@ -776,6 +776,7 @@ def _enrich_ticket_team(
     decision = intel.team_routing_decision(
         ticket.ai_suggested_category,
         ticket.ai_status,
+        source_group_id=ticket.external_group_id,
         source_category=ticket.external_category,
         ticket_status=ticket.workflow_status or ticket.status,
         ai_evidence_current=ai_evidence_current,

@@ -290,6 +290,13 @@ def queue_active_routing_backlog(
                 TicketRecord.status.is_(None),
                 func.lower(TicketRecord.status).notin_(("closed", "resolved", "cancelled")),
             ),
+            # A provider group assignment is already the authoritative route.
+            # Do not spend AI capacity generating a replacement route merely
+            # because the credential cannot read the optional group catalog.
+            or_(
+                TicketRecord.external_group_id.is_(None),
+                func.length(func.trim(TicketRecord.external_group_id)) == 0,
+            ),
             or_(
                 TicketRecord.external_category.is_(None),
                 TicketRecord.external_category.notin_(

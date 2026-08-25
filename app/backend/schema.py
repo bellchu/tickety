@@ -90,9 +90,14 @@ class Ticket(BaseModel):
     ai_suggested_category: Optional[str] = None
     recommended_team: str = "Unrouted / Review"
     recommended_team_basis: Literal[
-        "ai_category", "source_category", "not_applicable", "unrouted_review"
+        "source_group",
+        "ai_category",
+        "source_category",
+        "not_applicable",
+        "unrouted_review",
     ] = "unrouted_review"
     routing_status: Literal[
+        "source_group_assignment",
         "legacy_ai_category",
         "source_category_suggestion",
         "not_applicable",

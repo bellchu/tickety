@@ -48,6 +48,7 @@ test("analysis lifecycle renders every operational state without exposing raw st
 });
 
 test("routing, source, and related labels preserve their derivation", () => {
+  assert.equal(routingLabel({ recommended_team: "Freshservice group 2000241178", recommended_team_basis: "source_group" }), "Assigned route - Freshservice group 2000241178");
   assert.equal(routingLabel({ recommended_team: "Network Operations", recommended_team_basis: "ai_category" }), "Suggested team - Network Operations (catalog validation pending)");
   assert.equal(routingLabel({ recommended_team: "Application Support", recommended_team_basis: "source_category" }), "Suggested team - Application Support (Freshservice category)");
   assert.equal(routingLabel({ recommended_team: "No active routing", recommended_team_basis: "not_applicable" }), "No active route - ticket closed");
