@@ -1,20 +1,86 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import type { ReportDateField, ReportFilters } from "@/lib/types";
+import { resolvedLocalTimeZone, toLocalDateTimeInput } from "@/lib/date-time";
 import {
-  BarChart3, TicketIcon, Clock, CheckCircle2, AlertTriangle,
+  AlertTriangle, BarChart3, CheckCircle2, Clock, Download,
+  Filter, RotateCcw, TicketIcon,
 } from "lucide-react";
 import {
   AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell,
   XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
 } from "recharts";
 import { cn } from "@/lib/utils";
-import { Alert, EmptyState, ErrorState, Skeleton } from "@/components/ui";
+import { Alert, Button, EmptyState, ErrorState, Skeleton } from "@/components/ui";
 import { PageFrame, PageHeader } from "@/components/layout/PageLayout";
 
 const CHART_COLORS = ["#803CE8", "#005EB8", "#03CCB5", "#66FC90", "#E11BCC", "#F6AB3B", "#CF3E54"];
-const PRIORITY_COLORS: Record<string, string> = { P1: "#CF3E54", P2: "#F6AB3B", P3: "#803CE8", P4: "#7E8691" };
+const REPORT_PRESETS: ReadonlyArray<readonly [number, string]> = [
+  [1, "Last 24 hours"],
+  [7, "Last 7 days"],
+  [30, "Last 30 days"],
+  [90, "Last 90 days"],
+  [365, "Last 12 months"],
+];
+
+interface ReportFilterDraft {
+  startLocal: string;
+  endLocal: string;
+  dateField: ReportDateField;
+  status: string;
+  priority: string;
+  category: string;
+}
+
+function presetDraft(days: number): ReportFilterDraft {
+  const end = new Date();
+  end.setSeconds(0, 0);
+  const start = new Date(end.getTime() - days * 24 * 60 * 60 * 1000);
+  return {
+    startLocal: toLocalDateTimeInput(start),
+    endLocal: toLocalDateTimeInput(end),
+    dateField: "created",
+    status: "",
+    priority: "",
+    category: "",
+  };
+}
+
+function filtersFromDraft(draft: ReportFilterDraft): ReportFilters | null {
+  const start = new Date(draft.startLocal);
+  const end = new Date(draft.endLocal);
+  if (!draft.startLocal || !draft.endLocal || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start >= end) {
+    return null;
+  }
+  return {
+    startAt: start.toISOString(),
+    endAt: end.toISOString(),
+    dateField: draft.dateField,
+    status: draft.status || undefined,
+    priority: draft.priority || undefined,
+    category: draft.category.trim() || undefined,
+  };
+}
+
+function reportPeriodLabel(filters: ReportFilters) {
+  const formatter = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
+  return `${formatter.format(new Date(filters.startAt))} – ${formatter.format(new Date(filters.endAt))}`;
+}
+
+function reportFilterSignature(filters: ReportFilters | null) {
+  if (!filters) return "";
+  return [
+    filters.startAt,
+    filters.endAt,
+    filters.dateField,
+    filters.status ?? "",
+    filters.priority ?? "",
+    filters.category ?? "",
+  ].join("\u0000");
+}
 
 function wrapChartLabel(value: unknown, maxCharacters = 18) {
   const words = String(value ?? "").trim().split(/\s+/).filter(Boolean);
@@ -56,12 +122,54 @@ function WrappedYAxisTick({ x = 0, y = 0, payload }: { x?: number; y?: number; p
 }
 
 export default function ReportsPage() {
-  const summaryQuery = useQuery({ queryKey: ["report-summary"], queryFn: api.getReportSummary });
-  const volumeQuery = useQuery({ queryKey: ["report-volume"], queryFn: api.getReportVolume });
-  const categoryQuery = useQuery({ queryKey: ["report-by-category"], queryFn: api.getReportByCategory });
-  const statusQuery = useQuery({ queryKey: ["report-by-status"], queryFn: api.getReportByStatus });
-  const slaQuery = useQuery({ queryKey: ["report-sla"], queryFn: api.getReportSlaCompliance });
-  const resolutionQuery = useQuery({ queryKey: ["report-resolution"], queryFn: api.getReportResolutionTime });
+  const [draft, setDraft] = useState<ReportFilterDraft | null>(null);
+  const [filters, setFilters] = useState<ReportFilters | null>(null);
+  const [filterError, setFilterError] = useState("");
+  const [exportError, setExportError] = useState("");
+  const [exportNotice, setExportNotice] = useState("");
+  const [exporting, setExporting] = useState(false);
+  const [timeZone, setTimeZone] = useState("your local time zone");
+
+  useEffect(() => {
+    const initial = presetDraft(30);
+    setDraft(initial);
+    setFilters(filtersFromDraft(initial));
+    setTimeZone(resolvedLocalTimeZone());
+  }, []);
+
+  const summaryQuery = useQuery({
+    queryKey: ["report-summary", filters],
+    queryFn: () => api.getReportSummary(filters!),
+    enabled: Boolean(filters),
+  });
+  const volumeQuery = useQuery({
+    queryKey: ["report-volume", filters],
+    queryFn: () => api.getReportVolume(filters!),
+    enabled: Boolean(filters),
+  });
+  const categoryQuery = useQuery({
+    queryKey: ["report-by-category", filters],
+    queryFn: () => api.getReportByCategory(filters!),
+    enabled: Boolean(filters),
+  });
+  const statusQuery = useQuery({
+    queryKey: ["report-by-status", filters],
+    queryFn: () => api.getReportByStatus(filters!),
+    enabled: Boolean(filters),
+  });
+  const slaQuery = useQuery({
+    queryKey: ["report-sla", filters],
+    queryFn: () => api.getReportSlaCompliance(filters!),
+    enabled: Boolean(filters),
+  });
+  const resolutionQuery = useQuery({
+    queryKey: ["report-resolution", filters],
+    queryFn: () => api.getReportResolutionTime(filters!),
+    enabled: Boolean(filters),
+  });
+  const statusesQuery = useQuery({ queryKey: ["status-config"], queryFn: api.getStatusConfig });
+  const prioritiesQuery = useQuery({ queryKey: ["priority-config"], queryFn: api.getPriorityConfig });
+  const categoriesQuery = useQuery({ queryKey: ["ticket-categories"], queryFn: api.getCategories });
   const queries = [summaryQuery, volumeQuery, categoryQuery, statusQuery, slaQuery, resolutionQuery];
   const summary = summaryQuery.data;
   const volume = volumeQuery.data;
@@ -71,17 +179,208 @@ export default function ReportsPage() {
   const resolutionTime = resolutionQuery.data;
   const failed = queries.filter((query) => query.isError).length;
 
-  const volumeData = (volume?.days || []).map((d, i) => ({ day: d.slice(5), count: volume?.counts?.[i] ?? 0 }));
+  const volumeData = (volume?.days || []).map((day, index) => ({ day, count: volume?.counts?.[index] ?? 0 }));
   const categoryData = (byCategory?.categories || []).map((c, i) => ({ name: c, value: byCategory?.counts?.[i] ?? 0 }));
   const statusData = (byStatus?.statuses || []).map((s, i) => ({ name: s, value: byStatus?.counts?.[i] ?? 0 }));
   const slaData = slaCompliance ? Object.entries(slaCompliance).map(([p, v]) => ({
     priority: p, compliance: v.compliance, breached: v.breached, total: v.total,
   })) : [];
   const resolutionData = (resolutionTime?.categories || []).map((c, i) => ({ category: c, hours: resolutionTime?.avg_hours?.[i] ?? 0 }));
+  const draftFilters = draft ? filtersFromDraft(draft) : null;
+  const hasUnappliedChanges = Boolean(
+    filters && reportFilterSignature(draftFilters) !== reportFilterSignature(filters),
+  );
+  const appliedDimensions = filters ? [
+    filters.status ? `Status: ${filters.status}` : "",
+    filters.priority ? `Priority: ${filters.priority}` : "",
+    filters.category ? `Category: ${filters.category}` : "",
+  ].filter(Boolean) : [];
+
+  const applyDraft = () => {
+    if (!draft) return;
+    const nextFilters = filtersFromDraft(draft);
+    if (!nextFilters) {
+      setFilterError("Choose a valid start and end time. The start must be before the end.");
+      return;
+    }
+    setFilterError("");
+    setExportError("");
+    setExportNotice("");
+    setFilters(nextFilters);
+  };
+
+  const applyPreset = (days: number) => {
+    const nextDraft = {
+      ...presetDraft(days),
+      dateField: draft?.dateField ?? "created",
+      status: draft?.status ?? "",
+      priority: draft?.priority ?? "",
+      category: draft?.category ?? "",
+    } satisfies ReportFilterDraft;
+    setDraft(nextDraft);
+    setFilters(filtersFromDraft(nextDraft));
+    setFilterError("");
+    setExportError("");
+    setExportNotice("");
+  };
+
+  const resetReport = () => {
+    const nextDraft = presetDraft(30);
+    setDraft(nextDraft);
+    setFilters(filtersFromDraft(nextDraft));
+    setFilterError("");
+    setExportError("");
+    setExportNotice("");
+  };
+
+  const exportCsv = async () => {
+    if (!filters) return;
+    setExporting(true);
+    setExportError("");
+    setExportNotice("");
+    try {
+      const result = await api.downloadReportCsv(filters);
+      const url = URL.createObjectURL(result.blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = result.filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+      setExportNotice(`Exported ${result.rowCount.toLocaleString()} matching ticket${result.rowCount === 1 ? "" : "s"}.`);
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : "The report could not be exported.");
+    } finally {
+      setExporting(false);
+    }
+  };
 
   return (
     <PageFrame width="wide">
-      <PageHeader eyebrow="Operational analytics" icon={<BarChart3 className="h-4 w-4" />} title="Reports" description="Understand service demand, delivery speed, and SLA performance across the operating model." />
+      <PageHeader eyebrow="Operational analytics" icon={<BarChart3 className="h-4 w-4" />} title="Reports" description="Build a focused operational view, compare service outcomes, and export the matching ticket evidence." />
+
+      <section className="card-surface space-y-5 p-4 sm:p-5" aria-labelledby="report-criteria-heading">
+        <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <Filter className="h-4 w-4 text-semantic-primary" aria-hidden="true" />
+              <h2 id="report-criteria-heading" className="text-sm font-semibold text-ink-700">Report criteria</h2>
+            </div>
+            <p className="mt-1 text-xs leading-5 text-ink-400">
+              {filters
+                ? `${filters.dateField === "created" ? "Created" : "Resolved"} between ${reportPeriodLabel(filters)}${appliedDimensions.length ? ` · ${appliedDimensions.join(" · ")}` : ""}${summary ? ` · ${summary.total_tickets.toLocaleString()} matching tickets` : ""}`
+                : "Preparing the default 30-day reporting window…"}
+            </p>
+          </div>
+          <Button
+            variant="secondary"
+            leadingIcon={<Download className="h-4 w-4" />}
+            pending={exporting}
+            pendingLabel="Exporting…"
+            disabled={!filters || hasUnappliedChanges}
+            onClick={() => void exportCsv()}
+          >
+            Export matching CSV
+          </Button>
+        </div>
+
+        <div className="flex flex-wrap gap-2" aria-label="Quick date ranges">
+          {REPORT_PRESETS.map(([days, label]) => (
+            <Button key={days} size="sm" variant="ghost" onClick={() => applyPreset(days)}>{label}</Button>
+          ))}
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          <label>
+            <span className="mb-1.5 block text-xs font-semibold text-ink-500">Time basis</span>
+            <select
+              className="input-base"
+              value={draft?.dateField ?? "created"}
+              disabled={!draft}
+              onChange={(event) => setDraft((current) => current ? { ...current, dateField: event.target.value as ReportDateField } : current)}
+            >
+              <option value="created">Ticket created time</option>
+              <option value="resolved">Ticket resolved time</option>
+            </select>
+          </label>
+          <label>
+            <span className="mb-1.5 block text-xs font-semibold text-ink-500">From</span>
+            <input
+              type="datetime-local"
+              className="input-base"
+              value={draft?.startLocal ?? ""}
+              disabled={!draft}
+              onChange={(event) => setDraft((current) => current ? { ...current, startLocal: event.target.value } : current)}
+            />
+          </label>
+          <label>
+            <span className="mb-1.5 block text-xs font-semibold text-ink-500">Through</span>
+            <input
+              type="datetime-local"
+              className="input-base"
+              value={draft?.endLocal ?? ""}
+              disabled={!draft}
+              onChange={(event) => setDraft((current) => current ? { ...current, endLocal: event.target.value } : current)}
+            />
+          </label>
+          <label>
+            <span className="mb-1.5 block text-xs font-semibold text-ink-500">Status</span>
+            <select
+              className="input-base"
+              value={draft?.status ?? ""}
+              disabled={!draft}
+              onChange={(event) => setDraft((current) => current ? { ...current, status: event.target.value } : current)}
+            >
+              <option value="">All statuses</option>
+              {(statusesQuery.data ?? []).map((item) => <option key={item.id} value={item.name}>{item.label}</option>)}
+            </select>
+          </label>
+          <label>
+            <span className="mb-1.5 block text-xs font-semibold text-ink-500">Priority</span>
+            <select
+              className="input-base"
+              value={draft?.priority ?? ""}
+              disabled={!draft}
+              onChange={(event) => setDraft((current) => current ? { ...current, priority: event.target.value } : current)}
+            >
+              <option value="">All priorities</option>
+              {(prioritiesQuery.data ?? []).map((item) => <option key={item.id} value={item.name}>{item.label}</option>)}
+            </select>
+          </label>
+          <label>
+            <span className="mb-1.5 block text-xs font-semibold text-ink-500">Category</span>
+            <input
+              className="input-base"
+              list="report-category-options"
+              value={draft?.category ?? ""}
+              disabled={!draft}
+              maxLength={100}
+              placeholder="All categories"
+              onChange={(event) => setDraft((current) => current ? { ...current, category: event.target.value } : current)}
+            />
+            <datalist id="report-category-options">
+              {(categoriesQuery.data ?? []).map((item) => <option key={item.id} value={item.name} />)}
+            </datalist>
+          </label>
+        </div>
+
+        <div className="flex flex-col gap-3 border-t border-linen-300 pt-4 sm:flex-row sm:items-center sm:justify-between">
+          <p className={cn("text-xs", hasUnappliedChanges ? "font-semibold text-semantic-warning" : "text-ink-400")}>
+            {hasUnappliedChanges
+              ? "Criteria have changed. Apply them before reviewing or exporting the new result."
+              : `Times are entered in ${timeZone} and sent to the report service as UTC.`}
+          </p>
+          <div className="flex gap-2">
+            <Button size="sm" variant="ghost" leadingIcon={<RotateCcw className="h-3.5 w-3.5" />} onClick={resetReport}>Reset</Button>
+            <Button size="sm" onClick={applyDraft} disabled={!draft || !hasUnappliedChanges}>Apply criteria</Button>
+          </div>
+        </div>
+      </section>
+
+      {filterError && <Alert variant="danger" title="Check the report period">{filterError}</Alert>}
+      {exportError && <Alert variant="danger" title="Export failed">{exportError}</Alert>}
+      {exportNotice && <Alert variant="success" title="Export ready">{exportNotice}</Alert>}
 
       {failed === queries.length && (
         <ErrorState title="Reports could not be loaded" description="The analytics service did not return any report data." onRetry={() => void Promise.all(queries.map((query) => query.refetch()))} retrying={queries.some((query) => query.isFetching)} />
@@ -91,23 +390,23 @@ export default function ReportsPage() {
       {/* KPI summary cards */}
       {failed < queries.length && <>
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <KpiTile label="Total tickets" value={summary?.total_tickets} icon={TicketIcon} loading={summaryQuery.isLoading} />
-        <KpiTile label="Open" value={summary?.open_tickets} icon={Clock} color="text-semantic-info" loading={summaryQuery.isLoading} />
-        <KpiTile label="Resolved" value={summary?.resolved_tickets} icon={CheckCircle2} color="text-semantic-success" loading={summaryQuery.isLoading} />
-        <KpiTile label="SLA breached" value={summary?.breached_sla} icon={AlertTriangle} color="text-semantic-danger" loading={summaryQuery.isLoading} />
+        <KpiTile label="Matching tickets" value={summary?.total_tickets} icon={TicketIcon} loading={!filters || summaryQuery.isLoading} />
+        <KpiTile label="Open" value={summary?.open_tickets} icon={Clock} color="text-semantic-info" loading={!filters || summaryQuery.isLoading} />
+        <KpiTile label="Resolved" value={summary?.resolved_tickets} icon={CheckCircle2} color="text-semantic-success" loading={!filters || summaryQuery.isLoading} />
+        <KpiTile label="SLA breached" value={summary?.breached_sla} icon={AlertTriangle} color="text-semantic-danger" loading={!filters || summaryQuery.isLoading} />
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <MiniStat label="Avg resolution time" value={summary ? `${summary.avg_resolution_hours}h` : "—"} loading={summaryQuery.isLoading} />
-        <MiniStat label="Escalation rate" value={summary ? `${summary.escalation_rate}%` : "—"} loading={summaryQuery.isLoading} />
-        <MiniStat label="CSAT proxy" value={summary ? `${summary.csat_proxy}%` : "—"} loading={summaryQuery.isLoading} />
+        <MiniStat label="Avg resolution time" value={summary ? `${summary.avg_resolution_hours}h` : "—"} loading={!filters || summaryQuery.isLoading} />
+        <MiniStat label="Escalation rate" value={summary ? `${summary.escalation_rate}%` : "—"} loading={!filters || summaryQuery.isLoading} />
+        <MiniStat label="CSAT" value={summary ? `${summary.csat_proxy}%` : "—"} loading={!filters || summaryQuery.isLoading} />
       </div>
 
       {/* Volume chart */}
       <div className="card-surface min-w-0 p-4 sm:p-5">
-        <h2 className="text-sm font-semibold text-ink-700 mb-4">Ticket Volume (Last 30 Days)</h2>
-        {volumeQuery.isLoading ? <ChartSkeleton /> : volumeQuery.isError ? <SectionError onRetry={() => void volumeQuery.refetch()} /> : volumeData.length > 0 ? (
-          <><p className="sr-only">Daily ticket volume over the last 30 days. Values range from {Math.min(...volumeData.map((item) => item.count))} to {Math.max(...volumeData.map((item) => item.count))} tickets per day.</p><ResponsiveContainer width="100%" height={240}>
+        <h2 className="text-sm font-semibold text-ink-700 mb-4">Ticket volume by day</h2>
+        {!filters || volumeQuery.isLoading ? <ChartSkeleton /> : volumeQuery.isError ? <SectionError onRetry={() => void volumeQuery.refetch()} /> : volumeData.length > 0 ? (
+          <><p className="sr-only">Daily ticket volume for the selected period. Values range from {Math.min(...volumeData.map((item) => item.count))} to {Math.max(...volumeData.map((item) => item.count))} tickets per day.</p><ResponsiveContainer width="100%" height={240}>
             <AreaChart data={volumeData}>
               <defs>
                 <linearGradient id="volGrad" x1="0" y1="0" x2="0" y2="1">
@@ -131,7 +430,7 @@ export default function ReportsPage() {
         {/* By category */}
         <div className="card-surface min-w-0 p-4 sm:p-5">
           <h2 className="text-sm font-semibold text-ink-700 mb-4">Tickets by Category</h2>
-          {categoryQuery.isLoading ? <ChartSkeleton /> : categoryQuery.isError ? <SectionError onRetry={() => void categoryQuery.refetch()} /> : categoryData.length > 0 ? (
+          {!filters || categoryQuery.isLoading ? <ChartSkeleton /> : categoryQuery.isError ? <SectionError onRetry={() => void categoryQuery.refetch()} /> : categoryData.length > 0 ? (
             <div className="space-y-4">
               {byCategory?.truncated && <Alert variant="warning" title="Category view is limited" className="text-xs">Showing {categoryData.length.toLocaleString()} of {byCategory.total_categories.toLocaleString()} categories. Counts are exact for the categories shown.</Alert>}
               <ResponsiveContainer width="100%" height={210}>
@@ -158,7 +457,7 @@ export default function ReportsPage() {
         {/* By status */}
         <div className="card-surface min-w-0 p-4 sm:p-5">
           <h2 className="text-sm font-semibold text-ink-700 mb-4">Tickets by Status</h2>
-          {statusQuery.isLoading ? <ChartSkeleton /> : statusQuery.isError ? <SectionError onRetry={() => void statusQuery.refetch()} /> : statusData.length > 0 ? (
+          {!filters || statusQuery.isLoading ? <ChartSkeleton /> : statusQuery.isError ? <SectionError onRetry={() => void statusQuery.refetch()} /> : statusData.length > 0 ? (
             <ResponsiveContainer width="100%" height={categoryChartHeight(statusData, "name")}>
               <BarChart data={statusData} layout="vertical" margin={{ left: 8, right: 16 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#DDE2EA" horizontal={false} />
@@ -177,7 +476,7 @@ export default function ReportsPage() {
       {/* SLA compliance */}
       <div className="card-surface min-w-0 p-4 sm:p-5">
         <h2 className="text-sm font-semibold text-ink-700 mb-4">SLA Compliance by Priority</h2>
-        {slaQuery.isLoading ? <ChartSkeleton /> : slaQuery.isError ? <SectionError onRetry={() => void slaQuery.refetch()} /> : slaData.length > 0 ? (
+        {!filters || slaQuery.isLoading ? <ChartSkeleton /> : slaQuery.isError ? <SectionError onRetry={() => void slaQuery.refetch()} /> : slaData.length > 0 ? (
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             {slaData.map((s) => (
               <div key={s.priority} className="min-w-0 rounded border border-linen-400 p-4">
@@ -200,7 +499,7 @@ export default function ReportsPage() {
       {/* Resolution time by category */}
       <div className="card-surface min-w-0 p-4 sm:p-5">
         <h2 className="text-sm font-semibold text-ink-700 mb-4">Avg Resolution Time by Category (hours)</h2>
-        {resolutionQuery.isLoading ? <ChartSkeleton /> : resolutionQuery.isError ? <SectionError onRetry={() => void resolutionQuery.refetch()} /> : resolutionData.length > 0 ? (
+        {!filters || resolutionQuery.isLoading ? <ChartSkeleton /> : resolutionQuery.isError ? <SectionError onRetry={() => void resolutionQuery.refetch()} /> : resolutionData.length > 0 ? (
           <div className="space-y-4">
             {resolutionTime?.truncated && <Alert variant="warning" title="Resolution averages are sampled" className="text-xs">Calculated from the latest {resolutionTime.analyzed_tickets.toLocaleString()} of {resolutionTime.total_matching_tickets.toLocaleString()} matching resolved tickets.</Alert>}
             <ResponsiveContainer width="100%" height={categoryChartHeight(resolutionData, "category")}>

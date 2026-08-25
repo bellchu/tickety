@@ -977,6 +977,17 @@ export interface NotificationConfig {
 
 // ── Reports ─────────────────────────────────────────────────────
 
+export type ReportDateField = "created" | "resolved";
+
+export interface ReportFilters {
+  startAt: string;
+  endAt: string;
+  dateField: ReportDateField;
+  status?: string;
+  priority?: string;
+  category?: string;
+}
+
 export interface ReportSummary {
   total_tickets: number;
   open_tickets: number;

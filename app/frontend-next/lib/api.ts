@@ -57,6 +57,48 @@ async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
   return (await fetchAPIResponse<T>(path, options)).data;
 }
 
+function reportPath(path: string, filters: import("./types").ReportFilters): string {
+  const params = new URLSearchParams({
+    start_at: filters.startAt,
+    end_at: filters.endAt,
+    date_field: filters.dateField,
+  });
+  if (filters.status) params.set("status", filters.status);
+  if (filters.priority) params.set("priority", filters.priority);
+  if (filters.category) params.set("category", filters.category);
+  return `${path}?${params.toString()}`;
+}
+
+async function downloadReportCsv(filters: import("./types").ReportFilters) {
+  const path = reportPath("/reports/export", filters);
+  const response = await fetch(`${API_PREFIX}${path}`, {
+    credentials: "include",
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    let detail = `API ${path} failed: ${response.status}`;
+    if (text) {
+      try {
+        const data = JSON.parse(text);
+        if (typeof data.detail === "string") detail = data.detail;
+      } catch {
+        detail = text;
+      }
+    }
+    redirectExpiredSessionToLogin(path, response.status);
+    throw new APIError(detail, response.status);
+  }
+  const disposition = response.headers.get("content-disposition") || "";
+  const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1]
+    || "tickety-ticket-report.csv";
+  return {
+    blob: await response.blob(),
+    filename,
+    rowCount: Number(response.headers.get("x-report-rows")) || 0,
+  };
+}
+
 export const api = {
   getHealth: () => fetchAPI<{ status: string; mode: "demo" | "production" }>("/health"),
   getReadiness: () => fetchAPI<import("./types").ReadinessStatus>("/health/ready"),
@@ -330,15 +372,21 @@ export const api = {
       body: JSON.stringify({ enabled, channels }),
     }),
   // Reports
-  getReportSummary: () => fetchAPI<import("./types").ReportSummary>("/reports/summary"),
-  getReportVolume: () => fetchAPI<{ days: string[]; counts: number[] }>("/reports/volume"),
-  getReportByCategory: () =>
-    fetchAPI<import("./types").ReportByCategoryResponse>("/reports/by-category"),
-  getReportByStatus: () => fetchAPI<{ statuses: string[]; counts: number[] }>("/reports/by-status"),
-  getReportSlaCompliance: () =>
-    fetchAPI<Record<string, { total: number; breached: number; compliance: number }>>("/reports/sla-compliance"),
-  getReportResolutionTime: () =>
-    fetchAPI<import("./types").ReportResolutionTimeResponse>("/reports/resolution-time"),
+  getReportSummary: (filters: import("./types").ReportFilters) =>
+    fetchAPI<import("./types").ReportSummary>(reportPath("/reports/summary", filters)),
+  getReportVolume: (filters: import("./types").ReportFilters) =>
+    fetchAPI<{ days: string[]; counts: number[] }>(reportPath("/reports/volume", filters)),
+  getReportByCategory: (filters: import("./types").ReportFilters) =>
+    fetchAPI<import("./types").ReportByCategoryResponse>(reportPath("/reports/by-category", filters)),
+  getReportByStatus: (filters: import("./types").ReportFilters) =>
+    fetchAPI<{ statuses: string[]; counts: number[] }>(reportPath("/reports/by-status", filters)),
+  getReportSlaCompliance: (filters: import("./types").ReportFilters) =>
+    fetchAPI<Record<string, { total: number; breached: number; compliance: number }>>(
+      reportPath("/reports/sla-compliance", filters)
+    ),
+  getReportResolutionTime: (filters: import("./types").ReportFilters) =>
+    fetchAPI<import("./types").ReportResolutionTimeResponse>(reportPath("/reports/resolution-time", filters)),
+  downloadReportCsv,
   // Projects
   getProjects: () => fetchAPI<import("./types").Project[]>("/projects"),
   createProject: (payload: { name: string; key: string; description?: string; lead_id?: string }) =>

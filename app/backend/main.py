@@ -1,6 +1,8 @@
 import os
 import json
 import asyncio
+import csv
+import io
 import secrets
 import hashlib
 import hmac
@@ -8,6 +10,7 @@ import unicodedata
 import urllib.parse
 import re
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -16,7 +19,7 @@ import httpx
 
 from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query, Request, Response, Cookie, Body, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, case, desc, func, or_, text
 from sqlalchemy.exc import IntegrityError
@@ -4548,32 +4551,141 @@ async def update_notification_config(event: str, payload: NotificationConfigUpda
 
 # ── Reports / Analytics ─────────────────────────────────────────
 
+@dataclass(frozen=True)
+class ReportFilters:
+    start_at: datetime
+    end_at: datetime
+    date_field: str
+    status: Optional[str]
+    priority: Optional[str]
+    category: Optional[str]
+
+
+def _report_filters(
+    start_at: Optional[datetime] = Query(default=None),
+    end_at: Optional[datetime] = Query(default=None),
+    date_field: str = Query(default="created", pattern="^(created|resolved)$"),
+    status: Optional[str] = Query(default=None, max_length=100),
+    priority: Optional[str] = Query(default=None, max_length=100),
+    category: Optional[str] = Query(default=None, max_length=100),
+) -> ReportFilters:
+    """Normalize the shared report selection, bounded to 30 days by default."""
+    now = datetime.utcnow().replace(microsecond=0)
+
+    def utc_naive(value: Optional[datetime]) -> Optional[datetime]:
+        if value is None:
+            return None
+        if value.tzinfo is not None:
+            return value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value
+
+    normalized_end = utc_naive(end_at) or now
+    normalized_start = utc_naive(start_at) or (normalized_end - timedelta(days=30))
+    if normalized_start >= normalized_end:
+        raise HTTPException(
+            status_code=422,
+            detail="Report start_at must be earlier than end_at",
+        )
+    return ReportFilters(
+        start_at=normalized_start,
+        end_at=normalized_end,
+        date_field=date_field,
+        status=(status or "").strip() or None,
+        priority=(priority or "").strip() or None,
+        category=(category or "").strip() or None,
+    )
+
+
+def _report_created_at_column():
+    return func.coalesce(TicketRecord.external_created_at, TicketRecord.created_at)
+
+
+def _report_resolved_at_column():
+    return func.coalesce(TicketRecord.external_resolved_at, TicketRecord.resolved_at)
+
+
+def _report_date_column(filters: ReportFilters):
+    return (
+        _report_resolved_at_column()
+        if filters.date_field == "resolved"
+        else _report_created_at_column()
+    )
+
+
+def _report_ticket_query(db: Session, filters: ReportFilters, user: UserRecord):
+    date_column = _report_date_column(filters)
+    query = db.query(TicketRecord).filter(
+        date_column >= filters.start_at,
+        date_column <= filters.end_at,
+    )
+    allowed_assignee_id = _ticket_scope_assignee_id(user)
+    if allowed_assignee_id is not None:
+        query = query.filter(or_(
+            TicketRecord.assignee_id.is_(None),
+            TicketRecord.assignee_id == allowed_assignee_id,
+        ))
+    if filters.status:
+        query = query.filter(TicketRecord.status == filters.status)
+    if filters.priority:
+        query = query.filter(TicketRecord.priority == filters.priority)
+    if filters.category:
+        query = query.filter(TicketRecord.category == filters.category)
+    return query
+
+
+def _sla_breached_condition(now: datetime):
+    deadline = func.coalesce(TicketRecord.resolution_due_at, TicketRecord.due_by)
+    resolved_at = _report_resolved_at_column()
+    return and_(
+        deadline.isnot(None),
+        or_(
+            and_(resolved_at.isnot(None), resolved_at > deadline),
+            and_(resolved_at.is_(None), deadline < now),
+        ),
+    )
+
+
 @app.get("/reports/summary", response_model=ReportSummary)
-async def reports_summary(db: Session = Depends(get_db)):
+async def reports_summary(
+    filters: ReportFilters = Depends(_report_filters),
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(get_current_user),
+):
     now = datetime.utcnow()
     terminal = _terminal_status_names(db)
-    total = db.query(TicketRecord).count()
-    open_t = db.query(TicketRecord).filter(func.lower(TicketRecord.status).notin_(terminal)).count()
-    resolved = db.query(TicketRecord).filter(func.lower(TicketRecord.status).in_(terminal)).count()
-    breached = db.query(TicketRecord).filter(
-        or_(TicketRecord.resolution_due_at < now, TicketRecord.due_by < now),
+    query = _report_ticket_query(db, filters, user)
+    total = query.count()
+    open_t = query.filter(func.lower(TicketRecord.status).notin_(terminal)).count()
+    resolved = query.filter(func.lower(TicketRecord.status).in_(terminal)).count()
+    breached = query.filter(
+        _sla_breached_condition(now),
         func.lower(TicketRecord.status).notin_(terminal),
     ).count()
 
-    resolved_tickets = db.query(TicketRecord).filter(TicketRecord.resolved_at.isnot(None)).all()
-    avg_hours = 0.0
-    if resolved_tickets:
-        durations = []
-        for t in resolved_tickets:
-            start = t.external_created_at or t.created_at
-            end = t.external_resolved_at or t.resolved_at
-            if start and end:
-                durations.append((end - start).total_seconds())
-        if durations:
-            avg_hours = round(sum(durations) / len(durations) / 3600, 1)
+    resolved_tickets = query.with_entities(
+        _report_created_at_column().label("report_created_at"),
+        _report_resolved_at_column().label("report_resolved_at"),
+    ).filter(_report_resolved_at_column().isnot(None)).all()
+    durations = [
+        (row.report_resolved_at - row.report_created_at).total_seconds()
+        for row in resolved_tickets
+        if row.report_created_at and row.report_resolved_at
+    ]
+    avg_hours = round(sum(durations) / len(durations) / 3600, 1) if durations else 0.0
 
-    escalation_rate = round((db.query(TicketRecord).filter(TicketRecord.status == "Escalated").count() / total * 100), 1) if total else 0.0
-    avg_rating = db.query(func.avg(SurveyResponseRecord.rating)).scalar()
+    escalation_rate = round(
+        query.filter(func.lower(TicketRecord.status) == "escalated").count()
+        / total * 100,
+        1,
+    ) if total else 0.0
+    filtered_ticket_ids = query.with_entities(TicketRecord.id).subquery()
+    avg_rating = db.query(func.avg(SurveyResponseRecord.rating)).join(
+        SurveyRecord,
+        SurveyRecord.id == SurveyResponseRecord.survey_id,
+    ).join(
+        filtered_ticket_ids,
+        filtered_ticket_ids.c.id == SurveyRecord.ticket_id,
+    ).scalar()
     csat = round(float(avg_rating) / 5 * 100, 1) if avg_rating else 0.0
 
     return ReportSummary(
@@ -4584,32 +4696,41 @@ async def reports_summary(db: Session = Depends(get_db)):
 
 
 @app.get("/reports/volume")
-async def reports_volume(db: Session = Depends(get_db)):
-    """Ticket volume grouped by day for the last 30 days."""
-    now = datetime.utcnow()
-    since = now - timedelta(days=30)
-    created_col = func.coalesce(TicketRecord.external_created_at, TicketRecord.created_at)
-    rows = db.query(
-        func.date_trunc("day", created_col).label("day"),
+async def reports_volume(
+    filters: ReportFilters = Depends(_report_filters),
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(get_current_user),
+):
+    """Ticket volume grouped by day for the selected report period."""
+    query = _report_ticket_query(db, filters, user)
+    date_column = _report_date_column(filters)
+    rows = query.with_entities(
+        func.date(date_column).label("day"),
         func.count().label("count"),
-    ).filter(created_col >= since).group_by("day").order_by("day").all()
-    return {"days": [r.day.isoformat() for r in rows], "counts": [r.count for r in rows]}
+    ).group_by(func.date(date_column)).order_by(func.date(date_column)).all()
+    return {
+        "days": [
+            row.day.isoformat() if hasattr(row.day, "isoformat") else str(row.day)
+            for row in rows
+        ],
+        "counts": [row.count for row in rows],
+    }
 
 
 @app.get("/reports/by-category")
 async def reports_by_category(
+    filters: ReportFilters = Depends(_report_filters),
     db: Session = Depends(get_db),
     user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
     _reserve_analytics_request(db, user.id)
-    total_categories = int(db.query(
+    query = _report_ticket_query(db, filters, user).filter(TicketRecord.category.isnot(None))
+    total_categories = int(query.with_entities(
         func.count(func.distinct(TicketRecord.category))
-    ).filter(TicketRecord.category.isnot(None)).scalar() or 0)
-    rows = db.query(
+    ).scalar() or 0)
+    rows = query.with_entities(
         TicketRecord.category, func.count().label("count")
-    ).filter(TicketRecord.category.isnot(None)).group_by(
-        TicketRecord.category
-    ).order_by(func.count().desc()).limit(100).all()
+    ).group_by(TicketRecord.category).order_by(func.count().desc()).limit(100).all()
     return {
         "categories": [r.category for r in rows],
         "counts": [r.count for r in rows],
@@ -4619,62 +4740,205 @@ async def reports_by_category(
 
 
 @app.get("/reports/by-status")
-async def reports_by_status(db: Session = Depends(get_db)):
-    rows = db.query(
+async def reports_by_status(
+    filters: ReportFilters = Depends(_report_filters),
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(get_current_user),
+):
+    rows = _report_ticket_query(db, filters, user).with_entities(
         TicketRecord.status, func.count().label("count")
-    ).group_by(TicketRecord.status).all()
+    ).group_by(TicketRecord.status).order_by(func.count().desc()).all()
     return {"statuses": [r.status for r in rows], "counts": [r.count for r in rows]}
 
 
 @app.get("/reports/sla-compliance")
-async def reports_sla_compliance(db: Session = Depends(get_db)):
-    """SLA compliance rate by priority."""
+async def reports_sla_compliance(
+    filters: ReportFilters = Depends(_report_filters),
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(get_current_user),
+):
+    """SLA compliance rate by priority for the selected tickets."""
     now = datetime.utcnow()
+    query = _report_ticket_query(db, filters, user)
+    priorities = [
+        row.priority
+        for row in query.with_entities(TicketRecord.priority)
+        .filter(TicketRecord.priority.isnot(None))
+        .distinct()
+        .order_by(TicketRecord.priority)
+        .all()
+    ]
     result = {}
-    for p in ["P1", "P2", "P3"]:
-        total = db.query(TicketRecord).filter(TicketRecord.priority == p).count()
-        breached = db.query(TicketRecord).filter(
-            TicketRecord.priority == p,
-            or_(TicketRecord.resolution_due_at < now, TicketRecord.due_by < now),
+    for priority_name in priorities:
+        total = query.filter(TicketRecord.priority == priority_name).count()
+        breached = query.filter(
+            TicketRecord.priority == priority_name,
+            _sla_breached_condition(now),
         ).count()
         compliance = round(((total - breached) / total * 100), 1) if total else 100.0
-        result[p] = {"total": total, "breached": breached, "compliance": compliance}
+        result[priority_name] = {
+            "total": total,
+            "breached": breached,
+            "compliance": compliance,
+        }
     return result
 
 
 @app.get("/reports/resolution-time")
 async def reports_resolution_time(
+    filters: ReportFilters = Depends(_report_filters),
     db: Session = Depends(get_db),
     user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
-    """Avg resolution time by category."""
+    """Avg resolution time by category for all matching resolved tickets."""
     _reserve_analytics_request(db, user.id)
-    query = db.query(TicketRecord).filter(
-        TicketRecord.resolved_at.isnot(None),
+    query = _report_ticket_query(db, filters, user).filter(
+        _report_resolved_at_column().isnot(None),
         TicketRecord.category.isnot(None),
     )
     total_matching = query.count()
-    rows = query.order_by(TicketRecord.resolved_at.desc()).limit(500).all()
-    by_cat = {}
-    for t in rows:
-        start = t.external_created_at or t.created_at
-        end = t.external_resolved_at or t.resolved_at
-        if not start or not end:
+    rows = query.with_entities(
+        TicketRecord.category,
+        _report_created_at_column().label("report_created_at"),
+        _report_resolved_at_column().label("report_resolved_at"),
+    ).all()
+    by_category = {}
+    for row in rows:
+        if not row.report_created_at or not row.report_resolved_at:
             continue
-        hours = (end - start).total_seconds() / 3600
-        cat = t.category
-        by_cat.setdefault(cat, []).append(hours)
+        hours = (
+            row.report_resolved_at - row.report_created_at
+        ).total_seconds() / 3600
+        by_category.setdefault(row.category, []).append(hours)
     return {
-        "categories": list(by_cat.keys()),
-        "avg_hours": [round(sum(v) / len(v), 1) for v in by_cat.values()],
+        "categories": list(by_category.keys()),
+        "avg_hours": [
+            round(sum(values) / len(values), 1)
+            for values in by_category.values()
+        ],
         "total_matching_tickets": total_matching,
         "analyzed_tickets": len(rows),
-        "truncated": total_matching > len(rows),
+        "truncated": False,
     }
 
 
-# ── User / Engagement ────────────────────────────────────────
+# Report export
 
+_REPORT_EXPORT_LIMIT = 50_000
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_safe(value: Any) -> str:
+    text_value = "" if value is None else str(value)
+    if text_value.lstrip().startswith(_CSV_FORMULA_PREFIXES):
+        return f"'{text_value}"
+    return text_value
+
+
+@app.get("/reports/export")
+async def export_report_csv(
+    filters: ReportFilters = Depends(_report_filters),
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(get_current_user),
+):
+    """Export ticket-level evidence for exactly the active report selection."""
+    _reserve_analytics_request(db, user.id)
+    query = _report_ticket_query(db, filters, user)
+    rows = query.outerjoin(
+        UserRecord,
+        TicketRecord.assignee_id == UserRecord.id,
+    ).with_entities(
+        TicketRecord.id,
+        TicketRecord.external_id,
+        TicketRecord.subject,
+        TicketRecord.status,
+        TicketRecord.priority,
+        TicketRecord.category,
+        TicketRecord.external_source,
+        UserRecord.name.label("assignee_name"),
+        _report_created_at_column().label("report_created_at"),
+        _report_resolved_at_column().label("report_resolved_at"),
+        func.coalesce(
+            TicketRecord.resolution_due_at,
+            TicketRecord.due_by,
+        ).label("report_due_at"),
+    ).order_by(
+        _report_date_column(filters).desc(),
+        TicketRecord.id.asc(),
+    ).limit(_REPORT_EXPORT_LIMIT + 1).all()
+    if len(rows) > _REPORT_EXPORT_LIMIT:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Report export exceeds {_REPORT_EXPORT_LIMIT:,} tickets; "
+                "narrow the date range or add filters"
+            ),
+        )
+
+    now = datetime.utcnow()
+
+    def csv_lines():
+        output = io.StringIO()
+        writer = csv.writer(output, lineterminator="\r\n")
+
+        def emit(values):
+            writer.writerow([_csv_safe(value) for value in values])
+            content = output.getvalue()
+            output.seek(0)
+            output.truncate(0)
+            return content
+
+        # The BOM keeps UTF-8 category and subject text intact in Excel.
+        yield "\ufeff" + emit([
+            "Ticket ID", "External ID", "Subject", "Status", "Priority",
+            "Category", "Source", "Assignee", "Created at (UTC)",
+            "Resolved at (UTC)", "Resolution hours", "SLA due at (UTC)",
+            "SLA breached",
+        ])
+        for row in rows:
+            resolution_hours = ""
+            if row.report_created_at and row.report_resolved_at:
+                resolution_hours = round(
+                    (row.report_resolved_at - row.report_created_at).total_seconds() / 3600,
+                    2,
+                )
+            sla_breached = bool(
+                row.report_due_at
+                and (
+                    (row.report_resolved_at and row.report_resolved_at > row.report_due_at)
+                    or (not row.report_resolved_at and row.report_due_at < now)
+                )
+            )
+            yield emit([
+                row.id,
+                row.external_id,
+                row.subject,
+                row.status,
+                row.priority,
+                row.category,
+                row.external_source,
+                row.assignee_name,
+                row.report_created_at.isoformat() if row.report_created_at else "",
+                row.report_resolved_at.isoformat() if row.report_resolved_at else "",
+                resolution_hours,
+                row.report_due_at.isoformat() if row.report_due_at else "",
+                "Yes" if sla_breached else "No",
+            ])
+
+    filename = f"tickety-ticket-report-{now.strftime('%Y%m%d-%H%M')}.csv"
+    return StreamingResponse(
+        csv_lines(),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "X-Report-Rows": str(len(rows)),
+        },
+    )
+
+
+# ── User / Engagement ────────────────────────────────────────
 @app.get("/me", response_model=User)
 async def get_current_user_endpoint(user: UserRecord = Depends(get_current_user)):
     return user

@@ -63,6 +63,62 @@ test("getComments supports bounded history pagination without changing the defau
   }
 });
 
+test("every report request and CSV export use the same encoded criteria", async () => {
+  const { api } = loadApi();
+  const originalFetch = global.fetch;
+  const calls = [];
+  global.fetch = async (url) => {
+    calls.push(String(url));
+    const headers = String(url).includes("/reports/export")
+      ? {
+          "content-disposition": 'attachment; filename="filtered-report.csv"',
+          "content-type": "text/csv",
+          "x-report-rows": "3",
+        }
+      : { "content-type": "application/json" };
+    return new Response(
+      String(url).includes("/reports/export") ? "Ticket ID\nT-1\n" : "{}",
+      { status: 200, headers },
+    );
+  };
+  const filters = {
+    startAt: "2026-08-01T08:15:00.000Z",
+    endAt: "2026-08-25T17:45:00.000Z",
+    dateField: "resolved",
+    status: "Closed & verified",
+    priority: "P1",
+    category: "Network / VPN",
+  };
+
+  try {
+    await Promise.all([
+      api.getReportSummary(filters),
+      api.getReportVolume(filters),
+      api.getReportByCategory(filters),
+      api.getReportByStatus(filters),
+      api.getReportSlaCompliance(filters),
+      api.getReportResolutionTime(filters),
+    ]);
+    const exported = await api.downloadReportCsv(filters);
+
+    assert.equal(calls.length, 7);
+    for (const call of calls) {
+      const url = new URL(call, "https://tickety.nexora.com");
+      assert.equal(url.searchParams.get("start_at"), filters.startAt);
+      assert.equal(url.searchParams.get("end_at"), filters.endAt);
+      assert.equal(url.searchParams.get("date_field"), "resolved");
+      assert.equal(url.searchParams.get("status"), "Closed & verified");
+      assert.equal(url.searchParams.get("priority"), "P1");
+      assert.equal(url.searchParams.get("category"), "Network / VPN");
+    }
+    assert.equal(exported.filename, "filtered-report.csv");
+    assert.equal(exported.rowCount, 3);
+    assert.equal(await exported.blob.text(), "Ticket ID\nT-1\n");
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
 test("external directory requests encode server-side search, filters, and pagination", async () => {
   const { api } = loadApi();
   const originalFetch = global.fetch;
