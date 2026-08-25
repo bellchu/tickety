@@ -24,6 +24,7 @@ from .integrations.sync import (
 )
 from .integrations.registry import configured_provider, get_adapter
 from .integrations.bindings import expire_due_bindings, get_active_binding
+from .llm_manager import LLMCapacityError
 from . import settings as settings_module
 
 _scheduler: Optional[BackgroundScheduler] = None
@@ -252,7 +253,10 @@ def _auto_triage_job():
                             )
                         )
                 except Exception as e:
-                    print(f"[auto-triage] error kind={type(e).__name__}")
+                    if isinstance(e, LLMCapacityError):
+                        print("[auto-triage] deferred reason=provider_capacity")
+                    else:
+                        print(f"[auto-triage] error kind={type(e).__name__}")
                     db.rollback()
 
         # Fill missing summaries
@@ -291,7 +295,10 @@ def _auto_triage_job():
                         asyncio.run(_auto_process(t2, db, force=True))
                         print(f"[auto-triage] summary filled for {processed_id[:8]}")
                 except Exception as e:
-                    print(f"[auto-triage] summary error kind={type(e).__name__}")
+                    if isinstance(e, LLMCapacityError):
+                        print("[auto-triage] summary deferred reason=provider_capacity")
+                    else:
+                        print(f"[auto-triage] summary error kind={type(e).__name__}")
                     db.rollback()
 
         # Fill missing resolution plans
@@ -330,7 +337,10 @@ def _auto_triage_job():
                         asyncio.run(_auto_process(t2, db, force=True))
                         print(f"[auto-triage] resolution filled for {processed_id[:8]}")
                 except Exception as e:
-                    print(f"[auto-triage] resolution error kind={type(e).__name__}")
+                    if isinstance(e, LLMCapacityError):
+                        print("[auto-triage] resolution deferred reason=provider_capacity")
+                    else:
+                        print(f"[auto-triage] resolution error kind={type(e).__name__}")
                     db.rollback()
 
         # Fix missing escalation risk (column added later, may be NULL)

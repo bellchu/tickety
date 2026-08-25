@@ -880,7 +880,7 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 ticket.ai_status = "queued"
                 ticket.ai_requested_artifacts = "summary"
                 db.commit()
-                with self.assertRaises(LLMUnavailableError):
+                with self.assertRaises(LLMCapacityError):
                     await main._auto_process(ticket, db, force=True)
         finally:
             main.engine.llm = old_llm

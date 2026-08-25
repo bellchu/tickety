@@ -2717,8 +2717,9 @@ async def _run_ticket_analysis(
             if not claim_terminal:
                 error_code = _analysis_step_error_code(exc)
                 error_signature = f"triage:{error_code}"
+                event = "deferred" if isinstance(exc, LLMCapacityError) else "failed"
                 print(
-                    f"[analysis] artifact failed ticket={ticket.id[:8]} "
+                    f"[analysis] artifact {event} ticket={ticket.id[:8]} "
                     f"step=triage code={error_code}"
                 )
                 if isinstance(exc, LLMCapacityError):
@@ -2809,8 +2810,9 @@ async def _run_ticket_analysis(
                 errors.append({"step": "summary", "error": error_code})
                 if isinstance(result, LLMCapacityError):
                     capacity_deferrals["summary"] = result.retry_after_seconds
+                event = "deferred" if isinstance(result, LLMCapacityError) else "failed"
                 print(
-                    f"[analysis] artifact failed ticket={ticket.id[:8]} "
+                    f"[analysis] artifact {event} ticket={ticket.id[:8]} "
                     f"step=summary code={error_code}"
                 )
                 await emit("summary", "error")
@@ -2827,8 +2829,9 @@ async def _run_ticket_analysis(
                 errors.append({"step": "resolution", "error": error_code})
                 if isinstance(result, LLMCapacityError):
                     capacity_deferrals["resolution"] = result.retry_after_seconds
+                event = "deferred" if isinstance(result, LLMCapacityError) else "failed"
                 print(
-                    f"[analysis] artifact failed ticket={ticket.id[:8]} "
+                    f"[analysis] artifact {event} ticket={ticket.id[:8]} "
                     f"step=resolution code={error_code}"
                 )
                 await emit("resolution", "error")
@@ -2983,7 +2986,13 @@ async def _run_ticket_analysis(
             )
 
     if errors and len(requested_artifacts) == 1:
-        exc = LLMUnavailableError("AI artifact generation failed")
+        if failed_artifacts and failed_artifacts.issubset(capacity_deferrals):
+            exc = LLMCapacityError(
+                "AI artifact generation deferred by provider capacity",
+                max(capacity_deferrals.values()),
+            )
+        else:
+            exc = LLMUnavailableError("AI artifact generation failed")
         setattr(exc, "analysis_claim_id", claim_id)
         raise exc
 
