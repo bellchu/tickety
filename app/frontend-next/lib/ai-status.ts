@@ -87,6 +87,7 @@ export function aiArtifactLabel(artifact: string): string {
 
 export function aiCallStatusMeta(status: string): Pick<AITaskLifecycleMeta, "label" | "variant"> {
   if (status === "success") return { label: "Success", variant: "success" };
+  if (status === "capacity_deferred") return { label: "Capacity deferred", variant: "info" };
   if (status === "attempt_failed") return { label: "Attempt failed", variant: "warning" };
   if (status === "failed") return { label: "Failed", variant: "danger" };
   return { label: status.replaceAll("_", " ") || "Unknown", variant: "neutral" };

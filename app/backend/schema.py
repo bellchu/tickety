@@ -308,6 +308,7 @@ class AILLMCallSummary(BaseModel):
     calls: int = 0
     successful: int = 0
     failed_attempts: int = 0
+    deferred: int = 0
     total_tokens: int = 0
     average_latency_ms: int = 0
     last_call_at: Optional[datetime] = None

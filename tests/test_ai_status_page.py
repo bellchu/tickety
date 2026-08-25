@@ -154,6 +154,17 @@ class AIStatusPageApiTests(unittest.TestCase):
                     error_code="provider_capacity",
                     created_at=self.now - timedelta(minutes=2),
                 ),
+                LLMCallRecord(
+                    provider="foundry",
+                    model="deployment-a",
+                    task="TicketResolution",
+                    status="capacity_deferred",
+                    attempts=1,
+                    latency_ms=5,
+                    total_tokens=0,
+                    error_code="provider_capacity",
+                    created_at=self.now - timedelta(minutes=1),
+                ),
             ])
             db.commit()
 
@@ -224,11 +235,12 @@ class AIStatusPageApiTests(unittest.TestCase):
         self.assertEqual(tasks["dead-letter"]["error_code"], "legacy_error")
         self.assertNotIn("sk-proj-abcdefghijklmnopqrst", response.text)
 
-        self.assertEqual(payload["calls_24h"]["calls"], 2)
+        self.assertEqual(payload["calls_24h"]["calls"], 3)
         self.assertEqual(payload["calls_24h"]["successful"], 1)
         self.assertEqual(payload["calls_24h"]["failed_attempts"], 1)
+        self.assertEqual(payload["calls_24h"]["deferred"], 1)
         self.assertEqual(payload["calls_24h"]["total_tokens"], 160)
-        self.assertEqual(len(payload["recent_calls"]), 2)
+        self.assertEqual(len(payload["recent_calls"]), 3)
         self.assertEqual(
             [feature["enabled"] for feature in payload["automation"]],
             [True, False, False, False, False],
@@ -267,6 +279,7 @@ class AIStatusPageApiTests(unittest.TestCase):
         self.assertEqual(ai.status_code, 200, ai.text)
         self.assertTrue(ai.json()["entries"])
         self.assertNotIn("sk-proj-abcdefghijklmnopqrst", ai.text)
+        self.assertNotIn("capacity_deferred", ai.text)
 
     def test_operational_views_and_search_are_bounded_server_side(self):
         attention = self.client.get(

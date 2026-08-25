@@ -112,6 +112,7 @@ _LLM_METRICS = {
     "requests": 0,
     "successes": 0,
     "failures": 0,
+    "deferrals": 0,
     "retries": 0,
     "synthetic_results": 0,
     "prompt_tokens": 0,
@@ -1211,8 +1212,9 @@ class LLMManager:
                         )
                     )
                 )
+                event = "deferred" if capacity_wait else "failure"
                 print(
-                    f"[llm] failure provider={self.provider} model={self.model_name} "
+                    f"[llm] {event} provider={self.provider} model={self.model_name} "
                     f"attempt={attempt + 1}/{_MAX_RETRIES} status={status} "
                     f"kind={type(e).__name__}"
                 )
@@ -1225,7 +1227,7 @@ class LLMManager:
                     provider=self.provider,
                     model=self.model_name,
                     task=task_name,
-                    status="attempt_failed",
+                    status=("capacity_deferred" if capacity_wait else "attempt_failed"),
                     attempts=attempt + 1,
                     latency_ms=int((time.monotonic() - attempt_started) * 1000),
                     prompt_tokens=failed_prompt_tokens,
@@ -1233,7 +1235,9 @@ class LLMManager:
                     total_tokens=failed_total_tokens,
                     synthetic=False,
                     error_code=(
-                        "invalid_output"
+                        "provider_capacity"
+                        if capacity_wait
+                        else "invalid_output"
                         if isinstance(e, (json.JSONDecodeError, ValidationError, ValueError))
                         else "provider_unavailable"
                     ),
@@ -1255,7 +1259,13 @@ class LLMManager:
                 elif not retryable:
                     break
 
-        _metric(failures=1, latency_ms_total=int((time.monotonic() - started) * 1000))
+        if isinstance(last_err, LLMCapacityError):
+            _metric(deferrals=1)
+        else:
+            _metric(
+                failures=1,
+                latency_ms_total=int((time.monotonic() - started) * 1000),
+            )
         if isinstance(last_err, (json.JSONDecodeError, ValidationError, ValueError)):
             raise LLMInvalidOutputError("AI provider returned invalid structured output") from last_err
         if isinstance(last_err, LLMCapacityError):

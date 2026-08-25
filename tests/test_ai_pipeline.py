@@ -311,6 +311,7 @@ class LLMContractTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_capacity_denial_is_not_retried_or_dispatched(self):
         provider = AsyncMock()
+        record_call = MagicMock()
         with (
             patch.dict(os.environ, {
                 "APP_MODE": "production",
@@ -321,15 +322,19 @@ class LLMContractTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 llm_module,
                 "_reserve_provider_capacity",
-                side_effect=LLMUnavailableError("capacity"),
+                side_effect=LLMCapacityError("capacity", 3_600),
             ) as reserve,
             patch.object(llm_module, "_try_acquire_provider_lease", return_value="local-only"),
+            patch.object(llm_module, "_record_call", new=record_call),
         ):
             manager = LLMManager()
-            with self.assertRaises(LLMUnavailableError):
+            with self.assertRaises(LLMCapacityError):
                 await manager.analyze("ticket", response_model=TriageAnalysis)
         reserve.assert_called_once()
         provider.assert_not_awaited()
+        self.assertEqual(record_call.call_count, 1)
+        self.assertEqual(record_call.call_args.kwargs["status"], "capacity_deferred")
+        self.assertEqual(record_call.call_args.kwargs["error_code"], "provider_capacity")
 
     async def test_foundry_429_honors_retry_after_milliseconds(self):
         rate_limited = RuntimeError("rate limited")

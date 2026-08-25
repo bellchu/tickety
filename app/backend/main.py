@@ -5789,7 +5789,8 @@ async def ai_task_status(
     call_summary = db.query(
         func.count(LLMCallRecord.id),
         func.coalesce(func.sum(case((LLMCallRecord.status == "success", 1), else_=0)), 0),
-        func.coalesce(func.sum(case((LLMCallRecord.status != "success", 1), else_=0)), 0),
+        func.coalesce(func.sum(case((LLMCallRecord.status.in_(("attempt_failed", "failed")), 1), else_=0)), 0),
+        func.coalesce(func.sum(case((LLMCallRecord.status == "capacity_deferred", 1), else_=0)), 0),
         func.coalesce(func.sum(LLMCallRecord.total_tokens), 0),
         func.coalesce(func.avg(LLMCallRecord.latency_ms), 0),
         func.max(LLMCallRecord.created_at),
@@ -5873,9 +5874,10 @@ async def ai_task_status(
             "calls": int(call_summary[0] or 0),
             "successful": int(call_summary[1] or 0),
             "failed_attempts": int(call_summary[2] or 0),
-            "total_tokens": int(call_summary[3] or 0),
-            "average_latency_ms": int(round(float(call_summary[4] or 0))),
-            "last_call_at": call_summary[5],
+            "deferred": int(call_summary[3] or 0),
+            "total_tokens": int(call_summary[4] or 0),
+            "average_latency_ms": int(round(float(call_summary[5] or 0))),
+            "last_call_at": call_summary[6],
         },
     }
 
@@ -6001,7 +6003,7 @@ async def operational_status_diagnostics(
         remaining = max(0, 50 - len(entries))
         if remaining:
             call_rows = db.query(LLMCallRecord).filter(
-                LLMCallRecord.status != "success"
+                LLMCallRecord.status.notin_(("success", "capacity_deferred"))
             ).order_by(
                 LLMCallRecord.created_at.desc(), LLMCallRecord.id.desc()
             ).limit(remaining + 1).all()

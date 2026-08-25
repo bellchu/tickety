@@ -232,7 +232,7 @@ export default function AIStatusPage() {
         <MetricCard
           label="Provider calls · 24h"
           value={data.calls_24h.calls.toLocaleString()}
-          detail={`${data.calls_24h.successful.toLocaleString()} successful · ${data.calls_24h.total_tokens.toLocaleString()} tokens`}
+          detail={`${data.calls_24h.successful.toLocaleString()} successful · ${data.calls_24h.deferred.toLocaleString()} safely deferred · ${data.calls_24h.total_tokens.toLocaleString()} tokens`}
           icon={<Cpu className="h-4 w-4" />}
           tone="neutral"
         />

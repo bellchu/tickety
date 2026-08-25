@@ -297,6 +297,7 @@ export interface AIStatusResponse {
     calls: number;
     successful: number;
     failed_attempts: number;
+    deferred: number;
     total_tokens: number;
     average_latency_ms: number;
     last_call_at: string | null;
