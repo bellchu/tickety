@@ -310,11 +310,11 @@ function StatusCard({
       </div>
       <h2 className="mt-4 text-base font-semibold text-ink-700">{title}</h2>
       <p className="mt-1 text-xs leading-5 text-ink-500">{description}</p>
-      <dl className="mt-5 grid grid-cols-3 gap-3 border-t border-linen-300 pt-4">
+      <dl className="mt-5 grid gap-3 border-t border-linen-300 pt-4 sm:grid-cols-3">
         {facts.map((fact) => (
           <div key={fact.label} className="min-w-0">
             <dt className="text-[10px] font-semibold uppercase tracking-[0.08em] text-ink-400">{fact.label}</dt>
-            <dd className="mt-1 break-words text-xs font-medium text-ink-600">{fact.value}</dd>
+            <dd className="mt-1 break-words text-xs font-medium text-ink-600 [overflow-wrap:anywhere]" title={fact.value}>{fact.value}</dd>
           </div>
         ))}
       </dl>

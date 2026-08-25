@@ -162,7 +162,7 @@ export function AIThinkingStream({ ticketId, hasExisting, recoveryState, onCompl
                 ) : (
                   <div className="h-3.5 w-3.5 shrink-0 rounded-full border-2 border-linen-400" />
                 )}
-                <span className={`truncate ${
+                <span title={step.label} className={`truncate ${
                   step.status === "done" ? "text-ink-600" :
                   step.status === "active" ? "text-ink-700 font-medium" :
                   step.status === "error" ? "text-semantic-danger font-medium" :

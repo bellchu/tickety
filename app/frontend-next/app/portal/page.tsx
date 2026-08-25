@@ -71,7 +71,7 @@ function TicketResult({ ticket }: { ticket: PortalTicket }) {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.12em] text-ink-400">Request found</p>
-            <h2 id="request-result-title" className="mt-1 font-mono text-sm font-semibold text-ink-700">
+            <h2 id="request-result-title" className="mt-1 break-words font-mono text-sm font-semibold text-ink-700 [overflow-wrap:anywhere]">
               {ticket.id}
             </h2>
           </div>
@@ -81,7 +81,7 @@ function TicketResult({ ticket }: { ticket: PortalTicket }) {
         </div>
       </div>
       <div className="px-5 py-5 sm:px-6 sm:py-6">
-        <h3 className="text-lg font-semibold tracking-[-0.015em] text-ink-700">{ticket.subject}</h3>
+        <h3 className="break-words text-lg font-semibold tracking-[-0.015em] text-ink-700 [overflow-wrap:anywhere]">{ticket.subject}</h3>
         <dl className="mt-6 grid gap-4 border-t border-linen-300 pt-5 sm:grid-cols-3">
           <div>
             <dt className="text-xs font-medium text-ink-400">Priority</dt>

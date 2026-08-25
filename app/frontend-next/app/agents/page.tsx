@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Search, ShieldCheck, Trash2, UserCog, Users } from "lucide-react";
-import { Alert, Badge, Button, ConfirmDialog, Dialog, EmptyState, ErrorState, IconButton, Skeleton } from "@/components/ui";
+import { Alert, Badge, Button, ConfirmDialog, DataListCard, DataTable, DataTableViewport, Dialog, EmptyState, ErrorState, IconButton, ListText, Skeleton } from "@/components/ui";
 import { api } from "@/lib/api";
 import { canAccessAdministration, isDemoContext } from "@/lib/auth";
 import type { UserCreateInput, UserOut } from "@/lib/types";
@@ -140,28 +140,28 @@ export default function AgentsPage() {
           <EmptyState className="m-5" icon={<Users className="h-5 w-5" />} title={search ? "No agents match this search" : "No active agents"} description={search ? "Try a name, role, email address, or title." : "Add an agent to begin assigning operational work."} action={search ? <Button variant="secondary" onClick={() => setSearch("")}>Clear search</Button> : <Button onClick={() => setFormOpen(true)}>Add agent</Button>} />
         ) : (
           <>
-            <div className="divide-y divide-linen-300 md:hidden">
+            <div className="grid gap-3 bg-linen-100/60 p-3 md:hidden">
               {filteredUsers.map((user) => <AgentCard key={user.id} user={user} onEdit={() => { updateMutation.reset(); setEditing(user); }} onDeactivate={() => setDeactivating(user)} />)}
             </div>
-            <div className="hidden overflow-x-auto md:block">
-              <table className="w-full min-w-[760px] text-sm">
+            <DataTableViewport label="Active agent roster" className="hidden md:block">
+              <DataTable className="min-w-[680px]">
+                <colgroup><col className="w-[36%]" /><col className="w-[20%]" /><col className="w-[24%]" /><col className="w-[10%]" /><col className="w-[10%]" /></colgroup>
                 <thead className="bg-linen-100 text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-ink-400">
-                  <tr><th className="px-5 py-3" scope="col">Agent</th><th className="px-4 py-3" scope="col">Role</th><th className="px-4 py-3" scope="col">Title</th><th className="px-4 py-3 text-right" scope="col">Impact</th><th className="px-4 py-3 text-center" scope="col">Tier</th><th className="px-5 py-3 text-right" scope="col"><span className="sr-only">Actions</span></th></tr>
+                  <tr><th className="px-5 py-3" scope="col">Agent</th><th className="px-4 py-3" scope="col">Access</th><th className="px-4 py-3" scope="col">Title</th><th className="px-4 py-3 text-right" scope="col">Impact</th><th className="px-5 py-3 text-right" scope="col"><span className="sr-only">Actions</span></th></tr>
                 </thead>
                 <tbody className="divide-y divide-linen-300">
                   {filteredUsers.map((user) => (
                     <tr key={user.id} className="transition-colors hover:bg-linen-100">
                       <td className="px-5 py-4"><AgentIdentity user={user} /></td>
-                      <td className="px-4 py-4"><Badge variant={roleVariant(user.role)} dot>{user.role}</Badge></td>
-                      <td className="px-4 py-4 text-ink-500">{user.title || "Not set"}</td>
+                      <td className="px-4 py-4"><Badge variant={roleVariant(user.role)} dot>{user.role}</Badge><span className="mt-2 block text-[11px] font-medium text-ink-400">Tier {user.tier}</span></td>
+                      <td className="px-4 py-4"><ListText text={user.title || "Not set"} lines={2} className="text-xs text-ink-500" /></td>
                       <td className="px-4 py-4 text-right font-medium tabular-nums text-ink-700">{user.impact_points.toLocaleString()}</td>
-                      <td className="px-4 py-4 text-center"><Badge>T{user.tier}</Badge></td>
                       <td className="px-5 py-4"><div className="flex justify-end gap-1"><IconButton size="sm" aria-label={`Edit ${user.name}`} icon={<UserCog className="h-4 w-4" />} onClick={() => { updateMutation.reset(); setEditing(user); }} /><IconButton size="sm" aria-label={`Deactivate ${user.name}`} icon={<Trash2 className="h-4 w-4" />} onClick={() => setDeactivating(user)} /></div></td>
                     </tr>
                   ))}
                 </tbody>
-              </table>
-            </div>
+              </DataTable>
+            </DataTableViewport>
           </>
         )}
       </section>
@@ -178,9 +178,9 @@ export default function AgentsPage() {
         ) : (
           <div className="divide-y divide-linen-300">
             {filteredInactiveUsers.map((user) => (
-              <div key={user.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
-                <div className="min-w-0 opacity-75"><AgentIdentity user={user} /></div>
-                <div className="flex items-center gap-2">
+              <div key={user.id} className="flex min-w-0 flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0 flex-1 opacity-75"><AgentIdentity user={user} /></div>
+                <div className="flex flex-wrap items-center gap-2 sm:justify-end">
                   <Badge variant="neutral">Deactivated</Badge>
                   <Badge variant={roleVariant(user.role)}>{user.role}</Badge>
                   <Button size="sm" variant="destructive" leadingIcon={<Trash2 className="h-4 w-4" />} onClick={() => { purgeMutation.reset(); setPurging(user); }}>Purge</Button>
@@ -201,11 +201,11 @@ export default function AgentsPage() {
 }
 
 function AgentIdentity({ user }: { user: UserOut }) {
-  return <div className="flex min-w-0 items-center gap-3"><span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-ink-700 text-xs font-semibold text-white">{initials(user.name)}</span><span className="min-w-0"><span className="block truncate font-semibold text-ink-700">{user.name}</span><span className="block truncate text-xs text-ink-400">{user.email || "No email"}</span></span></div>;
+  return <div className="flex min-w-0 items-center gap-3"><span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-ink-700 text-xs font-semibold text-white">{initials(user.name)}</span><span className="min-w-0"><ListText text={user.name} lines={1} className="font-semibold text-ink-700" /><ListText text={user.email || "No email"} lines={1} className="text-xs text-ink-400" /></span></div>;
 }
 
 function AgentCard({ user, onEdit, onDeactivate }: { user: UserOut; onEdit: () => void; onDeactivate: () => void }) {
-  return <article className="p-4"><div className="flex items-start justify-between gap-3"><AgentIdentity user={user} /><div className="flex gap-1"><IconButton size="sm" aria-label={`Edit ${user.name}`} icon={<UserCog className="h-4 w-4" />} onClick={onEdit} /><IconButton size="sm" aria-label={`Deactivate ${user.name}`} icon={<Trash2 className="h-4 w-4" />} onClick={onDeactivate} /></div></div><div className="mt-4 flex flex-wrap items-center gap-2"><Badge variant={roleVariant(user.role)} dot>{user.role}</Badge><Badge>T{user.tier}</Badge><span className="text-xs text-ink-500">{user.impact_points.toLocaleString()} impact</span><span className="text-xs text-ink-500">{user.title || "Title not set"}</span></div></article>;
+  return <DataListCard><div className="flex min-w-0 items-start justify-between gap-3"><div className="min-w-0 flex-1"><AgentIdentity user={user} /></div><div className="flex shrink-0 gap-1"><IconButton size="sm" aria-label={`Edit ${user.name}`} icon={<UserCog className="h-4 w-4" />} onClick={onEdit} /><IconButton size="sm" aria-label={`Deactivate ${user.name}`} icon={<Trash2 className="h-4 w-4" />} onClick={onDeactivate} /></div></div><div className="mt-4 flex flex-wrap items-center gap-2 border-t border-linen-300 pt-3"><Badge variant={roleVariant(user.role)} dot>{user.role}</Badge><Badge>T{user.tier}</Badge><span className="text-xs whitespace-nowrap text-ink-500">{user.impact_points.toLocaleString()} impact</span><ListText text={user.title || "Title not set"} lines={2} className="w-full text-xs text-ink-500 xs:w-auto xs:max-w-[15rem]" /></div></DataListCard>;
 }
 
 function UserFormDialog({ open, user, demoMode, onOpenChange, onSubmit, pending, error }: { open: boolean; user: UserOut | null; demoMode: boolean; onOpenChange: (open: boolean) => void; onSubmit: (payload: UserCreateInput) => void; pending: boolean; error: unknown }) {

@@ -134,7 +134,10 @@ export function SearchableSelect({
         className="input-base flex items-center justify-between gap-2 text-left disabled:cursor-not-allowed disabled:opacity-60"
         disabled={disabled}
       >
-        <span className={cn("truncate", !value && "text-ink-400")}>
+        <span
+          className={cn("min-w-0 truncate", !value && "text-ink-400")}
+          title={selectedOption?.label || value || placeholder}
+        >
           {selectedOption?.label || value || placeholder}
         </span>
         <ChevronDown
@@ -200,9 +203,9 @@ export function SearchableSelect({
                       : "text-ink-600 hover:bg-linen-200",
                 )}
               >
-                <span className="block truncate">{option.label}</span>
+                <span className="block truncate" title={option.label}>{option.label}</span>
                 {option.id !== option.label && (
-                  <span className="block truncate text-[11px] font-normal text-ink-400">
+                  <span className="block truncate text-[11px] font-normal text-ink-400" title={option.id}>
                     {option.id}
                   </span>
                 )}

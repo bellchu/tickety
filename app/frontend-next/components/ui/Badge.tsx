@@ -31,20 +31,22 @@ export function Badge({
   icon,
   className,
   children,
+  title,
   ...props
 }: BadgeProps) {
   return (
     <span
       className={cn(
-        "inline-flex min-h-6 items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-semibold leading-none",
+        "inline-flex min-h-6 max-w-full items-center gap-1.5 whitespace-nowrap rounded-full border px-2 py-0.5 text-[11px] font-semibold leading-none",
         variantClasses[variant],
         className
       )}
+      title={title ?? (typeof children === "string" ? children : undefined)}
       {...props}
     >
-      {dot && <span className={cn("h-1.5 w-1.5 rounded-full", dotClasses[variant])} aria-hidden="true" />}
+      {dot && <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", dotClasses[variant])} aria-hidden="true" />}
       {icon && <span className="shrink-0" aria-hidden="true">{icon}</span>}
-      {children}
+      <span className="min-w-0 truncate">{children}</span>
     </span>
   );
 }

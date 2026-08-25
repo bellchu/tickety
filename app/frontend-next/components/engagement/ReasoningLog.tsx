@@ -79,12 +79,12 @@ export function ReasoningLog({ text }: { text: string }) {
         {segments.map((seg, i) => (
           <div
             key={i}
-            className={`flex gap-3 rounded-md border px-3 py-2.5 ${seg.color}`}
+            className={`flex min-w-0 flex-col gap-1.5 rounded-md border px-3 py-2.5 sm:flex-row sm:gap-3 ${seg.color}`}
           >
-            <span className="shrink-0 text-[11px] font-bold uppercase tracking-wider opacity-70 w-16">
+            <span className="shrink-0 text-[11px] font-bold uppercase tracking-wider opacity-70 sm:w-16">
               {seg.label}
             </span>
-            <span className="text-sm leading-relaxed">
+            <span className="min-w-0 break-words text-sm leading-relaxed [overflow-wrap:anywhere]">
               {highlightKeywords(seg.value)}
             </span>
           </div>

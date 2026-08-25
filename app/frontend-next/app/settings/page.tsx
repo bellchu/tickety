@@ -15,7 +15,7 @@ import {
   Power, KeyRound, Link2, SlidersHorizontal,
 } from "lucide-react";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
-import { Alert, Button, ErrorState, Skeleton } from "@/components/ui";
+import { Alert, Button, DataListCard, DataTable, DataTableViewport, ErrorState, ListText, Skeleton } from "@/components/ui";
 import { PageFrame, PageHeader } from "@/components/layout/PageLayout";
 
 const PROVIDER_OPTIONS = [
@@ -975,7 +975,7 @@ function SetupStep({ label, done }: { label: string; done: boolean }) {
       done ? "border-moss-500/30 bg-moss-500/10 text-moss-600" : "border-linen-400 bg-linen-50 text-ink-400"
     )}>
       {done ? <CheckCircle2 className="w-3.5 h-3.5 shrink-0" /> : <span className="h-3.5 w-3.5 shrink-0 rounded-full border border-linen-500" />}
-      <span className="truncate">{label}</span>
+      <span className="truncate" title={label}>{label}</span>
     </div>
   );
 }
@@ -1356,32 +1356,45 @@ function AgentSection() {
       {isLoading ? (
         <div className="space-y-2">{[1, 2, 3].map((item) => <Skeleton key={item} className="h-10 w-full" />)}</div>
       ) : users.length > 0 ? (
-        <div className="overflow-x-auto rounded border border-linen-400">
-          <table className="w-full min-w-[760px] text-sm">
+        <>
+          <div className="grid gap-3 md:hidden">
+            {users.map((externalUser) => (
+              <DataListCard key={externalUser.id}>
+                <div className="flex min-w-0 items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1"><ListText text={externalUser.name} lines={2} className="font-semibold leading-5 text-ink-700" /><ListText text={externalUser.title || "Title not provided"} lines={2} className="mt-1 text-xs text-ink-400" /></div>
+                  <span className="shrink-0 rounded border border-linen-400 px-2 py-0.5 text-[11px] font-semibold capitalize text-ink-600">{externalUser.user_type}</span>
+                </div>
+                <dl className="mt-4 grid gap-3 border-t border-linen-300 pt-3 text-xs xs:grid-cols-2">
+                  <div className="min-w-0"><dt className="text-ink-400">Email</dt><dd className="mt-1"><ListText text={externalUser.email || "Not provided"} lines="wrap" className="text-ink-600" /></dd></div>
+                  <div className="min-w-0"><dt className="text-ink-400">Provider identity</dt><dd className="mt-1 capitalize text-ink-600">{externalUser.provider}</dd><dd><ListText text={externalUser.external_id} lines="wrap" className="mt-0.5 font-mono text-[11px] text-ink-400" /></dd></div>
+                </dl>
+              </DataListCard>
+            ))}
+          </div>
+          <DataTableViewport label="External ITSM directory" className="hidden rounded border border-linen-400 md:block">
+          <DataTable className="min-w-[640px]">
+            <colgroup><col className="w-[34%]" /><col className="w-[30%]" /><col className="w-[22%]" /><col className="w-[14%]" /></colgroup>
             <thead>
               <tr className="border-b border-linen-400 bg-linen-200">
-                <th className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wider text-ink-500">Type</th>
-                <th className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wider text-ink-500">Provider user</th>
-                <th className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wider text-ink-500">Email</th>
-                <th className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wider text-ink-500">Title</th>
-                <th className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wider text-ink-500">External ID</th>
-                <th className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wider text-ink-500">Provider</th>
+                <th className="px-4 py-2.5 text-xs font-semibold uppercase tracking-wider text-ink-500">Provider user</th>
+                <th className="px-4 py-2.5 text-xs font-semibold uppercase tracking-wider text-ink-500">Contact</th>
+                <th className="px-4 py-2.5 text-xs font-semibold uppercase tracking-wider text-ink-500">Directory identity</th>
+                <th className="px-4 py-2.5 text-xs font-semibold uppercase tracking-wider text-ink-500">Type</th>
               </tr>
             </thead>
             <tbody>
               {users.map((externalUser) => (
                 <tr key={externalUser.id} className="border-b border-linen-300 last:border-0 hover:bg-linen-200">
-                  <td className="px-4 py-2.5"><span className="rounded border border-linen-400 px-2 py-0.5 text-[11px] font-semibold capitalize text-ink-600">{externalUser.user_type}</span></td>
-                  <td className="px-4 py-2.5 font-medium text-ink-700">{externalUser.name}</td>
-                  <td className="px-4 py-2.5 text-ink-500">{externalUser.email || "—"}</td>
-                  <td className="px-4 py-2.5 text-ink-500">{externalUser.title || "—"}</td>
-                  <td className="px-4 py-2.5 font-mono text-xs text-ink-500">{externalUser.external_id}</td>
-                  <td className="px-4 py-2.5 capitalize text-ink-500">{externalUser.provider}</td>
+                  <td className="px-4 py-3"><ListText text={externalUser.name} lines={2} className="font-medium leading-5 text-ink-700" /><ListText text={externalUser.title || "Title not provided"} lines={2} className="mt-1 text-xs text-ink-400" /></td>
+                  <td className="px-4 py-3"><ListText text={externalUser.email || "—"} lines={2} className="text-xs text-ink-500" /></td>
+                  <td className="px-4 py-3"><span className="block text-xs capitalize text-ink-500">{externalUser.provider}</span><ListText text={externalUser.external_id} lines={2} className="mt-1 font-mono text-[11px] text-ink-400" /></td>
+                  <td className="px-4 py-3"><span className="rounded border border-linen-400 px-2 py-0.5 text-[11px] font-semibold capitalize text-ink-600">{externalUser.user_type}</span></td>
                 </tr>
               ))}
             </tbody>
-          </table>
-        </div>
+          </DataTable>
+          </DataTableViewport>
+        </>
       ) : (
         <p className="py-2 text-sm text-ink-400">Refresh the directory to retrieve provider-owned agents and requesters.</p>
       )}

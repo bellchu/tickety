@@ -19,10 +19,14 @@ import {
   Alert,
   Button,
   ConfirmDialog,
+  DataListCard,
+  DataTable,
+  DataTableViewport,
   Dialog,
   EmptyState,
   ErrorState,
   IconButton,
+  ListText,
   Skeleton,
 } from "@/components/ui";
 import { PageFrame, PageHeader, SummaryStrip } from "@/components/layout/PageLayout";
@@ -44,11 +48,11 @@ function errorMessage(error: unknown) {
 }
 
 function StatusPill({ value }: { value: string }) {
-  return <span className={cn("inline-flex rounded-full border px-2.5 py-1 text-[11px] font-semibold", statusColor(value))}>{value}</span>;
+  return <span className={cn("inline-flex whitespace-nowrap rounded-full border px-2.5 py-1 text-[11px] font-semibold", statusColor(value))}>{value}</span>;
 }
 
 function PriorityPill({ value }: { value: string }) {
-  return <span className={cn("inline-flex rounded-full border px-2.5 py-1 text-[11px] font-semibold", priorityColor(value))}>{value}</span>;
+  return <span className={cn("inline-flex whitespace-nowrap rounded-full border px-2.5 py-1 text-[11px] font-semibold", priorityColor(value))}>{value}</span>;
 }
 
 export default function ProblemsPage() {
@@ -153,17 +157,18 @@ export default function ProblemsPage() {
           <div className="p-4"><EmptyState icon={<AlertOctagon className="h-5 w-5" />} title={problems.length ? "No matching problems" : "No problems recorded"} description={problems.length ? "Adjust the search or status filter to broaden this view." : "Create a problem record when an issue needs structured root-cause analysis."} action={!problems.length ? <Button onClick={() => setFormProblem(null)} leadingIcon={<Plus className="h-4 w-4" />}>Create first problem</Button> : <Button variant="secondary" onClick={() => { setSearch(""); setStatusFilter(""); }}>Clear filters</Button>} /></div>
         ) : (
           <>
-            <div className="hidden overflow-x-auto md:block">
-              <table className="w-full min-w-[860px] text-left text-sm">
+            <DataTableViewport label="Problem register" className="hidden md:block">
+              <DataTable className="min-w-[700px]">
+                <colgroup><col className="w-[34%]" /><col className="w-[20%]" /><col className="w-[20%]" /><col className="w-[16%]" /><col className="w-[10%]" /></colgroup>
                 <thead className="border-b border-linen-400 bg-linen-100 text-[11px] font-semibold uppercase tracking-[0.12em] text-ink-500">
-                  <tr><th className="px-5 py-3">Problem</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Priority</th><th className="px-4 py-3">Category</th><th className="px-4 py-3">Linked</th><th className="px-4 py-3">Owner</th><th className="px-5 py-3 text-right">Actions</th></tr>
+                  <tr><th className="px-5 py-3">Problem</th><th className="px-4 py-3">State</th><th className="px-4 py-3">Scope</th><th className="px-4 py-3">Owner</th><th className="px-5 py-3 text-right"><span className="sr-only">Actions</span></th></tr>
                 </thead>
                 <tbody className="divide-y divide-linen-300">
                   {filtered.map((problem) => <ProblemRow key={problem.id} problem={problem} onView={() => setViewing(problem)} onEdit={() => { resetMutationErrors(); setFormProblem(problem); }} onDelete={() => { deleteMutation.reset(); setDeleting(problem); }} />)}
                 </tbody>
-              </table>
-            </div>
-            <div className="divide-y divide-linen-300 md:hidden">
+              </DataTable>
+            </DataTableViewport>
+            <div className="grid gap-3 bg-linen-100/60 p-3 md:hidden">
               {filtered.map((problem) => <ProblemCard key={problem.id} problem={problem} onView={() => setViewing(problem)} onEdit={() => { resetMutationErrors(); setFormProblem(problem); }} onDelete={() => { deleteMutation.reset(); setDeleting(problem); }} />)}
             </div>
           </>
@@ -185,15 +190,15 @@ type ItemActions = { problem: Problem; onView: () => void; onEdit: () => void; o
 
 function ProblemRow({ problem, onView, onEdit, onDelete }: ItemActions) {
   return <tr className="transition-colors hover:bg-linen-100/80">
-    <td className="px-5 py-4"><button onClick={onView} className="max-w-xs text-left focus-visible:rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"><span className="block truncate font-semibold text-ink-800">{problem.title}</span><span className="mt-1 block font-mono text-[11px] text-ink-400">{problem.id.slice(0, 8).toUpperCase()}</span></button></td>
-    <td className="px-4 py-4"><StatusPill value={problem.status} /></td><td className="px-4 py-4">{problem.priority ? <PriorityPill value={problem.priority} /> : <span className="text-ink-300">—</span>}</td>
-    <td className="px-4 py-4 text-xs text-ink-600">{problem.category || "Uncategorized"}</td><td className="px-4 py-4 text-xs font-semibold tabular-nums text-ink-700">{problem.linked_tickets_count}</td><td className="px-4 py-4 text-xs text-ink-600">{problem.assigned_name || "Unassigned"}</td>
+    <td className="px-5 py-4"><button onClick={onView} className="block w-full min-w-0 text-left focus-visible:rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"><ListText text={problem.title} lines={2} className="font-semibold leading-5 text-ink-800" /><span className="mt-1 block font-mono text-[11px] text-ink-400">{problem.id.slice(0, 8).toUpperCase()}</span></button></td>
+    <td className="px-4 py-4"><StatusPill value={problem.status} />{problem.priority && <div className="mt-2"><PriorityPill value={problem.priority} /></div>}</td>
+    <td className="px-4 py-4"><ListText text={problem.category || "Uncategorized"} lines={2} className="text-xs font-medium text-ink-600" /><span className="mt-1 block text-[11px] tabular-nums text-ink-400">{problem.linked_tickets_count} linked ticket{problem.linked_tickets_count === 1 ? "" : "s"}</span></td><td className="px-4 py-4"><ListText text={problem.assigned_name || "Unassigned"} lines={2} className="text-xs text-ink-600" /></td>
     <td className="px-5 py-4"><div className="flex justify-end gap-1"><IconButton size="sm" aria-label={`View ${problem.title}`} icon={<Eye className="h-4 w-4" />} onClick={onView} /><IconButton size="sm" aria-label={`Edit ${problem.title}`} icon={<Pencil className="h-4 w-4" />} onClick={onEdit} /><IconButton size="sm" aria-label={`Delete ${problem.title}`} icon={<Trash2 className="h-4 w-4" />} onClick={onDelete} className="text-rust-600 hover:bg-rust-400/10" /></div></td>
   </tr>;
 }
 
 function ProblemCard({ problem, onView, onEdit, onDelete }: ItemActions) {
-  return <article className="p-4"><div className="flex items-start justify-between gap-3"><button onClick={onView} className="min-w-0 text-left"><span className="block font-semibold leading-5 text-ink-800">{problem.title}</span><span className="mt-1 block font-mono text-[11px] text-ink-400">{problem.id.slice(0, 8).toUpperCase()}</span></button><PriorityPill value={problem.priority || "—"} /></div><div className="mt-4 flex flex-wrap items-center gap-2"><StatusPill value={problem.status} /><span className="text-xs text-ink-500">{problem.category || "Uncategorized"}</span><span className="text-xs text-ink-500">{problem.linked_tickets_count} linked</span></div><div className="mt-4 flex items-center justify-between border-t border-linen-300 pt-3"><span className="truncate text-xs text-ink-500">{problem.assigned_name || "Unassigned"}</span><div className="flex gap-1"><IconButton size="sm" aria-label={`View ${problem.title}`} icon={<Eye className="h-4 w-4" />} onClick={onView} /><IconButton size="sm" aria-label={`Edit ${problem.title}`} icon={<Pencil className="h-4 w-4" />} onClick={onEdit} /><IconButton size="sm" aria-label={`Delete ${problem.title}`} icon={<Trash2 className="h-4 w-4" />} onClick={onDelete} className="text-rust-600" /></div></div></article>;
+  return <DataListCard><div className="flex min-w-0 items-start justify-between gap-3"><button onClick={onView} className="min-w-0 flex-1 text-left"><ListText text={problem.title} lines={2} className="font-semibold leading-5 text-ink-800" /><span className="mt-1 block font-mono text-[11px] text-ink-400">{problem.id.slice(0, 8).toUpperCase()}</span></button>{problem.priority && <PriorityPill value={problem.priority} />}</div><div className="mt-4 flex flex-wrap items-center gap-2"><StatusPill value={problem.status} /><ListText text={problem.category || "Uncategorized"} lines={2} className="w-full text-xs text-ink-500 xs:w-auto xs:max-w-[14rem]" /><span className="text-xs whitespace-nowrap text-ink-500">{problem.linked_tickets_count} linked</span></div><div className="mt-4 flex min-w-0 items-center justify-between gap-3 border-t border-linen-300 pt-3"><ListText text={problem.assigned_name || "Unassigned"} lines={2} className="flex-1 text-xs text-ink-500" /><div className="flex shrink-0 gap-1"><IconButton size="sm" aria-label={`View ${problem.title}`} icon={<Eye className="h-4 w-4" />} onClick={onView} /><IconButton size="sm" aria-label={`Edit ${problem.title}`} icon={<Pencil className="h-4 w-4" />} onClick={onEdit} /><IconButton size="sm" aria-label={`Delete ${problem.title}`} icon={<Trash2 className="h-4 w-4" />} onClick={onDelete} className="text-rust-600" /></div></div></DataListCard>;
 }
 
 function ProblemFormDialog({ open, problem, users, usersUnavailable, onOpenChange, onSubmit, pending, error }: { open: boolean; problem: Problem | null; users: UserOut[]; usersUnavailable: boolean; onOpenChange: (open: boolean) => void; onSubmit: (payload: ProblemPayload) => void; pending: boolean; error: unknown }) {
@@ -237,7 +242,7 @@ function ProblemDetailDialog({ problem, onOpenChange }: { problem: Problem | nul
       <section className="border-t border-linen-400 pt-5"><div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between"><div><h3 className="text-sm font-semibold text-ink-800">Linked tickets</h3><p className="mt-1 text-xs text-ink-500">Connect incident evidence to this root-cause record.</p></div><div className="flex gap-2"><label className="min-w-0 flex-1 sm:w-56"><span className="sr-only">Ticket ID to link</span><input className="input-base min-h-10" value={ticketId} onChange={(event) => setTicketId(event.target.value)} placeholder="Ticket ID" /></label><Button size="sm" leadingIcon={<Link className="h-4 w-4" />} pending={linkMutation.isPending} pendingLabel="Linking…" disabled={!ticketId.trim()} onClick={() => linkMutation.mutate(ticketId.trim())}>Link</Button></div></div>
         {linkMutation.error && <Alert className="mt-4" variant="danger" title="Ticket was not linked">{errorMessage(linkMutation.error)}</Alert>}
         {unlinkMutation.error && <Alert className="mt-4" variant="danger" title="Ticket was not unlinked">{errorMessage(unlinkMutation.error)}</Alert>}
-        <div className="mt-4">{ticketsQuery.isLoading ? <div className="space-y-2"><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : ticketsQuery.isError ? <ErrorState className="min-h-40" title="Linked tickets could not be loaded" description={errorMessage(ticketsQuery.error)} onRetry={() => ticketsQuery.refetch()} retrying={ticketsQuery.isFetching} /> : ticketsQuery.data?.length ? <div className="divide-y divide-linen-300 rounded-xl border border-linen-400">{ticketsQuery.data.map((ticket) => <div key={ticket.id} className="flex items-center justify-between gap-3 p-3"><div className="min-w-0"><p className="truncate text-sm font-medium text-ink-700">{ticket.subject}</p><p className="mt-0.5 font-mono text-[11px] text-ink-400">{ticket.id}</p></div><IconButton size="sm" aria-label={`Unlink ${ticket.subject}`} icon={<Unlink className="h-4 w-4" />} onClick={() => { unlinkMutation.reset(); setUnlinking(ticket); }} /></div>)}</div> : <EmptyState className="min-h-40" title="No linked tickets" description="Link the first incident using its ticket ID." />}</div>
+        <div className="mt-4">{ticketsQuery.isLoading ? <div className="space-y-2"><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : ticketsQuery.isError ? <ErrorState className="min-h-40" title="Linked tickets could not be loaded" description={errorMessage(ticketsQuery.error)} onRetry={() => ticketsQuery.refetch()} retrying={ticketsQuery.isFetching} /> : ticketsQuery.data?.length ? <div className="divide-y divide-linen-300 rounded-xl border border-linen-400">{ticketsQuery.data.map((ticket) => <div key={ticket.id} className="flex min-w-0 items-center justify-between gap-3 p-3"><div className="min-w-0 flex-1"><ListText text={ticket.subject} lines={2} className="text-sm font-medium text-ink-700" /><ListText text={ticket.id} lines="wrap" className="mt-0.5 font-mono text-[11px] text-ink-400" /></div><IconButton size="sm" aria-label={`Unlink ${ticket.subject}`} icon={<Unlink className="h-4 w-4" />} onClick={() => { unlinkMutation.reset(); setUnlinking(ticket); }} /></div>)}</div> : <EmptyState className="min-h-40" title="No linked tickets" description="Link the first incident using its ticket ID." />}</div>
       </section>
     </div>}
   </Dialog><ConfirmDialog open={Boolean(unlinking)} onOpenChange={(open) => { if (!open) setUnlinking(null); }} title="Unlink this ticket?" description={<>The ticket <strong>{unlinking?.subject}</strong> will no longer appear as evidence for this problem. The ticket itself is not deleted.</>} confirmLabel="Unlink ticket" destructive pending={unlinkMutation.isPending} onConfirm={() => { if (unlinking) unlinkMutation.mutate(unlinking.id); }} /></>;

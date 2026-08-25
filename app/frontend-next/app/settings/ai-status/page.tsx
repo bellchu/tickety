@@ -31,7 +31,7 @@ import {
 } from "@/lib/ai-status";
 import type { AILLMCallStatusItem, AITaskLifecycle, AITaskStatusItem, AITaskView, AIStatusResponse } from "@/lib/types";
 import { formatTimeAgo } from "@/lib/utils";
-import { Alert, Badge, Button, EmptyState, ErrorState, Skeleton } from "@/components/ui";
+import { Alert, Badge, Button, EmptyState, ErrorState, ListText, Skeleton } from "@/components/ui";
 import { DiagnosticReveal } from "@/components/admin/DiagnosticReveal";
 import {
   ContentSurface,
@@ -248,9 +248,9 @@ export default function AIStatusPage() {
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
             {data.automation.map((feature) => (
               <div key={feature.key} className="rounded-xl border border-linen-400 bg-linen-100 p-3">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-sm font-semibold text-ink-700">{feature.label}</span>
-                  <Badge variant={feature.enabled ? "success" : "neutral"} dot>{feature.enabled ? "On" : "Off"}</Badge>
+                <div className="flex min-w-0 items-start justify-between gap-2">
+                  <ListText text={feature.label} lines={2} className="min-w-0 flex-1 text-sm font-semibold text-ink-700" />
+                  <Badge className="shrink-0" variant={feature.enabled ? "success" : "neutral"} dot>{feature.enabled ? "On" : "Off"}</Badge>
                 </div>
                 <p className="mt-2 text-xs text-ink-400">{feature.enabled ? "Eligible for automatic work" : "Manual requests only"}</p>
               </div>
@@ -375,15 +375,15 @@ function TaskRow({ task }: { task: AITaskStatusItem }) {
       <summary className="cursor-pointer list-none rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 [&::-webkit-details-marker]:hidden">
         <div className="grid gap-3 lg:grid-cols-[minmax(0,1.4fr)_minmax(180px,0.55fr)_minmax(210px,0.7fr)_minmax(130px,0.4fr)] lg:items-center">
           <div className="min-w-0">
-            <div className="flex min-w-0 items-center gap-2">
-              <span className="truncate text-sm font-semibold text-ink-700">{task.subject}</span>
-              {task.synthetic && <Badge variant="warning">Synthetic</Badge>}
+            <div className="flex min-w-0 items-start gap-2">
+              <ListText text={task.subject} lines={2} className="min-w-0 flex-1 text-sm font-semibold leading-5 text-ink-700" />
+              {task.synthetic && <Badge className="shrink-0" variant="warning">Synthetic</Badge>}
             </div>
-            <p className="mt-1 truncate font-mono text-[11px] text-ink-400">{task.external_id || task.ticket_id} · {task.source}</p>
+            <ListText text={`${task.external_id || task.ticket_id} · ${task.source}`} lines="wrap" className="mt-1 font-mono text-[11px] text-ink-400" />
           </div>
           <div>
             <Badge variant={lifecycle.variant} dot>{lifecycle.label}</Badge>
-            <p className="mt-1.5 text-[11px] text-ink-400">{taskTiming(task)}</p>
+            <ListText text={taskTiming(task)} lines={2} className="mt-1.5 text-[11px] text-ink-400" />
           </div>
           <div className="flex flex-wrap gap-1.5">
             {task.requested_artifacts.length
@@ -422,7 +422,7 @@ function TaskDetail({ label, value, danger = false }: { label: string; value: st
   return (
     <div>
       <dt className="text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-400">{label}</dt>
-      <dd className={`mt-1 whitespace-pre-line break-words text-xs leading-5 ${danger ? "text-rust-600" : "text-ink-600"}`}>{value}</dd>
+      <dd className={`mt-1 whitespace-pre-line break-words text-xs leading-5 [overflow-wrap:anywhere] ${danger ? "text-rust-600" : "text-ink-600"}`}>{value}</dd>
     </div>
   );
 }
@@ -432,17 +432,17 @@ function ProviderCallRow({ call }: { call: AILLMCallStatusItem }) {
   return (
     <div className="grid gap-3 px-5 py-4 sm:px-6 lg:grid-cols-[minmax(0,1fr)_minmax(160px,0.45fr)_minmax(170px,0.5fr)_minmax(140px,0.4fr)] lg:items-center">
       <div className="min-w-0">
-        <div className="flex items-center gap-2">
-          <p className="truncate text-sm font-semibold text-ink-700">{humanizeTaskName(call.task)}</p>
-          {call.synthetic && <Badge variant="warning">Synthetic</Badge>}
+        <div className="flex min-w-0 items-start gap-2">
+          <ListText text={humanizeTaskName(call.task)} lines={2} className="min-w-0 flex-1 text-sm font-semibold leading-5 text-ink-700" />
+          {call.synthetic && <Badge className="shrink-0" variant="warning">Synthetic</Badge>}
         </div>
-        <p className="mt-1 truncate font-mono text-[11px] text-ink-400">{call.provider} · {call.model}</p>
+        <ListText text={`${call.provider} · ${call.model}`} lines={2} className="mt-1 font-mono text-[11px] text-ink-400" />
       </div>
       <div><Badge variant={status.variant} dot>{status.label}</Badge></div>
-      <p className="text-xs text-ink-500">{call.latency_ms.toLocaleString()} ms · {call.total_tokens.toLocaleString()} tokens · {call.attempts} attempt{call.attempts === 1 ? "" : "s"}</p>
+      <p className="break-words text-xs leading-5 text-ink-500 [overflow-wrap:anywhere]">{call.latency_ms.toLocaleString()} ms · {call.total_tokens.toLocaleString()} tokens · {call.attempts} attempt{call.attempts === 1 ? "" : "s"}</p>
       <div className="lg:text-right">
         <p className="text-xs text-ink-500">{formatTimeAgo(call.created_at)}</p>
-        {call.error_code && <p className="mt-1 text-[11px] text-rust-600">{operationalCodeLabel(call.error_code)}</p>}
+        {call.error_code && <ListText text={operationalCodeLabel(call.error_code)} lines={2} className="mt-1 text-[11px] text-rust-600" />}
       </div>
     </div>
   );

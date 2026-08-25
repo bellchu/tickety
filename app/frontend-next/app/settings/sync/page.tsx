@@ -274,20 +274,20 @@ function Metric({ label, value, detail, icon }: { label: string; value: string; 
 
 function LaneCard({ icon, title, state, detail, policy }: { icon: React.ReactNode; title: string; state: string; detail: string; policy: string }) {
   return (
-    <article className="rounded-xl border border-linen-400 bg-linen-100 p-4">
-      <div className="flex items-center justify-between gap-3">
+    <article className="min-w-0 rounded-xl border border-linen-400 bg-linen-100 p-4">
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
         <span className="text-semantic-primary">{icon}</span>
-        <span className="rounded-full bg-linen-300 px-2.5 py-1 text-[11px] font-semibold text-ink-600">{state}</span>
+        <span className="max-w-full break-words rounded-full bg-linen-300 px-2.5 py-1 text-[11px] font-semibold text-ink-600 [overflow-wrap:anywhere]" title={state}>{state}</span>
       </div>
       <h3 className="mt-4 text-sm font-semibold text-ink-700">{title}</h3>
-      <p className="mt-1 text-xs leading-5 text-ink-500">{detail}</p>
-      <p className="mt-3 border-t border-linen-300 pt-3 text-[11px] font-medium text-ink-400">{policy}</p>
+      <p className="mt-1 break-words text-xs leading-5 text-ink-500 [overflow-wrap:anywhere]">{detail}</p>
+      <p className="mt-3 break-words border-t border-linen-300 pt-3 text-[11px] font-medium text-ink-400 [overflow-wrap:anywhere]">{policy}</p>
     </article>
   );
 }
 
 function Detail({ label, value }: { label: string; value: string }) {
-  return <div className="flex items-center justify-between gap-4 py-3"><dt className="text-ink-500">{label}</dt><dd className="text-right font-medium text-ink-700">{value}</dd></div>;
+  return <div className="flex min-w-0 flex-wrap items-start justify-between gap-x-4 gap-y-1 py-3"><dt className="text-ink-500">{label}</dt><dd className="min-w-0 break-words text-right font-medium text-ink-700 [overflow-wrap:anywhere]" title={value}>{value}</dd></div>;
 }
 
 function SyncStatusSkeleton() {

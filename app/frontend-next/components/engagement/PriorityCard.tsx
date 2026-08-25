@@ -29,14 +29,14 @@ export function PriorityCard({ ticket, index = 0 }: Props) {
       <Link href={`/tickets/${ticket.id}`}>
         <div className="card-surface p-4 cursor-pointer hover:border-linen-400 transition-colors">
           {/* Badge + complexity row */}
-          <div className="flex items-center gap-2 mb-2.5">
-            <span className={cn("badge", priorityColor(ticket.priority))}>
+          <div className="mb-2.5 flex min-w-0 flex-wrap items-center gap-2">
+            <span className={cn("badge max-w-full", priorityColor(ticket.priority))} title={ticket.priority}>
               {ticket.priority}
             </span>
-            <span className={cn("badge", statusColor(ticket.status))}>
+            <span className={cn("badge max-w-full", statusColor(ticket.status))} title={ticket.status}>
               {ticket.status}
             </span>
-            <span className="flex items-center gap-1 ml-auto">
+            <span className="ml-auto flex shrink-0 items-center gap-1">
               {Array.from({ length: dots.filled }).map((_, i) => (
                 <span
                   key={i}
@@ -52,10 +52,10 @@ export function PriorityCard({ ticket, index = 0 }: Props) {
             </span>
           </div>
 
-          <h3 className="text-sm font-semibold text-ink-700 line-clamp-2">
+          <h3 className="line-clamp-2 break-words text-sm font-semibold text-ink-700 [overflow-wrap:anywhere]" title={ticket.subject}>
             {ticket.subject}
           </h3>
-          <p className="text-xs text-ink-500 mt-1 line-clamp-2 leading-relaxed">
+          <p className="mt-1 line-clamp-2 break-words text-xs leading-relaxed text-ink-500 [overflow-wrap:anywhere]" title={ticket.description || "(no description)"}>
             {ticket.description || "(no description)"}
           </p>
 

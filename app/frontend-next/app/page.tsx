@@ -22,7 +22,7 @@ import {
   UserRound,
 } from "lucide-react";
 import { NewTicketModal } from "@/components/ticket/NewTicketModal";
-import { Alert, Badge, Button, EmptyState, ErrorState, Skeleton } from "@/components/ui";
+import { Alert, Badge, Button, EmptyState, ErrorState, ListText, Skeleton } from "@/components/ui";
 import { PageFrame, PageHeader } from "@/components/layout/PageLayout";
 import { api } from "@/lib/api";
 import {
@@ -421,7 +421,7 @@ export default function DashboardPage() {
                 <dl className="mt-5 grid grid-cols-2 gap-2.5">
                   <div className="rounded-xl border border-linen-300 bg-linen-100 p-3"><dt className="flex items-center gap-1.5 text-[11px] font-medium text-ink-500"><Gauge className="h-3.5 w-3.5" aria-hidden="true" />Escalation risk</dt><dd className="mt-1 font-mono text-base font-medium text-ink-700">{Math.round(topRecommendation.escalation_risk)}%</dd></div>
                   <div className="rounded-xl border border-linen-300 bg-linen-100 p-3"><dt className="flex items-center gap-1.5 text-[11px] font-medium text-ink-500"><Clock3 className="h-3.5 w-3.5" aria-hidden="true" />Age</dt><dd className="mt-1 font-mono text-base font-medium text-ink-700">{formatDurationHours(topRecommendation.age_hours)}</dd></div>
-                  <div className="min-w-0 rounded-xl border border-linen-300 bg-linen-100 p-3"><dt className="flex items-center gap-1.5 text-[11px] font-medium text-ink-500"><AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />Priority</dt><dd className="mt-1 truncate font-mono text-base font-medium text-ink-700" title={topRecommendation.priority}>{topRecommendation.priority}</dd></div>
+                  <div className="min-w-0 rounded-xl border border-linen-300 bg-linen-100 p-3"><dt className="flex items-center gap-1.5 text-[11px] font-medium text-ink-500"><AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />Priority</dt><dd><ListText text={topRecommendation.priority} lines={2} className="mt-1 font-mono text-base font-medium text-ink-700" /></dd></div>
                   <div className="rounded-xl border border-linen-300 bg-linen-100 p-3"><dt className="flex items-center gap-1.5 text-[11px] font-medium text-ink-500"><Layers3 className="h-3.5 w-3.5" aria-hidden="true" />Complexity</dt><dd className="mt-1 font-mono text-base font-medium text-ink-700">{topRecommendation.complexity}/5</dd></div>
                 </dl>
               </>
@@ -430,10 +430,10 @@ export default function DashboardPage() {
                 <p className="break-words text-sm font-semibold leading-5 text-ink-700 [overflow-wrap:anywhere]">Review “{topTicket.subject}” first.</p>
                 <p className="mt-2 text-sm leading-6 text-ink-500">Selected by declared priority, then oldest first. AI-generated ticket content is not used for this queue policy.</p>
                 <dl className="mt-5 grid grid-cols-2 gap-2.5">
-                  <div className="min-w-0 rounded-xl border border-linen-300 bg-linen-100 p-3"><dt className="text-[11px] font-medium text-ink-500">Priority</dt><dd className="mt-1 truncate font-mono text-base font-medium text-ink-700" title={topTicket.priority}>{topTicket.priority}</dd></div>
+                  <div className="min-w-0 rounded-xl border border-linen-300 bg-linen-100 p-3"><dt className="text-[11px] font-medium text-ink-500">Priority</dt><dd><ListText text={topTicket.priority} lines={2} className="mt-1 font-mono text-base font-medium text-ink-700" /></dd></div>
                   <div className="rounded-xl border border-linen-300 bg-linen-100 p-3"><dt className="text-[11px] font-medium text-ink-500">Age</dt><dd className="mt-1 font-mono text-base font-medium text-ink-700">{formatQueueAge(topTicket.created_at)}</dd></div>
-                  <div className="min-w-0 rounded-xl border border-linen-300 bg-linen-100 p-3"><dt className="text-[11px] font-medium text-ink-500">Status</dt><dd className="mt-1 truncate text-sm font-semibold text-ink-700">{topTicket.status}</dd></div>
-                  <div className="min-w-0 rounded-xl border border-linen-300 bg-linen-100 p-3"><dt className="text-[11px] font-medium text-ink-500">Owner</dt><dd className="mt-1 truncate text-sm font-semibold text-ink-700">{topTicket.assignee_name || topTicket.external_assignee_name || "Unassigned"}</dd></div>
+                  <div className="min-w-0 rounded-xl border border-linen-300 bg-linen-100 p-3"><dt className="text-[11px] font-medium text-ink-500">Status</dt><dd><ListText text={topTicket.status} lines={2} className="mt-1 text-sm font-semibold text-ink-700" /></dd></div>
+                  <div className="min-w-0 rounded-xl border border-linen-300 bg-linen-100 p-3"><dt className="text-[11px] font-medium text-ink-500">Owner</dt><dd><ListText text={topTicket.assignee_name || topTicket.external_assignee_name || "Unassigned"} lines={2} className="mt-1 text-sm font-semibold text-ink-700" /></dd></div>
                 </dl>
               </>
             )}
@@ -490,11 +490,11 @@ export default function DashboardPage() {
                         {index === 0 && <span className="font-mono text-[9px] font-medium uppercase tracking-[0.09em] text-semantic-primary">Recommended</span>}
                         <TicketStatusBadge status={ticket.status} className="ml-auto max-w-[8rem]" />
                       </div>
-                      <Link href={`/tickets/${ticket.id}`} className="mt-2.5 block break-words text-sm font-semibold leading-5 text-ink-700 [overflow-wrap:anywhere] hover:text-semantic-primary hover:underline">{ticket.subject}</Link>
-                      <p className="mt-1 text-xs leading-5 text-ink-500">{ranked ? intelligenceQueueReason(ranked) : deterministicQueueReason(ticket)}</p>
-                      <p className="mt-2 flex min-w-0 items-center gap-1.5 text-xs text-ink-500"><UserRound className="h-3.5 w-3.5 shrink-0" aria-hidden="true" /><span className="truncate">{requesterName(ticket)}{requesterEmail(ticket) ? ` · ${requesterEmail(ticket)}` : ""}</span></p>
+                      <Link href={`/tickets/${ticket.id}`} className="mt-2.5 block text-ink-700 hover:text-semantic-primary hover:underline"><ListText text={ticket.subject} lines={2} className="text-sm font-semibold leading-5" /></Link>
+                      <ListText text={ranked ? intelligenceQueueReason(ranked) : deterministicQueueReason(ticket)} lines={2} className="mt-1 text-xs leading-5 text-ink-500" />
+                      <p className="mt-2 flex min-w-0 items-start gap-1.5 text-xs text-ink-500"><UserRound className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" /><ListText text={`${requesterName(ticket)}${requesterEmail(ticket) ? ` · ${requesterEmail(ticket)}` : ""}`} lines={2} /></p>
                       <p className="mt-1 text-[11px] text-ink-400">Created {formatTimeAgo(ticketCreatedAt(ticket))} · Last contact {formatTimeAgo(ticketLastCommunicationAt(ticket))}</p>
-                      <p className="mt-1 truncate text-[11px] text-ink-400">Owner: {ticket.assignee_name || ticket.external_assignee_name || "Unassigned"}</p>
+                      <ListText text={`Owner: ${ticket.assignee_name || ticket.external_assignee_name || "Unassigned"}`} lines={2} className="mt-1 text-[11px] text-ink-400" />
                     </article>
                   );
                 })}
@@ -534,16 +534,16 @@ export default function DashboardPage() {
                           <td className="min-w-0 px-3 py-4">
                             <div className="flex min-w-0 items-center gap-2">
                               <TicketPriorityBadge priority={ticket.priority} className="max-w-16 shrink" />
-                              <Link href={`/tickets/${ticket.id}`} className="min-w-0 break-words text-sm font-semibold leading-5 text-ink-700 [overflow-wrap:anywhere] hover:text-semantic-primary hover:underline">{ticket.subject}</Link>
+                              <Link href={`/tickets/${ticket.id}`} className="min-w-0 flex-1 text-ink-700 hover:text-semantic-primary hover:underline"><ListText text={ticket.subject} lines={2} className="text-sm font-semibold leading-5" /></Link>
                             </div>
                             <p className="mt-1 flex min-w-0 items-center gap-2 text-xs text-ink-500">
                               {index === 0 && <span className="shrink-0 font-mono text-[9px] font-medium uppercase tracking-[0.09em] text-semantic-primary">Recommended</span>}
-                              <span className="truncate">{ranked ? intelligenceQueueReason(ranked) : deterministicQueueReason(ticket)}</span>
+                              <ListText text={ranked ? intelligenceQueueReason(ranked) : deterministicQueueReason(ticket)} lines={2} className="min-w-0 flex-1" />
                             </p>
-                            <p className="mt-1 truncate text-[11px] text-ink-500">Requester: {requesterName(ticket)}{requesterEmail(ticket) ? ` · ${requesterEmail(ticket)}` : ""}</p>
+                            <ListText text={`Requester: ${requesterName(ticket)}${requesterEmail(ticket) ? ` · ${requesterEmail(ticket)}` : ""}`} lines={2} className="mt-1 text-[11px] text-ink-500" />
                             <p className="mt-0.5 text-[10px] text-ink-400">Created {formatTimeAgo(ticketCreatedAt(ticket))} · Last contact {formatTimeAgo(ticketLastCommunicationAt(ticket))}</p>
                           </td>
-                          <td className="min-w-0 px-3 py-4"><span className="flex min-w-0 items-center gap-1.5 text-xs text-ink-500"><UserRound className="h-3.5 w-3.5 shrink-0" aria-hidden="true" /><span className="truncate">{ticket.assignee_name || ticket.external_assignee_name || "Unassigned"}</span></span></td>
+                          <td className="min-w-0 px-3 py-4"><span className="flex min-w-0 items-start gap-1.5 text-xs text-ink-500"><UserRound className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" /><ListText text={ticket.assignee_name || ticket.external_assignee_name || "Unassigned"} lines={2} className="min-w-0 flex-1" /></span></td>
                           <td className="px-3 py-4"><TicketStatusBadge status={ticket.status} /></td>
                           {usesIntelligenceQueue ? (
                             <td className="px-3 py-4 text-right">{ranked ? <><span className="font-mono text-sm font-medium tabular-nums text-ink-700">{Math.round(ranked.score)}</span><span className="ml-1 text-[10px] uppercase text-ink-500">score</span></> : "—"}</td>

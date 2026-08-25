@@ -18,6 +18,6 @@ test("desktop ticket columns expose persistent pointer and keyboard resizing", (
 });
 
 test("routing content remains discoverable when space is constrained", () => {
-  assert.match(source, /title=\{routingLabel\(ticket\)\}/);
-  assert.match(source, /<dd className="mt-1 break-words font-semibold text-ink-600">\{routingLabel\(ticket\)\}<\/dd>/);
+  assert.match(source, /<ListText text=\{routingLabel\(ticket\)\} lines=\{2\}/);
+  assert.match(source, /<ListText text=\{routingLabel\(ticket\)\} lines="wrap"/);
 });

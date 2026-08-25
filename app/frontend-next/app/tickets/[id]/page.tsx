@@ -18,7 +18,7 @@ import {
   priorityColor, statusColor,
   formatTimeAgo, cn, safeExternalUrl,
 } from "@/lib/utils";
-import { Alert, Button, EmptyState, ErrorState, Skeleton } from "@/components/ui";
+import { Alert, Button, EmptyState, ErrorState, ListText, Skeleton } from "@/components/ui";
 import { PageFrame } from "@/components/layout/PageLayout";
 import { analysisLifecycleLabel, relatedStrength, routingLabel, sourceKindLabel, ticketSignalRatings } from "@/lib/ticket-intelligence";
 import { persistedAnalysisErrorDetails } from "@/lib/analysis-errors";
@@ -102,7 +102,7 @@ export default function TicketDetailPage() {
               {ticket.status}
             </span>
           </div>
-          <h1 id="ticket-title" title={ticket.subject} className="mt-3 max-w-5xl truncate text-2xl font-semibold tracking-[-0.025em] text-ink-700 sm:text-3xl">
+          <h1 id="ticket-title" title={ticket.subject} className="mt-3 max-w-5xl break-words text-2xl font-semibold tracking-[-0.025em] text-ink-700 [overflow-wrap:anywhere] sm:text-3xl">
             {ticket.subject}
           </h1>
           <TicketSignalStrip ratings={ticketSignalRatings(ticket, latestAnalysis)} />
@@ -528,10 +528,10 @@ function TicketBriefPanel({
             {relatedQuery.data.items.map((related) => (
               <Link key={related.ticket_id} href={`/tickets/${related.ticket_id}`} className="min-w-0 rounded-lg border border-linen-300 bg-white px-3 py-2.5 transition-colors hover:border-linen-500 hover:bg-linen-100">
                 <div className="flex min-w-0 items-center justify-between gap-2">
-                  <span className="truncate text-xs font-semibold text-ink-700">{related.subject}</span>
+                  <ListText text={related.subject} lines={2} className="min-w-0 text-xs font-semibold text-ink-700" />
                   <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-ink-400">{relatedStrength(related.score, related.match_method)}</span>
                 </div>
-                <p className="mt-1 truncate text-[11px] text-ink-400">{related.priority} · {related.status}{related.category ? ` · ${related.category}` : ""}</p>
+                <ListText text={`${related.priority} · ${related.status}${related.category ? ` · ${related.category}` : ""}`} lines={2} className="mt-1 text-[11px] text-ink-400" />
               </Link>
             ))}
           </div>
