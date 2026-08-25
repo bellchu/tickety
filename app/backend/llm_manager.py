@@ -204,9 +204,7 @@ def get_llm_metrics() -> dict:
 
 
 def _record_call(**values) -> None:
-    default_enabled = bool((os.getenv("TICKETY_PROCESS_ROLE") or "").strip())
-    configured = os.getenv("LLM_PERSIST_METRICS")
-    if not (_enabled(configured) if configured is not None else default_enabled):
+    if not _durable_llm_state_enabled():
         return
     try:
         from .database import LLMCallRecord, SessionLocal
@@ -219,6 +217,100 @@ def _record_call(**values) -> None:
             db.close()
     except Exception as exc:
         print(f"[llm] durable metric write failed kind={type(exc).__name__}")
+
+
+def _durable_llm_state_enabled() -> bool:
+    """Whether this process participates in shared operational LLM state."""
+    default_enabled = bool((os.getenv("TICKETY_PROCESS_ROLE") or "").strip())
+    configured = os.getenv("LLM_PERSIST_METRICS")
+    return _enabled(configured) if configured is not None else default_enabled
+
+
+def configured_llm_provider() -> str:
+    """Resolve the configured provider without constructing a network client."""
+    raw = (os.getenv("DEFAULT_MODEL") or DEFAULT_MODEL).strip()
+    return resolve_provider(raw)
+
+
+def provider_capacity_retry_after(
+    provider: str | None = None,
+    *,
+    db=None,
+) -> float:
+    """Return the remaining shared provider cooldown, if one is active."""
+    if not _durable_llm_state_enabled():
+        return 0.0
+    provider = provider or configured_llm_provider()
+    owns_session = db is None
+    try:
+        from .database import LLMProviderCooldownRecord, SessionLocal
+
+        session = db or SessionLocal()
+        try:
+            row = session.query(LLMProviderCooldownRecord).filter_by(
+                provider=provider
+            ).first()
+            if row is None:
+                return 0.0
+            return max(0.0, (row.retry_at - datetime.utcnow()).total_seconds())
+        finally:
+            if owns_session:
+                session.close()
+    except Exception as exc:
+        print(f"[llm] provider cooldown read failed kind={type(exc).__name__}")
+        return 0.0
+
+
+def defer_provider_capacity(
+    retry_after_seconds: float,
+    provider: str | None = None,
+    *,
+    reason: str = "provider_capacity",
+) -> None:
+    """Persist the longest known provider pause across API and worker replicas."""
+    if not _durable_llm_state_enabled():
+        return
+    provider = provider or configured_llm_provider()
+    retry_at = datetime.utcnow() + timedelta(
+        seconds=max(1.0, float(retry_after_seconds))
+    )
+    safe_reason = re.sub(r"[^a-z0-9_-]+", "_", reason.lower())[:64]
+    try:
+        from sqlalchemy import case
+        from .database import LLMProviderCooldownRecord, SessionLocal
+
+        db = SessionLocal()
+        try:
+            if db.bind.dialect.name == "postgresql":
+                from sqlalchemy.dialects.postgresql import insert
+            else:
+                from sqlalchemy.dialects.sqlite import insert
+            statement = insert(LLMProviderCooldownRecord).values(
+                provider=provider,
+                reason=safe_reason or "provider_capacity",
+                retry_at=retry_at,
+                updated_at=datetime.utcnow(),
+            )
+            statement = statement.on_conflict_do_update(
+                index_elements=["provider"],
+                set_={
+                    "reason": safe_reason or "provider_capacity",
+                    "retry_at": case(
+                        (
+                            LLMProviderCooldownRecord.retry_at < retry_at,
+                            retry_at,
+                        ),
+                        else_=LLMProviderCooldownRecord.retry_at,
+                    ),
+                    "updated_at": datetime.utcnow(),
+                },
+            )
+            db.execute(statement)
+            db.commit()
+        finally:
+            db.close()
+    except Exception as exc:
+        print(f"[llm] provider cooldown write failed kind={type(exc).__name__}")
 
 
 def _reserve_provider_tokens(provider: str, estimated_tokens: int) -> None:
@@ -386,6 +478,11 @@ def _reserve_provider_capacity(
                     )
                     retry_after = max(
                         1.0, (retry_at - now).total_seconds() + 1.0
+                    )
+                    defer_provider_capacity(
+                        retry_after,
+                        provider,
+                        reason=f"{kind}_exhausted",
                     )
                     raise LLMCapacityError(
                         "AI provider capacity exceeded", retry_after
@@ -1042,6 +1139,12 @@ class LLMManager:
         system_prompt: str | None = None,
         max_tokens: int = 1024,
     ) -> dict:
+        cooldown_remaining = provider_capacity_retry_after(self.provider)
+        if cooldown_remaining > 0:
+            raise LLMCapacityError(
+                "AI provider capacity is temporarily deferred",
+                cooldown_remaining,
+            )
         _metric(requests=1)
         task_name = response_model.__name__ if response_model else "json_analysis"
         started = time.monotonic()
@@ -1271,9 +1374,15 @@ class LLMManager:
         if isinstance(last_err, LLMCapacityError):
             raise last_err
         if last_status == 429:
+            retry_after = max(60.0, last_retry_delay)
+            defer_provider_capacity(
+                retry_after,
+                self.provider,
+                reason="provider_rate_limited",
+            )
             raise LLMCapacityError(
                 "AI provider capacity is temporarily unavailable",
-                max(60.0, last_retry_delay),
+                retry_after,
             ) from last_err
         if isinstance(last_status, int) and 400 <= last_status < 500:
             rejection_parts = [str(last_err or "")]

@@ -323,6 +323,12 @@ class AILLMCallSummary(BaseModel):
     last_call_at: Optional[datetime] = None
 
 
+class AIProviderCooldownStatus(BaseModel):
+    provider: str
+    reason: str
+    retry_at: datetime
+
+
 class AIStatusResponse(BaseModel):
     generated_at: datetime
     automation: List[AIAutomationFeatureStatus]
@@ -336,6 +342,7 @@ class AIStatusResponse(BaseModel):
     total_tasks: int
     limit: int
     offset: int
+    provider_cooldown: Optional[AIProviderCooldownStatus] = None
     recent_calls: List[AILLMCallStatusItem]
     calls_24h: AILLMCallSummary
 

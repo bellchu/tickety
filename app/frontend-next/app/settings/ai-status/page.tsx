@@ -196,6 +196,11 @@ export default function AIStatusPage() {
         )}
       />
 
+      {data.provider_cooldown && (
+        <Alert variant="info" title="Provider capacity pause is active">
+          Background admission is paused across all workers, so the backlog will not generate repeated attempts. Dispatch resumes after {formatDate(data.provider_cooldown.retry_at)}.
+        </Alert>
+      )}
       {data.queue.attention > 0 && (
         <Alert variant="warning" title={`${data.queue.attention.toLocaleString()} task${data.queue.attention === 1 ? "" : "s"} need attention`}>
           This includes exhausted retries, partial or stale results, paused work, and expired worker leases. Use the task detail below to identify the affected artifact and safe error code.

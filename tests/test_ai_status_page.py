@@ -11,6 +11,7 @@ from app.backend import main
 from app.backend.database import (
     Base,
     LLMCallRecord,
+    LLMProviderCooldownRecord,
     SessionRecord,
     SyncStateRecord,
     TicketRecord,
@@ -165,6 +166,12 @@ class AIStatusPageApiTests(unittest.TestCase):
                     error_code="provider_capacity",
                     created_at=self.now - timedelta(minutes=1),
                 ),
+                LLMProviderCooldownRecord(
+                    provider="foundry",
+                    reason="reserved_tokens_day_exhausted",
+                    retry_at=self.now + timedelta(hours=2),
+                    updated_at=self.now,
+                ),
             ])
             db.commit()
 
@@ -240,7 +247,12 @@ class AIStatusPageApiTests(unittest.TestCase):
         self.assertEqual(payload["calls_24h"]["failed_attempts"], 1)
         self.assertEqual(payload["calls_24h"]["deferred"], 1)
         self.assertEqual(payload["calls_24h"]["total_tokens"], 160)
-        self.assertEqual(len(payload["recent_calls"]), 3)
+        self.assertEqual(len(payload["recent_calls"]), 2)
+        self.assertEqual(payload["provider_cooldown"]["provider"], "foundry")
+        self.assertEqual(
+            payload["provider_cooldown"]["reason"],
+            "reserved_tokens_day_exhausted",
+        )
         self.assertEqual(
             [feature["enabled"] for feature in payload["automation"]],
             [True, False, False, False, False],

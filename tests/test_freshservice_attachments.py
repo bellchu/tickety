@@ -1,7 +1,8 @@
 import hashlib
 import os
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from sqlalchemy import create_engine
@@ -26,6 +27,15 @@ class _AttachmentAdapter:
         if len(content) > max_bytes:
             raise ValueError("too large")
         return content
+
+
+class _FailingAttachmentAdapter:
+    provider_name = "freshservice"
+
+    async def download_attachment(self, _url, _max_bytes):
+        error = RuntimeError("provider unavailable")
+        error.response = SimpleNamespace(status_code=503)
+        raise error
 
 
 class _Store:
@@ -209,6 +219,123 @@ class AttachmentPersistenceTests(unittest.TestCase):
         store.upload("ticket/screenshot.png", b"image", "image/png")
 
         self.assertEqual(blob_client.kwargs["metadata"], {"managed_by": "tickety"})
+
+    def test_failed_copy_uses_backoff_and_preserves_nested_http_status(self):
+        attachment = ExternalAttachment(
+            external_id="91",
+            name="screenshot.png",
+            content_type="image/png",
+            size=123,
+            download_url="https://acme.freshservice.com/attachments/91",
+        )
+        storage_env = {
+            "ATTACHMENT_STORAGE_PROVIDER": "azure_blob",
+            "AZURE_STORAGE_ACCOUNT_URL": "https://tickety.blob.core.windows.net",
+            "AZURE_STORAGE_CONTAINER": "tickety-attachments",
+        }
+        with patch.dict(os.environ, storage_env):
+            sync._upsert_attachment_metadata(
+                self.db,
+                ticket=self.ticket,
+                owner_type="ticket",
+                owner_external_id="1151",
+                attachments=[attachment],
+            )
+            self.db.commit()
+            attempted_at = datetime.utcnow()
+            stored, errors = sync._sync_freshservice_attachment_backlog(
+                self.db,
+                adapter=_FailingAttachmentAdapter(),
+                binding_id="legacy",
+                limit=2,
+            )
+            row = self.db.query(ExternalAttachmentRecord).one()
+            first_attempts = row.attempts
+            second_result = sync._sync_freshservice_attachment_backlog(
+                self.db,
+                adapter=_FailingAttachmentAdapter(),
+                binding_id="legacy",
+                limit=2,
+            )
+
+        self.assertEqual((stored, errors), (0, 1))
+        self.assertEqual(second_result, (0, 0))
+        self.assertEqual(row.attempts, first_attempts)
+        self.assertEqual(
+            row.last_error,
+            "attachment_copy_failed:download:RuntimeError:http_503",
+        )
+        self.assertGreaterEqual(
+            row.next_attempt_at,
+            attempted_at + timedelta(seconds=59),
+        )
+
+    def test_rotated_attachment_id_retires_obsolete_failed_copy(self):
+        storage_env = {
+            "ATTACHMENT_STORAGE_PROVIDER": "azure_blob",
+            "AZURE_STORAGE_ACCOUNT_URL": "https://tickety.blob.core.windows.net",
+            "AZURE_STORAGE_CONTAINER": "tickety-attachments",
+        }
+        old = ExternalAttachment(
+            external_id="old-id",
+            name="Health Check Report.xls",
+            content_type="application/vnd.ms-excel",
+            size=184_320,
+            download_url="https://acme.attachments.freshservice.com/old",
+        )
+        replacement = ExternalAttachment(
+            external_id="new-id",
+            name=old.name,
+            content_type=old.content_type,
+            size=old.size,
+            download_url="https://acme.attachments.freshservice.com/new",
+        )
+        with patch.dict(os.environ, storage_env):
+            sync._upsert_attachment_metadata(
+                self.db,
+                ticket=self.ticket,
+                owner_type="conversation",
+                owner_external_id="reply-1",
+                attachments=[old],
+            )
+            self.db.commit()
+            old_row = self.db.query(ExternalAttachmentRecord).one()
+            old_row.storage_status = "error"
+            old_row.attempts = 5
+            old_row.last_error = "attachment_copy_failed:download:HTTPStatusError:http_403"
+            self.db.commit()
+
+            sync._upsert_attachment_metadata(
+                self.db,
+                ticket=self.ticket,
+                owner_type="conversation",
+                owner_external_id="reply-1",
+                attachments=[replacement],
+            )
+            self.db.commit()
+            replacement_row = self.db.query(ExternalAttachmentRecord).filter_by(
+                external_id="new-id"
+            ).one()
+            replacement_row.storage_status = "stored"
+            replacement_row.content_sha256 = "a" * 64
+            replacement_row.stored_size = replacement.size
+            replacement_row.stored_at = datetime.utcnow()
+            self.db.commit()
+
+            sync._upsert_attachment_metadata(
+                self.db,
+                ticket=self.ticket,
+                owner_type="conversation",
+                owner_external_id="reply-1",
+                attachments=[replacement],
+            )
+            self.db.commit()
+
+        self.db.refresh(old_row)
+        self.assertEqual(old_row.storage_status, "superseded")
+        self.assertIsNone(old_row.source_url)
+        self.assertIsNone(old_row.last_error)
+        self.assertIsNone(old_row.next_attempt_at)
 
 
 if __name__ == "__main__":

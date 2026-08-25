@@ -1733,6 +1733,7 @@ def _upsert_attachment_metadata(
 ) -> None:
     provider = ticket.external_source or ""
     storage_ready = attachment_storage_configured()
+    current_ids = {attachment.external_id for attachment in attachments}
     for attachment in attachments:
         row = db.query(ExternalAttachmentRecord).filter(
             ExternalAttachmentRecord.binding_id == ticket.binding_id,
@@ -1784,6 +1785,51 @@ def _upsert_attachment_metadata(
                 row.storage_status = "pending"
                 row.attempts = 0
                 row.last_error = None
+                row.next_attempt_at = None
+
+    # Freshservice occasionally rotates an attachment identifier and signed
+    # source URL while retaining the same file in the same ticket/conversation
+    # snapshot. Once the current replacement is durable, retire the obsolete
+    # row so an expired URL cannot remain as a permanent sync error or create a
+    # duplicate attachment in the ticket UI. The old metadata remains stored
+    # for audit purposes.
+    db.flush()
+    current_rows = db.query(ExternalAttachmentRecord).filter(
+        ExternalAttachmentRecord.binding_id == ticket.binding_id,
+        ExternalAttachmentRecord.provider == provider,
+        ExternalAttachmentRecord.provider_ticket_id == (ticket.external_id or ""),
+        ExternalAttachmentRecord.owner_type == owner_type,
+        ExternalAttachmentRecord.owner_external_id == owner_external_id,
+        ExternalAttachmentRecord.external_id.in_(current_ids),
+    ).all() if current_ids else []
+    durable_replacements = {
+        (row.file_name, row.content_type or "", row.declared_size): row
+        for row in current_rows
+        if row.storage_status == "stored"
+    }
+    if durable_replacements:
+        stale_rows = db.query(ExternalAttachmentRecord).filter(
+            ExternalAttachmentRecord.binding_id == ticket.binding_id,
+            ExternalAttachmentRecord.provider == provider,
+            ExternalAttachmentRecord.provider_ticket_id == (ticket.external_id or ""),
+            ExternalAttachmentRecord.owner_type == owner_type,
+            ExternalAttachmentRecord.owner_external_id == owner_external_id,
+            ExternalAttachmentRecord.external_id.notin_(current_ids),
+            ExternalAttachmentRecord.storage_status != "superseded",
+        ).all()
+        for stale in stale_rows:
+            fingerprint = (
+                stale.file_name,
+                stale.content_type or "",
+                stale.declared_size,
+            )
+            if fingerprint not in durable_replacements:
+                continue
+            stale.storage_status = "superseded"
+            stale.source_url = None
+            stale.last_error = None
+            stale.next_attempt_at = None
+            stale.updated_at = datetime.utcnow()
 
 
 def _sync_freshservice_attachment_backlog(
@@ -1804,6 +1850,10 @@ def _sync_freshservice_attachment_backlog(
             "pending", "waiting_storage", "error",
         )),
         ExternalAttachmentRecord.attempts < 5,
+        or_(
+            ExternalAttachmentRecord.next_attempt_at.is_(None),
+            ExternalAttachmentRecord.next_attempt_at <= datetime.utcnow(),
+        ),
     ).order_by(
         ExternalAttachmentRecord.created_at.asc(),
         ExternalAttachmentRecord.id.asc(),
@@ -1833,6 +1883,7 @@ def _sync_freshservice_attachment_backlog(
             row.storage_status = "stored"
             row.stored_at = datetime.utcnow()
             row.last_error = None
+            row.next_attempt_at = None
             # Provider attachment URLs may be signed or otherwise sensitive.
             # They are needed only until the private copy is durable.
             row.source_url = None
@@ -1840,7 +1891,9 @@ def _sync_freshservice_attachment_backlog(
         except Exception as exc:
             if hasattr(exc, "retry_after"):
                 raise
-            status_code = getattr(exc, "status_code", None)
+            status_code = getattr(exc, "status_code", None) or getattr(
+                getattr(exc, "response", None), "status_code", None
+            )
             error_code = getattr(exc, "error_code", None)
             if hasattr(error_code, "value"):
                 error_code = error_code.value
@@ -1861,6 +1914,13 @@ def _sync_freshservice_attachment_backlog(
             error_detail = ":".join(detail_parts)[:255]
             row.storage_status = "error"
             row.last_error = error_detail
+            if row.attempts < 5:
+                delay_seconds = min(6 * 60 * 60, 60 * (2 ** (row.attempts - 1)))
+                row.next_attempt_at = datetime.utcnow() + timedelta(
+                    seconds=delay_seconds
+                )
+            else:
+                row.next_attempt_at = None
             errors += 1
             print(
                 "[sync] Freshservice attachment copy failed "

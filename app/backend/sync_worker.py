@@ -24,7 +24,11 @@ from .integrations.sync import (
 )
 from .integrations.registry import configured_provider, get_adapter
 from .integrations.bindings import expire_due_bindings, get_active_binding
-from .llm_manager import LLMCapacityError
+from .llm_manager import (
+    LLMCapacityError,
+    defer_provider_capacity,
+    provider_capacity_retry_after,
+)
 from . import settings as settings_module
 
 _scheduler: Optional[BackgroundScheduler] = None
@@ -97,6 +101,12 @@ def _auto_triage_job():
     _refresh_admin_settings()
     try:
         db = SessionLocal()
+        # A provider-wide cooldown stops admission before tickets are selected
+        # or mutated. This turns one capacity response into one durable pause
+        # instead of creating a retry warning for every ticket in the backlog.
+        if provider_capacity_retry_after(db=db) > 0:
+            db.close()
+            return
         batch_size = _bounded_interval(
             "AI_BACKGROUND_TICKETS_PER_SWEEP", 5, 1, 25
         )
@@ -255,6 +265,10 @@ def _auto_triage_job():
                 except Exception as e:
                     if isinstance(e, LLMCapacityError):
                         print("[auto-triage] deferred reason=provider_capacity")
+                        defer_provider_capacity(e.retry_after_seconds)
+                        db.rollback()
+                        db.close()
+                        return
                     else:
                         print(f"[auto-triage] error kind={type(e).__name__}")
                     db.rollback()
@@ -297,6 +311,10 @@ def _auto_triage_job():
                 except Exception as e:
                     if isinstance(e, LLMCapacityError):
                         print("[auto-triage] summary deferred reason=provider_capacity")
+                        defer_provider_capacity(e.retry_after_seconds)
+                        db.rollback()
+                        db.close()
+                        return
                     else:
                         print(f"[auto-triage] summary error kind={type(e).__name__}")
                     db.rollback()
@@ -339,6 +357,10 @@ def _auto_triage_job():
                 except Exception as e:
                     if isinstance(e, LLMCapacityError):
                         print("[auto-triage] resolution deferred reason=provider_capacity")
+                        defer_provider_capacity(e.retry_after_seconds)
+                        db.rollback()
+                        db.close()
+                        return
                     else:
                         print(f"[auto-triage] resolution error kind={type(e).__name__}")
                     db.rollback()

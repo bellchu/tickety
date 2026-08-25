@@ -37,6 +37,7 @@ from .database import (
     AIUsageEventRecord,
     AIRequestBucketRecord,
     LLMCallRecord,
+    LLMProviderCooldownRecord,
     AIArtifactRecord,
     SettingsRecord,
     IntegrationBindingRecord,
@@ -167,7 +168,7 @@ from .production_security import (
 
 # Single source of truth for the backend version. Bump when shipping user-visible
 # changes. Build SHA/time are injected at image build time (see Dockerfile).
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 BUILD_SHA = os.getenv("TICKETY_BUILD_SHA", "local")
 BUILD_TIME = os.getenv("TICKETY_BUILD_TIME", "")
 
@@ -1883,6 +1884,7 @@ async def list_ticket_attachments(
     _authorize_ticket_analysis(user, ticket)
     rows = db.query(ExternalAttachmentRecord).filter(
         ExternalAttachmentRecord.ticket_id == ticket_id,
+        ExternalAttachmentRecord.storage_status != "superseded",
     ).order_by(
         ExternalAttachmentRecord.created_at.asc(),
         ExternalAttachmentRecord.id.asc(),
@@ -6070,10 +6072,24 @@ async def ai_task_status(
         func.coalesce(func.avg(LLMCallRecord.latency_ms), 0),
         func.max(LLMCallRecord.created_at),
     ).filter(LLMCallRecord.created_at >= calls_since).one()
-    recent_call_rows = db.query(LLMCallRecord).order_by(
+    # Capacity deferrals are represented by the aggregate and the single
+    # provider cooldown below. Omitting each identical deferred attempt from
+    # this execution feed prevents an exhausted budget from burying useful
+    # success/failure telemetry.
+    recent_call_rows = db.query(LLMCallRecord).filter(
+        LLMCallRecord.status != "capacity_deferred"
+    ).order_by(
         LLMCallRecord.created_at.desc(),
         LLMCallRecord.id.desc(),
     ).limit(20).all()
+    provider_name = getattr(engine.llm, "provider", None)
+    provider_cooldown = (
+        db.query(LLMProviderCooldownRecord).filter(
+            LLMProviderCooldownRecord.provider == provider_name,
+            LLMProviderCooldownRecord.retry_at > now,
+        ).first()
+        if provider_name else None
+    )
 
     automation = [
         {
@@ -6129,6 +6145,14 @@ async def ai_task_status(
         "total_tasks": total_tasks,
         "limit": limit,
         "offset": offset,
+        "provider_cooldown": (
+            {
+                "provider": provider_cooldown.provider,
+                "reason": provider_cooldown.reason,
+                "retry_at": provider_cooldown.retry_at,
+            }
+            if provider_cooldown else None
+        ),
         "recent_calls": [
             {
                 "id": call.id,

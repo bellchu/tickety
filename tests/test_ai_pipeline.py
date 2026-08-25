@@ -1010,6 +1010,31 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
             ).one()
             self.assertEqual(daily.request_count, 100)
 
+    async def test_durable_provider_cooldown_blocks_repeat_dispatch(self):
+        provider = AsyncMock()
+        with (
+            patch.dict(os.environ, {
+                "APP_MODE": "production",
+                "TICKETY_PROCESS_ROLE": "worker",
+                "DEFAULT_MODEL": "custom/test-model",
+                "CUSTOM_API_KEY": "configured-key",
+                "CUSTOM_API_BASE": "https://example.com/v1",
+                "LLM_ALLOWED_PROVIDER_HOSTS": "example.com",
+            }, clear=False),
+            patch.object(database_module, "SessionLocal", self.session_factory),
+            patch.object(llm_module, "acompletion", new=provider),
+        ):
+            llm_module.defer_provider_capacity(300, "custom")
+            remaining = llm_module.provider_capacity_retry_after("custom")
+            with self.assertRaises(LLMCapacityError) as raised:
+                await LLMManager().analyze(
+                    "ticket", response_model=TriageAnalysis
+                )
+
+        self.assertGreater(remaining, 299)
+        self.assertGreater(raised.exception.retry_after_seconds, 299)
+        provider.assert_not_awaited()
+
     def test_provider_settlement_updates_the_original_reservation_windows(self):
         day_start = datetime(2026, 7, 30)
         minute_start = datetime(2026, 7, 30, 23, 59)
@@ -1118,6 +1143,56 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         ):
             sync_worker._auto_triage_job()
         self.assertEqual(process.await_count, 3)
+
+    def test_worker_provider_cooldown_stops_admission_before_queue_mutation(self):
+        process = AsyncMock()
+        with (
+            patch.object(sync_worker, "SessionLocal", self.session_factory),
+            patch.object(
+                sync_worker,
+                "provider_capacity_retry_after",
+                return_value=300,
+            ),
+            patch.object(sync_worker, "queue_active_routing_backlog") as routing,
+            patch.object(sync_worker, "queue_recent_automatic_ai") as recent,
+            patch.object(main, "_auto_process", new=process),
+        ):
+            sync_worker._auto_triage_job()
+
+        routing.assert_not_called()
+        recent.assert_not_called()
+        process.assert_not_awaited()
+
+    def test_worker_stops_current_sweep_after_first_capacity_deferral(self):
+        with self.session_factory() as db:
+            for index in range(3):
+                db.add(TicketRecord(
+                    id=f"capacity-{index}",
+                    subject=f"Capacity {index}",
+                    ai_status="queued",
+                    ai_requested_artifacts="triage",
+                ))
+            db.commit()
+        process = AsyncMock(side_effect=LLMCapacityError("capacity", 300))
+        with (
+            patch.object(sync_worker, "SessionLocal", self.session_factory),
+            patch.object(
+                sync_worker,
+                "provider_capacity_retry_after",
+                return_value=0,
+            ),
+            patch.object(sync_worker, "defer_provider_capacity") as defer,
+            patch.object(
+                sync_worker.settings_module,
+                "automation_enabled",
+                return_value=False,
+            ),
+            patch.object(main, "_auto_process", new=process),
+        ):
+            sync_worker._auto_triage_job()
+
+        process.assert_awaited_once()
+        defer.assert_called_once_with(300.0)
 
     def test_worker_batch_survives_orm_detach_after_each_ai_commit(self):
         with self.session_factory() as db:

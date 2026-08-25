@@ -171,6 +171,27 @@ class LLMProviderLeaseRecord(Base):
     expires_at = Column(DateTime, nullable=False, index=True)
 
 
+class LLMProviderCooldownRecord(Base):
+    """Durable provider-wide dispatch pause shared by API and worker processes."""
+
+    __tablename__ = "llm_provider_cooldowns"
+
+    provider = Column(String(64), primary_key=True)
+    reason = Column(
+        String(64),
+        nullable=False,
+        default="provider_capacity",
+        server_default="provider_capacity",
+    )
+    retry_at = Column(DateTime, nullable=False, index=True)
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )
+
+
 class AIArtifactRecord(Base):
     __tablename__ = "ai_artifact_records"
 
@@ -560,6 +581,7 @@ class ExternalAttachmentRecord(Base):
     attempts = Column(Integer, nullable=False, default=0)
     last_error = Column(String(255), nullable=True)
     last_attempted_at = Column(DateTime, nullable=True)
+    next_attempt_at = Column(DateTime, nullable=True, index=True)
     stored_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)

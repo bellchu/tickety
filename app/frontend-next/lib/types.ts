@@ -293,6 +293,11 @@ export interface AIStatusResponse {
   total_tasks: number;
   limit: number;
   offset: number;
+  provider_cooldown: {
+    provider: string;
+    reason: string;
+    retry_at: string;
+  } | null;
   recent_calls: AILLMCallStatusItem[];
   calls_24h: {
     calls: number;
