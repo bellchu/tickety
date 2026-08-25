@@ -8,6 +8,10 @@ class Ticket(BaseModel):
     subject: str
     description: str = ""
     reporter: str = ""
+    requester_id: Optional[str] = None
+    requester_name: Optional[str] = None
+    requester_email: Optional[str] = None
+    requester_title: Optional[str] = None
     status: str = "New"
     priority: str = "Medium"
     sentiment: Optional[str] = None
@@ -50,6 +54,7 @@ class Ticket(BaseModel):
     external_item_category: Optional[str] = None
     external_workspace_id: Optional[str] = None
     external_updated_at: Optional[datetime] = None
+    external_description_html: Optional[str] = None
     external_conversation_updated_at: Optional[datetime] = None
     external_created_at: Optional[datetime] = None
     external_resolved_at: Optional[datetime] = None
@@ -62,6 +67,7 @@ class Ticket(BaseModel):
 
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    last_communication_at: Optional[datetime] = None
 
     # Intelligence fields
     escalation_risk: int = 0
@@ -83,8 +89,15 @@ class Ticket(BaseModel):
     ai_suggested_priority: Optional[str] = None
     ai_suggested_category: Optional[str] = None
     recommended_team: str = "Unrouted / Review"
-    recommended_team_basis: Literal["ai_category", "unrouted_review"] = "unrouted_review"
-    routing_status: Literal["legacy_ai_category", "unrouted_review"] = "unrouted_review"
+    recommended_team_basis: Literal[
+        "ai_category", "source_category", "not_applicable", "unrouted_review"
+    ] = "unrouted_review"
+    routing_status: Literal[
+        "legacy_ai_category",
+        "source_category_suggestion",
+        "not_applicable",
+        "unrouted_review",
+    ] = "unrouted_review"
     routing_abstention_reason: Optional[
         Literal[
             "missing_ai_category",
@@ -179,6 +192,7 @@ class SyncStatus(BaseModel):
     automatic_ai_enabled_at: Optional[datetime] = None
     automatic_ai_paused_at: Optional[datetime] = None
     automatic_ai_lookback_days: int = 7
+    automatic_fetch_days: int = 30
     last_status: str = "idle"
     last_error: Optional[str] = None
     total_synced: int = 0
@@ -191,6 +205,9 @@ class SyncStatus(BaseModel):
     history_workspace_index: int = 0
     history_complete: bool = False
     history_processed: int = 0
+    history_since_at: Optional[datetime] = None
+    history_until_at: Optional[datetime] = None
+    history_requested_at: Optional[datetime] = None
     conversations_processed: int = 0
     run_started_at: Optional[datetime] = None
     run_finished_at: Optional[datetime] = None
@@ -206,6 +223,125 @@ class SyncStatus(BaseModel):
     recent_pages_per_sync: int = 2
     history_pages_per_sync: int = 1
     conversations_per_sync: int = 1
+    attachments_per_sync: int = 2
+    attachment_storage_configured: bool = False
+    attachment_pending: int = 0
+    attachment_stored: int = 0
+    attachment_errors: int = 0
+
+
+class AIAutomationFeatureStatus(BaseModel):
+    key: str
+    label: str
+    enabled: bool
+
+
+class AIQueueStatusSummary(BaseModel):
+    total_tickets: int = 0
+    not_analyzed: int = 0
+    queued: int = 0
+    queued_ready: int = 0
+    retry_scheduled: int = 0
+    running: int = 0
+    running_active: int = 0
+    lease_expired: int = 0
+    completed: int = 0
+    partial: int = 0
+    stale: int = 0
+    failed: int = 0
+    dead_letter: int = 0
+    paused: int = 0
+    attention: int = 0
+    oldest_queued_at: Optional[datetime] = None
+
+
+class AITaskStatusItem(BaseModel):
+    ticket_id: str
+    subject: str
+    ticket_status: str
+    priority: str
+    source: str
+    external_id: Optional[str] = None
+    ai_status: Optional[str] = None
+    lifecycle: Literal[
+        "not_analyzed",
+        "queued",
+        "retry_scheduled",
+        "running",
+        "lease_expired",
+        "completed",
+        "partial",
+        "stale",
+        "failed",
+        "dead_letter",
+        "paused",
+        "unknown",
+    ]
+    requested_artifacts: List[str] = Field(default_factory=list)
+    attempts: int = 0
+    model: Optional[str] = None
+    synthetic: bool = False
+    started_at: Optional[datetime] = None
+    generated_at: Optional[datetime] = None
+    next_attempt_at: Optional[datetime] = None
+    lease_expires_at: Optional[datetime] = None
+    error_code: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class AILLMCallStatusItem(BaseModel):
+    id: int
+    provider: str
+    model: str
+    task: str
+    status: str
+    attempts: int
+    latency_ms: int
+    total_tokens: int
+    synthetic: bool
+    error_code: Optional[str] = None
+    created_at: datetime
+
+
+class AILLMCallSummary(BaseModel):
+    calls: int = 0
+    successful: int = 0
+    failed_attempts: int = 0
+    total_tokens: int = 0
+    average_latency_ms: int = 0
+    last_call_at: Optional[datetime] = None
+
+
+class AIStatusResponse(BaseModel):
+    generated_at: datetime
+    automation: List[AIAutomationFeatureStatus]
+    active_integration_bindings: int = 0
+    automatic_ai_bindings: int = 0
+    active_routing_backlog_enabled: bool = False
+    queue: AIQueueStatusSummary
+    view: Literal["all", "active", "attention", "completed", "not_analyzed"]
+    search: str = ""
+    tasks: List[AITaskStatusItem]
+    total_tasks: int
+    limit: int
+    offset: int
+    recent_calls: List[AILLMCallStatusItem]
+    calls_24h: AILLMCallSummary
+
+
+class OperationalDiagnosticEntry(BaseModel):
+    severity: Literal["info", "warning", "error"]
+    source: str
+    message: str
+    timestamp: Optional[datetime] = None
+
+
+class OperationalDiagnosticsResponse(BaseModel):
+    area: Literal["application", "ai", "sync", "retrieval", "oauth"]
+    generated_at: datetime
+    entries: List[OperationalDiagnosticEntry]
+    truncated: bool = False
 
 
 class ExternalUser(BaseModel):
@@ -275,15 +411,29 @@ class TicketCreate(BaseModel):
     asset_id: Optional[str] = Field(None, max_length=255)
 
 
+class ExternalAttachment(BaseModel):
+    external_id: str = Field(..., min_length=1, max_length=255)
+    name: str = Field(..., min_length=1, max_length=1_024)
+    content_type: Optional[str] = Field(None, max_length=255)
+    size: Optional[int] = Field(None, ge=0)
+    download_url: str = Field(..., min_length=1, max_length=8_192)
+
+
 class ExternalConversation(BaseModel):
     external_id: str = Field(..., min_length=1, max_length=255)
-    body: str = Field(..., max_length=50_000)
+    # Provider content is retained losslessly. AI/search projections apply
+    # their own explicit bounds downstream and must never be the archive.
+    body: str
+    body_html: Optional[str] = None
     author_id: Optional[str] = Field(None, max_length=255)
+    author_name: Optional[str] = Field(None, max_length=255)
+    author_email: Optional[str] = Field(None, max_length=320)
     is_private: bool = False
     incoming: bool = False
     source: Optional[int] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    attachments: List[ExternalAttachment] = Field(default_factory=list, max_length=1_000)
 
 
 class AutomaticAIEnableRequest(BaseModel):
@@ -299,7 +449,10 @@ class AutomaticAIPauseRequest(BaseModel):
 class ExternalTicket(BaseModel):
     external_id: str = Field(..., min_length=1, max_length=255)
     subject: str = Field(..., min_length=1, max_length=500)
-    description: str = Field(..., max_length=100_000)
+    # Freshservice descriptions can exceed the old 100k validation ceiling.
+    # Text columns are the lossless source copy; prompt bounds live elsewhere.
+    description: str
+    description_html: Optional[str] = None
     reporter: str = Field(..., max_length=320)
     priority: str = Field(..., min_length=1, max_length=32)
     external_priority_code: Optional[str] = Field(None, max_length=64)
@@ -317,11 +470,32 @@ class ExternalTicket(BaseModel):
     fr_due_by: Optional[datetime] = None
     ticket_type: Optional[str] = Field(None, max_length=120)
     requester_id: Optional[str] = Field(None, max_length=255)
+    requester_name: Optional[str] = Field(None, max_length=255)
     requester_email: Optional[str] = Field(None, max_length=320)
+    requester_title: Optional[str] = Field(None, max_length=255)
     external_workspace_id: Optional[str] = Field(None, max_length=255)
     url: Optional[str] = Field(None, max_length=2_048)
     conversations_loaded: bool = False
     conversations: List[ExternalConversation] = Field(default_factory=list, max_length=1_000)
+    attachments: List[ExternalAttachment] = Field(default_factory=list, max_length=1_000)
+
+
+class TicketAttachment(BaseModel):
+    id: str
+    ticket_id: str
+    owner_type: Literal["ticket", "conversation"]
+    owner_external_id: str
+    external_id: str
+    name: str
+    content_type: Optional[str] = None
+    size: Optional[int] = None
+    stored_size: Optional[int] = None
+    status: str
+    created_at: datetime
+    stored_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
 
 
 class WebhookEvent(BaseModel):
@@ -387,6 +561,11 @@ class Settings(BaseModel):
     FRESHSERVICE_RECENT_PAGES_PER_SYNC: Optional[str] = None
     FRESHSERVICE_HISTORY_PAGES_PER_SYNC: Optional[str] = None
     FRESHSERVICE_CONVERSATIONS_PER_SYNC: Optional[str] = None
+    FRESHSERVICE_ATTACHMENTS_PER_SYNC: Optional[str] = None
+    ATTACHMENT_STORAGE_PROVIDER: Optional[str] = None
+    ATTACHMENT_MAX_BYTES: Optional[str] = None
+    AZURE_STORAGE_ACCOUNT_URL: Optional[str] = None
+    AZURE_STORAGE_CONTAINER: Optional[str] = None
     FRESHSERVICE_OAUTH_CLIENT_ID: Optional[str] = None
     FRESHSERVICE_OAUTH_CLIENT_SECRET: Optional[str] = None
     FRESHSERVICE_OAUTH_REDIRECT_URI: Optional[str] = None
@@ -479,6 +658,9 @@ class TicketComment(BaseModel):
     ticket_id: str
     author_id: Optional[str] = None
     author_name: str = "System"
+    author_email: Optional[str] = None
+    author_title: Optional[str] = None
+    author_type: Optional[Literal["agent", "requester"]] = None
     body: str
     is_private: bool = False
     created_at: datetime

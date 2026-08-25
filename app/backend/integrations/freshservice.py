@@ -6,6 +6,9 @@ import hmac
 import hashlib
 import base64
 import urllib.parse
+import ipaddress
+import socket
+from email.utils import parseaddr
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, List, Optional
@@ -13,7 +16,7 @@ from typing import Any, List, Optional
 import httpx
 
 from ..database import SessionLocal, SettingsRecord
-from ..schema import ExternalConversation, ExternalTicket, WebhookEvent
+from ..schema import ExternalAttachment, ExternalConversation, ExternalTicket, WebhookEvent
 from .base import BaseITSMAdapter
 
 FRESHSERVICE_PRIORITY_MAP = {
@@ -39,10 +42,10 @@ DEFAULT_FRESHSERVICE_OAUTH_SCOPES = (
 ALLOWED_FRESHSERVICE_OAUTH_SCOPES = frozenset(
     DEFAULT_FRESHSERVICE_OAUTH_SCOPES.split()
 )
-# List embeds cost additional account-wide API credits. Ticket discovery stays
-# lightweight by default; conversation detail is hydrated later in explicitly
-# bounded background work and requester profiles use the separate directory.
-DEFAULT_TICKET_LIST_INCLUDES = ""
+# Requester identity is required operational ticket data. The provider's
+# account-wide directory may be unavailable to otherwise valid ticket-reader
+# credentials, so every bounded ticket page carries its requester projection.
+DEFAULT_TICKET_LIST_INCLUDES = "requester"
 SUPPORTED_TICKET_LIST_INCLUDES = {
     "stats",
     "requester",
@@ -324,14 +327,33 @@ class FreshserviceAdapter(BaseITSMAdapter):
         stats = raw.get("stats") or {}
         requester = raw.get("requester") or {}
         requested_for = raw.get("requested_for") or {}
+        requester_name = (
+            requester.get("name")
+            or " ".join(
+                str(requester.get(key) or "").strip()
+                for key in ("first_name", "last_name")
+            ).strip()
+            or requested_for.get("name")
+            or " ".join(
+                str(requested_for.get(key) or "").strip()
+                for key in ("first_name", "last_name")
+            ).strip()
+        )
+        requester_email = (
+            requester.get("email")
+            or requested_for.get("email")
+            or raw.get("email")
+        )
         return ExternalTicket(
             external_id=str(raw.get("id", "")),
             subject=raw.get("subject", "(no subject)"),
             description=raw.get("description_text", raw.get("description", "")) or "",
+            description_html=(
+                str(raw.get("description"))
+                if raw.get("description") is not None else None
+            ),
             reporter=str(
-                requester.get("email")
-                or requested_for.get("email")
-                or raw.get("email")
+                requester_email
                 or raw.get("requester_id")
                 or raw.get("requested_for_id")
                 or ""
@@ -365,10 +387,53 @@ class FreshserviceAdapter(BaseITSMAdapter):
                 str(raw.get("requester_id") or raw.get("requested_for_id"))
                 if raw.get("requester_id") or raw.get("requested_for_id") else None
             ),
-            requester_email=requester.get("email") or raw.get("email"),
+            requester_name=str(requester_name) if requester_name else None,
+            requester_email=str(requester_email) if requester_email else None,
+            requester_title=(
+                str(
+                    requester.get("job_title")
+                    or requested_for.get("job_title")
+                )
+                if requester.get("job_title") or requested_for.get("job_title")
+                else None
+            ),
             external_workspace_id=str(raw.get("workspace_id")) if raw.get("workspace_id") is not None else None,
             url=self.build_ticket_url(str(raw.get("id", ""))),
+            attachments=self._parse_attachments(raw.get("attachments", [])),
         )
+
+    @staticmethod
+    def _parse_attachment(raw: dict) -> ExternalAttachment:
+        if not isinstance(raw, dict):
+            raise ValueError("Freshservice attachment must be an object")
+        external_id = raw.get("id")
+        download_url = raw.get("attachment_url") or raw.get("Attachment_url")
+        name = raw.get("name") or raw.get("file_name")
+        if external_id is None or not download_url or not name:
+            raise ValueError("Freshservice attachment metadata is incomplete")
+        size = raw.get("size")
+        try:
+            parsed_size = int(size) if size is not None else None
+        except (TypeError, ValueError):
+            parsed_size = None
+        return ExternalAttachment(
+            external_id=str(external_id),
+            name=str(name),
+            content_type=(
+                str(raw.get("content_type"))
+                if raw.get("content_type") is not None else None
+            ),
+            size=parsed_size,
+            download_url=str(download_url),
+        )
+
+    @classmethod
+    def _parse_attachments(cls, raw_attachments: Any) -> List[ExternalAttachment]:
+        if raw_attachments is None:
+            return []
+        if not isinstance(raw_attachments, list):
+            raise ValueError("Freshservice attachments must be a list")
+        return [cls._parse_attachment(raw) for raw in raw_attachments]
 
     def _parse_ticket_batch(self, raw_tickets: list) -> List[ExternalTicket]:
         """Validate provider records independently so one poison record cannot
@@ -619,15 +684,20 @@ class FreshserviceAdapter(BaseITSMAdapter):
         if raw.get("id") is None:
             raise ValueError("Freshservice conversation is missing its stable ID")
         body = raw.get("body_text", raw.get("body", "")) or ""
+        author_name, author_email = parseaddr(str(raw.get("from_email") or ""))
         return ExternalConversation(
             external_id=str(raw.get("id", "")),
             body=str(body),
+            body_html=(str(raw.get("body")) if raw.get("body") is not None else None),
             author_id=str(raw.get("user_id")) if raw.get("user_id") else None,
+            author_name=author_name or None,
+            author_email=author_email or None,
             is_private=bool(raw.get("private", False)),
             incoming=bool(raw.get("incoming", False)),
             source=int(raw["source"]) if raw.get("source") is not None else None,
             created_at=self._parse_datetime(raw.get("created_at")),
             updated_at=self._parse_datetime(raw.get("updated_at")),
+            attachments=self._parse_attachments(raw.get("attachments", [])),
         )
 
     def _parse_conversation_batch(
@@ -757,20 +827,117 @@ class FreshserviceAdapter(BaseITSMAdapter):
             *({**requester, "user_type": "requester"} for requester in requesters),
         ]
 
-    async def fetch_ticket_raw(self, external_id: str) -> dict:
+    async def fetch_ticket_raw(
+        self,
+        external_id: str,
+        *,
+        include_attachments: bool = False,
+        include_requester: bool = True,
+    ) -> dict:
         """Fetch one authoritative Freshservice ticket snapshot."""
         self._ensure_provider_configured()
         if not str(external_id).isdigit():
             raise ValueError("Freshservice ticket ID must be numeric")
         url = f"{self.base_url}/api/v2/tickets/{external_id}"
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await self._rate_limited_get(client, url, {})
+            includes = []
+            if include_attachments:
+                includes.append("ticket_attachments")
+            if include_requester:
+                includes.append("requester")
+            params = {"include": ",".join(includes)} if includes else {}
+            resp = await self._rate_limited_get(client, url, params)
             resp.raise_for_status()
             data = resp.json()
         ticket = data.get("ticket") if isinstance(data, dict) else None
         if not isinstance(ticket, dict):
             raise RuntimeError("Freshservice ticket response is invalid")
         return ticket
+
+    async def fetch_ticket_details(self, external_id: str) -> ExternalTicket:
+        """Fetch a lossless ticket body plus original ticket attachments."""
+        raw = await self.fetch_ticket_raw(external_id, include_attachments=True)
+        return self._parse_ticket(raw)
+
+    async def download_attachment(self, download_url: str, max_bytes: int) -> bytes:
+        """Download provider bytes with Freshservice auth and an explicit cap."""
+        limit = max(1, int(max_bytes))
+        current_url = str(download_url or "")
+        async with httpx.AsyncClient(timeout=120, follow_redirects=False) as client:
+            for _redirect in range(6):
+                parsed = urllib.parse.urlparse(current_url)
+                hostname = (parsed.hostname or "").lower().rstrip(".")
+                provider_host = (
+                    hostname == self.domain
+                    or hostname.endswith(".freshservice.com")
+                    or hostname.endswith(".freshworks.com")
+                )
+                credential_host = hostname == self.domain
+                if (
+                    parsed.scheme != "https"
+                    or not hostname
+                    or parsed.username
+                    or parsed.password
+                ):
+                    raise ValueError("Freshservice attachment URL is not trusted")
+                if not provider_host:
+                    try:
+                        addresses = {
+                            item[4][0]
+                            for item in socket.getaddrinfo(hostname, parsed.port or 443)
+                        }
+                    except socket.gaierror as exc:
+                        raise ValueError(
+                            "Freshservice attachment host could not be resolved"
+                        ) from exc
+                    if not addresses or any(
+                        not ipaddress.ip_address(address).is_global
+                        for address in addresses
+                    ):
+                        raise ValueError(
+                            "Freshservice attachment URL targets a non-public host"
+                        )
+                elapsed = time.monotonic() - getattr(self, "_last_get_ts", 0.0)
+                if provider_host and elapsed < self.min_interval_s:
+                    await asyncio.sleep(self.min_interval_s - elapsed)
+                auth = self._auth() if credential_host else None
+                headers = self._headers() if credential_host else {}
+                async with client.stream(
+                    "GET", current_url, auth=auth, headers=headers
+                ) as response:
+                    if provider_host:
+                        self._last_get_ts = time.monotonic()
+                        self._capture_rate_limit(response)
+                    if response.status_code == 429:
+                        raise FreshserviceRateLimited(self._last_retry_after or 60.0)
+                    if response.is_redirect:
+                        location = response.headers.get("location")
+                        if not location:
+                            raise RuntimeError(
+                                "Freshservice attachment redirect is missing a target"
+                            )
+                        current_url = urllib.parse.urljoin(current_url, location)
+                        continue
+                    response.raise_for_status()
+                    declared = response.headers.get("content-length")
+                    if declared:
+                        try:
+                            if int(declared) > limit:
+                                raise ValueError(
+                                    "Freshservice attachment exceeds configured size limit"
+                                )
+                        except ValueError as exc:
+                            if "exceeds" in str(exc):
+                                raise
+                    content = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        content.extend(chunk)
+                        if len(content) > limit:
+                            raise ValueError(
+                                "Freshservice attachment exceeds configured size limit"
+                            )
+                    return bytes(content)
+        raise RuntimeError("Freshservice attachment redirected too many times")
 
     def capability_manifest(self) -> dict[str, dict[str, Any]]:
         return {
@@ -779,6 +946,10 @@ class FreshserviceAdapter(BaseITSMAdapter):
             "conversation.read": {
                 "status": "supported",
                 "scope": "freshservice.tickets.conversations.view",
+            },
+            "attachment.read": {
+                "status": "supported",
+                "scope": "freshservice.tickets.view",
             },
             "agent.read": {"status": "supported", "scope": "freshservice.agents.manage"},
             "requester.read": {"status": "supported", "scope": "freshservice.requesters.view"},

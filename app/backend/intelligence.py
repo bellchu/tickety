@@ -200,16 +200,34 @@ CATEGORY_DIFFICULTY = {
 # Priority adds urgency that raises the required skill band.
 _PRIORITY_TIER_BUMP = {"P1": 1, "P2": 0, "P3": 0}
 
-# Team routing is intentionally derived only from validated AI issue type.
-# The canonical/source category remains authoritative and is never repurposed
-# as an AI recommendation.
+# Team routing prefers a trusted AI issue type. Freshservice's authoritative,
+# closed-set category can provide a deterministic fallback when an AI result is
+# not ready yet. The fallback is deliberately exact-match only: unknown values
+# and the AI ``Other`` bucket still fail closed for human review.
 AI_CATEGORY_TEAMS = {
     "Network": "Network Operations",
     "Access Request": "Identity and Access",
     "Hardware": "Workplace Technology",
     "Software": "Application Support",
 }
+SOURCE_CATEGORY_TEAMS = {
+    "User Management": "Identity and Access",
+    "Password Reset": "Identity and Access",
+    "Termination/Resignation": "Identity and Access",
+    "Hardware - Accessories": "Workplace Technology",
+    "Hardware - Computers": "Workplace Technology",
+    "Hardware - Printers": "Workplace Technology",
+    "Mobile Phones": "Workplace Technology",
+    "Software": "Application Support",
+    "E1 App": "Application Support",
+    "E1 CNC": "Application Support",
+    "E1 Credit Card Processing": "Application Support",
+    "Almo - ERP/WMS Team": "Application Support",
+    "B2B Web": "Application Support",
+    "WMS": "Application Support",
+}
 UNROUTED_REVIEW_TEAM = "Unrouted / Review"
+NO_ACTIVE_ROUTING_TEAM = "No active routing"
 _TRUSTED_AI_ROUTING_STATUSES = {"completed", "partial", "triage_completed"}
 
 
@@ -223,8 +241,13 @@ class TeamRoutingDecision:
     """
 
     recommended_team: str
-    basis: Literal["ai_category", "unrouted_review"]
-    status: Literal["legacy_ai_category", "unrouted_review"]
+    basis: Literal["ai_category", "source_category", "not_applicable", "unrouted_review"]
+    status: Literal[
+        "legacy_ai_category",
+        "source_category_suggestion",
+        "not_applicable",
+        "unrouted_review",
+    ]
     abstention_reason: Optional[
         Literal[
             "missing_ai_category",
@@ -236,37 +259,51 @@ class TeamRoutingDecision:
 
 
 def team_routing_decision(
-    ai_suggested_category: Optional[str], ai_status: Optional[str]
+    ai_suggested_category: Optional[str],
+    ai_status: Optional[str],
+    *,
+    source_category: Optional[str] = None,
+    ticket_status: Optional[str] = None,
 ) -> TeamRoutingDecision:
     """Return a fail-closed routing projection with explicit provenance."""
+    if (ticket_status or "").strip().lower() in {"closed", "resolved", "cancelled"}:
+        return TeamRoutingDecision(
+            recommended_team=NO_ACTIVE_ROUTING_TEAM,
+            basis="not_applicable",
+            status="not_applicable",
+            abstention_reason=None,
+        )
     normalized_status = (ai_status or "").strip().lower().replace("-", "_")
+    if normalized_status in _TRUSTED_AI_ROUTING_STATUSES and ai_suggested_category:
+        team = AI_CATEGORY_TEAMS.get(ai_suggested_category)
+        if team:
+            return TeamRoutingDecision(
+                recommended_team=team,
+                basis="ai_category",
+                status="legacy_ai_category",
+                abstention_reason=None,
+            )
+
+    source_team = SOURCE_CATEGORY_TEAMS.get((source_category or "").strip())
+    if source_team:
+        return TeamRoutingDecision(
+            recommended_team=source_team,
+            basis="source_category",
+            status="source_category_suggestion",
+            abstention_reason=None,
+        )
+
     if normalized_status not in _TRUSTED_AI_ROUTING_STATUSES:
-        return TeamRoutingDecision(
-            recommended_team=UNROUTED_REVIEW_TEAM,
-            basis="unrouted_review",
-            status="unrouted_review",
-            abstention_reason="untrusted_ai_status",
-        )
-    if not ai_suggested_category:
-        return TeamRoutingDecision(
-            recommended_team=UNROUTED_REVIEW_TEAM,
-            basis="unrouted_review",
-            status="unrouted_review",
-            abstention_reason="missing_ai_category",
-        )
-    team = AI_CATEGORY_TEAMS.get(ai_suggested_category)
-    if not team:
-        return TeamRoutingDecision(
-            recommended_team=UNROUTED_REVIEW_TEAM,
-            basis="unrouted_review",
-            status="unrouted_review",
-            abstention_reason="unsupported_ai_category",
-        )
+        reason = "untrusted_ai_status"
+    elif not ai_suggested_category:
+        reason = "missing_ai_category"
+    else:
+        reason = "unsupported_ai_category"
     return TeamRoutingDecision(
-        recommended_team=team,
-        basis="ai_category",
-        status="legacy_ai_category",
-        abstention_reason=None,
+        recommended_team=UNROUTED_REVIEW_TEAM,
+        basis="unrouted_review",
+        status="unrouted_review",
+        abstention_reason=reason,
     )
 
 

@@ -42,9 +42,12 @@ from .database import (
     IntegrationBindingRecord,
     IntegrationCapabilityRecord,
     IntegrationAuditRecord,
+    ExternalAttachmentRecord,
+    ExternalConversationRecord,
 )
 from .schema import (
     Ticket, User, UserSummary, Recognition, SyncStatus,
+    AIStatusResponse, OperationalDiagnosticsResponse,
     AutomaticAIEnableRequest, AutomaticAIPauseRequest,
     ExternalUser, ExternalUserSyncResult,
     TriageResult, PointsAwardedNotification, TicketCreate,
@@ -71,12 +74,15 @@ from .schema import (
     PortalTicketCreate, PortalTicketOut, PortalTicketCreated,
     IntegrationBindingCreate, IntegrationBindingSuspend,
     FreshworksBootstrapRequest, FreshworksBootstrapRedeem,
+    TicketAttachment,
 )
+from .attachment_storage import AzureBlobAttachmentStore, AttachmentStorageError
 from .llm_manager import (
     LLMAnalysisError,
     LLMCapacityError,
     LLMInvalidInputError,
     LLMInvalidOutputError,
+    LLMProviderRejectedError,
     LLMUnavailableError,
     LLMManager,
     get_llm_metrics,
@@ -107,13 +113,16 @@ from .prompts import (
 )
 from .integrations.registry import get_adapter
 from .integrations.sync import (
+    AUTOMATIC_FETCH_DAYS,
     AUTOMATIC_AI_LOOKBACK_DAYS,
+    active_routing_backlog_enabled,
     async_sync_external_users,
     enable_automatic_ai,
     pause_automatic_ai,
-    fetch_tickets_by_days,
     handle_webhook_event,
+    queue_old_ticket_fetch,
     sync_tickets_from_external,
+    ticket_created_within_filter,
 )
 from .integrations.freshservice import FreshserviceAdapter
 from .integrations.bindings import (
@@ -140,7 +149,7 @@ from .sync_worker import start_sync_worker, stop_sync_worker, get_sync_status
 from . import settings as settings_module
 from . import sso as sso_service
 from .security import RequestBodyLimitMiddleware
-from .privacy import redact_data
+from .privacy import configured_secret_values, redact_data, redact_text
 from .production_security import (
     disable_seeded_demo_identities as _disable_seeded_demo_identities,
 )
@@ -764,12 +773,210 @@ def _enrich_ticket_team(ticket: TicketRecord) -> None:
     decision = intel.team_routing_decision(
         ticket.ai_suggested_category,
         ticket.ai_status,
+        source_category=ticket.external_category,
+        ticket_status=ticket.workflow_status or ticket.status,
     )
     ticket.__dict__["recommended_team"] = decision.recommended_team
     ticket.__dict__["recommended_team_basis"] = decision.basis
     ticket.__dict__["routing_status"] = decision.status
     ticket.__dict__["routing_abstention_reason"] = decision.abstention_reason
     ticket.__dict__["routing_catalog_validated"] = decision.catalog_validated
+
+
+def _reporter_fallback_identity(reporter: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    value = (reporter or "").strip()
+    if not value or value.isdigit():
+        return None, None
+    if re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value):
+        return None, value.lower()
+    return value, None
+
+
+def _enrich_tickets(db: Session, tickets: list[TicketRecord]) -> None:
+    """Attach local owners, provider identities, and communication timing in batches."""
+    if not tickets:
+        return
+    ticket_ids = [ticket.id for ticket in tickets]
+
+    assignee_ids = {ticket.assignee_id for ticket in tickets if ticket.assignee_id}
+    assignee_names = {}
+    if assignee_ids:
+        assignee_names = dict(
+            db.query(UserRecord.id, UserRecord.name)
+            .filter(UserRecord.id.in_(assignee_ids))
+            .all()
+        )
+
+    external_ids = {
+        external_id
+        for ticket in tickets
+        for external_id in (
+            ticket.external_assignee_id,
+            ticket.external_requester_id,
+        )
+        if ticket.external_source and external_id
+    }
+    external_profiles: dict[tuple[str, str, str, str], ExternalUserRecord] = {}
+    if external_ids:
+        rows = db.query(ExternalUserRecord).filter(
+            ExternalUserRecord.binding_id.in_({ticket.binding_id for ticket in tickets}),
+            ExternalUserRecord.provider.in_({
+                ticket.external_source for ticket in tickets if ticket.external_source
+            }),
+            ExternalUserRecord.external_id.in_(external_ids),
+        ).all()
+        external_profiles = {
+            (row.binding_id, row.provider, row.user_type, row.external_id): row
+            for row in rows
+        }
+
+    public_comment_times = dict(
+        db.query(
+            TicketCommentRecord.ticket_id,
+            func.max(TicketCommentRecord.created_at),
+        ).filter(
+            TicketCommentRecord.ticket_id.in_(ticket_ids),
+            TicketCommentRecord.is_private.is_(False),
+        ).group_by(TicketCommentRecord.ticket_id).all()
+    )
+
+    for ticket in tickets:
+        ticket.__dict__["assignee_name"] = assignee_names.get(ticket.assignee_id)
+        assignee_profile = external_profiles.get((
+            ticket.binding_id,
+            ticket.external_source or "",
+            "agent",
+            ticket.external_assignee_id or "",
+        ))
+        ticket.__dict__["external_assignee_name"] = (
+            assignee_profile.name if assignee_profile else None
+        )
+
+        requester_profile = external_profiles.get((
+            ticket.binding_id,
+            ticket.external_source or "",
+            "requester",
+            ticket.external_requester_id or "",
+        ))
+        fallback_name, fallback_email = _reporter_fallback_identity(ticket.reporter)
+        ticket.__dict__["requester_id"] = ticket.external_requester_id
+        ticket.__dict__["requester_name"] = (
+            requester_profile.name
+            if requester_profile and requester_profile.name
+            else ticket.external_requester_name or fallback_name
+        )
+        ticket.__dict__["requester_email"] = (
+            requester_profile.email
+            if requester_profile and requester_profile.email
+            else ticket.external_requester_email or fallback_email
+        )
+        ticket.__dict__["requester_title"] = (
+            requester_profile.title
+            if requester_profile and requester_profile.title
+            else ticket.external_requester_title
+        )
+        communication_times = [
+            value for value in (
+                ticket.external_created_at or ticket.created_at,
+                ticket.external_conversation_updated_at,
+                public_comment_times.get(ticket.id),
+            )
+            if value is not None
+        ]
+        ticket.__dict__["last_communication_at"] = (
+            max(communication_times) if communication_times else None
+        )
+        _enrich_ticket_team(ticket)
+
+
+def _useful_external_name(value: Optional[str], external_id: Optional[str]) -> Optional[str]:
+    name = (value or "").strip()
+    if not name or name.isdigit() or name == (external_id or "").strip():
+        return None
+    if re.fullmatch(r"(?:external|freshservice) user \d+", name, re.IGNORECASE):
+        return None
+    return name
+
+
+def _enrich_comments(
+    db: Session,
+    ticket: TicketRecord,
+    comments: list[TicketCommentRecord],
+) -> None:
+    if not comments:
+        return
+    local_ids = {comment.author_id for comment in comments if comment.author_id}
+    local_profiles = {}
+    if local_ids:
+        local_profiles = {
+            row.id: row
+            for row in db.query(UserRecord).filter(UserRecord.id.in_(local_ids)).all()
+        }
+
+    external_author_ids = {
+        comment.external_author_id
+        for comment in comments
+        if comment.external_author_id
+    }
+    external_profiles: dict[tuple[str, str], ExternalUserRecord] = {}
+    if ticket.external_source and external_author_ids:
+        external_profiles = {
+            (row.user_type, row.external_id): row
+            for row in db.query(ExternalUserRecord).filter(
+                ExternalUserRecord.binding_id == ticket.binding_id,
+                ExternalUserRecord.provider == ticket.external_source,
+                ExternalUserRecord.external_id.in_(external_author_ids),
+            ).all()
+        }
+    external_comment_ids = {
+        comment.external_id for comment in comments if comment.external_id
+    }
+    incoming_by_id = {}
+    if external_comment_ids:
+        incoming_by_id = dict(db.query(
+            ExternalConversationRecord.external_id,
+            ExternalConversationRecord.incoming,
+        ).filter(
+            ExternalConversationRecord.ticket_id == ticket.id,
+            ExternalConversationRecord.external_id.in_(external_comment_ids),
+        ).all())
+
+    for comment in comments:
+        local_profile = local_profiles.get(comment.author_id)
+        if local_profile is not None:
+            comment.__dict__["author_name"] = local_profile.name
+            comment.__dict__["author_email"] = local_profile.email
+            comment.__dict__["author_title"] = local_profile.title
+            comment.__dict__["author_type"] = "agent"
+            continue
+        if not comment.external_source:
+            comment.__dict__["author_title"] = None
+            comment.__dict__["author_type"] = None
+            continue
+        author_type = (
+            "requester"
+            if incoming_by_id.get(comment.external_id or "", False)
+            else "agent"
+        )
+        profile = external_profiles.get((author_type, comment.external_author_id or ""))
+        stored_name = _useful_external_name(
+            comment.author_name,
+            comment.external_author_id,
+        )
+        profile_name = _useful_external_name(
+            profile.name if profile else None,
+            comment.external_author_id,
+        )
+        comment.__dict__["author_name"] = (
+            profile_name
+            or stored_name
+            or f"{comment.external_source.title()} {author_type}"
+        )
+        comment.__dict__["author_email"] = (
+            profile.email if profile and profile.email else comment.author_email
+        )
+        comment.__dict__["author_title"] = profile.title if profile else None
+        comment.__dict__["author_type"] = author_type
 
 
 def _ticket_for_request(request: Request, ticket: TicketRecord) -> Ticket | TicketRecord:
@@ -828,10 +1035,40 @@ async def list_tickets(
                 TicketRecord.subject.ilike(pattern, escape="\\"),
                 TicketRecord.description.ilike(pattern, escape="\\"),
                 TicketRecord.reporter.ilike(pattern, escape="\\"),
+                TicketRecord.external_requester_name.ilike(pattern, escape="\\"),
+                TicketRecord.external_requester_email.ilike(pattern, escape="\\"),
+                TicketRecord.external_requester_title.ilike(pattern, escape="\\"),
                 TicketRecord.external_id.ilike(pattern, escape="\\"),
+                db.query(ExternalUserRecord.id).filter(
+                    ExternalUserRecord.binding_id == TicketRecord.binding_id,
+                    ExternalUserRecord.provider == TicketRecord.external_source,
+                    ExternalUserRecord.external_id == TicketRecord.external_requester_id,
+                    ExternalUserRecord.user_type == "requester",
+                    or_(
+                        ExternalUserRecord.name.ilike(pattern, escape="\\"),
+                        ExternalUserRecord.email.ilike(pattern, escape="\\"),
+                        ExternalUserRecord.title.ilike(pattern, escape="\\"),
+                    ),
+                ).exists(),
             ))
+    source_created_at = func.coalesce(
+        TicketRecord.external_created_at,
+        TicketRecord.created_at,
+    )
+    latest_public_comment = db.query(
+        func.max(TicketCommentRecord.created_at)
+    ).filter(
+        TicketCommentRecord.ticket_id == TicketRecord.id,
+        TicketCommentRecord.is_private.is_(False),
+    ).correlate(TicketRecord).scalar_subquery()
+    last_communication_at = func.coalesce(
+        latest_public_comment,
+        TicketRecord.external_conversation_updated_at,
+        TicketRecord.external_created_at,
+        TicketRecord.created_at,
+    )
     if sort == "oldest":
-        q = q.order_by(TicketRecord.created_at.asc(), TicketRecord.id.asc())
+        q = q.order_by(source_created_at.asc(), TicketRecord.id.asc())
     elif sort == "priority":
         priority_rank = {
             "P1": 1, "Urgent": 1,
@@ -843,15 +1080,15 @@ async def list_tickets(
         # across SQLite (tests) and PostgreSQL (production).
         q = q.order_by(
             case(priority_rank, value=TicketRecord.priority, else_=5),
-            TicketRecord.created_at.desc(),
+            source_created_at.desc(),
             TicketRecord.id.asc(),
         )
     elif sort == "updated":
-        q = q.order_by(TicketRecord.updated_at.desc(), TicketRecord.id.asc())
+        q = q.order_by(last_communication_at.desc(), TicketRecord.id.asc())
     elif sort == "complexity":
-        q = q.order_by(TicketRecord.complexity.desc(), TicketRecord.created_at.desc(), TicketRecord.id.asc())
+        q = q.order_by(TicketRecord.complexity.desc(), source_created_at.desc(), TicketRecord.id.asc())
     else:
-        q = q.order_by(TicketRecord.created_at.desc(), TicketRecord.id.asc())
+        q = q.order_by(source_created_at.desc(), TicketRecord.id.asc())
 
     # Fetch one extra row to signal whether another page exists without a
     # potentially expensive COUNT(*) over the filtered result set.
@@ -862,39 +1099,7 @@ async def list_tickets(
     response.headers["X-Page-Offset"] = str(offset)
     response.headers["X-Has-More"] = str(has_more).lower()
 
-    # Resolve every assignee in one query instead of issuing one query per
-    # ticket. Missing users intentionally remain null in the API response.
-    assignee_ids = {ticket.assignee_id for ticket in tickets if ticket.assignee_id}
-    assignee_names = {}
-    if assignee_ids:
-        assignee_names = dict(
-            db.query(UserRecord.id, UserRecord.name)
-            .filter(UserRecord.id.in_(assignee_ids))
-            .all()
-        )
-    for ticket in tickets:
-        ticket.__dict__["assignee_name"] = assignee_names.get(ticket.assignee_id)
-    external_keys = {
-        (ticket.binding_id, ticket.external_source, ticket.external_assignee_id)
-        for ticket in tickets
-        if ticket.external_source and ticket.external_assignee_id
-    }
-    external_names = {}
-    if external_keys:
-        rows = db.query(ExternalUserRecord).filter(
-            ExternalUserRecord.binding_id.in_({key[0] for key in external_keys}),
-            ExternalUserRecord.provider.in_({key[1] for key in external_keys}),
-            ExternalUserRecord.external_id.in_({key[2] for key in external_keys}),
-            ExternalUserRecord.user_type == "agent",
-        ).all()
-        external_names = {
-            (row.binding_id, row.provider, row.external_id): row.name for row in rows
-        }
-    for ticket in tickets:
-        ticket.__dict__["external_assignee_name"] = external_names.get(
-            (ticket.binding_id, ticket.external_source, ticket.external_assignee_id)
-        )
-        _enrich_ticket_team(ticket)
+    _enrich_tickets(db, tickets)
     return [_ticket_for_request(request, ticket) for ticket in tickets]
 
 
@@ -909,21 +1114,7 @@ async def get_ticket(
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
     _authorize_ticket_analysis(user, ticket)
-    # Enrich with assignee name
-    if ticket.assignee_id:
-        user = db.query(UserRecord).filter(UserRecord.id == ticket.assignee_id).first()
-        ticket.__dict__["assignee_name"] = user.name if user else None
-    if ticket.external_source and ticket.external_assignee_id:
-        external_user = db.query(ExternalUserRecord).filter(
-            ExternalUserRecord.binding_id == ticket.binding_id,
-            ExternalUserRecord.provider == ticket.external_source,
-            ExternalUserRecord.external_id == ticket.external_assignee_id,
-            ExternalUserRecord.user_type == "agent",
-        ).first()
-        ticket.__dict__["external_assignee_name"] = (
-            external_user.name if external_user else None
-        )
-    _enrich_ticket_team(ticket)
+    _enrich_tickets(db, [ticket])
     return _ticket_for_request(request, ticket)
 
 
@@ -1564,7 +1755,112 @@ async def list_comments(
     comments = query.order_by(
         TicketCommentRecord.created_at.desc(), TicketCommentRecord.id.desc()
     ).offset(offset).limit(limit).all()
+    _enrich_comments(db, ticket, comments)
     return list(reversed(comments))
+
+
+@app.get("/tickets/{ticket_id}/attachments", response_model=List[TicketAttachment])
+async def list_ticket_attachments(
+    ticket_id: str,
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(get_authenticated_user),
+):
+    ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    _authorize_ticket_analysis(user, ticket)
+    rows = db.query(ExternalAttachmentRecord).filter(
+        ExternalAttachmentRecord.ticket_id == ticket_id,
+    ).order_by(
+        ExternalAttachmentRecord.created_at.asc(),
+        ExternalAttachmentRecord.id.asc(),
+    ).all()
+    if (user.role or "").lower() not in {"admin", "supervisor"}:
+        private_owner_ids = {
+            row.external_id for row in db.query(ExternalConversationRecord).filter(
+                ExternalConversationRecord.ticket_id == ticket_id,
+                ExternalConversationRecord.is_private.is_(True),
+            ).all()
+        }
+        rows = [
+            row for row in rows
+            if row.owner_type != "conversation"
+            or row.owner_external_id not in private_owner_ids
+        ]
+    return [
+        TicketAttachment(
+            id=row.id,
+            ticket_id=row.ticket_id,
+            owner_type=row.owner_type,
+            owner_external_id=row.owner_external_id,
+            external_id=row.external_id,
+            name=row.file_name,
+            content_type=row.content_type,
+            size=row.declared_size,
+            stored_size=row.stored_size,
+            status=row.storage_status,
+            created_at=row.created_at,
+            stored_at=row.stored_at,
+        )
+        for row in rows
+    ]
+
+
+@app.get("/tickets/{ticket_id}/attachments/{attachment_id}")
+async def download_ticket_attachment(
+    ticket_id: str,
+    attachment_id: str,
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(get_authenticated_user),
+):
+    ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    _authorize_ticket_analysis(user, ticket)
+    row = db.query(ExternalAttachmentRecord).filter(
+        ExternalAttachmentRecord.id == attachment_id,
+        ExternalAttachmentRecord.ticket_id == ticket_id,
+    ).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    if row.owner_type == "conversation" and (user.role or "").lower() not in {
+        "admin", "supervisor",
+    }:
+        private_owner = db.query(ExternalConversationRecord.id).filter(
+            ExternalConversationRecord.ticket_id == ticket_id,
+            ExternalConversationRecord.external_id == row.owner_external_id,
+            ExternalConversationRecord.is_private.is_(True),
+        ).first()
+        if private_owner:
+            raise HTTPException(status_code=404, detail="Attachment not found")
+    if row.storage_status != "stored" or not row.blob_key:
+        raise HTTPException(status_code=409, detail="Attachment copy is not ready")
+    try:
+        content = AzureBlobAttachmentStore().download(row.blob_key)
+    except AttachmentStorageError as exc:
+        raise HTTPException(status_code=503, detail="Attachment storage is unavailable") from exc
+    except Exception as exc:
+        print(f"[attachments] blob download failed kind={type(exc).__name__}")
+        raise HTTPException(status_code=503, detail="Attachment storage is unavailable") from exc
+    content_type = (row.content_type or "").strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*", content_type):
+        content_type = "application/octet-stream"
+    inline_types = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+    disposition = "inline" if content_type.lower() in inline_types else "attachment"
+    fallback_name = re.sub(r"[^A-Za-z0-9._-]+", "_", row.file_name) or "attachment"
+    encoded_name = urllib.parse.quote(row.file_name, safe="")
+    return Response(
+        content=content,
+        media_type=content_type,
+        headers={
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": (
+                f'{disposition}; filename="{fallback_name[:180]}"; '
+                f"filename*=UTF-8''{encoded_name}"
+            ),
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.post("/tickets/{ticket_id}/comments", response_model=TicketComment, status_code=201)
@@ -1814,6 +2110,7 @@ def _schedule_ai_retry(
     error_code: str,
     *,
     expected_claim_id: Optional[str] = None,
+    terminal: bool = False,
 ) -> bool:
     query = db.query(TicketRecord).filter(TicketRecord.id == ticket_id)
     if expected_claim_id:
@@ -1833,7 +2130,7 @@ def _schedule_ai_retry(
     ticket.ai_lease_expires_at = None
     ticket.ai_error = error_code
     ticket.ai_requested_artifacts = ",".join(sorted(artifacts))
-    if attempts >= max_attempts:
+    if terminal or attempts >= max_attempts:
         ticket.ai_status = "dead_letter"
         ticket.ai_next_attempt_at = None
     else:
@@ -1894,6 +2191,8 @@ def _analysis_step_error_code(exc: BaseException) -> str:
         return "invalid_output"
     if isinstance(exc, LLMCapacityError):
         return "provider_capacity"
+    if isinstance(exc, LLMProviderRejectedError):
+        return "provider_rejected"
     if isinstance(exc, LLMUnavailableError):
         return "provider_unavailable"
     if isinstance(exc, LLMAnalysisError):
@@ -2385,6 +2684,9 @@ async def _run_ticket_analysis(
                         requested_artifacts,
                         error_signature,
                         expected_claim_id=claim_id,
+                        terminal=isinstance(
+                            exc, (LLMInvalidInputError, LLMProviderRejectedError)
+                        ),
                     )
             await emit("triage", "error")
             raise
@@ -2438,6 +2740,9 @@ async def _run_ticket_analysis(
                 set(tasks),
                 error_signature,
                 expected_claim_id=claim_id,
+                terminal=isinstance(
+                    exc, (LLMInvalidInputError, LLMProviderRejectedError)
+                ),
             )
             raise
         task_results = dict(zip(tasks, results))
@@ -2594,6 +2899,11 @@ async def _run_ticket_analysis(
                 ticket.id,
                 failed_artifacts,
                 error_signature,
+                terminal=all(
+                    error["error"] in {"invalid_input", "provider_rejected"}
+                    for error in errors
+                    if error["step"] in failed_artifacts
+                ),
             )
 
     if errors and len(requested_artifacts) == 1:
@@ -4641,28 +4951,85 @@ def pause_integration_automatic_ai(
 
 @app.post("/admin/sync/fetch")
 def fetch_sync(
-    days: int = Query(7, ge=1, le=365, description="Fetch tickets updated in the last N days"),
-    overwrite: bool = Query(False, description="Refresh all provider fields on already-imported tickets"),
+    preset: str = Query(
+        "2_months",
+        description="2_months, 3_months, or custom",
+    ),
+    start_date: Optional[str] = Query(
+        None, description="Custom UTC start date in YYYY-MM-DD format"
+    ),
+    end_date: Optional[str] = Query(
+        None, description="Custom inclusive UTC end date in YYYY-MM-DD format"
+    ),
     binding_id: Optional[str] = Query(None, max_length=36),
     db: Session = Depends(get_db),
-    user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
+    user: UserRecord = Depends(require_protected_ai_role("admin")),
 ):
-    """Manual "fetch by days" pull from the ITSM provider.
+    """Queue an explicit admin-only old-ticket range for bounded fetching."""
+    selected = (preset or "").strip().lower()
+    now = datetime.utcnow().replace(microsecond=0)
+    if selected == "2_months":
+        range_start = now - timedelta(days=60)
+        range_end = now
+    elif selected == "3_months":
+        range_start = now - timedelta(days=90)
+        range_end = now
+    elif selected == "custom":
+        if not start_date or not end_date:
+            raise HTTPException(
+                status_code=422,
+                detail="custom old-ticket fetch requires start_date and end_date",
+            )
+        try:
+            range_start = datetime.strptime(start_date, "%Y-%m-%d")
+            # Treat the selected end date as inclusive.
+            range_end = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail="custom dates must use YYYY-MM-DD",
+            ) from exc
+        if range_end > now + timedelta(days=1):
+            raise HTTPException(
+                status_code=422,
+                detail="custom end_date cannot be in the future",
+            )
+        if range_start >= range_end:
+            raise HTTPException(
+                status_code=422,
+                detail="custom start_date must be on or before end_date",
+            )
+        if range_end - range_start > timedelta(days=366):
+            raise HTTPException(
+                status_code=422,
+                detail="custom old-ticket range cannot exceed 366 days",
+            )
+    else:
+        raise HTTPException(
+            status_code=422,
+            detail="preset must be 2_months, 3_months, or custom",
+        )
 
-    Walks every page of tickets updated in the last `days` days while
-    respecting the provider's rate limits. Source status is always reconciled
-    for already-imported tickets. Other local fields remain unchanged unless
-    overwrite=true requests a full provider refresh.
-    """
-    _reserve_ai_request(db, user.id, "itsm_fetch")
+    _reserve_ai_request(db, user.id, "itsm_fetch_old")
     adapter, effective_binding_id = _sync_adapter_for_binding(db, binding_id)
-    result = fetch_tickets_by_days(
-        adapter,
-        days=days,
-        overwrite=overwrite,
-        binding_id=effective_binding_id,
-    )
-    return {"status": "completed", "result": result}
+    try:
+        result = queue_old_ticket_fetch(
+            adapter,
+            start_at=range_start,
+            end_at=range_end,
+            requested_by=user.id,
+            binding_id=effective_binding_id,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = 409 if detail == "old_ticket_fetch_already_queued" else 422
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+    result.update({
+        "preset": selected,
+        "start_date": range_start.date().isoformat(),
+        "end_date": (range_end - timedelta(microseconds=1)).date().isoformat(),
+    })
+    return {"status": "queued", "result": result}
 
 
 @app.get("/admin/sync/status", response_model=SyncStatus)
@@ -4691,6 +5058,7 @@ async def sync_status(
         automatic_ai_lookback_days=s.get(
             "automatic_ai_lookback_days", AUTOMATIC_AI_LOOKBACK_DAYS
         ),
+        automatic_fetch_days=s.get("automatic_fetch_days", AUTOMATIC_FETCH_DAYS),
         last_status=s.get("last_status", "idle"),
         last_error="sync_failed" if s.get("last_error") else None,
         total_synced=s.get("total_synced", 0),
@@ -4712,6 +5080,18 @@ async def sync_status(
         history_workspace_index=s.get("history_workspace_index", 0),
         history_complete=s.get("history_complete", False),
         history_processed=s.get("history_processed", 0),
+        history_since_at=(
+            datetime.fromisoformat(s["history_since_at"])
+            if s.get("history_since_at") else None
+        ),
+        history_until_at=(
+            datetime.fromisoformat(s["history_until_at"])
+            if s.get("history_until_at") else None
+        ),
+        history_requested_at=(
+            datetime.fromisoformat(s["history_requested_at"])
+            if s.get("history_requested_at") else None
+        ),
         conversations_processed=s.get("conversations_processed", 0),
         run_started_at=(
             datetime.fromisoformat(s["run_started_at"])
@@ -4736,6 +5116,11 @@ async def sync_status(
         recent_pages_per_sync=s.get("recent_pages_per_sync", 2),
         history_pages_per_sync=s.get("history_pages_per_sync", 1),
         conversations_per_sync=s.get("conversations_per_sync", 1),
+        attachments_per_sync=s.get("attachments_per_sync", 2),
+        attachment_storage_configured=s.get("attachment_storage_configured", False),
+        attachment_pending=s.get("attachment_pending", 0),
+        attachment_stored=s.get("attachment_stored", 0),
+        attachment_errors=s.get("attachment_errors", 0),
     )
 
 
@@ -4967,17 +5352,45 @@ async def oauth_refresh(
     return {"status": "refreshed", "expires_in": tokens.get("expires_in")}
 
 
+_MAINTENANCE_WINDOW_LIMITS = {"days": 7, "weeks": 4}
+
+
+def _maintenance_window(
+    window_unit: str,
+    window_value: Optional[int],
+) -> tuple[str, int, int, datetime]:
+    unit = (window_unit or "days").strip().lower()
+    maximum = _MAINTENANCE_WINDOW_LIMITS.get(unit)
+    if maximum is None:
+        raise HTTPException(
+            status_code=422,
+            detail="window_unit must be days or weeks",
+        )
+    value = window_value if window_value is not None else (7 if unit == "days" else 1)
+    if value < 1 or value > maximum:
+        raise HTTPException(
+            status_code=422,
+            detail=f"window_value must be between 1 and {maximum} for {unit}",
+        )
+    days = value if unit == "days" else value * 7
+    return unit, value, days, datetime.utcnow() - timedelta(days=days)
+
+
 @app.post("/admin/sync/triage-all")
 async def triage_all_untriaged(
     db: Session = Depends(get_db),
     user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
     limit: int = Query(default=100, ge=1, le=500),
+    window_unit: str = Query(default="days"),
+    window_value: Optional[int] = Query(default=None, ge=1),
 ):
-    """Retroactively run AI triage on every ticket that hasn't been analysed yet.
-    Useful after enabling auto‑triage or when tickets were imported before
-    AI automation was turned on."""
+    """Queue untriaged tickets only inside an explicit, bounded age window."""
+    unit, value, window_days, cutoff = _maintenance_window(
+        window_unit, window_value
+    )
     _reserve_ai_request(db, user.id, "triage_all")
     untriaged = db.query(TicketRecord).filter(
+        ticket_created_within_filter(cutoff),
         TicketRecord.ai_reasoning.is_(None),
         or_(
             TicketRecord.ai_status.is_(None),
@@ -4989,11 +5402,21 @@ async def triage_all_untriaged(
     for ticket in untriaged:
         ticket.ai_status = "queued"
         ticket.ai_started_at = None
+        ticket.ai_claim_id = None
+        ticket.ai_lease_expires_at = None
         ticket.ai_error = None
         ticket.ai_next_attempt_at = None
         ticket.ai_requested_artifacts = "triage"
     db.commit()
-    return {"status": "queued", "found": len(untriaged), "queued": len(untriaged)}
+    return {
+        "status": "queued",
+        "found": len(untriaged),
+        "queued": len(untriaged),
+        "window_unit": unit,
+        "window_value": value,
+        "window_days": window_days,
+        "cutoff_at": cutoff.isoformat(),
+    }
 
 
 @app.post("/admin/sync/repair")
@@ -5001,11 +5424,16 @@ async def repair_ai_gaps(
     db: Session = Depends(get_db),
     user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
     limit: int = Query(default=100, ge=1, le=500),
+    window_unit: str = Query(default="days"),
+    window_value: Optional[int] = Query(default=None, ge=1),
 ):
-    """One‑time repair sweep: fill summary and resolution plan gaps for
-    tickets that have triage data but are missing the later pipeline steps."""
+    """Queue AI gap repairs only inside an explicit, bounded age window."""
+    unit, value, window_days, cutoff = _maintenance_window(
+        window_unit, window_value
+    )
     _reserve_ai_request(db, user.id, "repair_ai_gaps")
     candidates = db.query(TicketRecord).filter(
+        ticket_created_within_filter(cutoff),
         or_(
             and_(TicketRecord.ai_reasoning.isnot(None), TicketRecord.summary.is_(None)),
             and_(
@@ -5044,6 +5472,8 @@ async def repair_ai_gaps(
             artifacts.append("resolution")
         ticket.ai_status = "queued"
         ticket.ai_started_at = None
+        ticket.ai_claim_id = None
+        ticket.ai_lease_expires_at = None
         ticket.ai_error = None
         ticket.ai_next_attempt_at = None
         ticket.ai_requested_artifacts = ",".join(artifacts)
@@ -5055,12 +5485,541 @@ async def repair_ai_gaps(
         "found_no_resolution": len(no_resolution),
         "found_legacy_stale": len(legacy_stale),
         "queued": len(queued),
+        "window_unit": unit,
+        "window_value": value,
+        "window_days": window_days,
+        "cutoff_at": cutoff.isoformat(),
     }
 
 
 @app.get("/admin/settings")
 async def get_settings(_user: UserRecord = Depends(require_protected_ai_role("admin"))):
     return settings_module.get_settings()
+
+
+_AI_TASK_STATUSES = {
+    "queued",
+    "running",
+    "completed",
+    "triage_completed",
+    "partial",
+    "stale",
+    "legacy_stale",
+    "provenance_unknown",
+    "failed",
+    "dead_letter",
+    "paused",
+}
+_AI_ATTENTION_STATUSES = {
+    "partial",
+    "stale",
+    "legacy_stale",
+    "provenance_unknown",
+    "failed",
+    "dead_letter",
+    "paused",
+}
+_AI_ARTIFACT_NAMES = {"triage", "summary", "route", "resolution", "refresh"}
+_SAFE_OPERATIONAL_CODE = re.compile(
+    r"^[a-z0-9_]+(?::[a-z0-9_]+)?(?:,[a-z0-9_]+(?::[a-z0-9_]+)?)*$"
+)
+
+
+def _safe_operational_code(value: Optional[str]) -> Optional[str]:
+    """Expose stable status codes without returning legacy provider messages."""
+    normalized = (value or "").strip().lower().replace("-", "_")
+    if not normalized:
+        return None
+    if len(normalized) <= 256 and _SAFE_OPERATIONAL_CODE.fullmatch(normalized):
+        return normalized
+    return "legacy_error"
+
+
+def _ai_task_lifecycle(ticket: TicketRecord, now: datetime) -> str:
+    status = (ticket.ai_status or "").strip().lower().replace("-", "_")
+    if not status:
+        return "not_analyzed"
+    if status == "queued":
+        if ticket.ai_next_attempt_at and ticket.ai_next_attempt_at > now:
+            return "retry_scheduled"
+        return "queued"
+    if status == "running":
+        if not ticket.ai_lease_expires_at or ticket.ai_lease_expires_at < now:
+            return "lease_expired"
+        return "running"
+    if status in {"completed", "triage_completed"}:
+        return "completed"
+    if status in {"stale", "legacy_stale", "provenance_unknown"}:
+        return "stale"
+    if status in {"partial", "failed", "dead_letter", "paused"}:
+        return status
+    return "unknown"
+
+
+@app.get("/admin/settings/ai-status", response_model=AIStatusResponse)
+async def ai_task_status(
+    view: str = Query(
+        default="all",
+        pattern="^(all|active|attention|completed|not_analyzed)$",
+    ),
+    search: str = Query(default="", max_length=200),
+    limit: int = Query(default=25, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
+    _user: UserRecord = Depends(require_protected_ai_role("admin")),
+    db: Session = Depends(get_db),
+):
+    """Return bounded, prompt-free operational detail for durable AI work."""
+    now = datetime.utcnow()
+    normalized_status = func.lower(func.coalesce(TicketRecord.ai_status, "not_analyzed"))
+    active_ticket = or_(
+        TicketRecord.status.is_(None),
+        func.lower(TicketRecord.status).notin_(("closed", "resolved", "cancelled")),
+    )
+    status_rows = db.query(
+        normalized_status,
+        func.count(TicketRecord.id),
+    ).group_by(normalized_status).all()
+    status_counts = {str(status): int(count) for status, count in status_rows}
+
+    queued_ready = db.query(func.count(TicketRecord.id)).filter(
+        TicketRecord.ai_status == "queued",
+        or_(
+            TicketRecord.ai_next_attempt_at.is_(None),
+            TicketRecord.ai_next_attempt_at <= now,
+        ),
+    ).scalar() or 0
+    retry_scheduled = db.query(func.count(TicketRecord.id)).filter(
+        TicketRecord.ai_status == "queued",
+        TicketRecord.ai_next_attempt_at > now,
+    ).scalar() or 0
+    running_active = db.query(func.count(TicketRecord.id)).filter(
+        TicketRecord.ai_status == "running",
+        TicketRecord.ai_lease_expires_at >= now,
+    ).scalar() or 0
+    lease_expired = db.query(func.count(TicketRecord.id)).filter(
+        active_ticket,
+        TicketRecord.ai_status == "running",
+        or_(
+            TicketRecord.ai_lease_expires_at.is_(None),
+            TicketRecord.ai_lease_expires_at < now,
+        ),
+    ).scalar() or 0
+    oldest_queued_at = db.query(func.min(TicketRecord.updated_at)).filter(
+        TicketRecord.ai_status == "queued"
+    ).scalar()
+    completed_count = sum(
+        status_counts.get(status, 0)
+        for status in ("completed", "triage_completed")
+    )
+    attention_rows = db.query(
+        normalized_status,
+        func.count(TicketRecord.id),
+    ).filter(
+        active_ticket,
+        TicketRecord.ai_status.in_(tuple(_AI_ATTENTION_STATUSES)),
+    ).group_by(normalized_status).all()
+    attention_status_counts = {
+        str(status): int(count) for status, count in attention_rows
+    }
+    attention_count = sum(attention_status_counts.values()) + int(lease_expired)
+
+    task_query = db.query(TicketRecord)
+    if view == "active":
+        task_query = task_query.filter(TicketRecord.ai_status.in_(("queued", "running")))
+    elif view == "attention":
+        task_query = task_query.filter(active_ticket, or_(
+            TicketRecord.ai_status.in_(tuple(_AI_ATTENTION_STATUSES)),
+            and_(
+                TicketRecord.ai_status == "running",
+                or_(
+                    TicketRecord.ai_lease_expires_at.is_(None),
+                    TicketRecord.ai_lease_expires_at < now,
+                ),
+            ),
+        ))
+    elif view == "completed":
+        task_query = task_query.filter(
+            TicketRecord.ai_status.in_(("completed", "triage_completed"))
+        )
+    elif view == "not_analyzed":
+        task_query = task_query.filter(TicketRecord.ai_status.is_(None))
+
+    escaped_search = (
+        search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    )
+    if escaped_search:
+        pattern = f"%{escaped_search}%"
+        task_query = task_query.filter(or_(
+            TicketRecord.subject.ilike(pattern, escape="\\"),
+            TicketRecord.id.ilike(pattern, escape="\\"),
+            TicketRecord.external_id.ilike(pattern, escape="\\"),
+        ))
+    total_tasks = task_query.count()
+    task_order = case(
+        {
+            "dead_letter": 0,
+            "failed": 1,
+            "partial": 2,
+            "running": 3,
+            "queued": 4,
+            "paused": 5,
+            "stale": 6,
+            "legacy_stale": 6,
+            "provenance_unknown": 6,
+            "triage_completed": 7,
+            "completed": 7,
+            "not_analyzed": 8,
+        },
+        value=normalized_status,
+        else_=9,
+    )
+    task_rows = task_query.order_by(
+        task_order.asc(),
+        TicketRecord.updated_at.desc(),
+        TicketRecord.id.asc(),
+    ).offset(offset).limit(limit).all()
+
+    tasks = []
+    for ticket in task_rows:
+        status = (ticket.ai_status or "").strip().lower().replace("-", "_")
+        requested_artifacts = sorted({
+            artifact
+            for artifact in (ticket.ai_requested_artifacts or "").split(",")
+            if artifact in _AI_ARTIFACT_NAMES
+        })
+        tasks.append({
+            "ticket_id": ticket.id,
+            "subject": ticket.subject,
+            "ticket_status": ticket.status or "Unknown",
+            "priority": ticket.priority or "Unknown",
+            "source": ticket.external_source or "local",
+            "external_id": ticket.external_id,
+            "ai_status": status if status in _AI_TASK_STATUSES else None,
+            "lifecycle": _ai_task_lifecycle(ticket, now),
+            "requested_artifacts": requested_artifacts,
+            "attempts": int(ticket.ai_attempts or 0),
+            "model": ticket.ai_model,
+            "synthetic": bool(ticket.ai_synthetic),
+            "started_at": ticket.ai_started_at,
+            "generated_at": ticket.ai_generated_at,
+            "next_attempt_at": ticket.ai_next_attempt_at,
+            "lease_expires_at": ticket.ai_lease_expires_at,
+            "error_code": _safe_operational_code(ticket.ai_error),
+            "created_at": ticket.created_at,
+            "updated_at": ticket.updated_at,
+        })
+
+    calls_since = now - timedelta(days=1)
+    call_summary = db.query(
+        func.count(LLMCallRecord.id),
+        func.coalesce(func.sum(case((LLMCallRecord.status == "success", 1), else_=0)), 0),
+        func.coalesce(func.sum(case((LLMCallRecord.status != "success", 1), else_=0)), 0),
+        func.coalesce(func.sum(LLMCallRecord.total_tokens), 0),
+        func.coalesce(func.avg(LLMCallRecord.latency_ms), 0),
+        func.max(LLMCallRecord.created_at),
+    ).filter(LLMCallRecord.created_at >= calls_since).one()
+    recent_call_rows = db.query(LLMCallRecord).order_by(
+        LLMCallRecord.created_at.desc(),
+        LLMCallRecord.id.desc(),
+    ).limit(20).all()
+
+    automation = [
+        {
+            "key": key,
+            "label": label,
+            "enabled": settings_module.automation_enabled(key, legacy),
+        }
+        for key, label, legacy in (
+            ("AUTO_TRIAGE_ENABLED", "Triage", "AUTO_TRIAGE"),
+            ("AUTO_SUMMARIZE_ENABLED", "Summarization", None),
+            ("AUTO_ROUTE_ENABLED", "Routing", None),
+            ("AUTO_RESOLVE_ENABLED", "Resolution", None),
+            ("AUTO_SYSTEMIC_ENABLED", "Systemic detection", None),
+        )
+    ]
+    active_integration_bindings = db.query(func.count(IntegrationBindingRecord.id)).filter(
+        IntegrationBindingRecord.state == "active"
+    ).scalar() or 0
+    automatic_ai_bindings = db.query(func.count(SyncStateRecord.id)).filter(
+        SyncStateRecord.automatic_ai_enabled.is_(True)
+    ).scalar() or 0
+
+    return {
+        "generated_at": now,
+        "automation": automation,
+        "active_integration_bindings": int(active_integration_bindings),
+        "automatic_ai_bindings": int(automatic_ai_bindings),
+        "active_routing_backlog_enabled": active_routing_backlog_enabled(),
+        "queue": {
+            "total_tickets": sum(status_counts.values()),
+            "not_analyzed": status_counts.get("not_analyzed", 0),
+            "queued": status_counts.get("queued", 0),
+            "queued_ready": int(queued_ready),
+            "retry_scheduled": int(retry_scheduled),
+            "running": status_counts.get("running", 0),
+            "running_active": int(running_active),
+            "lease_expired": int(lease_expired),
+            "completed": completed_count,
+            "partial": attention_status_counts.get("partial", 0),
+            "stale": sum(
+                attention_status_counts.get(status, 0)
+                for status in ("stale", "legacy_stale", "provenance_unknown")
+            ),
+            "failed": attention_status_counts.get("failed", 0),
+            "dead_letter": attention_status_counts.get("dead_letter", 0),
+            "paused": attention_status_counts.get("paused", 0),
+            "attention": attention_count,
+            "oldest_queued_at": oldest_queued_at,
+        },
+        "view": view,
+        "search": search.strip(),
+        "tasks": tasks,
+        "total_tasks": total_tasks,
+        "limit": limit,
+        "offset": offset,
+        "recent_calls": [
+            {
+                "id": call.id,
+                "provider": call.provider,
+                "model": call.model,
+                "task": call.task,
+                "status": call.status,
+                "attempts": call.attempts,
+                "latency_ms": call.latency_ms,
+                "total_tokens": call.total_tokens,
+                "synthetic": bool(call.synthetic),
+                "error_code": _safe_operational_code(call.error_code),
+                "created_at": call.created_at,
+            }
+            for call in recent_call_rows
+        ],
+        "calls_24h": {
+            "calls": int(call_summary[0] or 0),
+            "successful": int(call_summary[1] or 0),
+            "failed_attempts": int(call_summary[2] or 0),
+            "total_tokens": int(call_summary[3] or 0),
+            "average_latency_ms": int(round(float(call_summary[4] or 0))),
+            "last_call_at": call_summary[5],
+        },
+    }
+
+
+def _diagnostic_text(value: Any) -> str:
+    """Return bounded stored diagnostics while always removing deployment secrets."""
+    return redact_text(
+        str(value or "No durable diagnostic message was recorded"),
+        configured_secret_values(),
+    )[:4000]
+
+
+def _diagnostic_severity(status: str) -> str:
+    normalized = (status or "").strip().lower()
+    if normalized in {"failed", "dead_letter", "error", "lease_expired"}:
+        return "error"
+    if normalized in {
+        "partial", "stale", "legacy_stale", "provenance_unknown",
+        "paused", "queued", "attempt_failed", "throttled", "not_ready",
+    }:
+        return "warning"
+    return "info"
+
+
+@app.get(
+    "/admin/settings/ai-status/{ticket_id}/diagnostics",
+    response_model=OperationalDiagnosticsResponse,
+)
+async def ai_ticket_diagnostics(
+    ticket_id: str,
+    response: Response,
+    _user: UserRecord = Depends(require_protected_ai_role("admin")),
+    db: Session = Depends(get_db),
+):
+    """Reveal bounded stored task diagnostics only after an explicit admin read."""
+    ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    response.headers["Cache-Control"] = "no-store"
+    status = _ai_task_lifecycle(ticket, datetime.utcnow())
+    entries = []
+    if ticket.ai_error:
+        entries.append({
+            "severity": _diagnostic_severity(status),
+            "source": "ticket.ai_error",
+            "message": _diagnostic_text(ticket.ai_error),
+            "timestamp": ticket.updated_at,
+        })
+    if status == "lease_expired":
+        entries.append({
+            "severity": "error",
+            "source": "analysis_lease",
+            "message": _diagnostic_text(
+                f"Worker lease expired at {ticket.ai_lease_expires_at.isoformat() if ticket.ai_lease_expires_at else 'unknown'}"
+            ),
+            "timestamp": ticket.ai_lease_expires_at,
+        })
+    elif status == "retry_scheduled":
+        entries.append({
+            "severity": "warning",
+            "source": "analysis_retry",
+            "message": _diagnostic_text(
+                f"Retry scheduled for {ticket.ai_next_attempt_at.isoformat() if ticket.ai_next_attempt_at else 'unknown'} after {ticket.ai_attempts or 0} attempt(s)"
+            ),
+            "timestamp": ticket.ai_next_attempt_at,
+        })
+    if not entries and status in {
+        "partial", "stale", "failed", "dead_letter", "paused", "unknown"
+    }:
+        entries.append({
+            "severity": _diagnostic_severity(status),
+            "source": "ticket.ai_status",
+            "message": _diagnostic_text(ticket.ai_status),
+            "timestamp": ticket.updated_at,
+        })
+    return {
+        "area": "ai",
+        "generated_at": datetime.utcnow(),
+        "entries": entries,
+        "truncated": False,
+    }
+
+
+@app.get(
+    "/admin/settings/status/diagnostics",
+    response_model=OperationalDiagnosticsResponse,
+)
+async def operational_status_diagnostics(
+    response: Response,
+    area: str = Query(
+        ...,
+        pattern="^(application|ai|sync|retrieval|oauth)$",
+    ),
+    _user: UserRecord = Depends(require_protected_ai_role("admin")),
+    db: Session = Depends(get_db),
+):
+    """Reveal bounded durable diagnostics for one Admin Status area."""
+    response.headers["Cache-Control"] = "no-store"
+    entries: list[dict[str, Any]] = []
+    truncated = False
+
+    if area == "ai":
+        now = datetime.utcnow()
+        rows = db.query(TicketRecord).filter(or_(
+            TicketRecord.ai_status.in_(tuple(_AI_ATTENTION_STATUSES)),
+            and_(
+                TicketRecord.ai_status == "running",
+                or_(
+                    TicketRecord.ai_lease_expires_at.is_(None),
+                    TicketRecord.ai_lease_expires_at < now,
+                ),
+            ),
+        )).order_by(TicketRecord.updated_at.desc(), TicketRecord.id.asc()).limit(51).all()
+        truncated = len(rows) > 50
+        for ticket in rows[:50]:
+            lifecycle = _ai_task_lifecycle(ticket, now)
+            entries.append({
+                "severity": _diagnostic_severity(lifecycle),
+                "source": f"ticket:{ticket.id}",
+                "message": _diagnostic_text(ticket.ai_error or ticket.ai_status),
+                "timestamp": ticket.updated_at,
+            })
+        remaining = max(0, 50 - len(entries))
+        if remaining:
+            call_rows = db.query(LLMCallRecord).filter(
+                LLMCallRecord.status != "success"
+            ).order_by(
+                LLMCallRecord.created_at.desc(), LLMCallRecord.id.desc()
+            ).limit(remaining + 1).all()
+            truncated = truncated or len(call_rows) > remaining
+            for call in call_rows[:remaining]:
+                entries.append({
+                    "severity": _diagnostic_severity(call.status),
+                    "source": f"llm:{call.provider}:{call.task}",
+                    "message": _diagnostic_text(call.error_code or call.status),
+                    "timestamp": call.created_at,
+                })
+
+    elif area == "sync":
+        rows = db.query(SyncStateRecord).filter(or_(
+            SyncStateRecord.last_error.isnot(None),
+            SyncStateRecord.last_status.in_(("error", "throttled")),
+        )).order_by(
+            SyncStateRecord.run_finished_at.desc(), SyncStateRecord.id.desc()
+        ).limit(51).all()
+        truncated = len(rows) > 50
+        for state in rows[:50]:
+            message = state.last_error
+            if not message and state.last_status == "throttled":
+                message = (
+                    "Provider throttled the sync lane"
+                    + (
+                        f"; next retry at {state.next_retry_at.isoformat()}"
+                        if state.next_retry_at else ""
+                    )
+                )
+            entries.append({
+                "severity": _diagnostic_severity(state.last_status),
+                "source": f"sync:{state.provider}:{state.binding_id}",
+                "message": _diagnostic_text(message or state.last_status),
+                "timestamp": state.run_finished_at,
+            })
+        remaining = max(0, 50 - len(entries))
+        if remaining:
+            attachment_rows = db.query(ExternalAttachmentRecord).filter(
+                ExternalAttachmentRecord.storage_status == "error"
+            ).order_by(
+                ExternalAttachmentRecord.last_attempted_at.desc(),
+                ExternalAttachmentRecord.id.asc(),
+            ).limit(remaining + 1).all()
+            truncated = truncated or len(attachment_rows) > remaining
+            for attachment in attachment_rows[:remaining]:
+                entries.append({
+                    "severity": "error",
+                    "source": f"attachment:{attachment.id}",
+                    "message": _diagnostic_text(
+                        attachment.last_error or "attachment_copy_failed"
+                    ),
+                    "timestamp": attachment.last_attempted_at,
+                })
+
+    elif area == "retrieval":
+        from .rag.store_v2 import store_ready
+        if store_ready(db):
+            rows = db.execute(text("""
+                SELECT key, value, updated_at
+                FROM rag_v2_schema_meta
+                WHERE key LIKE 'index_error:%'
+                ORDER BY updated_at DESC, key ASC
+                LIMIT 51
+            """)).all()
+            truncated = len(rows) > 50
+            for row in rows[:50]:
+                entries.append({
+                    "severity": "error",
+                    "source": str(row.key),
+                    "message": _diagnostic_text(row.value),
+                    "timestamp": row.updated_at,
+                })
+
+    elif area == "oauth":
+        from .integrations.registry import get_adapter as _diagnostic_adapter
+        adapter = _diagnostic_adapter()
+        if adapter.oauth_configured and not adapter.oauth_access_token:
+            entries.append({
+                "severity": "warning",
+                "source": "freshservice_oauth",
+                "message": "OAuth client configuration is present, but no access token is available",
+                "timestamp": None,
+            })
+
+    # Application dependency exceptions are intentionally not persisted in the
+    # database. Returning an empty list truthfully indicates there is no durable
+    # diagnostic record instead of inventing or exposing process internals.
+    return {
+        "area": area,
+        "generated_at": datetime.utcnow(),
+        "entries": entries,
+        "truncated": truncated,
+    }
 
 
 @app.put("/admin/settings")

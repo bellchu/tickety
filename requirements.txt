@@ -3,6 +3,7 @@ uvicorn[standard]
 pydantic
 litellm
 azure-identity
+azure-storage-blob
 requests
 python-dotenv
 sqlalchemy

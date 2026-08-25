@@ -8,7 +8,14 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.backend import main
-from app.backend.database import Base, TicketRecord, UserRecord, get_db
+from app.backend.database import (
+    Base,
+    ExternalUserRecord,
+    TicketCommentRecord,
+    TicketRecord,
+    UserRecord,
+    get_db,
+)
 
 
 class TicketListApiTests(unittest.TestCase):
@@ -51,6 +58,9 @@ class TicketListApiTests(unittest.TestCase):
             target.category = "Database"
             target.assignee_id = "agent-b"
             target.external_id = "INC_100%"
+            target.external_source = "freshservice"
+            target.external_requester_id = "requester-100"
+            target.external_created_at = created + timedelta(minutes=100)
             target.ai_suggested_category = "Network"
             target.ai_status = "completed"
             for index, subject in zip(
@@ -69,6 +79,24 @@ class TicketListApiTests(unittest.TestCase):
             # from user input were not escaped.
             tickets[101].external_id = "INCX100A"
             db.add_all(tickets)
+            db.add(ExternalUserRecord(
+                id="external-requester-100",
+                binding_id="legacy",
+                provider="freshservice",
+                external_id="requester-100",
+                user_type="requester",
+                name="Riley Requester",
+                email="riley.requester@example.com",
+                title="Finance Director",
+                profile_json="{}",
+            ))
+            db.add(TicketCommentRecord(
+                ticket_id="ticket-100",
+                author_name="Riley Requester",
+                body="Following up with more detail",
+                is_private=False,
+                created_at=created + timedelta(minutes=200),
+            ))
             db.commit()
 
         def override_db():
@@ -137,6 +165,13 @@ class TicketListApiTests(unittest.TestCase):
         self.assertEqual(response.json()[0]["recommended_team_basis"], "ai_category")
         self.assertEqual(response.json()[0]["routing_status"], "legacy_ai_category")
         self.assertFalse(response.json()[0]["routing_catalog_validated"])
+        self.assertEqual(response.json()[0]["requester_name"], "Riley Requester")
+        self.assertEqual(response.json()[0]["requester_email"], "riley.requester@example.com")
+        self.assertEqual(response.json()[0]["requester_title"], "Finance Director")
+        self.assertEqual(
+            response.json()[0]["last_communication_at"],
+            "2026-01-01T15:20:00",
+        )
 
     def test_team_is_unrouted_when_ai_category_is_missing_or_stale(self):
         ready = self.client.get("/tickets/ticket-100").json()
@@ -185,6 +220,36 @@ class TicketListApiTests(unittest.TestCase):
             main.intel.recommended_team("Network", None),
             ("Unrouted / Review", "unrouted_review"),
         )
+
+    def test_routing_uses_exact_source_fallback_and_skips_closed_tickets(self):
+        source = main.intel.team_routing_decision(
+            None,
+            None,
+            source_category="Hardware - Printers",
+            ticket_status="Open",
+        )
+        self.assertEqual(source.recommended_team, "Workplace Technology")
+        self.assertEqual(source.basis, "source_category")
+        self.assertEqual(source.status, "source_category_suggestion")
+
+        ambiguous = main.intel.team_routing_decision(
+            "Other",
+            "completed",
+            source_category="Infrastructure",
+            ticket_status="Open",
+        )
+        self.assertEqual(ambiguous.recommended_team, "Unrouted / Review")
+        self.assertEqual(ambiguous.abstention_reason, "unsupported_ai_category")
+
+        closed = main.intel.team_routing_decision(
+            None,
+            None,
+            source_category=None,
+            ticket_status="Closed",
+        )
+        self.assertEqual(closed.recommended_team, "No active routing")
+        self.assertEqual(closed.basis, "not_applicable")
+        self.assertEqual(closed.status, "not_applicable")
 
     def test_related_tickets_are_bounded_deduplicated_and_authoritative(self):
         retrieval = {
@@ -242,6 +307,14 @@ class TicketListApiTests(unittest.TestCase):
             ["ticket-100"],
         )
 
+        requester_match = self.client.get(
+            "/tickets", params={"search": "Finance Director"}
+        )
+        self.assertEqual(
+            [ticket["id"] for ticket in requester_match.json()],
+            ["ticket-100"],
+        )
+
     def test_priority_sort_is_semantic_and_stable(self):
         response = self.client.get(
             "/tickets", params={"sort": "priority", "limit": 105}
@@ -265,7 +338,9 @@ class TicketListApiTests(unittest.TestCase):
             event.remove(self.engine, "before_cursor_execute", track_selects)
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(len(select_statements), 2)
+        # Ticket page, local owners, provider profiles, and one batched
+        # public-comment timestamp aggregation. No row causes an N+1 query.
+        self.assertEqual(len(select_statements), 4)
         self.assertTrue(all(ticket["assignee_name"] for ticket in response.json()))
 
 

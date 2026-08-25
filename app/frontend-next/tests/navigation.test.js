@@ -59,6 +59,7 @@ test("active navigation matches exact and nested routes without prefix collision
 test("mobile context labels cover nested and utility routes", () => {
   assert.equal(getCurrentNavigationItem("/tickets/123")?.label, "Tickets");
   assert.equal(getCurrentNavigationItem("/settings/security")?.label, "Settings");
+  assert.equal(getCurrentNavigationItem("/settings/status/ai")?.label, "Status");
   assert.equal(getCurrentNavigationItem("/profile")?.label, "My profile");
   assert.equal(getCurrentNavigationItem("/unknown"), undefined);
 });

@@ -10,7 +10,7 @@ import { AIThinkingStream } from "@/components/ticket/AIThinkingStream";
 import { FreshserviceConversationThread } from "@/components/ticket/FreshserviceConversationThread";
 import { TicketSignalStrip } from "@/components/ticket/TicketSignalStrip";
 import {
-  ArrowLeft, ArrowUpRight, User, Tag, Flag, MessageSquare,
+  ArrowLeft, ArrowUpRight, BriefcaseBusiness, CalendarDays, Clock3, User, Tag, Flag, Mail, MessageSquare,
   Gauge, Wrench, Inbox,
 } from "lucide-react";
 import Link from "next/link";
@@ -22,6 +22,14 @@ import { Alert, Button, EmptyState, ErrorState, Skeleton } from "@/components/ui
 import { PageFrame } from "@/components/layout/PageLayout";
 import { analysisLifecycleLabel, relatedStrength, routingLabel, sourceKindLabel, ticketSignalRatings } from "@/lib/ticket-intelligence";
 import { persistedAnalysisErrorDetails } from "@/lib/analysis-errors";
+import {
+  formatOperationalTimestamp,
+  requesterEmail,
+  requesterName,
+  safeMailto,
+  ticketCreatedAt,
+  ticketLastCommunicationAt,
+} from "@/lib/ticket-display";
 
 export default function TicketDetailPage() {
   const params = useParams();
@@ -85,7 +93,8 @@ export default function TicketDetailPage() {
           <div className="flex flex-wrap items-center gap-x-2 gap-y-2 text-xs text-ink-400">
             <span className="font-mono font-semibold">#{ticket.external_id || ticket.id}</span>
             <span>· {sourceKindLabel(ticket)}</span>
-            <span>· Created {formatTimeAgo(ticket.created_at)}</span>
+            <time dateTime={ticketCreatedAt(ticket) || undefined} title={formatOperationalTimestamp(ticketCreatedAt(ticket))}>· Created {formatTimeAgo(ticketCreatedAt(ticket))}</time>
+            <time dateTime={ticketLastCommunicationAt(ticket) || undefined} title={formatOperationalTimestamp(ticketLastCommunicationAt(ticket))}>· Last contact {formatTimeAgo(ticketLastCommunicationAt(ticket))}</time>
             <span className={cn("badge ml-1", priorityColor(ticket.priority))}>
               {ticket.priority}
             </span>
@@ -129,6 +138,8 @@ export default function TicketDetailPage() {
 
 function FreshserviceSourcePanel({ ticket }: { ticket: Ticket }) {
   const sourceUrl = safeExternalUrl(ticket.external_url);
+  const email = requesterEmail(ticket);
+  const emailHref = safeMailto(email);
   return (
     <details className="rounded-2xl border border-linen-400 bg-linen-50 p-4 shadow-sm sm:p-5">
       <summary className="cursor-pointer list-none" aria-labelledby="source-record-title">
@@ -146,10 +157,14 @@ function FreshserviceSourcePanel({ ticket }: { ticket: Ticket }) {
       </summary>
       <div className="mt-4 border-t border-linen-300 pt-4">
         {sourceUrl && <div className="mb-4 flex justify-end"><a href={sourceUrl} target="_blank" rel="noopener noreferrer" className="inline-flex min-h-9 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-linen-400 bg-white px-3 text-xs font-semibold text-ink-700 hover:bg-linen-200">Open in Freshservice <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" /></a></div>}
-        <div className="grid gap-4 text-sm sm:grid-cols-3">
-          <InfoItem icon={<User className="h-3.5 w-3.5" />} label="Reporter"><span className="break-all">{ticket.reporter || "—"}</span></InfoItem>
+        <div className="grid gap-4 text-sm sm:grid-cols-2 lg:grid-cols-3">
+          <InfoItem icon={<User className="h-3.5 w-3.5" />} label="Requester">{requesterName(ticket)}</InfoItem>
+          <InfoItem icon={<Mail className="h-3.5 w-3.5" />} label="Email">{emailHref ? <a href={emailHref} className="break-all text-semantic-primary hover:underline">{email}</a> : <span className="text-ink-400">Not provided</span>}</InfoItem>
+          <InfoItem icon={<BriefcaseBusiness className="h-3.5 w-3.5" />} label="Title">{ticket.requester_title || <span className="text-ink-400">Not provided by Freshservice</span>}</InfoItem>
           <InfoItem icon={<Tag className="h-3.5 w-3.5" />} label="Source category">{ticket.category || "—"}</InfoItem>
           <InfoItem icon={<Flag className="h-3.5 w-3.5" />} label="Source status">{ticket.external_status || ticket.status}</InfoItem>
+          <InfoItem icon={<CalendarDays className="h-3.5 w-3.5" />} label="Created">{formatOperationalTimestamp(ticketCreatedAt(ticket))}</InfoItem>
+          <InfoItem icon={<Clock3 className="h-3.5 w-3.5" />} label="Last communication">{formatOperationalTimestamp(ticketLastCommunicationAt(ticket))}</InfoItem>
         </div>
       </div>
       <dl className="mt-4 grid divide-y divide-linen-300 overflow-hidden rounded-xl border border-linen-300 bg-linen-100 sm:grid-cols-3 sm:divide-x sm:divide-y-0">

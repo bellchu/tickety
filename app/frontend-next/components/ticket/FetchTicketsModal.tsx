@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
-import type { FetchTicketsResult } from "@/lib/types";
+import type { FetchOldTicketsResult } from "@/lib/types";
 import { Download, CheckCircle2 } from "lucide-react";
 import { Alert, Button, Dialog } from "@/components/ui";
 
@@ -14,12 +14,14 @@ interface Props {
 
 export function FetchTicketsModal({ open, onClose }: Props) {
   const queryClient = useQueryClient();
-  const [days, setDays] = useState(7);
+  const [preset, setPreset] = useState<"2_months" | "3_months" | "custom">("2_months");
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<FetchTicketsResult | null>(null);
+  const [result, setResult] = useState<FetchOldTicketsResult | null>(null);
 
   const mutation = useMutation({
-    mutationFn: () => api.fetchTickets(days),
+    mutationFn: () => api.fetchOldTickets({ preset, startDate, endDate }),
     onSuccess: (res) => {
       setResult(res.result);
       queryClient.invalidateQueries({ queryKey: ["tickets"] });
@@ -43,47 +45,50 @@ export function FetchTicketsModal({ open, onClose }: Props) {
     <Dialog
       open={open}
       onOpenChange={(next) => { if (!next) close(); }}
-      title="Fetch tickets from ITSM"
-      description="Prioritize recently updated source records without creating a provider traffic burst."
+      title="Fetch old tickets"
+      description="Queue an administrator-requested Freshservice range without changing the automatic 30-day sync window."
       dismissible={!mutation.isPending}
-      footer={result ? <Button onClick={close}>Done</Button> : <><Button variant="secondary" onClick={close} disabled={mutation.isPending}>Cancel</Button><Button onClick={() => mutation.mutate()} disabled={days < 1} pending={mutation.isPending} pendingLabel="Fetching…" leadingIcon={<Download className="h-4 w-4" />}>Fetch last {days} day{days > 1 ? "s" : ""}</Button></>}
+      footer={result ? <Button onClick={close}>Done</Button> : <><Button variant="secondary" onClick={close} disabled={mutation.isPending}>Cancel</Button><Button onClick={() => mutation.mutate()} disabled={preset === "custom" && (!startDate || !endDate)} pending={mutation.isPending} pendingLabel="Queueing…" leadingIcon={<Download className="h-4 w-4" />}>Queue old-ticket fetch</Button></>}
     >
         <div className="space-y-4">
           <p className="text-sm text-ink-500">
-            Move tickets updated in the last N days to the front of the sync queue.
-            This request imports one bounded batch; remaining pages continue in
-            the background under the provider&apos;s reported rate limit.
+            Only administrators can request older records. The worker checkpoints
+            each page and continues under Freshservice&apos;s reported rate limit.
           </p>
 
           <div>
-            <label className="block text-xs font-medium text-ink-600 mb-1.5">
-              Days to fetch
-            </label>
-            <input
-              type="number"
-              min={1}
-              max={365}
-              value={days}
-              onChange={(e) =>
-                setDays(Math.max(1, Math.min(365, Number(e.target.value) || 1)))
-              }
-              disabled={mutation.isPending}
-              className="input-base"
-            />
-            <div className="flex flex-wrap gap-1.5 mt-2">
-              {[1, 7, 30, 90].map((d) => (
+            <span className="block text-xs font-medium text-ink-600 mb-1.5">Range</span>
+            <div className="grid gap-2 sm:grid-cols-3">
+              {([
+                ["2_months", "Last 2 months"],
+                ["3_months", "Last 3 months"],
+                ["custom", "Custom dates"],
+              ] as const).map(([value, label]) => (
                 <button
-                  key={d}
+                  key={value}
                   type="button"
                   disabled={mutation.isPending}
-                  onClick={() => setDays(d)}
-                  className="px-2.5 py-1 rounded-md text-xs font-medium bg-linen-300 text-ink-600 hover:bg-linen-400 disabled:opacity-50 transition-colors"
+                  onClick={() => { setPreset(value); setError(null); }}
+                  className={`min-h-10 rounded-md border px-3 text-xs font-semibold transition-colors disabled:opacity-50 ${preset === value ? "border-semantic-primary bg-semantic-primary/10 text-semantic-primary" : "border-linen-400 bg-linen-100 text-ink-600 hover:bg-linen-200"}`}
                 >
-                  {d}d
+                  {label}
                 </button>
               ))}
             </div>
           </div>
+
+          {preset === "custom" && (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="text-xs font-medium text-ink-600">
+                Start date
+                <input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} disabled={mutation.isPending} className="input-base mt-1.5" />
+              </label>
+              <label className="text-xs font-medium text-ink-600">
+                End date
+                <input type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} disabled={mutation.isPending} className="input-base mt-1.5" />
+              </label>
+            </div>
+          )}
 
           {error && (
             <Alert variant="danger" title="Fetch failed">{error}</Alert>
@@ -92,33 +97,11 @@ export function FetchTicketsModal({ open, onClose }: Props) {
           {result && (
             <div className="rounded-lg bg-linen-200 border border-linen-400 p-3">
               <div className="flex items-center gap-1.5 text-ink-600 text-sm font-medium mb-2">
-                <CheckCircle2 className="w-4 h-4" /> {result.queued ? "Priority sync started" : "Fetch complete"}
+                <CheckCircle2 className="w-4 h-4" /> Old-ticket fetch queued
               </div>
-              <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-sm">
-                <span className="text-ink-600">Fetched from source</span>
-                <span className="text-right font-medium text-ink-700">
-                  {result.fetched}
-                </span>
-                <span className="text-ink-600">New</span>
-                <span className="text-right font-medium text-ink-600">
-                  {result.new}
-                </span>
-                <span className="text-ink-600">Updated</span>
-                <span className="text-right font-medium text-ink-600">
-                  {result.updated}
-                </span>
-                <span className="text-ink-600">Skipped</span>
-                <span className="text-right font-medium text-ink-500">
-                  {result.skipped}
-                </span>
-                {result.errors > 0 && (
-                  <>
-                    <span className="text-ink-600">Errors</span>
-                    <span className="text-right font-medium text-rust-500">
-                      {result.errors}
-                    </span>
-                  </>
-                )}
+              <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
+                <span className="text-ink-500">Start</span><span className="text-right font-medium text-ink-700">{result.start_date}</span>
+                <span className="text-ink-500">End</span><span className="text-right font-medium text-ink-700">{result.end_date}</span>
               </div>
             </div>
           )}

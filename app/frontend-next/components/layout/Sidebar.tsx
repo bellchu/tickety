@@ -6,7 +6,6 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { canAccessAdministration, canAccessProtectedIntelligence, isDemoContext } from "@/lib/auth";
 import { TicketyLogo } from "@/components/layout/TicketyLogo";
-import { SyncIndicator } from "@/components/layout/SyncIndicator";
 import { LoginLink } from "@/components/layout/LoginLink";
 import { LogoutButton } from "@/components/layout/LogoutButton";
 import { ProductIcon } from "@/components/icons/ProductIcon";
@@ -32,6 +31,7 @@ import {
   MessageSquareHeart,
   Clock3,
   ChevronRight,
+  Activity,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -155,12 +155,6 @@ export function Sidebar({
       </nav>
 
       <div className="relative z-10 space-y-1 border-t border-white/10 bg-[#021123] p-3">
-        {canAccessAdmin && (
-          <div className="px-3 py-1.5 text-slate-400 [&_*]:!text-slate-400">
-            <SyncIndicator enabled={canAccessAdmin} />
-          </div>
-        )}
-
         {showLogin && (
           <LoginLink
             onNavigate={onClose}
@@ -169,23 +163,41 @@ export function Sidebar({
         )}
 
         {(canAccessAdmin || isDemoWorkspace) && (
-          <Link
-            href="/settings"
-            onClick={onClose}
-            aria-current={pathname.startsWith("/settings") ? "page" : undefined}
-            className={cn(
-              "group flex min-h-10 items-center gap-3 rounded-md px-3 py-2 text-[13px] transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#803CE8]",
-              pathname.startsWith("/settings")
-                ? "bg-white/[0.10] font-semibold text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)]"
-                : "font-normal text-[#AEB8C5] hover:bg-white/[0.055] hover:text-white"
-            )}
-          >
-            <ProductIcon
-              icon={SettingsIcon}
-              active={pathname.startsWith("/settings")}
-            />
-            Settings{!canAccessAdmin && <span className="sr-only"> (sign in as a demo administrator to manage settings)</span>}
-          </Link>
+          <div role="group" aria-labelledby="nav-admin">
+            <div id="nav-admin" className="px-3 pb-1.5 font-mono text-[9px] font-medium uppercase tracking-[0.14em] text-slate-500">Admin</div>
+            <div className="space-y-1">
+              {canAccessAdmin && (
+                <Link
+                  href="/settings/status"
+                  onClick={onClose}
+                  aria-current={pathname.startsWith("/settings/status") ? "page" : undefined}
+                  className={cn(
+                    "group flex min-h-10 items-center gap-3 rounded-md px-3 py-2 text-[13px] transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#803CE8]",
+                    pathname.startsWith("/settings/status")
+                      ? "bg-white/[0.10] font-semibold text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)]"
+                      : "font-normal text-[#AEB8C5] hover:bg-white/[0.055] hover:text-white"
+                  )}
+                >
+                  <ProductIcon icon={Activity} active={pathname.startsWith("/settings/status")} />
+                  Status
+                </Link>
+              )}
+              <Link
+                href="/settings"
+                onClick={onClose}
+                aria-current={pathname === "/settings" ? "page" : undefined}
+                className={cn(
+                  "group flex min-h-10 items-center gap-3 rounded-md px-3 py-2 text-[13px] transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#803CE8]",
+                  pathname === "/settings"
+                    ? "bg-white/[0.10] font-semibold text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)]"
+                    : "font-normal text-[#AEB8C5] hover:bg-white/[0.055] hover:text-white"
+                )}
+              >
+                <ProductIcon icon={SettingsIcon} active={pathname === "/settings"} />
+                Settings{!canAccessAdmin && <span className="sr-only"> (sign in as a demo administrator to manage settings)</span>}
+              </Link>
+            </div>
+          </div>
         )}
 
         <div className="mt-2 border-t border-white/10 pt-3">

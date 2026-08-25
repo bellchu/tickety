@@ -3,6 +3,10 @@ export interface Ticket {
   subject: string;
   description: string;
   reporter: string;
+  requester_id: string | null;
+  requester_name: string | null;
+  requester_email: string | null;
+  requester_title: string | null;
   status: string;
   priority: string;
   sentiment: string | null;
@@ -27,8 +31,8 @@ export interface Ticket {
   ai_suggested_priority: string | null;
   ai_suggested_category: string | null;
   recommended_team: string;
-  recommended_team_basis: "ai_category" | "unrouted_review";
-  routing_status: "legacy_ai_category" | "unrouted_review";
+  recommended_team_basis: "ai_category" | "source_category" | "not_applicable" | "unrouted_review";
+  routing_status: "legacy_ai_category" | "source_category_suggestion" | "not_applicable" | "unrouted_review";
   routing_abstention_reason: "missing_ai_category" | "unsupported_ai_category" | "untrusted_ai_status" | null;
   routing_catalog_validated: boolean;
   ticket_type: string;
@@ -47,6 +51,7 @@ export interface Ticket {
   sla_paused_seconds: number;
   tags: string | null;
   external_source: string | null;
+  binding_id: string;
   external_id: string | null;
   external_url: string | null;
   external_status: string | null;
@@ -54,6 +59,8 @@ export interface Ticket {
   external_assignee_name: string | null;
   external_workspace_id: string | null;
   external_updated_at: string | null;
+  external_description_html: string | null;
+  external_conversation_updated_at: string | null;
   external_created_at: string | null;
   external_resolved_at: string | null;
   external_due_by: string | null;
@@ -63,6 +70,7 @@ export interface Ticket {
   points_awarded: number;
   created_at: string | null;
   updated_at: string | null;
+  last_communication_at: string | null;
   escalation_risk: number;
   summary: string | null;
   recommended_solution: string | null;
@@ -159,6 +167,7 @@ export interface SyncStatus {
   last_status: string;
   last_error: string | null;
   total_synced: number;
+  automatic_fetch_days: number;
   recent_since_at: string | null;
   recent_cycle_started_at: string | null;
   recent_page: number;
@@ -168,6 +177,9 @@ export interface SyncStatus {
   history_workspace_index: number;
   history_complete: boolean;
   history_processed: number;
+  history_since_at: string | null;
+  history_until_at: string | null;
+  history_requested_at: string | null;
   conversations_processed: number;
   run_started_at: string | null;
   run_finished_at: string | null;
@@ -183,6 +195,158 @@ export interface SyncStatus {
   recent_pages_per_sync: number;
   history_pages_per_sync: number;
   conversations_per_sync: number;
+  attachments_per_sync: number;
+  attachment_storage_configured: boolean;
+  attachment_pending: number;
+  attachment_stored: number;
+  attachment_errors: number;
+}
+
+export type AITaskView = "all" | "active" | "attention" | "completed" | "not_analyzed";
+
+export type AITaskLifecycle =
+  | "not_analyzed"
+  | "queued"
+  | "retry_scheduled"
+  | "running"
+  | "lease_expired"
+  | "completed"
+  | "partial"
+  | "stale"
+  | "failed"
+  | "dead_letter"
+  | "paused"
+  | "unknown";
+
+export interface AIAutomationFeatureStatus {
+  key: string;
+  label: string;
+  enabled: boolean;
+}
+
+export interface AIQueueStatusSummary {
+  total_tickets: number;
+  not_analyzed: number;
+  queued: number;
+  queued_ready: number;
+  retry_scheduled: number;
+  running: number;
+  running_active: number;
+  lease_expired: number;
+  completed: number;
+  partial: number;
+  stale: number;
+  failed: number;
+  dead_letter: number;
+  paused: number;
+  attention: number;
+  oldest_queued_at: string | null;
+}
+
+export interface AITaskStatusItem {
+  ticket_id: string;
+  subject: string;
+  ticket_status: string;
+  priority: string;
+  source: string;
+  external_id: string | null;
+  ai_status: string | null;
+  lifecycle: AITaskLifecycle;
+  requested_artifacts: string[];
+  attempts: number;
+  model: string | null;
+  synthetic: boolean;
+  started_at: string | null;
+  generated_at: string | null;
+  next_attempt_at: string | null;
+  lease_expires_at: string | null;
+  error_code: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface AILLMCallStatusItem {
+  id: number;
+  provider: string;
+  model: string;
+  task: string;
+  status: string;
+  attempts: number;
+  latency_ms: number;
+  total_tokens: number;
+  synthetic: boolean;
+  error_code: string | null;
+  created_at: string;
+}
+
+export interface AIStatusResponse {
+  generated_at: string;
+  automation: AIAutomationFeatureStatus[];
+  active_integration_bindings: number;
+  automatic_ai_bindings: number;
+  active_routing_backlog_enabled: boolean;
+  queue: AIQueueStatusSummary;
+  view: AITaskView;
+  search: string;
+  tasks: AITaskStatusItem[];
+  total_tasks: number;
+  limit: number;
+  offset: number;
+  recent_calls: AILLMCallStatusItem[];
+  calls_24h: {
+    calls: number;
+    successful: number;
+    failed_attempts: number;
+    total_tokens: number;
+    average_latency_ms: number;
+    last_call_at: string | null;
+  };
+}
+
+export interface ReadinessStatus {
+  status: "ready" | "not_ready";
+  checks: Record<string, "ok" | "unavailable">;
+}
+
+export interface TicketIntelligenceStatus {
+  vector_store_ready: boolean;
+  embedding_enabled: boolean;
+  embedding_model: string;
+  embedding_dimensions: number;
+  documents: number;
+  embedded_documents: number;
+  stale_documents: number;
+  legacy_ticket_documents: number;
+  missing_ticket_documents: number;
+  missing_comment_documents: number;
+  missing_kb_documents: number;
+  rag_v2: {
+    ready: boolean;
+    read_enabled: boolean;
+    write_enabled: boolean;
+    chunks: number;
+    queued: number;
+    running: number;
+    ready_chunks: number;
+    dead_letter: number;
+    indexing_errors: number;
+    stale_identity_chunks: number;
+    oldest_queue_age_seconds: number;
+  };
+}
+
+export type OperationalDiagnosticArea = "application" | "ai" | "sync" | "retrieval" | "oauth";
+
+export interface OperationalDiagnosticsResponse {
+  area: OperationalDiagnosticArea;
+  generated_at: string;
+  entries: Array<{
+    severity: "info" | "warning" | "error";
+    source: string;
+    message: string;
+    timestamp: string | null;
+  }>;
+  truncated: boolean;
 }
 
 export interface TriageResult {
@@ -257,6 +421,11 @@ export interface Settings {
   FRESHSERVICE_RECENT_PAGES_PER_SYNC: string;
   FRESHSERVICE_HISTORY_PAGES_PER_SYNC: string;
   FRESHSERVICE_CONVERSATIONS_PER_SYNC: string;
+  FRESHSERVICE_ATTACHMENTS_PER_SYNC: string;
+  ATTACHMENT_STORAGE_PROVIDER: string;
+  ATTACHMENT_MAX_BYTES: string;
+  AZURE_STORAGE_ACCOUNT_URL: string;
+  AZURE_STORAGE_CONTAINER: string;
   FRESHSERVICE_OAUTH_CLIENT_ID: string;
   FRESHSERVICE_OAUTH_CLIENT_SECRET: string;
   FRESHSERVICE_OAUTH_REDIRECT_URI: string;
@@ -488,15 +657,14 @@ export interface BuildInfo {
 }
 // ── Manual ticket fetch (by days) ─────────────────────────────
 
-export interface FetchTicketsResult {
-  new: number;
-  updated: number;
-  skipped: number;
-  errors: number;
-  fetched: number;
-  days: number;
-  overwrite: boolean;
-  queued?: boolean;
+export interface FetchOldTicketsResult {
+  queued: boolean;
+  preset: "2_months" | "3_months" | "custom";
+  start_at: string;
+  end_at: string;
+  requested_at: string;
+  start_date: string;
+  end_date: string;
 }
 
 // ── External ITSM user directory ─────────────────────────────
@@ -578,9 +746,31 @@ export interface TicketComment {
   ticket_id: string;
   author_id: string | null;
   author_name: string;
+  author_email: string | null;
+  author_title: string | null;
+  author_type: "agent" | "requester" | null;
   body: string;
   is_private: boolean;
   created_at: string;
+  external_source: string | null;
+  external_id: string | null;
+  external_author_id: string | null;
+  external_updated_at: string | null;
+}
+
+export interface TicketAttachment {
+  id: string;
+  ticket_id: string;
+  owner_type: "ticket" | "conversation";
+  owner_external_id: string;
+  external_id: string;
+  name: string;
+  content_type: string | null;
+  size: number | null;
+  stored_size: number | null;
+  status: string;
+  created_at: string;
+  stored_at: string | null;
 }
 
 export interface TicketCategory {

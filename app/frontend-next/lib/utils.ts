@@ -101,8 +101,16 @@ export function safeExternalUrl(value: string | null | undefined): string | null
 export function formatTimeAgo(dateStr: string | null): string {
   if (!dateStr) return "—";
   const date = new Date(dateStr);
+  if (Number.isNaN(date.getTime())) return "Date unavailable";
   const now = new Date();
   const seconds = Math.floor((now.getTime() - date.getTime()) / 1000);
+  if (seconds < -60) {
+    const futureMinutes = Math.ceil(Math.abs(seconds) / 60);
+    if (futureMinutes < 60) return `in ${futureMinutes}m`;
+    const futureHours = Math.ceil(futureMinutes / 60);
+    if (futureHours < 24) return `in ${futureHours}h`;
+    return `in ${Math.ceil(futureHours / 24)}d`;
+  }
   if (seconds < 60) return "just now";
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes}m ago`;

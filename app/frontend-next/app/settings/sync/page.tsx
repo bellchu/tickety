@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -9,9 +9,11 @@ import {
   ArrowLeft,
   Clock3,
   Database,
+  Download,
   Gauge,
   History,
   MessagesSquare,
+  Paperclip,
   RefreshCw,
   ShieldCheck,
 } from "lucide-react";
@@ -19,6 +21,8 @@ import { api, APIError } from "@/lib/api";
 import { canAccessAdministration } from "@/lib/auth";
 import { formatTimeAgo } from "@/lib/utils";
 import { Alert, Button, ErrorState, Skeleton } from "@/components/ui";
+import { DiagnosticReveal } from "@/components/admin/DiagnosticReveal";
+import { FetchTicketsModal } from "@/components/ticket/FetchTicketsModal";
 import {
   ContentSurface,
   PageFrame,
@@ -36,6 +40,11 @@ function formatDate(value: string | null) {
   return new Date(value).toLocaleString();
 }
 
+function formatInclusiveEnd(value: string | null) {
+  if (!value) return "Not set";
+  return new Date(new Date(value).getTime() - 1).toLocaleDateString();
+}
+
 function statusLabel(status: string) {
   if (status === "running") return "Sync running";
   if (status === "throttled") return "Provider pause";
@@ -48,6 +57,7 @@ function statusLabel(status: string) {
 export default function TicketSyncStatusPage() {
   const router = useRouter();
   const queryClient = useQueryClient();
+  const [oldTicketFetchOpen, setOldTicketFetchOpen] = useState(false);
   const authQuery = useQuery({
     queryKey: ["auth-me"],
     queryFn: api.getAuthMe,
@@ -71,7 +81,7 @@ export default function TicketSyncStatusPage() {
 
   const authError = isAuthError(authQuery.error) || isAuthError(statusQuery.error);
   useEffect(() => {
-    if (authError) router.replace("/login?next=/settings/sync");
+    if (authError) router.replace("/login?next=/settings/status/sync");
   }, [authError, router]);
 
   if (authQuery.isLoading || (canAccess && statusQuery.isLoading)) {
@@ -112,12 +122,12 @@ export default function TicketSyncStatusPage() {
         eyebrow="Settings · Ticketing"
         icon={<Activity className="h-5 w-5" />}
         title="Freshservice sync status"
-        description="Current tickets are synchronized first. Historical tickets and conversation threads drain through bounded background queues."
+        description="Automatic sync is restricted to tickets updated in the last 30 days. Older tickets enter a separate queue only after an administrator requests a range."
         meta={`Provider: ${status.provider} · checked ${formatTimeAgo(new Date().toISOString())}`}
         actions={(
           <div className="flex gap-2">
-            <Link href="/settings" className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-linen-500 bg-linen-50 px-4 text-sm font-semibold text-ink-700 shadow-sm hover:bg-linen-200">
-              <ArrowLeft className="h-4 w-4" /> Settings
+            <Link href="/settings/status" className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-linen-500 bg-linen-50 px-4 text-sm font-semibold text-ink-700 shadow-sm hover:bg-linen-200">
+              <ArrowLeft className="h-4 w-4" /> Status
             </Link>
             <Button
               variant="secondary"
@@ -127,6 +137,13 @@ export default function TicketSyncStatusPage() {
               leadingIcon={<RefreshCw className="h-4 w-4" />}
             >
               Refresh
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={() => setOldTicketFetchOpen(true)}
+              leadingIcon={<Download className="h-4 w-4" />}
+            >
+              Fetch old tickets
             </Button>
             <Button
               onClick={() => triggerMutation.mutate()}
@@ -150,6 +167,19 @@ export default function TicketSyncStatusPage() {
           The page checkpoint was retained, so the next run can retry without losing already imported tickets.
         </Alert>
       )}
+      {!status.attachment_storage_configured && status.attachment_pending > 0 && (
+        <Alert variant="warning" title="Attachment storage is waiting for configuration">
+          {status.attachment_pending.toLocaleString()} attachment copies are queued. Configure a private Azure Blob container in Advanced Freshservice Sync to begin copying them.
+        </Alert>
+      )}
+      {status.attachment_errors > 0 && (
+        <Alert variant="danger" title="Some attachment copies need attention">
+          {status.attachment_errors.toLocaleString()} attachment copies are in an error state. Ticket and conversation checkpoints continue independently.
+        </Alert>
+      )}
+      {(status.last_status === "error" || status.last_status === "throttled" || status.attachment_errors > 0) && (
+        <DiagnosticReveal area="sync" />
+      )}
       {triggerMutation.isError && (
         <Alert variant="danger" title="The sync could not be started">
           {triggerMutation.error instanceof Error ? triggerMutation.error.message : "Unknown request error"}
@@ -159,13 +189,13 @@ export default function TicketSyncStatusPage() {
       <SummaryStrip label="Ticket synchronization overview">
         <Metric label="Local tickets" value={status.local_ticket_count.toLocaleString()} detail={`${status.total_synced.toLocaleString()} source changes applied`} icon={<Database className="h-4 w-4" />} />
         <Metric label="Current lane" value={statusLabel(status.last_status)} detail={status.recent_completed_at ? `Completed ${formatTimeAgo(status.recent_completed_at)}` : `Page ${status.recent_page}`} icon={<Clock3 className="h-4 w-4" />} />
-        <Metric label="Historical queue" value={status.history_complete ? "Complete" : `${status.history_processed.toLocaleString()} scanned`} detail={status.history_complete ? "Full inventory checkpointed" : `Next page ${status.history_page}`} icon={<History className="h-4 w-4" />} />
+        <Metric label="Old-ticket request" value={!status.history_requested_at ? "Not requested" : status.history_complete ? "Complete" : `${status.history_processed.toLocaleString()} scanned`} detail={!status.history_requested_at ? "Administrator action required" : status.history_complete ? "Requested range checkpointed" : `Next page ${status.history_page}`} icon={<History className="h-4 w-4" />} />
         <Metric label="API budget" value={status.rate_limit_remaining == null ? "Awaiting headers" : `${status.rate_limit_remaining.toLocaleString()} left`} detail={status.rate_limit_total ? `${Math.round(remainingPercent ?? 0)}% of ${status.rate_limit_total.toLocaleString()} available` : "Reported by Freshservice"} icon={<Gauge className="h-4 w-4" />} />
       </SummaryStrip>
 
       <ContentSurface className="p-5 sm:p-6">
-        <SectionHeader title="Synchronization lanes" description="Each checkpoint is committed before another Freshservice page is requested." />
-        <div className="mt-5 grid gap-4 lg:grid-cols-3">
+        <SectionHeader title="Synchronization lanes" description="The automatic and administrator-requested cursors are isolated, and each checkpoint is committed before another Freshservice page is requested." />
+        <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           <LaneCard
             icon={<Clock3 className="h-5 w-5" />}
             title="Current and new tickets"
@@ -173,14 +203,16 @@ export default function TicketSyncStatusPage() {
             detail={status.recent_cycle_started_at
               ? `Updated since ${formatDate(status.recent_since_at)} · page ${status.recent_page}`
               : `Last completed ${formatDate(status.recent_completed_at)}`}
-            policy={`${status.recent_pages_per_sync} page${status.recent_pages_per_sync === 1 ? "" : "s"} admitted per run`}
+            policy={`Automatic ${status.automatic_fetch_days}-day window · ${status.recent_pages_per_sync} page${status.recent_pages_per_sync === 1 ? "" : "s"} per run`}
           />
           <LaneCard
             icon={<History className="h-5 w-5" />}
-            title="Historical tickets"
-            state={status.history_complete ? "Complete" : "Background import"}
-            detail={`${status.history_processed.toLocaleString()} records scanned · page ${status.history_page}`}
-            policy={`${status.history_pages_per_sync} ascending page${status.history_pages_per_sync === 1 ? "" : "s"} per run`}
+            title="Older tickets"
+            state={!status.history_requested_at ? "Admin only" : status.history_complete ? "Complete" : "Requested import"}
+            detail={!status.history_requested_at
+              ? "No older-ticket range is queued"
+              : `${formatDate(status.history_since_at)} to ${formatInclusiveEnd(status.history_until_at)} · ${status.history_processed.toLocaleString()} scanned`}
+            policy={`2 months, 3 months, or custom dates · ${status.history_pages_per_sync} page${status.history_pages_per_sync === 1 ? "" : "s"} per run`}
           />
           <LaneCard
             icon={<MessagesSquare className="h-5 w-5" />}
@@ -188,6 +220,13 @@ export default function TicketSyncStatusPage() {
             state="Newest first"
             detail={`${status.conversations_processed.toLocaleString()} ticket threads hydrated`}
             policy={`${status.conversations_per_sync} thread${status.conversations_per_sync === 1 ? "" : "s"} admitted per run`}
+          />
+          <LaneCard
+            icon={<Paperclip className="h-5 w-5" />}
+            title="Original attachments"
+            state={status.attachment_storage_configured ? "Private storage" : "Storage not configured"}
+            detail={`${status.attachment_stored.toLocaleString()} stored · ${status.attachment_pending.toLocaleString()} pending · ${status.attachment_errors.toLocaleString()} errors`}
+            policy={`${status.attachments_per_sync} attachment${status.attachments_per_sync === 1 ? "" : "s"} copied per run`}
           />
         </div>
       </ContentSurface>
@@ -218,6 +257,7 @@ export default function TicketSyncStatusPage() {
           </dl>
         </ContentSurface>
       </div>
+      <FetchTicketsModal open={oldTicketFetchOpen} onClose={() => setOldTicketFetchOpen(false)} />
     </PageFrame>
   );
 }

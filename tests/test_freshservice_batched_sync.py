@@ -33,7 +33,11 @@ class _BatchedFreshserviceAdapter:
         order_type,
         include_resources,
     ):
-        lane = "history" if since.year == 1970 else "recent"
+        lane = (
+            "history"
+            if since < datetime.utcnow() - timedelta(days=31)
+            else "recent"
+        )
         self.calls.append((lane, page, order_type, include_resources))
         tickets = self.historical if lane == "history" else self.recent
         return SimpleNamespace(
@@ -99,7 +103,7 @@ class FreshserviceBatchedSyncTests(unittest.TestCase):
         ):
             return sync.sync_tickets_from_external(adapter)
 
-    def test_recent_page_is_persisted_before_slow_history_and_hydrated_first(self):
+    def test_automatic_sync_never_opens_history_without_admin_request(self):
         recent = self._ticket("recent", self.now, self.now)
         historical = self._ticket(
             "historical",
@@ -112,10 +116,44 @@ class FreshserviceBatchedSyncTests(unittest.TestCase):
 
         self.assertEqual(result["errors"], 0)
         self.assertEqual(result["recent_pages"], 1)
+        self.assertEqual(result["history_pages"], 0)
+        self.assertEqual(adapter.calls, [("recent", 1, "asc", True)])
+        with self.session_factory() as db:
+            self.assertEqual(
+                {row.external_id for row in db.query(TicketRecord).all()},
+                {"recent"},
+            )
+            state = db.query(SyncStateRecord).one()
+            self.assertIsNone(state.history_requested_at)
+
+    def test_admin_requested_old_range_runs_after_recent_lane(self):
+        recent = self._ticket("recent", self.now, self.now)
+        historical = self._ticket(
+            "historical",
+            self.now - timedelta(days=500),
+            self.now - timedelta(days=400),
+        )
+        adapter = _BatchedFreshserviceAdapter([recent], [historical])
+        with self.session_factory() as db:
+            db.add(SyncStateRecord(
+                binding_id="legacy",
+                provider="freshservice",
+                history_since_at=self.now - timedelta(days=500),
+                history_until_at=self.now - timedelta(days=300),
+                history_requested_at=self.now,
+                history_requested_by="admin",
+                history_complete=False,
+            ))
+            db.commit()
+
+        result = self._run(adapter)
+
+        self.assertEqual(result["errors"], 0)
+        self.assertEqual(result["recent_pages"], 1)
         self.assertEqual(result["history_pages"], 1)
         self.assertEqual(adapter.calls, [
-            ("recent", 1, "asc", False),
-            ("history", 1, "asc", False),
+            ("recent", 1, "asc", True),
+            ("history", 1, "asc", True),
         ])
         self.assertEqual(adapter.conversation_calls, ["recent"])
         with self.session_factory() as db:
@@ -165,6 +203,33 @@ class FreshserviceBatchedSyncTests(unittest.TestCase):
 
         self.assertEqual(result["deferred"], 1)
         self.assertEqual(adapter.calls, [])
+
+    def test_old_ticket_range_requires_explicit_queue_and_cannot_be_replaced(self):
+        adapter = _BatchedFreshserviceAdapter([], [])
+        start_at = self.now - timedelta(days=90)
+        end_at = self.now - timedelta(days=30)
+        with patch.object(sync, "SessionLocal", self.session_factory):
+            result = sync.queue_old_ticket_fetch(
+                adapter,
+                start_at=start_at,
+                end_at=end_at,
+                requested_by="admin",
+            )
+            with self.assertRaisesRegex(ValueError, "already_queued"):
+                sync.queue_old_ticket_fetch(
+                    adapter,
+                    start_at=start_at,
+                    end_at=end_at,
+                    requested_by="admin",
+                )
+
+        self.assertTrue(result["queued"])
+        with self.session_factory() as db:
+            state = db.query(SyncStateRecord).one()
+            self.assertEqual(state.history_since_at, start_at)
+            self.assertEqual(state.history_until_at, end_at)
+            self.assertFalse(state.history_complete)
+            self.assertEqual(state.history_requested_by, "admin")
 
 
 if __name__ == "__main__":

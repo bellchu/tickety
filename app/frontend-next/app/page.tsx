@@ -37,7 +37,13 @@ import {
   selectDeterministicQueue,
 } from "@/lib/dashboard";
 import type { PrioritizedTicket, Ticket } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, formatTimeAgo } from "@/lib/utils";
+import {
+  requesterEmail,
+  requesterName,
+  ticketCreatedAt,
+  ticketLastCommunicationAt,
+} from "@/lib/ticket-display";
 
 const CLOSED_STATUSES = new Set(["canceled", "cancelled", "closed", "resolved", "completed"]);
 const EMPTY_TICKETS: Ticket[] = [];
@@ -70,10 +76,13 @@ function exportTickets(tickets: Ticket[]) {
     ["Status", (ticket) => ticket.status],
     ["Priority", (ticket) => ticket.priority],
     ["Reporter", (ticket) => ticket.reporter],
+    ["Requester name", (ticket) => requesterName(ticket)],
+    ["Requester email", (ticket) => requesterEmail(ticket)],
+    ["Requester title", (ticket) => ticket.requester_title],
     ["Assignee", (ticket) => ticket.assignee_name || ticket.external_assignee_name],
     ["Category", (ticket) => ticket.category],
-    ["Created", (ticket) => ticket.created_at],
-    ["Updated", (ticket) => ticket.updated_at],
+    ["Created", (ticket) => ticketCreatedAt(ticket)],
+    ["Last communication", (ticket) => ticketLastCommunicationAt(ticket)],
   ];
   const rows = [
     columns.map(([label]) => csvCell(label)).join(","),
@@ -483,7 +492,9 @@ export default function DashboardPage() {
                       </div>
                       <Link href={`/tickets/${ticket.id}`} className="mt-2.5 block break-words text-sm font-semibold leading-5 text-ink-700 [overflow-wrap:anywhere] hover:text-semantic-primary hover:underline">{ticket.subject}</Link>
                       <p className="mt-1 text-xs leading-5 text-ink-500">{ranked ? intelligenceQueueReason(ranked) : deterministicQueueReason(ticket)}</p>
-                      <p className="mt-2 flex min-w-0 items-center gap-1.5 text-xs text-ink-500"><UserRound className="h-3.5 w-3.5 shrink-0" aria-hidden="true" /><span className="truncate">{ticket.assignee_name || ticket.external_assignee_name || "Unassigned"}</span></p>
+                      <p className="mt-2 flex min-w-0 items-center gap-1.5 text-xs text-ink-500"><UserRound className="h-3.5 w-3.5 shrink-0" aria-hidden="true" /><span className="truncate">{requesterName(ticket)}{requesterEmail(ticket) ? ` · ${requesterEmail(ticket)}` : ""}</span></p>
+                      <p className="mt-1 text-[11px] text-ink-400">Created {formatTimeAgo(ticketCreatedAt(ticket))} · Last contact {formatTimeAgo(ticketLastCommunicationAt(ticket))}</p>
+                      <p className="mt-1 truncate text-[11px] text-ink-400">Owner: {ticket.assignee_name || ticket.external_assignee_name || "Unassigned"}</p>
                     </article>
                   );
                 })}
@@ -529,6 +540,8 @@ export default function DashboardPage() {
                               {index === 0 && <span className="shrink-0 font-mono text-[9px] font-medium uppercase tracking-[0.09em] text-semantic-primary">Recommended</span>}
                               <span className="truncate">{ranked ? intelligenceQueueReason(ranked) : deterministicQueueReason(ticket)}</span>
                             </p>
+                            <p className="mt-1 truncate text-[11px] text-ink-500">Requester: {requesterName(ticket)}{requesterEmail(ticket) ? ` · ${requesterEmail(ticket)}` : ""}</p>
+                            <p className="mt-0.5 text-[10px] text-ink-400">Created {formatTimeAgo(ticketCreatedAt(ticket))} · Last contact {formatTimeAgo(ticketLastCommunicationAt(ticket))}</p>
                           </td>
                           <td className="min-w-0 px-3 py-4"><span className="flex min-w-0 items-center gap-1.5 text-xs text-ink-500"><UserRound className="h-3.5 w-3.5 shrink-0" aria-hidden="true" /><span className="truncate">{ticket.assignee_name || ticket.external_assignee_name || "Unassigned"}</span></span></td>
                           <td className="px-3 py-4"><TicketStatusBadge status={ticket.status} /></td>

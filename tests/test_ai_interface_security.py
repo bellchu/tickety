@@ -1012,7 +1012,7 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
         with (
             patch.object(main, "_reserve_ai_request") as reserve,
             patch.object(main, "sync_tickets_from_external", return_value={}),
-            patch.object(main, "fetch_tickets_by_days", return_value={}),
+            patch.object(main, "queue_old_ticket_fetch", return_value={}),
             patch.object(main, "async_sync_external_users", new=AsyncMock(return_value={})),
             patch.object(main, "get_adapter", return_value=adapter),
             patch("app.backend.integrations.registry.get_adapter", return_value=adapter),
@@ -1021,7 +1021,7 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
         ):
             requests = (
                 ("/admin/sync/trigger", "itsm_sync"),
-                ("/admin/sync/fetch", "itsm_fetch"),
+                ("/admin/sync/fetch", "itsm_fetch_old"),
                 ("/oauth/refresh", "itsm_oauth_refresh"),
                 ("/admin/sync/triage-all", "triage_all"),
                 ("/admin/sync/repair", "repair_ai_gaps"),
@@ -1067,6 +1067,49 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
         with self.session_factory() as db:
             self.assertEqual(db.query(UserRecord).count(), before)
 
+    def test_old_ticket_fetch_is_admin_only_and_custom_dates_are_validated(self):
+        headers = {"Origin": "https://tickety.example"}
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-agent-session")
+        with (
+            patch.object(main, "queue_old_ticket_fetch") as queue,
+            patch.object(main, "_reserve_ai_request") as reserve,
+        ):
+            forbidden = self.client.post(
+                "/admin/sync/fetch?preset=2_months", headers=headers
+            )
+        self.assertEqual(forbidden.status_code, 403, forbidden.text)
+        queue.assert_not_called()
+        reserve.assert_not_called()
+
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
+        with patch.object(main, "queue_old_ticket_fetch") as queue:
+            invalid = self.client.post(
+                "/admin/sync/fetch?preset=custom&start_date=2026-08-20",
+                headers=headers,
+            )
+        self.assertEqual(invalid.status_code, 422, invalid.text)
+        queue.assert_not_called()
+
+        queued = {
+            "queued": True,
+            "start_at": "2026-06-01T00:00:00",
+            "end_at": "2026-07-01T00:00:00",
+            "requested_at": "2026-08-25T00:00:00",
+        }
+        with (
+            patch.object(main, "queue_old_ticket_fetch", return_value=queued) as queue,
+            patch.object(main, "_reserve_ai_request"),
+            patch.object(main, "_sync_adapter_for_binding", return_value=(MagicMock(), "legacy")),
+        ):
+            custom = self.client.post(
+                "/admin/sync/fetch?preset=custom&start_date=2026-06-01&end_date=2026-06-30",
+                headers=headers,
+            )
+        self.assertEqual(custom.status_code, 200, custom.text)
+        self.assertEqual(custom.json()["status"], "queued")
+        self.assertEqual(custom.json()["result"]["preset"], "custom")
+        queue.assert_called_once()
+
     def test_external_directory_api_returns_provider_profile_not_tickety_role(self):
         with self.session_factory() as db:
             db.add(ExternalUserRecord(
@@ -1094,41 +1137,55 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
         self.assertNotIn("password_hash", external_user)
 
     def test_maintenance_batches_are_bounded_and_never_revive_dead_letters(self):
+        now = datetime.utcnow().replace(microsecond=0)
         with self.session_factory() as db:
             db.add_all([
                 TicketRecord(
                     id="triage-first",
                     subject="First triage candidate",
-                    created_at=datetime(2000, 1, 1),
+                    created_at=now - timedelta(days=2),
                 ),
                 TicketRecord(
                     id="triage-second",
                     subject="Second triage candidate",
-                    created_at=datetime(2001, 1, 1),
+                    created_at=now - timedelta(days=1),
+                ),
+                TicketRecord(
+                    id="triage-old",
+                    subject="Old triage candidate",
+                    created_at=now - timedelta(days=40),
                 ),
                 TicketRecord(
                     id="triage-dead",
                     subject="Dead triage candidate",
-                    created_at=datetime(1999, 1, 1),
+                    created_at=now - timedelta(days=1),
                     ai_status="dead_letter",
                     ai_attempts=7,
                 ),
                 TicketRecord(
                     id="repair-first",
                     subject="First repair candidate",
-                    updated_at=datetime(2000, 1, 1),
+                    created_at=now - timedelta(days=1),
+                    updated_at=now - timedelta(days=2),
                     ai_reasoning="current triage",
                 ),
                 TicketRecord(
                     id="repair-second",
                     subject="Second repair candidate",
-                    updated_at=datetime(2001, 1, 1),
+                    created_at=now - timedelta(days=2),
+                    updated_at=now - timedelta(days=1),
+                    ai_reasoning="current triage",
+                ),
+                TicketRecord(
+                    id="repair-old",
+                    subject="Old repair candidate",
+                    created_at=now - timedelta(days=40),
                     ai_reasoning="current triage",
                 ),
                 TicketRecord(
                     id="repair-dead",
                     subject="Dead repair candidate",
-                    updated_at=datetime(1999, 1, 1),
+                    created_at=now - timedelta(days=1),
                     ai_reasoning="current triage",
                     ai_status="dead_letter",
                     ai_attempts=9,
@@ -1139,29 +1196,60 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
         self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
         with patch.object(main, "_reserve_ai_request"):
             triage = self.client.post(
-                "/admin/sync/triage-all?limit=1",
+                "/admin/sync/triage-all?limit=1&window_unit=days&window_value=7",
                 headers={"Origin": "https://tickety.example"},
             )
             repair = self.client.post(
-                "/admin/sync/repair?limit=1",
+                "/admin/sync/repair?limit=1&window_unit=days&window_value=7",
                 headers={"Origin": "https://tickety.example"},
             )
 
         self.assertEqual(triage.status_code, 200, triage.text)
         self.assertEqual(triage.json()["queued"], 1)
+        self.assertEqual(triage.json()["window_days"], 7)
         self.assertEqual(repair.status_code, 200, repair.text)
         self.assertEqual(repair.json()["queued"], 1)
         with self.session_factory() as db:
             self.assertEqual(db.get(TicketRecord, "triage-first").ai_status, "queued")
             self.assertIsNone(db.get(TicketRecord, "triage-second").ai_status)
+            self.assertIsNone(db.get(TicketRecord, "triage-old").ai_status)
             triage_dead = db.get(TicketRecord, "triage-dead")
             self.assertEqual(triage_dead.ai_status, "dead_letter")
             self.assertEqual(triage_dead.ai_attempts, 7)
             self.assertEqual(db.get(TicketRecord, "repair-first").ai_status, "queued")
             self.assertIsNone(db.get(TicketRecord, "repair-second").ai_status)
+            self.assertIsNone(db.get(TicketRecord, "repair-old").ai_status)
             repair_dead = db.get(TicketRecord, "repair-dead")
             self.assertEqual(repair_dead.ai_status, "dead_letter")
             self.assertEqual(repair_dead.ai_attempts, 9)
+
+    def test_maintenance_window_options_are_strictly_bounded(self):
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
+        headers = {"Origin": "https://tickety.example"}
+        with patch.object(main, "_reserve_ai_request"):
+            valid = self.client.post(
+                "/admin/sync/triage-all?window_unit=weeks&window_value=4",
+                headers=headers,
+            )
+            invalid = (
+                self.client.post(
+                    "/admin/sync/triage-all?window_unit=days&window_value=8",
+                    headers=headers,
+                ),
+                self.client.post(
+                    "/admin/sync/repair?window_unit=weeks&window_value=5",
+                    headers=headers,
+                ),
+                self.client.post(
+                    "/admin/sync/repair?window_unit=months&window_value=1",
+                    headers=headers,
+                ),
+            )
+
+        self.assertEqual(valid.status_code, 200, valid.text)
+        self.assertEqual(valid.json()["window_days"], 28)
+        for response in invalid:
+            self.assertEqual(response.status_code, 422, response.text)
 
     def test_quota_failure_prevents_model_catalog_dispatch(self):
         self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")

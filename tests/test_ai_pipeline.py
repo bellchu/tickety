@@ -37,6 +37,7 @@ from app.backend.llm_manager import (
     LLMInvalidInputError,
     LLMInvalidOutputError,
     LLMManager,
+    LLMProviderRejectedError,
     LLMUnavailableError,
     resolve_provider,
 )
@@ -367,6 +368,48 @@ class LLMContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["priority"], "P3")
         self.assertEqual(provider.await_count, 2)
         self.assertAlmostEqual(sleep.await_args_list[-1].args[0], 2.5)
+
+    async def test_exhausted_429_becomes_capacity_deferral(self):
+        rate_limited = RuntimeError("rate limited")
+        rate_limited.status_code = 429
+        rate_limited.response = SimpleNamespace(status_code=429, headers={})
+        with (
+            patch.dict(os.environ, {
+                "APP_MODE": "production",
+                "DEFAULT_MODEL": "custom/test-model",
+                "CUSTOM_API_KEY": "configured-key",
+            }, clear=False),
+            patch.object(
+                llm_module,
+                "acompletion",
+                new=AsyncMock(side_effect=rate_limited),
+            ),
+            patch.object(llm_module, "_MAX_RETRIES", 1),
+        ):
+            with self.assertRaises(LLMCapacityError) as raised:
+                await LLMManager().analyze(
+                    "ticket", response_model=TriageAnalysis
+                )
+        self.assertGreaterEqual(raised.exception.retry_after_seconds, 60)
+
+    async def test_non_retryable_provider_4xx_is_classified_without_replay(self):
+        rejected = RuntimeError("request rejected")
+        rejected.status_code = 400
+        rejected.response = SimpleNamespace(status_code=400, headers={})
+        provider = AsyncMock(side_effect=rejected)
+        with (
+            patch.dict(os.environ, {
+                "APP_MODE": "production",
+                "DEFAULT_MODEL": "custom/test-model",
+                "CUSTOM_API_KEY": "configured-key",
+            }, clear=False),
+            patch.object(llm_module, "acompletion", new=provider),
+        ):
+            with self.assertRaises(LLMProviderRejectedError):
+                await LLMManager().analyze(
+                    "ticket", response_model=TriageAnalysis
+                )
+        provider.assert_awaited_once()
 
 
 class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
@@ -1002,6 +1045,43 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         ):
             sync_worker._auto_triage_job()
         self.assertEqual(process.await_count, 3)
+
+    def test_worker_batch_survives_orm_detach_after_each_ai_commit(self):
+        with self.session_factory() as db:
+            for index in range(3):
+                db.add(TicketRecord(
+                    id=f"detach-{index}",
+                    subject=f"Detach {index}",
+                    ai_status="queued",
+                    ai_requested_artifacts="triage",
+                ))
+            db.commit()
+
+        processed_ids = []
+
+        async def detach_after_processing(ticket, db, **_kwargs):
+            processed_ids.append(ticket.id)
+            db.expunge_all()
+
+        process = AsyncMock(side_effect=detach_after_processing)
+        with (
+            patch.dict(
+                os.environ,
+                {"AI_BACKGROUND_TICKETS_PER_SWEEP": "3"},
+                clear=False,
+            ),
+            patch.object(sync_worker, "SessionLocal", self.session_factory),
+            patch.object(
+                sync_worker.settings_module,
+                "automation_enabled",
+                return_value=False,
+            ),
+            patch.object(main, "_auto_process", new=process),
+        ):
+            sync_worker._auto_triage_job()
+
+        self.assertEqual(process.await_count, 3)
+        self.assertEqual(processed_ids, ["detach-0", "detach-1", "detach-2"])
 
     def test_demo_worker_recovers_durable_queued_analysis_when_automation_is_off(self):
         """An admin-approved durable queue must not depend on demo automation."""

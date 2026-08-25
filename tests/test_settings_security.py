@@ -508,6 +508,8 @@ class SettingsSecurityTests(unittest.TestCase):
                 "APP_MODE": "production",
                 "TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED": "false",
                 "SSO_PROVIDER": "entra",
+                "FOUNDRY_API_BASE": "",
+                "CUSTOM_API_BASE": "",
             }, clear=False),
             patch.object(settings, "_read_db_overrides", return_value={
                 "SSO_PROVIDER": "okta",

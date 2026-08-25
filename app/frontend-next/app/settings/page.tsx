@@ -46,6 +46,7 @@ const SSO_PORTAL_KEYS = new Set([
 ]);
 
 type FreshserviceAuthMode = "api" | "oauth";
+type MaintenanceWindowUnit = "days" | "weeks";
 const FRESHSERVICE_DEFAULT_SCOPES = "freshservice.tickets.view freshservice.tickets.conversations.view freshservice.agents.manage freshservice.requesters.view";
 
 function normalizeDomain(value: string) {
@@ -114,16 +115,13 @@ export default function SettingsPage() {
   const { data, isLoading, error: settingsError } = settingsQuery;
   const { data: catalog, error: catalogError } = catalogQuery;
   const { data: version } = useQuery({ queryKey: ["version"], queryFn: api.getVersion, staleTime: Infinity });
-  const { data: syncStatus } = useQuery({
-    queryKey: ["sync-status"],
-    queryFn: api.getSyncStatus,
-    refetchInterval: 30000,
-    enabled: canAccessSettings,
-  });
-
   const [form, setForm] = useState<Partial<SettingsType>>({});
   const [saved, setSaved] = useState(false);
   const [freshserviceAuthMode, setFreshserviceAuthMode] = useState<FreshserviceAuthMode>("api");
+  const [repairWindowUnit, setRepairWindowUnit] = useState<MaintenanceWindowUnit>("days");
+  const [repairWindowValue, setRepairWindowValue] = useState(7);
+  const [triageWindowUnit, setTriageWindowUnit] = useState<MaintenanceWindowUnit>("days");
+  const [triageWindowValue, setTriageWindowValue] = useState(7);
   const appMode = ((form.APP_MODE || data?.APP_MODE) as string) || "demo";
   const productionOperationalSettingsReadOnly = false;
   const productionSecuritySettingsReadOnly = false;
@@ -181,12 +179,12 @@ export default function SettingsPage() {
   });
 
   const repairMut = useMutation({
-    mutationFn: () => postMaintenanceAction("/api/admin/sync/repair"),
+    mutationFn: () => postMaintenanceAction(`/api/admin/sync/repair?window_unit=${repairWindowUnit}&window_value=${repairWindowValue}`),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["tickets"] }); },
   });
 
   const triageAllMut = useMutation({
-    mutationFn: () => postMaintenanceAction("/api/admin/sync/triage-all"),
+    mutationFn: () => postMaintenanceAction(`/api/admin/sync/triage-all?window_unit=${triageWindowUnit}&window_value=${triageWindowValue}`),
   });
 
   const handleChange = (key: keyof SettingsType, value: string) => {
@@ -359,6 +357,7 @@ export default function SettingsPage() {
 
       <nav aria-label="Settings sections" className="sticky top-20 z-20 -mx-1 flex gap-1 overflow-x-auto rounded-xl border border-linen-400 bg-linen-50/95 p-1 shadow-sm backdrop-blur">
         {[
+          ["settings-status", "Status"],
           ["settings-ai", "AI"],
           ["settings-ticketing", "Ticketing & integrations"],
           ["settings-workspace", "Workspace"],
@@ -368,6 +367,27 @@ export default function SettingsPage() {
       </nav>
 
       <form onSubmit={handleSubmit} className="space-y-8">
+        {/* ═══ Consolidated Admin Status ═══ */}
+        <SettingsSection id="settings-status" title="Status" subtitle="All operational checks are consolidated in one read-only admin view">
+          <Link href="/settings/status" className="group flex items-center justify-between gap-4 rounded-xl border border-linen-400 bg-linen-100 p-4 transition-colors hover:border-clay-400 hover:bg-clay-50">
+            <span className="flex min-w-0 items-start gap-3">
+              <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[var(--color-info-soft)] text-semantic-info"><Activity className="h-5 w-5" /></span>
+              <span className="min-w-0">
+                <span className="block text-sm font-semibold text-ink-700">Open Admin Status</span>
+                <span className="mt-1 block text-xs leading-5 text-ink-500">Check application readiness, AI tasks, ticket synchronization, search indexing, and integration connectivity. Warning and error cards can reveal their stored diagnostic logs.</span>
+                <span className="mt-3 flex flex-wrap gap-2 text-[11px] font-medium text-ink-400">
+                  <span className="rounded-full bg-linen-300 px-2 py-1">Application</span>
+                  <span className="rounded-full bg-linen-300 px-2 py-1">AI</span>
+                  <span className="rounded-full bg-linen-300 px-2 py-1">Ticket sync</span>
+                  <span className="rounded-full bg-linen-300 px-2 py-1">Search</span>
+                  <span className="rounded-full bg-linen-300 px-2 py-1">Integrations</span>
+                </span>
+              </span>
+            </span>
+            <span className="shrink-0 text-xs font-semibold text-semantic-primary group-hover:underline">Open status →</span>
+          </Link>
+        </SettingsSection>
+
         {/* ═══ LLM Configuration ═══ */}
         <SettingsSection id="settings-ai" title="LLM Configuration" subtitle="Use Microsoft Foundry or one simplified custom OpenAI-compatible API">
           <Field label="Provider">
@@ -561,24 +581,35 @@ export default function SettingsPage() {
                   <Field label="Current pages per sync" ready={Boolean(form.FRESHSERVICE_RECENT_PAGES_PER_SYNC?.trim())}>
                     <input type="number" min={1} max={10} value={form.FRESHSERVICE_RECENT_PAGES_PER_SYNC || ""} onChange={(e) => handleChange("FRESHSERVICE_RECENT_PAGES_PER_SYNC", e.target.value)} placeholder="2" className="input-base" />
                   </Field>
-                  <Field label="Historical pages per sync" ready={Boolean(form.FRESHSERVICE_HISTORY_PAGES_PER_SYNC?.trim())}>
-                    <input type="number" min={0} max={5} value={form.FRESHSERVICE_HISTORY_PAGES_PER_SYNC || ""} onChange={(e) => handleChange("FRESHSERVICE_HISTORY_PAGES_PER_SYNC", e.target.value)} placeholder="1" className="input-base" />
+                  <Field label="Admin old-ticket pages per sync" ready={Boolean(form.FRESHSERVICE_HISTORY_PAGES_PER_SYNC?.trim())}>
+                    <input type="number" min={1} max={5} value={form.FRESHSERVICE_HISTORY_PAGES_PER_SYNC || ""} onChange={(e) => handleChange("FRESHSERVICE_HISTORY_PAGES_PER_SYNC", e.target.value)} placeholder="1" className="input-base" />
                   </Field>
                   <Field label="Conversation threads per sync" ready={Boolean(form.FRESHSERVICE_CONVERSATIONS_PER_SYNC?.trim())}>
                     <input type="number" min={0} max={5} value={form.FRESHSERVICE_CONVERSATIONS_PER_SYNC || ""} onChange={(e) => handleChange("FRESHSERVICE_CONVERSATIONS_PER_SYNC", e.target.value)} placeholder="1" className="input-base" />
                   </Field>
+                  <Field label="Attachments per sync" ready={Boolean(form.FRESHSERVICE_ATTACHMENTS_PER_SYNC?.trim())}>
+                    <input type="number" min={0} max={20} value={form.FRESHSERVICE_ATTACHMENTS_PER_SYNC || ""} onChange={(e) => handleChange("FRESHSERVICE_ATTACHMENTS_PER_SYNC", e.target.value)} placeholder="2" className="input-base" />
+                  </Field>
+                  <Field label="Attachment storage" ready={form.ATTACHMENT_STORAGE_PROVIDER === "azure_blob"}>
+                    <select value={form.ATTACHMENT_STORAGE_PROVIDER || ""} onChange={(e) => handleChange("ATTACHMENT_STORAGE_PROVIDER", e.target.value)} className="input-base">
+                      <option value="">Disabled until storage is ready</option>
+                      <option value="azure_blob">Azure Blob Storage</option>
+                    </select>
+                  </Field>
+                  <Field label="Azure Blob account URL" ready={Boolean(form.AZURE_STORAGE_ACCOUNT_URL?.trim())}>
+                    <input type="url" value={form.AZURE_STORAGE_ACCOUNT_URL || ""} onChange={(e) => handleChange("AZURE_STORAGE_ACCOUNT_URL", e.target.value)} placeholder="https://account.blob.core.windows.net" className="input-base" />
+                  </Field>
+                  <Field label="Private container" ready={Boolean(form.AZURE_STORAGE_CONTAINER?.trim())}>
+                    <input type="text" value={form.AZURE_STORAGE_CONTAINER || ""} onChange={(e) => handleChange("AZURE_STORAGE_CONTAINER", e.target.value.toLowerCase())} placeholder="tickety-attachments" className="input-base" />
+                  </Field>
+                  <Field label="Maximum attachment bytes" ready={Boolean(form.ATTACHMENT_MAX_BYTES?.trim())}>
+                    <input type="number" min={1048576} max={104857600} value={form.ATTACHMENT_MAX_BYTES || ""} onChange={(e) => handleChange("ATTACHMENT_MAX_BYTES", e.target.value)} placeholder="52428800" className="input-base" />
+                  </Field>
                 </div>
-                <p className="mt-3 text-xs leading-5 text-ink-400">Discovery excludes embedded resources to conserve Freshservice API credits. Current tickets always run before the ascending historical queue.</p>
+                <p className="mt-3 text-xs leading-5 text-ink-400">Discovery excludes embedded resources to conserve Freshservice API credits. Full content and attachment metadata are hydrated in the bounded conversation lane. Azure access uses the worker identity or deployment-managed service-principal credentials; the container must remain private.</p>
               </AdvancedPanel>
             </ConnectionPanel>
 
-            <Link href="/settings/sync" className="group flex items-center justify-between gap-4 rounded-xl border border-linen-400 bg-linen-100 p-4 transition-colors hover:border-clay-400 hover:bg-clay-50">
-              <span>
-                <span className="flex items-center gap-2 text-sm font-semibold text-ink-700"><Activity className="h-4 w-4 text-semantic-primary" /> Ticket sync status</span>
-                <span className="mt-1 block text-xs leading-5 text-ink-500">Inspect current, historical, conversation, and provider rate-limit queues.</span>
-              </span>
-              <span className="shrink-0 text-xs font-semibold text-clay-600 group-hover:text-clay-700">Open status →</span>
-            </Link>
             </>
           )}
 
@@ -624,7 +655,7 @@ export default function SettingsPage() {
         </SettingsSection>
 
         {/* ═══ AI Automation Toggles ═══ */}
-        <SettingsSection title="AI Automation" subtitle="Toggle which ambient AI agents run automatically on incoming tickets">
+        <SettingsSection id="settings-automation" title="AI Automation" subtitle="Toggle which ambient AI agents run automatically on incoming tickets">
           <div className="space-y-2">
             {[
               { key: "AUTO_TRIAGE_ENABLED", label: "Auto-Triage", desc: "Sentiment, category, priority, mood, complexity analysis on every new ticket" },
@@ -815,29 +846,34 @@ export default function SettingsPage() {
         <NotificationSection />
 
         {/* ═══ System Maintenance ═══ */}
-        <SettingsSection id="settings-system" title="System Maintenance" subtitle="Run AI pipeline sweeps and repair data gaps across all tickets">
+        <SettingsSection id="settings-system" title="System Maintenance" subtitle="Run bounded AI maintenance only for tickets created inside the selected recent window">
           <div className="space-y-3">
             <MaintenanceButton
               label="Repair AI Gaps"
-              description="Fill missing summaries and resolution plans for tickets that have triage data but incomplete AI pipeline."
+              description="Queue missing summaries and resolution plans only for tickets created inside the selected recent window."
               icon={Zap}
               mutation={repairMut}
               loadingText="Repairing…"
-              resultFormatter={(r: any) => `Filled ${r.summaries_filled ?? 0} summaries, ${r.resolutions_filled ?? 0} resolutions`}
+              windowUnit={repairWindowUnit}
+              windowValue={repairWindowValue}
+              onWindowUnitChange={(unit) => { setRepairWindowUnit(unit); setRepairWindowValue((value) => Math.min(value, unit === "days" ? 7 : 4)); }}
+              onWindowValueChange={setRepairWindowValue}
+              resultFormatter={(r: any) => `Queued ${r.queued ?? 0} ticket${r.queued === 1 ? "" : "s"} from the selected ${r.window_days ?? 0}-day window`}
             />
             <MaintenanceButton
               label="Triage All Untriaged"
-              description="Run AI triage on every ticket that hasn't been analyzed yet."
+              description="Queue untriaged tickets only when they were created inside the selected recent window."
               icon={Activity}
               mutation={triageAllMut}
               loadingText="Triaging…"
-              resultFormatter={(r: any) => `Found ${r.found ?? 0} untriaged, processed ${r.processed ?? 0}`}
+              windowUnit={triageWindowUnit}
+              windowValue={triageWindowValue}
+              onWindowUnitChange={(unit) => { setTriageWindowUnit(unit); setTriageWindowValue((value) => Math.min(value, unit === "days" ? 7 : 4)); }}
+              onWindowValueChange={setTriageWindowValue}
+              resultFormatter={(r: any) => `Found ${r.found ?? 0} and queued ${r.queued ?? 0} within the selected ${r.window_days ?? 0}-day window`}
             />
           </div>
         </SettingsSection>
-
-        {/* ═══ System Info ═══ */}
-        <SystemInfoSection version={version} syncStatus={syncStatus} />
 
         {/* ═══ Save Bar ═══ */}
         {(isDirty || saved || mutation.isError) && <div className="sticky bottom-4 z-30 flex flex-col gap-3 rounded-xl border border-linen-400 bg-linen-50/95 px-4 py-3 shadow-[var(--shadow-raised)] backdrop-blur sm:flex-row sm:items-center sm:justify-between">
@@ -1134,12 +1170,16 @@ function SecretInput({ value, onChange, placeholder, disabled = false }: { value
 
 // ═══ Maintenance Button ══════════════════════════════════════
 
-function MaintenanceButton({ label, description, icon: Icon, mutation, loadingText, resultFormatter }: {
+function MaintenanceButton({ label, description, icon: Icon, mutation, loadingText, windowUnit, windowValue, onWindowUnitChange, onWindowValueChange, resultFormatter }: {
   label: string; description: string; icon: React.ComponentType<{ className?: string }>;
-  mutation: any; loadingText: string; resultFormatter: (r: any) => string;
+  mutation: any; loadingText: string; windowUnit: MaintenanceWindowUnit; windowValue: number;
+  onWindowUnitChange: (unit: MaintenanceWindowUnit) => void;
+  onWindowValueChange: (value: number) => void;
+  resultFormatter: (r: any) => string;
 }) {
+  const maximum = windowUnit === "days" ? 7 : 4;
   return (
-    <div className="flex items-center justify-between rounded border border-linen-400 p-3">
+    <div className="flex flex-col gap-3 rounded border border-linen-400 p-3 sm:flex-row sm:items-center sm:justify-between">
       <div className="min-w-0 flex-1">
         <p className="text-sm font-medium text-ink-600 flex items-center gap-2"><Icon className="w-3.5 h-3.5 text-ink-400" /> {label}</p>
         <p className="text-xs text-ink-500 mt-0.5">{description}</p>
@@ -1150,10 +1190,23 @@ function MaintenanceButton({ label, description, icon: Icon, mutation, loadingTe
           <p className="text-xs text-rust-500 mt-1.5">Failed: {mutation.error instanceof Error ? mutation.error.message : "Unknown error"}</p>
         )}
       </div>
-      <button type="button" onClick={() => mutation.mutate()} disabled={mutation.isPending} className="shrink-0 ml-3 inline-flex items-center gap-1.5 px-3 py-1.5 rounded border border-linen-400 text-xs font-medium text-ink-600 hover:bg-linen-200 disabled:opacity-50">
-        {mutation.isPending ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Icon className="w-3 h-3" />}
-        {mutation.isPending ? loadingText : "Run"}
-      </button>
+      <div className="flex shrink-0 flex-wrap items-end gap-2 sm:ml-3 sm:justify-end">
+        <label className="text-[11px] font-medium text-ink-500">Unit
+          <select value={windowUnit} onChange={(event) => onWindowUnitChange(event.target.value as MaintenanceWindowUnit)} disabled={mutation.isPending} className="input-base mt-1 min-h-9 w-24 py-1 text-xs">
+            <option value="days">Days</option>
+            <option value="weeks">Weeks</option>
+          </select>
+        </label>
+        <label className="text-[11px] font-medium text-ink-500">Window
+          <select value={windowValue} onChange={(event) => onWindowValueChange(Number(event.target.value))} disabled={mutation.isPending} className="input-base mt-1 min-h-9 w-20 py-1 text-xs">
+            {Array.from({ length: maximum }, (_, index) => index + 1).map((value) => <option key={value} value={value}>{value}</option>)}
+          </select>
+        </label>
+        <button type="button" onClick={() => mutation.mutate()} disabled={mutation.isPending} className="inline-flex min-h-9 items-center gap-1.5 rounded border border-linen-400 px-3 py-1.5 text-xs font-medium text-ink-600 hover:bg-linen-200 disabled:opacity-50">
+          {mutation.isPending ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Icon className="w-3 h-3" />}
+          {mutation.isPending ? loadingText : "Run"}
+        </button>
+      </div>
     </div>
   );
 }
@@ -1227,24 +1280,6 @@ function CategorySection() {
           )}
         </div>
       )}
-    </SettingsSection>
-  );
-}
-
-// ═══ System Info Section ═════════════════════════════════════
-
-function SystemInfoSection({ version, syncStatus }: { version?: BuildInfo; syncStatus?: any }) {
-  return (
-    <SettingsSection title="System Information" subtitle="Build version, sync status, and runtime details">
-      <div className="grid grid-cols-2 gap-4">
-        <InfoTile label="Version" value={version?.version || "—"} />
-        <InfoTile label="Build SHA" value={version?.build_sha || "—"} mono />
-        <InfoTile label="Build Time" value={version?.build_time || "—"} mono />
-        <InfoTile label="Sync Status" value={syncStatus?.last_status || "idle"} />
-        {syncStatus?.last_synced_at && <InfoTile label="Last Sync" value={syncStatus.last_synced_at} />}
-        {syncStatus?.total_synced !== undefined && <InfoTile label="Total Synced" value={String(syncStatus.total_synced)} />}
-        {syncStatus?.provider && <InfoTile label="Provider" value={syncStatus.provider} />}
-      </div>
     </SettingsSection>
   );
 }

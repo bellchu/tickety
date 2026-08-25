@@ -7,12 +7,13 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional
 
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from ..database import (
     AIArtifactRecord,
     ExternalActivityRecord,
+    ExternalAttachmentRecord,
     ExternalConversationRecord,
     ExternalTicketContextRecord,
     ExternalUserRecord,
@@ -21,7 +22,13 @@ from ..database import (
     TicketCommentRecord,
     TicketRecord,
 )
-from ..schema import ExternalConversation, ExternalTicket, WebhookEvent
+from ..schema import ExternalAttachment, ExternalConversation, ExternalTicket, WebhookEvent
+from ..attachment_storage import (
+    AzureBlobAttachmentStore,
+    attachment_max_bytes,
+    attachment_storage_configured,
+    safe_blob_name,
+)
 # Kept as a module attribute for compatibility with integrations/tests that
 # patch it. External persistence never promotes un-indexed provider text into
 # shared RAG: only tickets that already have evidence documents are refreshed
@@ -64,6 +71,51 @@ def _queue_analysis(ticket: TicketRecord, artifacts: set[str]) -> None:
 
 
 AUTOMATIC_AI_LOOKBACK_DAYS = 7
+AUTOMATIC_FETCH_DAYS = 30
+
+
+def active_routing_backlog_enabled() -> bool:
+    """Whether this deployment explicitly admits older active tickets.
+
+    The realtime cutover remains the default safety boundary. A deployment
+    must opt in before the worker can classify the pre-existing open backlog.
+    """
+    return (os.getenv("AI_ACTIVE_ROUTING_BACKLOG_ENABLED") or "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def ticket_created_within_filter(cutoff: datetime):
+    """Return the authoritative creation-time predicate for bounded AI work.
+
+    Freshservice creation time wins whenever it is present. Tickety's local
+    creation time is only a fallback for records whose provider creation time
+    is unavailable; otherwise importing an old provider ticket today would
+    incorrectly make it eligible for automatic analysis.
+    """
+    return or_(
+        TicketRecord.external_created_at >= cutoff,
+        and_(
+            TicketRecord.external_created_at.is_(None),
+            TicketRecord.created_at >= cutoff,
+        ),
+    )
+
+
+def _ticket_created_within_automatic_window(
+    ticket: TicketRecord,
+    *,
+    now: Optional[datetime] = None,
+) -> bool:
+    current = _utc_naive(now) or datetime.utcnow()
+    created_at = _utc_naive(ticket.external_created_at)
+    if created_at is None:
+        created_at = _utc_naive(ticket.created_at)
+    return bool(
+        created_at is not None
+        and created_at >= current - timedelta(days=AUTOMATIC_AI_LOOKBACK_DAYS)
+        and created_at <= current
+    )
 
 
 def _missing_automatic_artifacts(
@@ -86,14 +138,39 @@ def _missing_automatic_artifacts(
     }
     missing: set[str] = set()
     if "triage" in generated and (stale or not ticket.ai_reasoning):
-        missing.add("triage")
-    if "summary" in generated and (stale or not ticket.summary):
-        missing.add("summary")
-    if "resolution" in generated and (stale or not ticket.recommended_solution):
-        missing.add("resolution")
+        missing = {"triage"}
+    elif "summary" in generated and (stale or not ticket.summary):
+        missing = {"summary"}
+    elif "resolution" in generated and (stale or not ticket.recommended_solution):
+        missing = {"resolution"}
     if missing and "route" in enabled:
         missing.add("route")
     return missing
+
+
+def _staged_automatic_artifacts(
+    ticket: TicketRecord,
+    eligible: set[str],
+) -> set[str]:
+    """Admit one provider-backed stage at a time to avoid traffic bursts."""
+    enabled = _enabled_analysis_artifacts()
+    requested = eligible & enabled
+    if not requested:
+        return set()
+    stale = (ticket.ai_status or "").strip().lower() in {
+        "stale", "legacy_stale", "provenance_unknown",
+    }
+    if "triage" in requested and (stale or not ticket.ai_reasoning):
+        stage = {"triage"}
+    elif "summary" in requested and (stale or not ticket.summary):
+        stage = {"summary"}
+    elif "resolution" in requested and (stale or not ticket.recommended_solution):
+        stage = {"resolution"}
+    else:
+        return set()
+    if "route" in requested:
+        stage.add("route")
+    return stage
 
 
 def queue_recent_automatic_ai(
@@ -142,12 +219,7 @@ def queue_recent_automatic_ai(
         tickets = db.query(TicketRecord).filter(
             TicketRecord.binding_id == state.binding_id,
             TicketRecord.external_source == state.provider,
-            or_(
-                TicketRecord.external_created_at >= cutoff,
-                TicketRecord.external_updated_at >= cutoff,
-                TicketRecord.external_conversation_updated_at >= cutoff,
-                TicketRecord.created_at >= cutoff,
-            ),
+            ticket_created_within_filter(cutoff),
             or_(
                 TicketRecord.ai_status.is_(None),
                 TicketRecord.ai_status.notin_(unavailable_statuses),
@@ -164,6 +236,70 @@ def queue_recent_automatic_ai(
                 continue
             _queue_analysis(ticket, artifacts)
             result["queued"] += 1
+            remaining -= 1
+            if remaining <= 0:
+                break
+
+    if result["queued"]:
+        db.commit()
+    return result
+
+
+def queue_active_routing_backlog(
+    db: Session,
+    *,
+    batch_size: int = 5,
+) -> dict[str, int | bool]:
+    """Queue triage-only work for active external tickets outside lookback.
+
+    This bounded repair lane is disabled unless the deployment explicitly
+    opts in. It requires both automatic triage and routing, only considers
+    active tickets under an enabled binding, and never queues summaries or
+    resolution plans. Repeated sweeps are idempotent.
+    """
+    enabled = _enabled_analysis_artifacts()
+    result: dict[str, int | bool] = {
+        "enabled": active_routing_backlog_enabled(),
+        "queued": 0,
+    }
+    if not result["enabled"] or not {"triage", "route"}.issubset(enabled):
+        return result
+
+    limit = max(1, min(int(batch_size), 25))
+    states = db.query(SyncStateRecord).filter(
+        SyncStateRecord.automatic_ai_enabled.is_(True),
+        SyncStateRecord.automatic_ai_generation.isnot(None),
+    ).order_by(SyncStateRecord.id.asc()).all()
+    remaining = limit
+    unavailable_statuses = ("queued", "running", "failed", "dead_letter", "paused")
+    stale_statuses = ("stale", "legacy_stale", "provenance_unknown")
+
+    for state in states:
+        if remaining <= 0:
+            break
+        tickets = db.query(TicketRecord).filter(
+            TicketRecord.binding_id == state.binding_id,
+            TicketRecord.external_source == state.provider,
+            or_(
+                TicketRecord.status.is_(None),
+                func.lower(TicketRecord.status).notin_(("closed", "resolved", "cancelled")),
+            ),
+            or_(
+                TicketRecord.ai_status.is_(None),
+                TicketRecord.ai_status.notin_(unavailable_statuses),
+            ),
+            or_(
+                TicketRecord.ai_reasoning.is_(None),
+                TicketRecord.ai_status.in_(stale_statuses),
+            ),
+        ).order_by(
+            TicketRecord.external_updated_at.desc().nullslast(),
+            TicketRecord.updated_at.desc().nullslast(),
+            TicketRecord.id.asc(),
+        ).limit(remaining).all()
+        for ticket in tickets:
+            _queue_analysis(ticket, {"triage", "route"})
+            result["queued"] = int(result["queued"]) + 1
             remaining -= 1
             if remaining <= 0:
                 break
@@ -217,7 +353,9 @@ def _normalize_external_ticket(ext: ExternalTicket) -> ExternalTicket:
         "external_status_code",
         "ticket_type",
         "requester_id",
+        "requester_name",
         "requester_email",
+        "requester_title",
         "external_workspace_id",
     )
     updates = {
@@ -237,7 +375,68 @@ def _normalize_external_ticket(ext: ExternalTicket) -> ExternalTicket:
     for field in optional_fields:
         value = getattr(ext, field)
         updates[field] = _normalize_text(value) if value is not None else None
+    if ext.description_html is not None:
+        updates["description_html"] = _normalize_text(ext.description_html)
     return ext.model_copy(update=updates)
+
+
+def _upsert_embedded_external_user(
+    db: Session,
+    *,
+    binding_id: str,
+    provider: str,
+    external_id: Optional[str],
+    user_type: str,
+    name: Optional[str],
+    email: Optional[str],
+    title: Optional[str] = None,
+) -> None:
+    """Cache identity already authorized in a ticket/conversation envelope.
+
+    Freshservice can allow ticket reads while denying account-wide directory
+    endpoints. Keeping the embedded projection makes identity enrichment
+    reliable without broadening provider permissions.
+    """
+    external_id = _normalize_text(external_id).strip() if external_id else ""
+    name = _normalize_text(name).strip() if name else ""
+    email = _normalize_text(email).strip().lower() if email else ""
+    title = _normalize_text(title).strip() if title else ""
+    if not external_id or user_type not in {"agent", "requester"}:
+        return
+    record = db.query(ExternalUserRecord).filter(
+        ExternalUserRecord.binding_id == binding_id,
+        ExternalUserRecord.provider == provider,
+        ExternalUserRecord.user_type == user_type,
+        ExternalUserRecord.external_id == external_id,
+    ).first()
+    now = datetime.utcnow()
+    if record is None:
+        record = ExternalUserRecord(
+            id=str(uuid.uuid4()),
+            binding_id=binding_id,
+            provider=provider,
+            external_id=external_id,
+            user_type=user_type,
+            name=name or email or f"{provider.title()} {user_type}",
+            email=email or None,
+            title=title or None,
+            active=True,
+            profile_json='{"source":"embedded_ticket_projection"}',
+            fetched_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(record)
+        return
+    if name:
+        record.name = name
+    if email:
+        record.email = email
+    if title:
+        record.title = title
+    record.active = True
+    record.fetched_at = now
+    record.updated_at = now
 
 
 def _automatic_eligibility(
@@ -364,6 +563,9 @@ def _record_activity(
     elif not artifacts and reason == "at_or_after_cutover":
         eligible = False
         reason = "no_public_ai_effect"
+    elif eligible and not _ticket_created_within_automatic_window(ticket):
+        eligible = False
+        reason = "ticket_created_before_lookback"
     db.add(ExternalActivityRecord(
         binding_id=ticket.binding_id,
         provider=ticket.external_source or "",
@@ -458,9 +660,11 @@ def _project_ticket_context(
 
 def _conversation_revision_hash(conversation: ExternalConversation) -> str:
     body = _normalize_text(conversation.body)
+    body_html = _normalize_text(conversation.body_html)
     return _canonical_hash({
         "id": conversation.external_id,
         "body_hash": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        "body_html_hash": hashlib.sha256(body_html.encode("utf-8")).hexdigest(),
         "private": conversation.is_private,
         "incoming": conversation.incoming,
         "source": conversation.source,
@@ -631,10 +835,46 @@ def _project_conversations(
         body = _normalize_text(conversation.body)
         body_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
         row = existing_by_id.get(conversation.external_id)
+        author_type = "requester" if conversation.incoming else "agent"
+        author_name = conversation.author_name
+        author_email = conversation.author_email
+        if conversation.incoming and (
+            not conversation.author_id
+            or conversation.author_id == ticket.external_requester_id
+        ):
+            author_name = ticket.external_requester_name or author_name
+            author_email = ticket.external_requester_email or author_email
+        author_name = (
+            (author_name or "").strip()
+            or (author_email or "").strip()
+            or f"{provider.title()} {author_type}"
+        )
+        author_email = (author_email or "").strip().lower() or None
+        _upsert_embedded_external_user(
+            db,
+            binding_id=ticket.binding_id,
+            provider=provider,
+            external_id=conversation.author_id,
+            user_type=author_type,
+            name=author_name,
+            email=author_email,
+        )
         prior_public = bool(row and not row.deleted and not row.is_private)
         current_public = not conversation.is_private
         changed = row is None or row.revision_hash != revision_hash or row.deleted
+        comment = db.query(TicketCommentRecord).filter(
+            TicketCommentRecord.ticket_id == ticket.id,
+            TicketCommentRecord.external_source == provider,
+            TicketCommentRecord.external_id == conversation.external_id,
+        ).first()
         if not changed:
+            row.author_name = author_name
+            row.author_email = author_email
+            row.received_at = datetime.utcnow()
+            row.updated_at = datetime.utcnow()
+            if comment is not None:
+                comment.author_name = author_name
+                comment.author_email = author_email
             continue
         artifacts = (
             {"triage", "summary", "route", "resolution"}
@@ -664,11 +904,17 @@ def _project_conversations(
                 required_transcript_ids.add(conversation.external_id)
         values = {
             "body": body,
+            "body_html": (
+                _normalize_text(conversation.body_html)
+                if conversation.body_html is not None else None
+            ),
             "body_hash": body_hash,
             "is_private": conversation.is_private,
             "incoming": conversation.incoming,
             "source": conversation.source,
             "author_external_id": conversation.author_id,
+            "author_name": author_name,
+            "author_email": author_email,
             "provider_created_at": _utc_naive(conversation.created_at),
             "provider_updated_at": _utc_naive(conversation.updated_at),
             "deleted": False,
@@ -697,11 +943,6 @@ def _project_conversations(
             for key, value in values.items():
                 setattr(row, key, value)
 
-        comment = db.query(TicketCommentRecord).filter(
-            TicketCommentRecord.ticket_id == ticket.id,
-            TicketCommentRecord.external_source == provider,
-            TicketCommentRecord.external_id == conversation.external_id,
-        ).first()
         if comment is None:
             comment = TicketCommentRecord(
                 ticket_id=ticket.id,
@@ -710,10 +951,8 @@ def _project_conversations(
                 external_id=conversation.external_id,
             )
             db.add(comment)
-        comment.author_name = (
-            f"{provider.title()} user {conversation.author_id}"
-            if conversation.author_id else provider.title()
-        )
+        comment.author_name = author_name
+        comment.author_email = author_email
         comment.body = body
         comment.is_private = conversation.is_private
         comment.created_at = _utc_naive(conversation.created_at) or datetime.utcnow()
@@ -941,6 +1180,7 @@ def _upsert_ticket(
         changed = (
             existing.subject != ext.subject
             or existing.description != ext.description
+            or existing.external_description_html != ext.description_html
             or existing.reporter != ext.reporter
             or existing.priority != ext.priority
             or existing.external_priority_code != ext.external_priority_code
@@ -948,6 +1188,10 @@ def _upsert_ticket(
             or source_status_changed
             or existing.external_status_code != ext.external_status_code
             or existing.external_assignee_id != ext.assignee_id
+            or existing.external_requester_id != ext.requester_id
+            or existing.external_requester_name != ext.requester_name
+            or existing.external_requester_email != ext.requester_email
+            or existing.external_requester_title != ext.requester_title
             or existing.external_group_id != ext.external_group_id
             or existing.external_category != ext.external_category
             or existing.external_subcategory != ext.external_subcategory
@@ -967,6 +1211,7 @@ def _upsert_ticket(
             return "skipped", existing
         existing.subject = ext.subject
         existing.description = ext.description
+        existing.external_description_html = ext.description_html
         if analysis_input_changed:
             invalidate_ticket_ai(existing)
         if resolution_input_changed:
@@ -981,6 +1226,10 @@ def _upsert_ticket(
         )
         existing.external_status = external_status
         existing.external_assignee_id = ext.assignee_id
+        existing.external_requester_id = ext.requester_id
+        existing.external_requester_name = ext.requester_name
+        existing.external_requester_email = ext.requester_email
+        existing.external_requester_title = ext.requester_title
         existing.external_group_id = ext.external_group_id
         existing.external_category = ext.external_category
         existing.external_subcategory = ext.external_subcategory
@@ -1018,6 +1267,7 @@ def _upsert_ticket(
         id=str(uuid.uuid4()),
         subject=ext.subject,
         description=ext.description,
+        external_description_html=ext.description_html,
         reporter=ext.reporter,
         status=workflow_status,
         workflow_status=workflow_status,
@@ -1036,6 +1286,10 @@ def _upsert_ticket(
         external_ticket_type_raw=ext.ticket_type,
         external_source_context_hash=_canonical_hash(_source_context_payload(ext)),
         external_assignee_id=ext.assignee_id,
+        external_requester_id=ext.requester_id,
+        external_requester_name=ext.requester_name,
+        external_requester_email=ext.requester_email,
+        external_requester_title=ext.requester_title,
         external_group_id=ext.external_group_id,
         external_category=ext.external_category,
         external_subcategory=ext.external_subcategory,
@@ -1101,6 +1355,16 @@ def _apply_external_ticket(
 
     eligible_artifacts: set[str] = set()
     if provider.strip().lower() == "freshservice":
+        _upsert_embedded_external_user(
+            db,
+            binding_id=binding_id,
+            provider=provider,
+            external_id=ext.requester_id,
+            user_type="requester",
+            name=ext.requester_name,
+            email=ext.requester_email,
+            title=ext.requester_title,
+        )
         _project_ticket_context(db, ticket, ext, provider)
         if before is None or overwrite:
             activity_at = ext.created_at if before is None else ext.updated_at
@@ -1124,7 +1388,7 @@ def _apply_external_ticket(
                 conversations=ext.conversations,
                 confirmed_absent_ids=confirmed_absent,
             ))
-        requested = eligible_artifacts & _enabled_analysis_artifacts()
+        requested = _staged_automatic_artifacts(ticket, eligible_artifacts)
         if requested:
             _queue_analysis(ticket, requested)
     db.commit()
@@ -1173,10 +1437,13 @@ def freshservice_sync_limits() -> dict[str, int]:
             "FRESHSERVICE_RECENT_PAGES_PER_SYNC", 2, 1, 10
         ),
         "history_pages": _bounded_sync_setting(
-            "FRESHSERVICE_HISTORY_PAGES_PER_SYNC", 1, 0, 5
+            "FRESHSERVICE_HISTORY_PAGES_PER_SYNC", 1, 1, 5
         ),
         "conversations": _bounded_sync_setting(
             "FRESHSERVICE_CONVERSATIONS_PER_SYNC", 1, 0, 5
+        ),
+        "attachments": _bounded_sync_setting(
+            "FRESHSERVICE_ATTACHMENTS_PER_SYNC", 2, 0, 20
         ),
         "lease_seconds": _bounded_sync_setting(
             "FRESHSERVICE_SYNC_LEASE_SECONDS", 900, 120, 3600
@@ -1315,10 +1582,32 @@ def _hydrate_freshservice_conversations(
 ) -> tuple[int, int, SyncStateRecord]:
     if limit <= 0:
         return 0, 0, state
+    automatic_cutoff = datetime.utcnow() - timedelta(days=AUTOMATIC_FETCH_DAYS)
+    hydration_scope = or_(
+        TicketRecord.external_updated_at >= automatic_cutoff,
+        and_(
+            TicketRecord.external_updated_at.is_(None),
+            ticket_created_within_filter(automatic_cutoff),
+        ),
+    )
+    if state.history_since_at and state.history_until_at:
+        history_activity = func.coalesce(
+            TicketRecord.external_updated_at,
+            TicketRecord.external_created_at,
+            TicketRecord.created_at,
+        )
+        hydration_scope = or_(
+            hydration_scope,
+            and_(
+                history_activity >= state.history_since_at,
+                history_activity < state.history_until_at,
+            ),
+        )
     candidates = db.query(TicketRecord).filter(
         TicketRecord.binding_id == binding_id,
         TicketRecord.external_source == adapter.provider_name,
         TicketRecord.external_id.isnot(None),
+        hydration_scope,
         or_(
             TicketRecord.external_conversations_synced_at.is_(None),
             and_(
@@ -1336,9 +1625,40 @@ def _hydrate_freshservice_conversations(
     errors = 0
     for ticket in candidates:
         try:
+            detail = (
+                asyncio.run(adapter.fetch_ticket_details(ticket.external_id))
+                if hasattr(adapter, "fetch_ticket_details") else None
+            )
             conversations = asyncio.run(
                 adapter.fetch_ticket_conversations(ticket.external_id)
             )
+            if detail is not None:
+                normalized_detail = _normalize_external_ticket(detail)
+                ticket.description = normalized_detail.description
+                ticket.external_description_html = normalized_detail.description_html
+                ticket.external_requester_id = normalized_detail.requester_id
+                ticket.external_requester_name = normalized_detail.requester_name
+                ticket.external_requester_email = normalized_detail.requester_email
+                ticket.external_requester_title = normalized_detail.requester_title
+                if normalized_detail.requester_email:
+                    ticket.reporter = normalized_detail.requester_email
+                _upsert_embedded_external_user(
+                    db,
+                    binding_id=binding_id,
+                    provider=adapter.provider_name,
+                    external_id=normalized_detail.requester_id,
+                    user_type="requester",
+                    name=normalized_detail.requester_name,
+                    email=normalized_detail.requester_email,
+                    title=normalized_detail.requester_title,
+                )
+                _upsert_attachment_metadata(
+                    db,
+                    ticket=ticket,
+                    owner_type="ticket",
+                    owner_external_id=ticket.external_id or "",
+                    attachments=normalized_detail.attachments,
+                )
             artifacts = _project_conversations(
                 db,
                 state=state,
@@ -1348,7 +1668,15 @@ def _hydrate_freshservice_conversations(
                 # not sufficient evidence to tombstone an absent provider row.
                 confirmed_absent_ids=set(),
             )
-            requested = artifacts & _enabled_analysis_artifacts()
+            for conversation in conversations:
+                _upsert_attachment_metadata(
+                    db,
+                    ticket=ticket,
+                    owner_type="conversation",
+                    owner_external_id=conversation.external_id,
+                    attachments=conversation.attachments,
+                )
+            requested = _staged_automatic_artifacts(ticket, artifacts)
             if requested:
                 _queue_analysis(ticket, requested)
             ticket.external_conversations_synced_at = datetime.utcnow()
@@ -1373,6 +1701,154 @@ def _hydrate_freshservice_conversations(
     return hydrated, errors, state
 
 
+def _upsert_attachment_metadata(
+    db: Session,
+    *,
+    ticket: TicketRecord,
+    owner_type: str,
+    owner_external_id: str,
+    attachments: list[ExternalAttachment],
+) -> None:
+    provider = ticket.external_source or ""
+    storage_ready = attachment_storage_configured()
+    for attachment in attachments:
+        row = db.query(ExternalAttachmentRecord).filter(
+            ExternalAttachmentRecord.binding_id == ticket.binding_id,
+            ExternalAttachmentRecord.provider == provider,
+            ExternalAttachmentRecord.provider_ticket_id == (ticket.external_id or ""),
+            ExternalAttachmentRecord.owner_type == owner_type,
+            ExternalAttachmentRecord.owner_external_id == owner_external_id,
+            ExternalAttachmentRecord.external_id == attachment.external_id,
+        ).first()
+        blob_key = safe_blob_name(
+            binding_id=ticket.binding_id,
+            provider_ticket_id=ticket.external_id or "unknown",
+            owner_type=owner_type,
+            owner_external_id=owner_external_id,
+            external_id=attachment.external_id,
+            file_name=attachment.name,
+        )
+        if row is None:
+            row = ExternalAttachmentRecord(
+                id=str(uuid.uuid4()),
+                binding_id=ticket.binding_id,
+                provider=provider,
+                ticket_id=ticket.id,
+                provider_ticket_id=ticket.external_id or "",
+                owner_type=owner_type,
+                owner_external_id=owner_external_id,
+                external_id=attachment.external_id,
+                file_name=attachment.name,
+                content_type=attachment.content_type,
+                declared_size=attachment.size,
+                source_url=attachment.download_url,
+                blob_key=blob_key,
+                storage_status="pending" if storage_ready else "waiting_storage",
+                attempts=0,
+            )
+            db.add(row)
+            continue
+        row.ticket_id = ticket.id
+        row.provider_ticket_id = ticket.external_id or ""
+        row.file_name = attachment.name
+        row.content_type = attachment.content_type
+        row.declared_size = attachment.size
+        row.blob_key = row.blob_key or blob_key
+        row.updated_at = datetime.utcnow()
+        if row.storage_status != "stored":
+            url_changed = row.source_url != attachment.download_url
+            row.source_url = attachment.download_url
+            if storage_ready and (row.storage_status == "waiting_storage" or url_changed):
+                row.storage_status = "pending"
+                row.attempts = 0
+                row.last_error = None
+
+
+def _sync_freshservice_attachment_backlog(
+    db: Session,
+    *,
+    adapter,
+    binding_id: str,
+    limit: int,
+) -> tuple[int, int]:
+    if limit <= 0 or not attachment_storage_configured():
+        return 0, 0
+    store = AzureBlobAttachmentStore()
+    max_bytes = attachment_max_bytes()
+    rows = db.query(ExternalAttachmentRecord).filter(
+        ExternalAttachmentRecord.binding_id == binding_id,
+        ExternalAttachmentRecord.provider == adapter.provider_name,
+        ExternalAttachmentRecord.storage_status.in_((
+            "pending", "waiting_storage", "error",
+        )),
+        ExternalAttachmentRecord.attempts < 5,
+    ).order_by(
+        ExternalAttachmentRecord.created_at.asc(),
+        ExternalAttachmentRecord.id.asc(),
+    ).limit(limit).all()
+    stored = 0
+    errors = 0
+    for row in rows:
+        row.last_attempted_at = datetime.utcnow()
+        row.attempts = int(row.attempts or 0) + 1
+        stage = "validate"
+        try:
+            if not row.source_url or not row.blob_key:
+                raise ValueError("attachment_source_unavailable")
+            if row.declared_size is not None and row.declared_size > max_bytes:
+                raise ValueError("attachment_too_large")
+            stage = "download"
+            content = asyncio.run(
+                adapter.download_attachment(row.source_url, max_bytes)
+            )
+            stage = "validate"
+            if row.declared_size is not None and len(content) != row.declared_size:
+                raise ValueError("attachment_size_mismatch")
+            stage = "upload"
+            store.upload(row.blob_key, content, row.content_type)
+            row.content_sha256 = hashlib.sha256(content).hexdigest()
+            row.stored_size = len(content)
+            row.storage_status = "stored"
+            row.stored_at = datetime.utcnow()
+            row.last_error = None
+            # Provider attachment URLs may be signed or otherwise sensitive.
+            # They are needed only until the private copy is durable.
+            row.source_url = None
+            stored += 1
+        except Exception as exc:
+            if hasattr(exc, "retry_after"):
+                raise
+            status_code = getattr(exc, "status_code", None)
+            error_code = getattr(exc, "error_code", None)
+            if hasattr(error_code, "value"):
+                error_code = error_code.value
+            detail_parts = [
+                "attachment_copy_failed",
+                stage,
+                type(exc).__name__,
+            ]
+            if status_code is not None:
+                detail_parts.append(f"http_{status_code}")
+            if error_code:
+                safe_error_code = "".join(
+                    char for char in str(error_code)
+                    if char.isalnum() or char in ("_", "-")
+                )[:80]
+                if safe_error_code:
+                    detail_parts.append(safe_error_code)
+            error_detail = ":".join(detail_parts)[:255]
+            row.storage_status = "error"
+            row.last_error = error_detail
+            errors += 1
+            print(
+                "[sync] Freshservice attachment copy failed "
+                f"detail={error_detail}"
+            )
+        row.updated_at = datetime.utcnow()
+        db.commit()
+    return stored, errors
+
+
 def _sync_freshservice_tickets(adapter, *, binding_id: str) -> dict:
     """Synchronize Freshservice in small durable batches, newest work first."""
     from .freshservice import FreshserviceRateLimited
@@ -1386,6 +1862,8 @@ def _sync_freshservice_tickets(adapter, *, binding_id: str) -> dict:
         "recent_pages": 0,
         "history_pages": 0,
         "conversations": 0,
+        "attachments": 0,
+        "attachment_errors": 0,
         "deferred": 0,
         "throttled": 0,
     }
@@ -1410,8 +1888,12 @@ def _sync_freshservice_tickets(adapter, *, binding_id: str) -> dict:
         if state.recent_cycle_started_at is None:
             cycle_started = datetime.utcnow().replace(microsecond=0)
             state.recent_cycle_started_at = cycle_started
-            state.recent_since_at = state.last_synced_at or cycle_started.replace(
-                hour=0, minute=0, second=0
+            automatic_window_start = cycle_started - timedelta(
+                days=AUTOMATIC_FETCH_DAYS
+            )
+            state.recent_since_at = max(
+                state.last_synced_at or automatic_window_start,
+                automatic_window_start,
             )
             state.recent_page = 1
             state.recent_workspace_index = 0
@@ -1424,7 +1906,7 @@ def _sync_freshservice_tickets(adapter, *, binding_id: str) -> dict:
                 page=state.recent_page,
                 workspace_index=state.recent_workspace_index,
                 order_type="asc",
-                include_resources=False,
+                include_resources=True,
             ))
             result["recent_pages"] += 1
             result["fetched"] += len(page_data.tickets)
@@ -1460,31 +1942,43 @@ def _sync_freshservice_tickets(adapter, *, binding_id: str) -> dict:
         if (
             not pause_for_budget
             and not result["errors"]
+            and state.history_requested_at is not None
+            and state.history_since_at is not None
+            and state.history_until_at is not None
             and not state.history_complete
         ):
             for _ in range(limits["history_pages"]):
                 page_data = asyncio.run(adapter.fetch_ticket_page(
-                    since=datetime(1970, 1, 1),
+                    since=state.history_since_at,
                     page=state.history_page,
                     workspace_index=state.history_workspace_index,
                     order_type="asc",
-                    include_resources=False,
+                    include_resources=True,
                 ))
                 result["history_pages"] += 1
                 result["fetched"] += len(page_data.tickets)
+                requested_tickets = [
+                    ticket for ticket in page_data.tickets
+                    if (
+                        (ticket.updated_at or ticket.created_at) is not None
+                        and state.history_since_at
+                        <= (ticket.updated_at or ticket.created_at)
+                        < state.history_until_at
+                    )
+                ]
                 counts, state = _persist_freshservice_page(
                     db,
                     state=state,
                     adapter=adapter,
                     binding_id=binding_id,
-                    tickets=page_data.tickets,
+                    tickets=requested_tickets,
                 )
                 for key in ("new", "updated", "errors"):
                     result[key] += counts[key]
                 if counts["errors"]:
                     break
-                state.history_processed = (state.history_processed or 0) + len(
-                    page_data.tickets
+                state.history_processed = (
+                    (state.history_processed or 0) + len(page_data.tickets)
                 )
                 state.total_synced = (
                     (state.total_synced or 0)
@@ -1513,6 +2007,17 @@ def _sync_freshservice_tickets(adapter, *, binding_id: str) -> dict:
                 state.conversations_processed or 0
             ) + hydrated
             pause_for_budget = adapter.should_pause_requests()
+
+        if not pause_for_budget and not result["errors"]:
+            stored, attachment_errors = _sync_freshservice_attachment_backlog(
+                db,
+                adapter=adapter,
+                binding_id=binding_id,
+                limit=limits["attachments"],
+            )
+            result["attachments"] = stored
+            result["attachment_errors"] = attachment_errors
+            result["errors"] += attachment_errors
 
         state.last_batch_new = result["new"]
         state.last_batch_updated = result["updated"]
@@ -1682,6 +2187,56 @@ def _sync_tickets_legacy(adapter=None, *, binding_id: str = "legacy") -> dict:
         db.close()
 
     return result
+
+
+def queue_old_ticket_fetch(
+    adapter,
+    *,
+    start_at: datetime,
+    end_at: datetime,
+    requested_by: str,
+    binding_id: str = "legacy",
+) -> dict[str, Any]:
+    """Create an admin-requested, durable old-ticket range cursor.
+
+    The scheduler processes this lane only while these explicit request
+    fields are present. It never changes the automatic 30-day cursor.
+    """
+    start_at = _utc_naive(start_at)
+    end_at = _utc_naive(end_at)
+    if start_at is None or end_at is None or start_at >= end_at:
+        raise ValueError("old_ticket_fetch_range_invalid")
+    db: Session = SessionLocal()
+    try:
+        _ensure_sync_state(db, adapter, binding_id)
+        state = db.query(SyncStateRecord).filter(
+            SyncStateRecord.binding_id == binding_id,
+            SyncStateRecord.provider == adapter.provider_name,
+        ).with_for_update().one()
+        if state.history_requested_at is not None and not state.history_complete:
+            raise ValueError("old_ticket_fetch_already_queued")
+        state.history_since_at = start_at
+        state.history_until_at = end_at
+        state.history_requested_at = datetime.utcnow()
+        state.history_requested_by = requested_by
+        state.history_page = 1
+        state.history_workspace_index = 0
+        state.history_complete = False
+        state.history_processed = 0
+        state.last_status = "queued"
+        state.last_error = None
+        db.commit()
+        return {
+            "queued": True,
+            "start_at": start_at.isoformat(),
+            "end_at": end_at.isoformat(),
+            "requested_at": state.history_requested_at.isoformat(),
+        }
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 
 def fetch_tickets_by_days(

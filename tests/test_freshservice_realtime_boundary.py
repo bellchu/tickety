@@ -141,7 +141,7 @@ class FreshserviceRealtimeBoundaryTests(unittest.TestCase):
                 )
             )
 
-    def test_post_cutover_reply_on_old_ticket_queues_public_ai(self):
+    def test_post_cutover_reply_on_old_ticket_requires_manual_analysis(self):
         with self.session_factory() as db:
             state = SyncStateRecord(
                 binding_id="legacy",
@@ -162,16 +162,16 @@ class FreshserviceRealtimeBoundaryTests(unittest.TestCase):
         self.assertEqual(result["errors"], 0)
         with self.session_factory() as db:
             ticket = db.query(TicketRecord).one()
-            self.assertEqual(ticket.ai_status, "queued")
-            self.assertEqual(
-                set(ticket.ai_requested_artifacts.split(",")),
-                {"triage", "summary", "route", "resolution"},
-            )
+            self.assertIsNone(ticket.ai_status)
             activity = db.query(ExternalActivityRecord).filter(
                 ExternalActivityRecord.entity_type == "conversation"
             ).one()
-            self.assertTrue(activity.automatic_ai_eligible)
-            self.assertEqual(activity.automatic_ai_generation, 1)
+            self.assertFalse(activity.automatic_ai_eligible)
+            self.assertEqual(
+                activity.eligibility_reason,
+                "ticket_created_before_lookback",
+            )
+            self.assertIsNone(activity.automatic_ai_generation)
             conversation = db.query(ExternalConversationRecord).one()
             self.assertEqual(conversation.author_external_id, "requester-7")
             comment = db.query(TicketCommentRecord).one()
@@ -215,7 +215,7 @@ class FreshserviceRealtimeBoundaryTests(unittest.TestCase):
             self.assertEqual(ticket.ai_status, "queued")
             self.assertEqual(
                 set(ticket.ai_requested_artifacts.split(",")),
-                {"triage", "summary", "route", "resolution"},
+                {"triage", "route"},
             )
             activity = db.query(ExternalActivityRecord).filter(
                 ExternalActivityRecord.entity_type == "ticket"
@@ -265,6 +265,7 @@ class FreshserviceRealtimeBoundaryTests(unittest.TestCase):
             db.commit()
 
         public = self._ticket(self.cutover + timedelta(minutes=1))
+        public.created_at = self.cutover + timedelta(minutes=1)
         adapter = _FreshserviceAdapter([public])
         self.assertEqual(self._sync(adapter)["errors"], 0)
 
@@ -440,6 +441,16 @@ class FreshserviceRealtimeBoundaryTests(unittest.TestCase):
                     external_created_at=activity_at,
                     external_updated_at=activity_at,
                 ))
+            db.add(TicketRecord(
+                id="old-imported-today",
+                binding_id="binding-1",
+                external_source="freshservice",
+                external_id="old-imported-today",
+                subject="old-imported-today",
+                created_at=now,
+                external_created_at=now - timedelta(days=30),
+                external_updated_at=now,
+            ))
             db.commit()
 
             with patch.object(
@@ -470,10 +481,82 @@ class FreshserviceRealtimeBoundaryTests(unittest.TestCase):
                 self.assertEqual(ticket.ai_status, "queued")
                 self.assertEqual(
                     set(ticket.ai_requested_artifacts.split(",")),
-                    {"triage", "summary", "route", "resolution"},
+                    {"triage", "route"},
                 )
             self.assertIsNone(db.get(TicketRecord, "too-old").ai_status)
+            self.assertIsNone(
+                db.get(TicketRecord, "old-imported-today").ai_status
+            )
             self.assertIsNone(db.get(TicketRecord, "paused").ai_status)
+
+    def test_active_routing_backlog_requires_explicit_opt_in_and_is_staged(self):
+        now = datetime.utcnow().replace(microsecond=0)
+        with self.session_factory() as db:
+            db.add(SyncStateRecord(
+                binding_id="binding-1",
+                provider="freshservice",
+                automatic_ai_enabled=True,
+                automatic_ai_generation=1,
+                automatic_ai_cutover_at=now,
+                automatic_ai_enabled_at=now,
+            ))
+            db.add_all([
+                TicketRecord(
+                    id="old-active",
+                    binding_id="binding-1",
+                    external_source="freshservice",
+                    external_id="old-active",
+                    subject="Old active ticket",
+                    status="Open",
+                    external_created_at=now - timedelta(days=90),
+                    external_updated_at=now - timedelta(days=1),
+                ),
+                TicketRecord(
+                    id="old-closed",
+                    binding_id="binding-1",
+                    external_source="freshservice",
+                    external_id="old-closed",
+                    subject="Old closed ticket",
+                    status="Closed",
+                    external_created_at=now - timedelta(days=90),
+                    external_updated_at=now,
+                ),
+            ])
+            db.commit()
+
+            with (
+                patch.dict(
+                    "os.environ",
+                    {"AI_ACTIVE_ROUTING_BACKLOG_ENABLED": "false"},
+                    clear=False,
+                ),
+                patch.object(sync.settings_module, "automation_enabled", return_value=True),
+            ):
+                self.assertEqual(
+                    sync.queue_active_routing_backlog(db),
+                    {"enabled": False, "queued": 0},
+                )
+
+            with (
+                patch.dict(
+                    "os.environ",
+                    {"AI_ACTIVE_ROUTING_BACKLOG_ENABLED": "true"},
+                    clear=False,
+                ),
+                patch.object(sync.settings_module, "automation_enabled", return_value=True),
+            ):
+                self.assertEqual(
+                    sync.queue_active_routing_backlog(db),
+                    {"enabled": True, "queued": 1},
+                )
+
+            active = db.get(TicketRecord, "old-active")
+            self.assertEqual(active.ai_status, "queued")
+            self.assertEqual(
+                set(active.ai_requested_artifacts.split(",")),
+                {"triage", "route"},
+            )
+            self.assertIsNone(db.get(TicketRecord, "old-closed").ai_status)
 
     def test_worker_processes_recent_external_gap_without_manual_queueing(self):
         now = datetime.utcnow().replace(microsecond=0)

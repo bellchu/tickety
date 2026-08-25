@@ -227,8 +227,8 @@ class ProviderParserIsolationTests(unittest.TestCase):
             {"id": 1, "subject": "First", "description_text": "valid"},
             {
                 "id": 2,
-                "subject": "Poison marker must not be logged",
-                "description_text": "x" * 100_001,
+                "subject": "x" * 501,
+                "description_text": "Poison marker must not be logged",
             },
             {"id": 3, "subject": "Third", "description_text": "valid"},
         ]
@@ -259,7 +259,7 @@ class ProviderParserIsolationTests(unittest.TestCase):
 
         records = [
             issue("IT-1", "First", "valid"),
-            issue("IT-2", "Poison marker must not be logged", "x" * 100_001),
+            issue("IT-2", "x" * 501, "Poison marker must not be logged"),
             issue("IT-3", "Third", "valid"),
         ]
         output = io.StringIO()
@@ -278,7 +278,6 @@ class ExternalTicketBoundsTests(unittest.TestCase):
         field_limits = {
             "external_id": 255,
             "subject": 500,
-            "description": 100_000,
             "reporter": 320,
             "priority": 32,
             "status": 120,
@@ -292,6 +291,10 @@ class ExternalTicketBoundsTests(unittest.TestCase):
             with self.subTest(field=field):
                 with self.assertRaises(ValidationError):
                     _external_ticket(**{field: "x" * (limit + 1)})
+
+    def test_external_description_is_lossless_beyond_the_old_projection_limit(self):
+        description = "x" * 150_000
+        self.assertEqual(_external_ticket(description=description).description, description)
 
     def test_required_external_identifiers_and_labels_cannot_be_empty(self):
         for field in ("external_id", "subject", "priority", "status"):

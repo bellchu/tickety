@@ -27,6 +27,7 @@ _SENSITIVE_KEYS = {
     "FRESHSERVICE_OAUTH_REFRESH_TOKEN",
     "WEBHOOK_SECRET",
     "SSO_CLIENT_SECRET",
+    "AZURE_STORAGE_CONNECTION_STRING",
 }
 
 _PLACEHOLDER_VALUES = {
@@ -114,6 +115,11 @@ _ALL_KEYS = [
     "FRESHSERVICE_RECENT_PAGES_PER_SYNC",
     "FRESHSERVICE_HISTORY_PAGES_PER_SYNC",
     "FRESHSERVICE_CONVERSATIONS_PER_SYNC",
+    "FRESHSERVICE_ATTACHMENTS_PER_SYNC",
+    "ATTACHMENT_STORAGE_PROVIDER",
+    "ATTACHMENT_MAX_BYTES",
+    "AZURE_STORAGE_ACCOUNT_URL",
+    "AZURE_STORAGE_CONTAINER",
     "FRESHSERVICE_OAUTH_CLIENT_ID",
     "FRESHSERVICE_OAUTH_CLIENT_SECRET",
     "FRESHSERVICE_OAUTH_REDIRECT_URI",
@@ -253,6 +259,11 @@ _PRODUCTION_ENV_ONLY_KEYS = (
     "FRESHSERVICE_RECENT_PAGES_PER_SYNC",
     "FRESHSERVICE_HISTORY_PAGES_PER_SYNC",
     "FRESHSERVICE_CONVERSATIONS_PER_SYNC",
+    "FRESHSERVICE_ATTACHMENTS_PER_SYNC",
+    "ATTACHMENT_STORAGE_PROVIDER",
+    "ATTACHMENT_MAX_BYTES",
+    "AZURE_STORAGE_ACCOUNT_URL",
+    "AZURE_STORAGE_CONTAINER",
     "FRESHSERVICE_OAUTH_CLIENT_ID",
     "FRESHSERVICE_OAUTH_REDIRECT_URI",
     "FRESHSERVICE_OAUTH_SCOPES",
@@ -650,12 +661,40 @@ def update_settings(payload: dict, *, actor_id: Optional[str] = None) -> dict:
                 from .integrations.freshservice import FreshserviceAdapter
 
                 new_val = FreshserviceAdapter._validate_oauth_scopes(new_val)
+            if key == "ATTACHMENT_STORAGE_PROVIDER" and new_val not in {
+                "", "azure_blob",
+            }:
+                raise ValueError(
+                    "ATTACHMENT_STORAGE_PROVIDER must be 'azure_blob' or blank"
+                )
+            if key == "AZURE_STORAGE_ACCOUNT_URL" and new_val:
+                parsed = urlparse(new_val)
+                if (
+                    parsed.scheme != "https"
+                    or not parsed.hostname
+                    or parsed.username
+                    or parsed.password
+                    or parsed.query
+                    or parsed.fragment
+                    or not parsed.hostname.endswith(".blob.core.windows.net")
+                ):
+                    raise ValueError(
+                        "AZURE_STORAGE_ACCOUNT_URL must be an Azure Blob HTTPS account URL"
+                    )
+                new_val = new_val.rstrip("/")
+            if key == "AZURE_STORAGE_CONTAINER" and new_val:
+                if not re.fullmatch(
+                    r"[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?", new_val
+                ):
+                    raise ValueError("AZURE_STORAGE_CONTAINER is not a valid container name")
             freshservice_numeric_bounds = {
                 "FRESHSERVICE_MIN_INTERVAL_SECONDS": (0.25, 60.0, float),
                 "FRESHSERVICE_RATE_LIMIT_RESERVE": (2, 10_000, int),
                 "FRESHSERVICE_RECENT_PAGES_PER_SYNC": (1, 10, int),
-                "FRESHSERVICE_HISTORY_PAGES_PER_SYNC": (0, 5, int),
+                "FRESHSERVICE_HISTORY_PAGES_PER_SYNC": (1, 5, int),
                 "FRESHSERVICE_CONVERSATIONS_PER_SYNC": (0, 5, int),
+                "FRESHSERVICE_ATTACHMENTS_PER_SYNC": (0, 20, int),
+                "ATTACHMENT_MAX_BYTES": (1_048_576, 104_857_600, int),
             }
             if key in freshservice_numeric_bounds and new_val:
                 minimum, maximum, parser = freshservice_numeric_bounds[key]

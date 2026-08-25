@@ -35,6 +35,13 @@ function loadConversationModule() {
     if (specifier === "lucide-react") return { LockKeyhole: icon, MessageSquareText: icon };
     if (specifier === "@/lib/api") return { api: {} };
     if (specifier === "@/lib/utils") return { formatTimeAgo: () => "recently" };
+    if (specifier === "@/lib/ticket-display") {
+      return {
+        requesterName: (ticket) => ticket.requester_name || ticket.requester_email || "Requester profile pending",
+        requesterEmail: (ticket) => ticket.requester_email || null,
+        safeMailto: (email) => email ? `mailto:${email}` : null,
+      };
+    }
     if (specifier === "@/components/ui") {
       return {
         Alert: ({ title, children }) => React.createElement("div", null, title, children),
@@ -53,6 +60,9 @@ function ticket(overrides = {}) {
     id: "ticket-1",
     description: "The printer is showing error 50.",
     reporter: "Avery Requester",
+    requester_name: "Avery Requester",
+    requester_email: "avery@example.com",
+    requester_title: "Finance Director",
     created_at: "2026-08-24T10:00:00Z",
     external_created_at: "2026-08-24T09:59:00Z",
     ...overrides,
@@ -65,6 +75,9 @@ function comment(overrides = {}) {
     ticket_id: "ticket-1",
     author_id: null,
     author_name: "Freshservice user 7",
+    author_email: "agent.rivera@example.com",
+    author_title: "Support Engineer",
+    author_type: "agent",
     body: "Please restart the printer.",
     is_private: false,
     created_at: "2026-08-24T10:05:00Z",
@@ -96,6 +109,9 @@ test("Freshservice conversation renders the request and replies as an ordered BB
   assert.match(html, /#2/);
   assert.match(html, /#3/);
   assert.match(html, /Private note/);
+  assert.match(html, /avery@example.com/);
+  assert.match(html, /Finance Director/);
+  assert.match(html, /agent.rivera@example.com/);
   assert.match(html, /Read only/);
   assert.match(html, /3 posts shown/);
   assert.doesNotMatch(html, /textarea|contenteditable/i);

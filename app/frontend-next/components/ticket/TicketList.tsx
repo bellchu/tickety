@@ -5,12 +5,14 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Bookmark,
+  CalendarDays,
   ChevronLeft,
   ChevronRight,
   Clock3,
   Download,
   Filter,
   Inbox,
+  Mail,
   Plus,
   Search,
   Trash2,
@@ -24,6 +26,13 @@ import { canAccessProtectedIntelligence, isDemoContext } from "@/lib/auth";
 import type { Ticket, TicketListSort } from "@/lib/types";
 import { analysisLifecycleLabel, routingLabel, sourceKindLabel } from "@/lib/ticket-intelligence";
 import { cn, formatTimeAgo } from "@/lib/utils";
+import {
+  formatOperationalTimestamp,
+  requesterEmail,
+  requesterName,
+  ticketCreatedAt,
+  ticketLastCommunicationAt,
+} from "@/lib/ticket-display";
 
 const SAVED_VIEWS_KEY = "tickety.ticket-queue.views.v1";
 const STATUS_FILTERS = ["Open", "Escalated", "Awaiting Review", "Closed"];
@@ -32,7 +41,7 @@ const PAGE_SIZES = [25, 50, 100];
 const EMPTY_TICKETS: Ticket[] = [];
 const SORT_OPTIONS: Array<{ value: TicketListSort; label: string }> = [
   { value: "newest", label: "Newest created" },
-  { value: "updated", label: "Recently updated" },
+  { value: "updated", label: "Recently communicated" },
   { value: "priority", label: "Highest priority" },
   { value: "complexity", label: "Most complex" },
   { value: "oldest", label: "Oldest created" },
@@ -86,10 +95,13 @@ function exportPage(tickets: Ticket[]) {
     ["Status", (ticket) => ticket.status],
     ["Priority", (ticket) => ticket.priority],
     ["Reporter", (ticket) => ticket.reporter],
+    ["Requester name", (ticket) => requesterName(ticket)],
+    ["Requester email", (ticket) => requesterEmail(ticket)],
+    ["Requester title", (ticket) => ticket.requester_title],
     ["Assignee", (ticket) => ticket.assignee_name || ticket.external_assignee_name],
     ["Category", (ticket) => ticket.category],
-    ["Created", (ticket) => ticket.created_at],
-    ["Updated", (ticket) => ticket.updated_at],
+    ["Created", (ticket) => ticketCreatedAt(ticket)],
+    ["Last communication", (ticket) => ticketLastCommunicationAt(ticket)],
   ];
   const rows = [
     columns.map(([label]) => csvCell(label)).join(","),
@@ -114,6 +126,19 @@ function LoadingQueue() {
         {[0, 1, 2, 3, 4, 5].map((row) => <Skeleton key={row} className="h-14 w-full" />)}
       </div>
     </div>
+  );
+}
+
+function TimelineValue({ value, label }: { value: string | null; label: string }) {
+  return (
+    <time
+      dateTime={value || undefined}
+      title={`${label}: ${formatOperationalTimestamp(value)}`}
+      className="inline-flex items-center gap-1.5 whitespace-nowrap text-xs text-ink-400"
+    >
+      <Clock3 className="h-3.5 w-3.5" aria-hidden="true" />
+      {formatTimeAgo(value)}
+    </time>
   );
 }
 
@@ -403,23 +428,25 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
         <>
           <div className="hidden overflow-hidden rounded-2xl border border-linen-400 bg-linen-50 shadow-sm md:block">
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[880px] table-fixed text-left">
+	              <table className="w-full min-w-[1180px] table-fixed text-left">
                 <caption className="sr-only">Tickets in the current server-filtered page</caption>
                 <thead className="border-b border-linen-300 bg-linen-100 text-[11px] font-semibold uppercase tracking-[0.09em] text-ink-400">
                   <tr>
                     {canBulk && <th scope="col" className="w-12 px-4 py-3"><input ref={selectAllRef} type="checkbox" checked={allOnPageSelected} onChange={togglePage} aria-label="Select all tickets on this page" className="h-4 w-4" /></th>}
-                    <th scope="col" className="w-[36%] px-4 py-3">Ticket</th><th scope="col" className="w-[12%] px-4 py-3">Priority</th><th scope="col" className="w-[25%] px-4 py-3">Routing</th><th scope="col" className="w-[14%] px-4 py-3">Status</th><th scope="col" className="w-[13%] px-4 py-3 text-right">Updated</th>
+	                    <th scope="col" className="w-[26%] px-4 py-3">Ticket</th><th scope="col" className="w-[20%] px-4 py-3">Requester</th><th scope="col" className="w-[8%] px-4 py-3">Priority</th><th scope="col" className="w-[17%] px-4 py-3">Routing</th><th scope="col" className="w-[11%] px-4 py-3">Status</th><th scope="col" className="w-[9%] px-4 py-3">Created</th><th scope="col" className="w-[9%] px-4 py-3">Last contact</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-linen-300">
                   {tickets.map((ticket) => (
                     <tr key={ticket.id} className={cn("transition-colors hover:bg-linen-100", selected.has(ticket.id) && "bg-[var(--color-primary-soft)]/60")}>
                       {canBulk && <td className="px-4 py-4"><input type="checkbox" checked={selected.has(ticket.id)} onChange={() => toggleTicket(ticket.id)} aria-label={`Select ${ticket.subject}`} className="h-4 w-4" /></td>}
-                      <td className="min-w-0 px-4 py-4"><div className="flex min-w-0 items-baseline gap-2"><Link href={`/tickets/${ticket.id}`} title={ticket.subject} className="min-w-0 flex-1 truncate text-sm font-semibold text-ink-700 hover:text-semantic-primary hover:underline">{ticket.subject}</Link><span className="shrink-0 whitespace-nowrap font-mono text-[11px] text-ink-400">#{ticket.external_id || ticket.id}</span></div><div className="mt-1 flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap text-[11px] text-ink-400"><span>{sourceKindLabel(ticket)}</span>{ticket.ai_suggested_category && <span className="truncate">· AI issue: {ticket.ai_suggested_category}</span>}<span className="shrink-0">· {analysisLifecycleLabel(ticket)}</span></div></td>
-                      <td className="px-4 py-4"><Badge variant={badgeForPriority(ticket.priority)}>{ticket.priority}</Badge>{ticket.ai_suggested_priority && ticket.ai_suggested_priority !== ticket.priority && <span className="mt-1 block whitespace-nowrap text-[10px] font-medium text-ink-400">AI suggests {ticket.ai_suggested_priority}</span>}</td>
+	                      <td className="min-w-0 px-4 py-4"><div className="flex min-w-0 items-baseline gap-2"><Link href={`/tickets/${ticket.id}`} title={ticket.subject} className="min-w-0 flex-1 truncate text-sm font-semibold text-ink-700 hover:text-semantic-primary hover:underline">{ticket.subject}</Link><span className="shrink-0 whitespace-nowrap font-mono text-[11px] text-ink-400">#{ticket.external_id || ticket.id}</span></div><div className="mt-1 flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap text-[11px] text-ink-400"><span>{sourceKindLabel(ticket)}</span>{ticket.ai_suggested_category && <span className="truncate">· AI issue: {ticket.ai_suggested_category}</span>}<span className="shrink-0">· {analysisLifecycleLabel(ticket)}</span></div></td>
+	                      <td className="min-w-0 px-4 py-4"><span className="block truncate text-xs font-semibold text-ink-700" title={requesterName(ticket)}>{requesterName(ticket)}</span>{requesterEmail(ticket) && <span className="mt-1 block truncate text-[11px] text-ink-500" title={requesterEmail(ticket) || undefined}>{requesterEmail(ticket)}</span>}<span className="mt-0.5 block truncate text-[10px] text-ink-400">{ticket.requester_title || "Title not provided"}</span></td>
+	                      <td className="px-4 py-4"><Badge variant={badgeForPriority(ticket.priority)}>{ticket.priority}</Badge>{ticket.ai_suggested_priority && ticket.ai_suggested_priority !== ticket.priority && <span className="mt-1 block whitespace-nowrap text-[10px] font-medium text-ink-400">AI suggests {ticket.ai_suggested_priority}</span>}</td>
                       <td className="min-w-0 px-4 py-4"><span className="block truncate text-xs font-semibold text-ink-600">{routingLabel(ticket)}</span><span className="mt-1 block truncate text-[11px] text-ink-400">{ticket.external_assignee_name || ticket.assignee_name || "Unassigned"}</span></td>
                       <td className="px-4 py-4"><Badge variant={badgeForStatus(ticket.status)} dot>{ticket.status}</Badge></td>
-                      <td className="px-4 py-4 text-right"><span className="inline-flex items-center gap-1.5 whitespace-nowrap text-xs text-ink-400"><Clock3 className="h-3.5 w-3.5" aria-hidden="true" />{formatTimeAgo(ticket.updated_at || ticket.created_at)}</span></td>
+	                      <td className="px-4 py-4"><TimelineValue value={ticketCreatedAt(ticket)} label="Created" /></td>
+	                      <td className="px-4 py-4"><TimelineValue value={ticketLastCommunicationAt(ticket)} label="Last contact" /></td>
                     </tr>
                   ))}
                 </tbody>
@@ -435,8 +462,8 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
                   <div className="min-w-0 flex-1"><div className="flex flex-wrap gap-1.5"><Badge variant={badgeForPriority(ticket.priority)}>{ticket.priority}</Badge>{ticket.ai_suggested_priority && ticket.ai_suggested_priority !== ticket.priority && <span className="self-center text-[10px] font-medium text-ink-400">AI suggests {ticket.ai_suggested_priority}</span>}</div><Link href={`/tickets/${ticket.id}`} className="mt-3 block truncate text-sm font-semibold leading-5 text-ink-700 hover:text-semantic-primary">{ticket.subject}</Link><p className="mt-1 truncate font-mono text-[11px] text-ink-400">#{ticket.external_id || ticket.id}</p></div>
                 </div>
                 <div className="mt-3 flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap text-[11px] text-ink-400"><span>{sourceKindLabel(ticket)}</span>{ticket.ai_suggested_category && <span className="truncate">· AI issue: {ticket.ai_suggested_category}</span>}<span className="shrink-0">· {analysisLifecycleLabel(ticket)}</span></div>
-                <dl className="mt-4 space-y-3 border-t border-linen-300 pt-3 text-xs"><div><dt className="text-ink-400">Routing</dt><dd className="mt-1 truncate font-semibold text-ink-600">{routingLabel(ticket)}</dd><dd className="mt-0.5 truncate text-ink-400">{ticket.external_assignee_name || ticket.assignee_name || "Unassigned"}</dd></div><div><dt className="text-ink-400">Status</dt><dd className="mt-1"><Badge variant={badgeForStatus(ticket.status)} dot>{ticket.status}</Badge></dd></div></dl>
-                <p className="mt-3 flex items-center gap-1.5 text-[11px] text-ink-400"><Clock3 className="h-3.5 w-3.5" aria-hidden="true" />Updated {formatTimeAgo(ticket.updated_at || ticket.created_at)}</p>
+	                <dl className="mt-4 space-y-3 border-t border-linen-300 pt-3 text-xs"><div><dt className="text-ink-400">Requester</dt><dd className="mt-1 truncate font-semibold text-ink-600">{requesterName(ticket)}</dd>{requesterEmail(ticket) && <dd className="mt-0.5 flex min-w-0 items-center gap-1 text-ink-400"><Mail className="h-3 w-3 shrink-0" aria-hidden="true" /><span className="truncate">{requesterEmail(ticket)}</span></dd>}<dd className="mt-0.5 truncate text-ink-400">{ticket.requester_title || "Title not provided"}</dd></div><div><dt className="text-ink-400">Routing</dt><dd className="mt-1 truncate font-semibold text-ink-600">{routingLabel(ticket)}</dd><dd className="mt-0.5 truncate text-ink-400">{ticket.external_assignee_name || ticket.assignee_name || "Unassigned"}</dd></div><div><dt className="text-ink-400">Status</dt><dd className="mt-1"><Badge variant={badgeForStatus(ticket.status)} dot>{ticket.status}</Badge></dd></div></dl>
+	                <div className="mt-3 grid grid-cols-2 gap-2 rounded-xl bg-linen-100 p-3 text-[11px] text-ink-400"><div><span className="mb-1 flex items-center gap-1"><CalendarDays className="h-3 w-3" aria-hidden="true" />Created</span><TimelineValue value={ticketCreatedAt(ticket)} label="Created" /></div><div><span className="mb-1 flex items-center gap-1"><Clock3 className="h-3 w-3" aria-hidden="true" />Last contact</span><TimelineValue value={ticketLastCommunicationAt(ticket)} label="Last contact" /></div></div>
               </article>
             ))}
           </div>

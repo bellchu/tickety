@@ -341,9 +341,14 @@ export function sourceKindLabel(ticket: Pick<Ticket, "external_source" | "ticket
 }
 
 export function routingLabel(ticket: Pick<Ticket, "recommended_team" | "recommended_team_basis">): string {
-  return ticket.recommended_team_basis === "ai_category"
-    ? `Suggested team - ${ticket.recommended_team} (catalog validation pending)`
-    : "Unrouted - review required";
+  if (ticket.recommended_team_basis === "not_applicable") return "No active route - ticket closed";
+  if (ticket.recommended_team_basis === "source_category") {
+    return `Suggested team - ${ticket.recommended_team} (Freshservice category)`;
+  }
+  if (ticket.recommended_team_basis === "ai_category") {
+    return `Suggested team - ${ticket.recommended_team} (catalog validation pending)`;
+  }
+  return "Unrouted - review required";
 }
 
 export function relatedStrength(score: number, method: string): "Strong match" | "Related" | "Possible" | "Keyword" {

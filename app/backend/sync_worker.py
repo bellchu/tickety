@@ -5,12 +5,20 @@ from datetime import datetime
 from typing import Optional
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 
-from .database import SessionLocal, SyncStateRecord, TicketRecord
+from .database import (
+    ExternalAttachmentRecord,
+    SessionLocal,
+    SyncStateRecord,
+    TicketRecord,
+)
+from .attachment_storage import attachment_storage_configured
 from .integrations.sync import (
+    AUTOMATIC_FETCH_DAYS,
     AUTOMATIC_AI_LOOKBACK_DAYS,
     freshservice_sync_limits,
+    queue_active_routing_backlog,
     queue_recent_automatic_ai,
     sync_tickets_from_external,
 )
@@ -95,9 +103,19 @@ def _auto_triage_job():
         auto_summary = settings_module.automation_enabled("AUTO_SUMMARIZE_ENABLED")
         auto_resolution = settings_module.automation_enabled("AUTO_RESOLVE_ENABLED")
         try:
-            recent = queue_recent_automatic_ai(db, batch_size=batch_size)
+            routing_backlog = queue_active_routing_backlog(
+                db, batch_size=batch_size
+            )
+            recent = queue_recent_automatic_ai(
+                db,
+                batch_size=max(1, batch_size - int(routing_backlog["queued"])),
+            ) if int(routing_backlog["queued"]) < batch_size else {
+                "lookback_days": AUTOMATIC_AI_LOOKBACK_DAYS,
+                "queued": 0,
+            }
         except Exception as exc:
             db.rollback()
+            routing_backlog = {"enabled": False, "queued": 0}
             recent = {
                 "lookback_days": AUTOMATIC_AI_LOOKBACK_DAYS,
                 "queued": 0,
@@ -141,10 +159,14 @@ def _auto_triage_job():
             ).limit(remaining).all()
             if auto_triage and remaining else []
         )
-        triage_candidates = list(
-            {ticket.id: ticket for ticket in [*queued, *untriaged]}.values()
-        )
-        selected_ids = {ticket.id for ticket in triage_candidates}
+        # Keep immutable identifiers across commits and AI calls. SQLAlchemy
+        # may expire or detach the originally selected ORM instances after a
+        # processed ticket commits, which must not break the remainder of the
+        # batch.
+        triage_candidate_ids = list(dict.fromkeys(
+            ticket.id for ticket in [*queued, *untriaged]
+        ))
+        selected_ids = set(triage_candidate_ids)
         remaining = max(0, batch_size - len(selected_ids))
 
         summary_query = db.query(TicketRecord).filter(
@@ -168,7 +190,8 @@ def _auto_triage_job():
             summary_query.limit(remaining).all()
             if auto_summary and remaining else []
         )
-        selected_ids.update(ticket.id for ticket in no_summary)
+        no_summary_ids = [ticket.id for ticket in no_summary]
+        selected_ids.update(no_summary_ids)
         remaining = max(0, batch_size - len(selected_ids))
 
         resolution_query = db.query(TicketRecord).filter(
@@ -195,21 +218,23 @@ def _auto_triage_job():
             resolution_query.limit(remaining).all()
             if auto_resolution and remaining else []
         )
+        no_resolution_ids = [ticket.id for ticket in no_resolution]
 
-        if recent["queued"] or queued or untriaged or no_summary or no_resolution:
+        if routing_backlog["queued"] or recent["queued"] or queued or untriaged or no_summary or no_resolution:
             print(
-                f"[auto-triage] recent={recent['queued']}, {len(queued)} queued, "
+                f"[auto-triage] routing_backlog={routing_backlog['queued']}, "
+                f"recent={recent['queued']}, {len(queued)} queued, "
                 f"{len(untriaged)} untriaged, "
                 f"{len(no_summary)} no-summary, {len(no_resolution)} no-plan"
             )
 
-        if triage_candidates:
+        if triage_candidate_ids:
             import asyncio
             from .main import _auto_process
-            for t in triage_candidates:
+            for ticket_id in triage_candidate_ids:
                 try:
                     t2 = db.query(TicketRecord).filter(
-                        TicketRecord.id == t.id
+                        TicketRecord.id == ticket_id
                     ).with_for_update().first()
                     live_claim = bool(
                         t2
@@ -231,13 +256,13 @@ def _auto_triage_job():
                     db.rollback()
 
         # Fill missing summaries
-        if no_summary:
+        if no_summary_ids:
             import asyncio
             from .main import _auto_process
-            for t in no_summary:
+            for ticket_id in no_summary_ids:
                 try:
                     t2 = db.query(TicketRecord).filter(
-                        TicketRecord.id == t.id
+                        TicketRecord.id == ticket_id
                     ).with_for_update().first()
                     live_claim = bool(
                         t2
@@ -261,21 +286,22 @@ def _auto_triage_job():
                     ):
                         t2.ai_requested_artifacts = "summary"
                         t2.ai_status = "queued"
+                        processed_id = t2.id
                         db.commit()
                         asyncio.run(_auto_process(t2, db, force=True))
-                        print(f"[auto-triage] summary filled for {t2.id[:8]}")
+                        print(f"[auto-triage] summary filled for {processed_id[:8]}")
                 except Exception as e:
                     print(f"[auto-triage] summary error kind={type(e).__name__}")
                     db.rollback()
 
         # Fill missing resolution plans
-        if no_resolution:
+        if no_resolution_ids:
             import asyncio
             from .main import _auto_process
-            for t in no_resolution:
+            for ticket_id in no_resolution_ids:
                 try:
                     t2 = db.query(TicketRecord).filter(
-                        TicketRecord.id == t.id
+                        TicketRecord.id == ticket_id
                     ).with_for_update().first()
                     live_claim = bool(
                         t2
@@ -299,23 +325,26 @@ def _auto_triage_job():
                     ):
                         t2.ai_requested_artifacts = "resolution"
                         t2.ai_status = "queued"
+                        processed_id = t2.id
                         db.commit()
                         asyncio.run(_auto_process(t2, db, force=True))
-                        print(f"[auto-triage] resolution filled for {t2.id[:8]}")
+                        print(f"[auto-triage] resolution filled for {processed_id[:8]}")
                 except Exception as e:
                     print(f"[auto-triage] resolution error kind={type(e).__name__}")
                     db.rollback()
 
         # Fix missing escalation risk (column added later, may be NULL)
-        no_risk = db.query(TicketRecord).filter(
+        no_risk_ids = [row.id for row in db.query(TicketRecord.id).filter(
             TicketRecord.ai_reasoning.isnot(None),
             TicketRecord.escalation_risk == 0
-        ).all()
-        if no_risk:
+        ).all()]
+        if no_risk_ids:
             from . import intelligence as intel
-            for t in no_risk:
+            for ticket_id in no_risk_ids:
                 try:
-                    t2 = db.query(TicketRecord).filter(TicketRecord.id == t.id).first()
+                    t2 = db.query(TicketRecord).filter(
+                        TicketRecord.id == ticket_id
+                    ).first()
                     if t2:
                         t2.escalation_risk = intel.escalation_risk(t2)
                         db.commit()
@@ -440,6 +469,13 @@ def get_sync_status() -> dict:
             TicketRecord.external_source == current_provider,
         ).count()
         limits = freshservice_sync_limits()
+        attachment_counts = dict(db.query(
+            ExternalAttachmentRecord.storage_status,
+            func.count(ExternalAttachmentRecord.id),
+        ).filter(
+            ExternalAttachmentRecord.binding_id == binding_id,
+            ExternalAttachmentRecord.provider == current_provider,
+        ).group_by(ExternalAttachmentRecord.storage_status).all())
         operational = {
             "local_ticket_count": local_ticket_count,
             "sync_interval_seconds": _bounded_interval(
@@ -448,6 +484,14 @@ def get_sync_status() -> dict:
             "recent_pages_per_sync": limits["recent_pages"],
             "history_pages_per_sync": limits["history_pages"],
             "conversations_per_sync": limits["conversations"],
+            "attachments_per_sync": limits["attachments"],
+            "attachment_storage_configured": attachment_storage_configured(),
+            "attachment_pending": int(
+                attachment_counts.get("pending", 0)
+                + attachment_counts.get("waiting_storage", 0)
+            ),
+            "attachment_stored": int(attachment_counts.get("stored", 0)),
+            "attachment_errors": int(attachment_counts.get("error", 0)),
         }
         if not state:
             return {"provider": current_provider, "binding_id": binding_id,
@@ -458,12 +502,15 @@ def get_sync_status() -> dict:
                     "automatic_ai_enabled_at": None,
                     "automatic_ai_paused_at": None,
                     "automatic_ai_lookback_days": AUTOMATIC_AI_LOOKBACK_DAYS,
+                    "automatic_fetch_days": AUTOMATIC_FETCH_DAYS,
                     "last_status": "idle", "last_error": None, "total_synced": 0,
                     "recent_since_at": None, "recent_cycle_started_at": None,
                     "recent_page": 1, "recent_workspace_index": 0,
                     "recent_completed_at": None, "history_page": 1,
                     "history_workspace_index": 0, "history_complete": False,
-                    "history_processed": 0, "conversations_processed": 0,
+                    "history_processed": 0, "history_since_at": None,
+                    "history_until_at": None, "history_requested_at": None,
+                    "conversations_processed": 0,
                     "run_started_at": None, "run_finished_at": None,
                     "next_retry_at": None, "rate_limit_total": None,
                     "rate_limit_remaining": None, "rate_limit_used": None,
@@ -488,6 +535,7 @@ def get_sync_status() -> dict:
                 if state.automatic_ai_paused_at else None
             ),
             "automatic_ai_lookback_days": AUTOMATIC_AI_LOOKBACK_DAYS,
+            "automatic_fetch_days": AUTOMATIC_FETCH_DAYS,
             "last_status": state.last_status or "idle",
             "last_error": state.last_error,
             "total_synced": state.total_synced or 0,
@@ -508,6 +556,16 @@ def get_sync_status() -> dict:
             "history_workspace_index": state.history_workspace_index or 0,
             "history_complete": bool(state.history_complete),
             "history_processed": state.history_processed or 0,
+            "history_since_at": (
+                state.history_since_at.isoformat() if state.history_since_at else None
+            ),
+            "history_until_at": (
+                state.history_until_at.isoformat() if state.history_until_at else None
+            ),
+            "history_requested_at": (
+                state.history_requested_at.isoformat()
+                if state.history_requested_at else None
+            ),
             "conversations_processed": state.conversations_processed or 0,
             "run_started_at": (
                 state.run_started_at.isoformat() if state.run_started_at else None

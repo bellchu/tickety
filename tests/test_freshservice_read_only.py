@@ -100,12 +100,15 @@ class FreshserviceReadOnlyContractTests(unittest.TestCase):
             "private": False,
             "incoming": True,
             "user_id": 9,
+            "from_email": '"Avery Requester" <avery@example.com>',
             "created_at": "2026-08-24T01:00:00Z",
             "updated_at": "2026-08-24T01:01:00Z",
         })
         self.assertEqual(parsed.external_id, "1001")
         self.assertEqual(parsed.body, "Plain text")
         self.assertTrue(parsed.incoming)
+        self.assertEqual(parsed.author_name, "Avery Requester")
+        self.assertEqual(parsed.author_email, "avery@example.com")
         with self.assertRaisesRegex(ValueError, "stable ID"):
             adapter._parse_conversation({"body_text": "missing identity"})
 
@@ -144,6 +147,30 @@ class FreshserviceReadOnlyContractTests(unittest.TestCase):
             for call in adapter._rate_limited_get.await_args_list
         ]
         self.assertEqual(workspace_params, ["10", "20"])
+
+    def test_ticket_parser_preserves_embedded_requester_identity(self):
+        adapter = FreshserviceAdapter()
+
+        parsed = adapter._parse_ticket({
+            "id": 42,
+            "subject": "Payroll access",
+            "description_text": "Please restore access",
+            "priority": 3,
+            "status": 2,
+            "requester_id": 2001455211,
+            "requester": {
+                "id": 2001455211,
+                "name": "Avery Requester",
+                "email": "avery@example.com",
+                "job_title": "Finance Director",
+            },
+        })
+
+        self.assertEqual(parsed.reporter, "avery@example.com")
+        self.assertEqual(parsed.requester_id, "2001455211")
+        self.assertEqual(parsed.requester_name, "Avery Requester")
+        self.assertEqual(parsed.requester_email, "avery@example.com")
+        self.assertEqual(parsed.requester_title, "Finance Director")
 
     def test_background_ticket_page_is_lightweight_and_does_not_hydrate_threads(self):
         adapter = FreshserviceAdapter({

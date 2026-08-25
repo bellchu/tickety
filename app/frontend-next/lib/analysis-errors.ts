@@ -17,6 +17,8 @@ const ERROR_LABELS: Record<string, string> = {
   invalid_input: "ticket input was rejected by the safety limits",
   invalid_output: "the provider returned an invalid structured response",
   provider_unavailable: "the AI provider was unavailable",
+  provider_rejected: "the AI provider rejected this request",
+  provider_capacity: "provider capacity is temporarily constrained; retry is scheduled",
   timeout: "the step timed out",
   pipeline_timeout: "the pipeline timed out",
   analysis_rejected: "the provider response was rejected",

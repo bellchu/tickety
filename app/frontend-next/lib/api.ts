@@ -59,6 +59,7 @@ async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
 
 export const api = {
   getHealth: () => fetchAPI<{ status: string; mode: "demo" | "production" }>("/health"),
+  getReadiness: () => fetchAPI<import("./types").ReadinessStatus>("/health/ready"),
   getTickets: () => fetchAPI<import("./types").Ticket[]>("/tickets"),
   getTicketsPage: async (options: import("./types").TicketListParams = {}) => {
     const params = new URLSearchParams();
@@ -98,11 +99,19 @@ export const api = {
     fetchAPI<import("./types").Recognition[]>(`/recognitions/${userId}`),
   getSyncStatus: () => fetchAPI<import("./types").SyncStatus>("/admin/sync/status"),
   triggerSync: () => fetchAPI<{ status: string; result: Record<string, number> }>("/admin/sync/trigger", { method: "POST" }),
-  fetchTickets: (days: number, overwrite = false) =>
-    fetchAPI<{ status: string; result: import("./types").FetchTicketsResult }>(
-      `/admin/sync/fetch?days=${days}&overwrite=${overwrite ? 1 : 0}`,
-      { method: "POST" }
-    ),
+  fetchOldTickets: (request: {
+    preset: "2_months" | "3_months" | "custom";
+    startDate?: string;
+    endDate?: string;
+  }) => {
+    const params = new URLSearchParams({ preset: request.preset });
+    if (request.startDate) params.set("start_date", request.startDate);
+    if (request.endDate) params.set("end_date", request.endDate);
+    return fetchAPI<{
+      status: string;
+      result: import("./types").FetchOldTicketsResult;
+    }>(`/admin/sync/fetch?${params.toString()}`, { method: "POST" });
+  },
   syncExternalUsers: () =>
     fetchAPI<{ status: string; result: import("./types").ExternalUserSyncResult }>(
       "/admin/sync/external-users", { method: "POST" }
@@ -113,6 +122,31 @@ export const api = {
   getOAuthStatus: () => fetchAPI<{ configured: boolean; connected: boolean; domain: string }>("/oauth/status"),
   getOAuthAuthorizeUrl: () => fetchAPI<{ url: string }>("/oauth/authorize"),
   getSettings: () => fetchAPI<import("./types").Settings>("/admin/settings"),
+  getAIStatus: (options: {
+    view?: import("./types").AITaskView;
+    search?: string;
+    limit?: number;
+    offset?: number;
+  } = {}) => {
+    const params = new URLSearchParams();
+    if (options.view) params.set("view", options.view);
+    if (options.search) params.set("search", options.search);
+    if (options.limit != null) params.set("limit", String(options.limit));
+    if (options.offset != null) params.set("offset", String(options.offset));
+    return fetchAPI<import("./types").AIStatusResponse>(
+      `/admin/settings/ai-status${params.size ? `?${params.toString()}` : ""}`
+    );
+  },
+  getTicketIntelligenceStatus: () =>
+    fetchAPI<import("./types").TicketIntelligenceStatus>("/ticket-intelligence/status"),
+  getStatusDiagnostics: (area: import("./types").OperationalDiagnosticArea) =>
+    fetchAPI<import("./types").OperationalDiagnosticsResponse>(
+      `/admin/settings/status/diagnostics?area=${encodeURIComponent(area)}`
+    ),
+  getAITaskDiagnostics: (ticketId: string) =>
+    fetchAPI<import("./types").OperationalDiagnosticsResponse>(
+      `/admin/settings/ai-status/${encodeURIComponent(ticketId)}/diagnostics`
+    ),
   updateSettings: (payload: Partial<import("./types").Settings>) =>
     fetchAPI<import("./types").Settings>("/admin/settings", {
       method: "PUT",
@@ -162,6 +196,8 @@ export const api = {
     const query = params.size > 0 ? `?${params.toString()}` : "";
     return fetchAPI<import("./types").TicketComment[]>(`/tickets/${ticketId}/comments${query}`);
   },
+  getAttachments: (ticketId: string) =>
+    fetchAPI<import("./types").TicketAttachment[]>(`/tickets/${ticketId}/attachments`),
   addComment: (ticketId: string, body: string, isPrivate = false) =>
     fetchAPI<import("./types").TicketComment>(`/tickets/${ticketId}/comments`, {
       method: "POST",

@@ -1,17 +1,25 @@
 "use client";
 
 import { useInfiniteQuery } from "@tanstack/react-query";
-import { LockKeyhole, MessageSquareText } from "lucide-react";
+import { Download, Image as ImageIcon, LockKeyhole, MessageSquareText, Paperclip } from "lucide-react";
 import { api } from "@/lib/api";
-import type { Ticket, TicketComment } from "@/lib/types";
+import type { Ticket, TicketAttachment, TicketComment } from "@/lib/types";
 import { formatTimeAgo } from "@/lib/utils";
+import { requesterEmail, requesterName, safeMailto } from "@/lib/ticket-display";
 import { Alert, Button, Skeleton } from "@/components/ui";
 
 const COMMENT_PAGE_SIZE = 500;
 
 type ThreadTicket = Pick<
   Ticket,
-  "id" | "description" | "reporter" | "created_at" | "external_created_at"
+  | "id"
+  | "description"
+  | "reporter"
+  | "requester_name"
+  | "requester_email"
+  | "requester_title"
+  | "created_at"
+  | "external_created_at"
 >;
 
 export function formatThreadTimestamp(value: string | null): string {
@@ -30,19 +38,28 @@ export function mergeChronologicalCommentPages(
 function ThreadPost({
   position,
   author,
+  authorEmail,
+  authorTitle,
+  authorType,
   body,
   createdAt,
   isOriginal = false,
   isPrivate = false,
+  attachments = [],
 }: {
   position: number;
   author: string;
+  authorEmail?: string | null;
+  authorTitle?: string | null;
+  authorType?: "agent" | "requester" | null;
   body: string;
   createdAt: string | null;
   isOriginal?: boolean;
   isPrivate?: boolean;
+  attachments?: TicketAttachment[];
 }) {
   const timestamp = formatThreadTimestamp(createdAt);
+  const emailHref = safeMailto(authorEmail);
 
   return (
     <article
@@ -59,6 +76,13 @@ function ThreadPost({
           )}
         </div>
         <p className="mt-2 break-words text-xs font-semibold text-ink-700">{author || "Unknown author"}</p>
+        {authorType && <p className="mt-0.5 text-[10px] font-medium uppercase tracking-wide text-ink-400">{authorType}</p>}
+        {authorTitle && <p className="mt-1 break-words text-[10px] leading-4 text-ink-500">{authorTitle}</p>}
+        {authorEmail && (
+          emailHref
+            ? <a href={emailHref} className="mt-1 block break-all text-[10px] leading-4 text-semantic-primary hover:underline">{authorEmail}</a>
+            : <p className="mt-1 break-all text-[10px] leading-4 text-ink-400">{authorEmail}</p>
+        )}
         <time
           className="mt-1 block font-mono text-[10px] leading-4 text-ink-400"
           dateTime={createdAt || undefined}
@@ -77,14 +101,68 @@ function ThreadPost({
         <p className="break-words whitespace-pre-wrap text-sm leading-6 text-ink-600">
           {body || (isOriginal ? "No description was provided for this ticket." : "[Empty reply]")}
         </p>
+        <AttachmentList ticketId={attachments[0]?.ticket_id || ""} attachments={attachments} />
       </div>
     </article>
+  );
+}
+
+function formatBytes(value: number | null) {
+  if (value == null) return "Size unavailable";
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function AttachmentList({ ticketId, attachments }: { ticketId: string; attachments: TicketAttachment[] }) {
+  if (attachments.length === 0) return null;
+  return (
+    <div className="mt-5 border-t border-linen-300 pt-4" aria-label="Synchronized attachments">
+      <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-ink-500">
+        <Paperclip className="h-3.5 w-3.5" aria-hidden="true" />
+        {attachments.length} {attachments.length === 1 ? "attachment" : "attachments"}
+      </p>
+      <ul className="grid gap-2 sm:grid-cols-2">
+        {attachments.map((attachment) => {
+          const ready = attachment.status === "stored";
+          const isImage = ready && ["image/png", "image/jpeg", "image/gif", "image/webp"].includes((attachment.content_type || "").toLowerCase());
+          const href = `/api/tickets/${encodeURIComponent(ticketId)}/attachments/${encodeURIComponent(attachment.id)}`;
+          return (
+            <li key={attachment.id} className="overflow-hidden rounded-lg border border-linen-300 bg-linen-50">
+              {isImage && (
+                <a href={href} target="_blank" rel="noreferrer" className="block border-b border-linen-300 bg-white p-2">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={href} alt={attachment.name} loading="lazy" className="max-h-56 w-full rounded object-contain" />
+                </a>
+              )}
+              <div className="flex items-center gap-2 p-2.5">
+                {isImage ? <ImageIcon className="h-4 w-4 shrink-0 text-semantic-primary" /> : <Paperclip className="h-4 w-4 shrink-0 text-ink-400" />}
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-xs font-medium text-ink-700" title={attachment.name}>{attachment.name}</p>
+                  <p className="mt-0.5 text-[10px] text-ink-400">{formatBytes(attachment.stored_size ?? attachment.size)}</p>
+                </div>
+                {ready ? (
+                  <a href={href} download className="rounded p-1.5 text-semantic-primary hover:bg-linen-200" aria-label={`Download ${attachment.name}`}>
+                    <Download className="h-4 w-4" />
+                  </a>
+                ) : (
+                  <span className="rounded-full bg-linen-200 px-2 py-1 text-[10px] font-medium text-ink-500">
+                    {attachment.status === "error" ? "Copy failed" : "Copy pending"}
+                  </span>
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
   );
 }
 
 export function FreshserviceConversationThreadView({
   ticket,
   comments,
+  attachments = [],
   loading,
   error,
   hasOlderReplies,
@@ -94,6 +172,7 @@ export function FreshserviceConversationThreadView({
 }: {
   ticket: ThreadTicket;
   comments: TicketComment[];
+  attachments?: TicketAttachment[];
   loading: boolean;
   error: boolean;
   hasOlderReplies: boolean;
@@ -129,10 +208,14 @@ export function FreshserviceConversationThreadView({
         <li>
           <ThreadPost
             position={1}
-            author={ticket.reporter || "Requester"}
+            author={requesterName(ticket)}
+            authorEmail={requesterEmail(ticket)}
+            authorTitle={ticket.requester_title}
+            authorType="requester"
             body={ticket.description}
             createdAt={ticket.external_created_at || ticket.created_at}
             isOriginal
+            attachments={attachments.filter((attachment) => attachment.owner_type === "ticket")}
           />
         </li>
 
@@ -174,9 +257,16 @@ export function FreshserviceConversationThreadView({
             <ThreadPost
               position={index + 2}
               author={comment.author_name}
+              authorEmail={comment.author_email}
+              authorTitle={comment.author_title}
+              authorType={comment.author_type}
               body={comment.body}
               createdAt={comment.created_at}
               isPrivate={comment.is_private}
+              attachments={attachments.filter((attachment) => (
+                attachment.owner_type === "conversation"
+                && attachment.owner_external_id === comment.external_id
+              ))}
             />
           </li>
         ))}
@@ -208,11 +298,18 @@ export function FreshserviceConversationThread({ ticket }: { ticket: ThreadTicke
   const comments = commentsQuery.data
     ? mergeChronologicalCommentPages(commentsQuery.data.pages)
     : [];
+  const attachmentsQuery = useInfiniteQuery({
+    queryKey: ["ticket-attachments", ticket.id],
+    queryFn: async () => api.getAttachments(ticket.id),
+    initialPageParam: 0,
+    getNextPageParam: () => undefined,
+  });
 
   return (
     <FreshserviceConversationThreadView
       ticket={ticket}
       comments={comments}
+      attachments={attachmentsQuery.data?.pages[0] || []}
       loading={commentsQuery.isLoading}
       error={commentsQuery.isError}
       hasOlderReplies={commentsQuery.hasNextPage}

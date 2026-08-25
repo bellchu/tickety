@@ -73,6 +73,7 @@ export const navigationSections: readonly NavigationSection[] = [
 ];
 
 const utilityNavigationItems: readonly Pick<NavigationItem, "href" | "label">[] = [
+  { href: "/settings/status", label: "Status" },
   { href: "/settings", label: "Settings" },
   { href: "/profile", label: "My profile" },
 ];

@@ -146,6 +146,12 @@ class LLMCapacityError(LLMUnavailableError):
         self.retry_after_seconds = max(1.0, float(retry_after_seconds))
 
 
+class LLMProviderRejectedError(LLMAnalysisError):
+    """The provider rejected a valid dispatch with a non-retryable 4xx."""
+
+    pass
+
+
 class LLMInvalidOutputError(LLMAnalysisError):
     pass
 
@@ -1091,6 +1097,8 @@ class LLMManager:
                 )
 
         last_err = None
+        last_status = None
+        last_retry_delay = 0.0
         deadline = started + self.overall_timeout
         # UTF-8 bytes are a conservative model-independent upper bound when a
         # provider tokenizer is unavailable; output is bounded by max_tokens.
@@ -1188,6 +1196,7 @@ class LLMManager:
                 status = getattr(e, "status_code", None) or getattr(
                     getattr(e, "response", None), "status_code", None
                 )
+                last_status = status
                 capacity_wait = isinstance(e, LLMCapacityError)
                 retryable = capacity_wait or (
                     not isinstance(e, LLMAnalysisError) and (
@@ -1231,6 +1240,7 @@ class LLMManager:
                     delay = (2 ** attempt) + random.uniform(0, 0.25)
                     response_headers = getattr(getattr(e, "response", None), "headers", {}) or {}
                     delay = _provider_retry_delay(response_headers, delay)
+                    last_retry_delay = max(last_retry_delay, delay)
                     if capacity_wait:
                         delay = max(delay, e.retry_after_seconds)
                     if time.monotonic() + delay >= deadline:
@@ -1244,6 +1254,15 @@ class LLMManager:
             raise LLMInvalidOutputError("AI provider returned invalid structured output") from last_err
         if isinstance(last_err, LLMCapacityError):
             raise last_err
+        if last_status == 429:
+            raise LLMCapacityError(
+                "AI provider capacity is temporarily unavailable",
+                max(60.0, last_retry_delay),
+            ) from last_err
+        if isinstance(last_status, int) and 400 <= last_status < 500:
+            raise LLMProviderRejectedError(
+                "AI provider rejected the request"
+            ) from last_err
         raise LLMUnavailableError("AI provider request failed") from last_err
 
     # ── helpers ────────────────────────────────────────────────

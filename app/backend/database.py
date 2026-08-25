@@ -84,6 +84,10 @@ class TicketRecord(Base):
     external_ticket_type_raw = Column(String(255), nullable=True)
     external_source_context_hash = Column(String(64), nullable=True)
     external_assignee_id = Column(String, nullable=True)
+    external_requester_id = Column(String(255), nullable=True, index=True)
+    external_requester_name = Column(String(255), nullable=True)
+    external_requester_email = Column(String(320), nullable=True)
+    external_requester_title = Column(String(255), nullable=True)
     external_group_id = Column(String, nullable=True)
     external_category = Column(String, nullable=True)
     external_subcategory = Column(String, nullable=True)
@@ -91,6 +95,7 @@ class TicketRecord(Base):
     external_workspace_id = Column(String, nullable=True)
     external_updated_at = Column(DateTime, nullable=True)
     external_conversation_text = Column(Text, nullable=True)
+    external_description_html = Column(Text, nullable=True)
     external_conversation_updated_at = Column(DateTime, nullable=True)
     external_conversations_synced_at = Column(DateTime, nullable=True, index=True)
     external_created_at = Column(DateTime, nullable=True)
@@ -255,8 +260,7 @@ class SyncStateRecord(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     binding_id = Column(String(36), nullable=False, default="legacy", index=True)
     provider = Column(String, nullable=False)
-    # A new binding starts with a full inventory; only a successful pass
-    # advances this cursor.
+    # Automatic discovery advances only inside the fixed recent window.
     last_synced_at = Column(DateTime, nullable=True)
     automatic_ai_enabled = Column(Boolean, nullable=False, default=False, index=True)
     automatic_ai_generation = Column(Integer, nullable=True)
@@ -278,6 +282,10 @@ class SyncStateRecord(Base):
     history_workspace_index = Column(Integer, nullable=False, default=0)
     history_complete = Column(Boolean, nullable=False, default=False)
     history_processed = Column(Integer, nullable=False, default=0)
+    history_since_at = Column(DateTime, nullable=True)
+    history_until_at = Column(DateTime, nullable=True)
+    history_requested_at = Column(DateTime, nullable=True)
+    history_requested_by = Column(String(255), nullable=True)
     conversations_processed = Column(Integer, nullable=False, default=0)
     # A durable lease prevents overlapping scheduled and manual provider calls
     # and can be reclaimed after an interrupted worker run.
@@ -469,6 +477,7 @@ class TicketCommentRecord(Base):
     ticket_id = Column(String, ForeignKey("tickets.id"), nullable=False, index=True)
     author_id = Column(String, ForeignKey("users.id"), nullable=True)
     author_name = Column(String, default="System")
+    author_email = Column(String(320), nullable=True)
     body = Column(Text, nullable=False)
     is_private = Column(Boolean, default=False)  # True = internal note, False = public reply
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -497,11 +506,14 @@ class ExternalConversationRecord(Base):
     provider_ticket_id = Column(String(255), nullable=False, index=True)
     external_id = Column(String(255), nullable=False)
     body = Column(Text, nullable=True)
+    body_html = Column(Text, nullable=True)
     body_hash = Column(String(64), nullable=False)
     is_private = Column(Boolean, nullable=False, default=False, index=True)
     incoming = Column(Boolean, nullable=False, default=False)
     source = Column(Integer, nullable=True)
     author_external_id = Column(String(255), nullable=True)
+    author_name = Column(String(255), nullable=True)
+    author_email = Column(String(320), nullable=True)
     provider_created_at = Column(DateTime, nullable=True)
     provider_updated_at = Column(DateTime, nullable=True)
     deleted = Column(Boolean, nullable=False, default=False, index=True)
@@ -519,6 +531,51 @@ class ExternalConversationRecord(Base):
         Index(
             "ix_external_conversations_ticket_current",
             "binding_id", "provider", "provider_ticket_id", "deleted", "is_private",
+        ),
+    )
+
+
+class ExternalAttachmentRecord(Base):
+    """Lossless provider attachment metadata and private object-store state."""
+
+    __tablename__ = "external_attachments"
+
+    id = Column(String(36), primary_key=True)
+    binding_id = Column(String(36), nullable=False, index=True)
+    provider = Column(String(64), nullable=False, index=True)
+    ticket_id = Column(String, ForeignKey("tickets.id"), nullable=False, index=True)
+    provider_ticket_id = Column(String(255), nullable=False, index=True)
+    owner_type = Column(String(32), nullable=False)
+    owner_external_id = Column(String(255), nullable=False)
+    external_id = Column(String(255), nullable=False)
+    file_name = Column(String(1024), nullable=False)
+    content_type = Column(String(255), nullable=True)
+    declared_size = Column(Integer, nullable=True)
+    source_url = Column(Text, nullable=True)
+    blob_key = Column(Text, nullable=True)
+    content_sha256 = Column(String(64), nullable=True, index=True)
+    stored_size = Column(Integer, nullable=True)
+    storage_status = Column(String(32), nullable=False, default="pending", index=True)
+    attempts = Column(Integer, nullable=False, default=0)
+    last_error = Column(String(255), nullable=True)
+    last_attempted_at = Column(DateTime, nullable=True)
+    stored_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "binding_id", "provider", "provider_ticket_id", "owner_type",
+            "owner_external_id", "external_id",
+            name="uix_external_attachment_identity",
+        ),
+        Index(
+            "ix_external_attachments_ticket_status",
+            "ticket_id", "storage_status",
+        ),
+        CheckConstraint(
+            "owner_type IN ('ticket', 'conversation')",
+            name="ck_external_attachment_owner_type",
         ),
     )
 
@@ -1116,6 +1173,10 @@ def _ensure_columns():
             "history_workspace_index": "INTEGER NOT NULL DEFAULT 0",
             "history_complete": "BOOLEAN NOT NULL DEFAULT FALSE",
             "history_processed": "INTEGER NOT NULL DEFAULT 0",
+            "history_since_at": "TIMESTAMP",
+            "history_until_at": "TIMESTAMP",
+            "history_requested_at": "TIMESTAMP",
+            "history_requested_by": "VARCHAR(255)",
             "conversations_processed": "INTEGER NOT NULL DEFAULT 0",
             "run_token": "VARCHAR(36)",
             "run_started_at": "TIMESTAMP",

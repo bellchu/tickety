@@ -43,7 +43,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             for table_name, table in Base.metadata.tables.items():
                 actual_columns = {column["name"] for column in inspector.get_columns(table_name)}
                 self.assertEqual(actual_columns, set(table.columns.keys()), table_name)
-            self.assertEqual(self._current_revision(engine), "0013")
+            self.assertEqual(self._current_revision(engine), "0016")
             self.assertIn("external_users", inspector.get_table_names())
             self.assertIn("external_conversations", inspector.get_table_names())
             self.assertIn("external_activity_ledger", inspector.get_table_names())
@@ -96,7 +96,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertEqual(user["name"], "Legacy User")
             self.assertEqual(user["role"], "agent")
             self.assertTrue(user["is_active"])
-            self.assertEqual(self._current_revision(engine), "0013")
+            self.assertEqual(self._current_revision(engine), "0016")
         finally:
             engine.dispose()
 
@@ -181,7 +181,7 @@ class DatabaseMigrationTests(unittest.TestCase):
                 scopes,
                 "freshservice.tickets.view freshservice.agents.manage",
             )
-            self.assertEqual(self._current_revision(engine), "0013")
+            self.assertEqual(self._current_revision(engine), "0016")
         finally:
             engine.dispose()
 

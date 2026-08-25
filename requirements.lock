@@ -26,8 +26,12 @@ attrs==26.1.0
     #   jsonschema
     #   referencing
 azure-core==1.41.0
-    # via azure-identity
+    # via
+    #   azure-identity
+    #   azure-storage-blob
 azure-identity==1.25.3
+    # via -r requirements.txt
+azure-storage-blob==12.30.0
     # via -r requirements.txt
 certifi==2026.7.22
     # via
@@ -50,6 +54,7 @@ colorama==0.4.6 ; sys_platform == 'win32'
 cryptography==50.0.0
     # via
     #   azure-identity
+    #   azure-storage-blob
     #   msal
     #   pyjwt
 distro==1.9.0
@@ -94,6 +99,8 @@ idna==3.19
     #   yarl
 importlib-metadata==8.9.0
     # via litellm
+isodate==0.7.2
+    # via azure-storage-blob
 jinja2==3.1.6
     # via litellm
 jiter==0.16.0
@@ -199,6 +206,7 @@ typing-extensions==4.16.0
     #   anyio
     #   azure-core
     #   azure-identity
+    #   azure-storage-blob
     #   fastapi
     #   huggingface-hub
     #   openai
