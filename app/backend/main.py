@@ -28,6 +28,7 @@ from .database import (
     Base, init_db, get_db, SessionLocal,
     TicketRecord, UserRecord, RecognitionRecord,
     ExternalUserRecord, ExternalGroupRecord, ExternalGroupMembershipRecord,
+    IntelligenceStudyRecord,
     UserExternalIdentityLinkRecord, UserExternalIdentityAuditRecord,
     AgentTicketStateRecord, SyncStateRecord,
     TicketCommentRecord, TicketCategoryRecord, TicketAuditLogRecord,
@@ -7764,6 +7765,7 @@ async def refresh_models(
 # ── Intelligence (SupportLogic-style ambient agents) ──────────
 
 _INTELLIGENCE_ROW_LIMIT = 500
+_INTELLIGENCE_SLA_ROW_LIMIT = 5_000
 _INTELLIGENCE_DEFAULT_WINDOW_DAYS = 30
 
 
@@ -8010,6 +8012,214 @@ async def intel_overview(
             "latest_ticket_activity_at": latest_activity.isoformat() if latest_activity else None,
         },
     }
+
+
+@app.get("/intelligence/service-quality")
+def intel_service_quality(
+    window_days: int = Query(_INTELLIGENCE_DEFAULT_WINDOW_DAYS, ge=7, le=365),
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
+):
+    """Alert-only routing, support-level, friction, and clarity signals."""
+    _reserve_analytics_request(db, _user.id)
+    now = datetime.utcnow()
+    cutoff = _intelligence_cutoff(now, window_days)
+    query = _open_ticket_query(db, cutoff).filter(
+        TicketRecord.portal_access_token_hash.is_(None)
+    )
+    total = query.count()
+    tickets = query.order_by(*_intelligence_candidate_order()).limit(
+        _INTELLIGENCE_ROW_LIMIT
+    ).all()
+    profiles = intel.build_group_profiles(db, since=now - timedelta(days=365))
+    conversations = intel.public_conversations_for_tickets(
+        db, [ticket.id for ticket in tickets]
+    )
+
+    routing_alerts = []
+    level_assessments = []
+    friction_alerts = []
+    clarification_alerts = []
+    routing_profiled = 0
+    assigned_level_profiled = 0
+    level_distribution = {str(level): 0 for level in range(4)}
+    for ticket in tickets:
+        profile = profiles.get((ticket.binding_id or "legacy", ticket.external_group_id or ""))
+        if profile and (
+            profile.get("functional_samples", 0) >= intel._GROUP_PROFILE_MIN_SAMPLE
+            and profile.get("functional_confidence", 0) >= intel._GROUP_PROFILE_MIN_CONFIDENCE
+            and intel._recommended_team_for_signal(ticket)[0]
+        ):
+            routing_profiled += 1
+        route_alert = intel.routing_alert(ticket, profile, now=now)
+        if route_alert:
+            routing_alerts.append(route_alert)
+
+        assessment = intel.support_level_assessment(ticket, profile)
+        level_distribution[str(assessment["recommended_level"])] += 1
+        if assessment["inferred_from_group_history"]:
+            assigned_level_profiled += 1
+        level_assessments.append(assessment)
+
+        thread = conversations.get(ticket.id, [])
+        friction = intel.customer_friction_signal(ticket, thread, now=now)
+        if friction["flagged"]:
+            friction_alerts.append(friction)
+        clarification = intel.clarification_assessment(ticket, thread)
+        if clarification["flagged"]:
+            clarification_alerts.append(clarification)
+
+    severity_order = {"high": 0, "medium": 1, "low": 2}
+    routing_alerts.sort(key=lambda row: (
+        severity_order.get(row["severity"], 3), -row["dormant_hours"], row["ticket_id"]
+    ))
+    friction_alerts.sort(key=lambda row: (
+        severity_order.get(row["severity"], 3), -row["current_unanswered_gap_hours"], row["ticket_id"]
+    ))
+    clarification_alerts.sort(key=lambda row: (row["detail_score"], row["ticket_id"]))
+    level_assessments.sort(key=lambda row: (
+        not row["mismatch"],
+        0 if row["mismatch_direction"] == "under-tiered" else 1,
+        -row["recommended_level"],
+        row["ticket_id"],
+    ))
+    level_mismatches = sum(row["mismatch"] for row in level_assessments)
+    return {
+        "generated_at": now.isoformat(),
+        "window_days": window_days,
+        "alert_only": True,
+        "scope": {
+            "total_active_tickets": total,
+            "analyzed_tickets": len(tickets),
+            "truncated": total > len(tickets),
+            "group_profile_period_days": 365,
+        },
+        "summary": {
+            "routing_mismatches": len(routing_alerts),
+            "routing_profiled_tickets": routing_profiled,
+            "level_mismatches": level_mismatches,
+            "assigned_level_profiled_tickets": assigned_level_profiled,
+            "customer_friction": len(friction_alerts),
+            "clarification_needed": len(clarification_alerts),
+        },
+        "routing_alerts": routing_alerts[:100],
+        "level_distribution": level_distribution,
+        "level_assessments": level_assessments[:100],
+        "friction_alerts": friction_alerts[:100],
+        "clarification_alerts": clarification_alerts[:100],
+        "items_truncated": any(len(items) > 100 for items in (
+            routing_alerts, level_assessments, friction_alerts, clarification_alerts,
+        )),
+    }
+
+
+@app.get("/intelligence/sla-monitoring")
+def intel_sla_monitoring(
+    window_days: int = Query(_INTELLIGENCE_DEFAULT_WINDOW_DAYS, ge=7, le=365),
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
+):
+    """First-response and resolution SLA dashboard, reactive and proactive."""
+    _reserve_analytics_request(db, _user.id)
+    now = datetime.utcnow()
+    cutoff = _intelligence_cutoff(now, window_days)
+    query = db.query(TicketRecord).filter(
+        _ticket_activity_expression() >= cutoff,
+        TicketRecord.portal_access_token_hash.is_(None),
+    )
+    total = query.count()
+    tickets = query.order_by(
+        _ticket_activity_expression().desc(), TicketRecord.id.asc()
+    ).limit(_INTELLIGENCE_SLA_ROW_LIMIT).all()
+    conversations = intel.public_conversations_for_tickets(
+        db, [ticket.id for ticket in tickets]
+    )
+    rows = []
+    for ticket in tickets:
+        rows.append(intel.first_response_sla_status(
+            ticket, conversations.get(ticket.id, []), now=now
+        ))
+        rows.append(intel.resolution_sla_monitor_status(ticket, now=now))
+
+    measured = [row for row in rows if row["status"] != "unmeasured"]
+    reactive = [row for row in measured if row["status"] == "breached"]
+    proactive = [row for row in measured if row["status"] == "approaching"]
+    reactive.sort(key=lambda row: (-row["overdue_hours"], row["ticket_id"], row["metric"]))
+    proactive.sort(key=lambda row: (row["remaining_hours"], row["ticket_id"], row["metric"]))
+    by_priority: Dict[str, Any] = {}
+    for row in measured:
+        priority = row["priority"]
+        bucket = by_priority.setdefault(priority, {
+            "first_response": {"breached": 0, "approaching": 0},
+            "resolution": {"breached": 0, "approaching": 0},
+        })
+        if row["status"] in {"breached", "approaching"}:
+            bucket[row["metric"]][row["status"]] += 1
+    return {
+        "generated_at": now.isoformat(),
+        "window_days": window_days,
+        "scope": {
+            "total_tickets": total,
+            "analyzed_tickets": len(tickets),
+            "truncated": total > len(tickets),
+            "measured_clocks": len(measured),
+            "unmeasured_clocks": len(rows) - len(measured),
+        },
+        "summary": {
+            "reactive_breaches": len(reactive),
+            "active_breaches": sum(row["breach_state"] == "active" for row in reactive),
+            "historical_breaches": sum(row["breach_state"] == "historical" for row in reactive),
+            "approaching_breaches": len(proactive),
+            "first_response_breaches": sum(row["metric"] == "first_response" for row in reactive),
+            "resolution_breaches": sum(row["metric"] == "resolution" for row in reactive),
+        },
+        "by_priority": by_priority,
+        "reactive": reactive[:100],
+        "proactive": proactive[:100],
+        "items_truncated": len(reactive) > 100 or len(proactive) > 100,
+    }
+
+
+def _serialize_intelligence_study(record: IntelligenceStudyRecord) -> Dict[str, Any]:
+    result = json.loads(record.result_json)
+    return {
+        **result,
+        "run_id": record.id,
+        "created_at": record.created_at.isoformat(),
+        "created_by": record.created_by,
+    }
+
+
+@app.get("/intelligence/level-zero-study")
+def get_level_zero_study(
+    months: int = Query(12, ge=6, le=12),
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
+):
+    """Return the latest stable Level Zero snapshot without rerunning it."""
+    _reserve_analytics_request(db, _user.id)
+    record = db.query(IntelligenceStudyRecord).filter(
+        IntelligenceStudyRecord.study_type == "level_zero_opportunity",
+        IntelligenceStudyRecord.period_months == months,
+    ).order_by(
+        IntelligenceStudyRecord.created_at.desc(),
+        IntelligenceStudyRecord.id.desc(),
+    ).first()
+    return {"study": _serialize_intelligence_study(record) if record else None}
+
+
+@app.post("/intelligence/level-zero-study")
+def run_level_zero_study(
+    months: int = Query(12, ge=6, le=12),
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
+):
+    """Deliberately run and persist a complete 6-12 month Level Zero study."""
+    _reserve_analytics_request(db, user.id)
+    record, _result = intel.create_level_zero_study_snapshot(
+        db, months=months, created_by=user.id
+    )
+    return _serialize_intelligence_study(record)
 
 @app.get("/intelligence/alerts")
 async def intel_alerts(

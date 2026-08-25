@@ -338,6 +338,37 @@ class ExternalGroupMembershipRecord(Base):
     )
 
 
+class IntelligenceStudyRecord(Base):
+    """Persisted snapshot for deliberate, one-time operational studies.
+
+    These records are intentionally separate from live cockpit signals. A
+    study is run by an administrator or supervisor, records the exact source
+    period and result, and remains stable until somebody explicitly runs a
+    replacement snapshot.
+    """
+
+    __tablename__ = "intelligence_studies"
+
+    id = Column(String(36), primary_key=True)
+    study_type = Column(String(64), nullable=False, index=True)
+    period_months = Column(Integer, nullable=False)
+    range_start_at = Column(DateTime, nullable=False)
+    range_end_at = Column(DateTime, nullable=False)
+    source_data_through_at = Column(DateTime, nullable=True)
+    analyzed_tickets = Column(Integer, nullable=False, default=0)
+    eligible_tickets = Column(Integer, nullable=False, default=0)
+    result_json = Column(Text, nullable=False)
+    created_by = Column(String, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+    __table_args__ = (
+        Index(
+            "ix_intelligence_studies_latest",
+            "study_type", "period_months", "created_at",
+        ),
+    )
+
+
 class UserExternalIdentityLinkRecord(Base):
     """Explicit, administrator-managed bridge used only for work visibility."""
     __tablename__ = "user_external_identity_links"

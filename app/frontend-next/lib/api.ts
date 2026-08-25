@@ -297,6 +297,23 @@ export const api = {
     fetchAPI<import("./types").IntelligenceOverviewResponse>(
       `/intelligence/overview?window_days=${windowDays}`
     ),
+  getIntelServiceQuality: (windowDays = 30) =>
+    fetchAPI<import("./types").ServiceQualityResponse>(
+      `/intelligence/service-quality?window_days=${windowDays}`
+    ),
+  getIntelSlaMonitoring: (windowDays = 30) =>
+    fetchAPI<import("./types").SlaMonitoringResponse>(
+      `/intelligence/sla-monitoring?window_days=${windowDays}`
+    ),
+  getLevelZeroStudy: (months = 12) =>
+    fetchAPI<import("./types").LevelZeroStudyResponse>(
+      `/intelligence/level-zero-study?months=${months}`
+    ),
+  runLevelZeroStudy: (months = 12) =>
+    fetchAPI<import("./types").LevelZeroStudy>(
+      `/intelligence/level-zero-study?months=${months}`,
+      { method: "POST" }
+    ),
   getIntelAlerts: () =>
     fetchAPI<import("./types").IntelAlertsResponse>("/intelligence/alerts?window_days=30"),
   getIntelAlertsForWindow: (windowDays: number) =>

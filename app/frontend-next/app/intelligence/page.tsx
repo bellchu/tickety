@@ -2,27 +2,33 @@
 
 import Link from "next/link";
 import { useState, type ReactNode } from "react";
-import { useIsFetching, useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
+import { useIsFetching, useMutation, useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import {
   Activity,
   AlertTriangle,
   Archive,
   ArrowRight,
   BarChart3,
+  Bot,
   CheckCircle2,
+  CircleHelp,
   Gauge,
   Layers3,
   ListChecks,
+  MessageSquare,
+  Play,
   Radar,
   RefreshCw,
   Search,
   ShieldCheck,
   Siren,
   Sparkles,
+  Timer,
   TrendingDown,
   TrendingUp,
   UserRoundX,
   Users,
+  Waypoints,
 } from "lucide-react";
 import { Alert, Badge, Button, EmptyState, ErrorState, ListText, Skeleton } from "@/components/ui";
 import { PageFrame, PageHeader, SectionHeader, SummaryStrip } from "@/components/layout/PageLayout";
@@ -35,6 +41,9 @@ import type {
   IntelligenceOverviewResponse,
   IntelTrendsResponse,
   IntelWorkloadResponse,
+  LevelZeroStudy,
+  ServiceQualityResponse,
+  SlaMonitoringResponse,
   SystemicIssuesResponse,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -147,6 +156,14 @@ function IntelligenceCockpit() {
     queryKey: ["intelligence", "systemic", windowDays],
     queryFn: () => api.getIntelSystemicForWindow(2, windowDays),
   });
+  const qualityQuery = useQuery({
+    queryKey: ["intelligence", "service-quality", windowDays],
+    queryFn: () => api.getIntelServiceQuality(windowDays),
+  });
+  const slaMonitoringQuery = useQuery({
+    queryKey: ["intelligence", "sla-monitoring", windowDays],
+    queryFn: () => api.getIntelSlaMonitoring(windowDays),
+  });
 
   const refreshAll = () => queryClient.invalidateQueries({ queryKey: ["intelligence"] });
   const overview = overviewQuery.data;
@@ -193,6 +210,15 @@ function IntelligenceCockpit() {
         </>
       )}
 
+      <section data-intelligence-section="service-assurance" className="space-y-4">
+        <SectionHeader
+          title="Service assurance"
+          description={`Human-review guardrails for routing, support level, customer friction, request quality, and SLA exposure in the last ${windowDays} days.`}
+        />
+        <ServiceQualityPanels query={qualityQuery} />
+        <SlaMonitoringPanel query={slaMonitoringQuery} />
+      </section>
+
       <section data-intelligence-section="team-capacity" className="space-y-4">
         <SectionHeader
           title="Team capacity"
@@ -213,6 +239,14 @@ function IntelligenceCockpit() {
           <TrendsPanel query={trendsQuery} />
           <SystemicPanel query={systemicQuery} />
         </div>
+      </section>
+
+      <section data-intelligence-section="automation-discovery" className="space-y-4">
+        <SectionHeader
+          title="Automation discovery"
+          description="A deliberate historical study, kept separate from the live operating window and never rerun automatically."
+        />
+        <LevelZeroStudyPanel />
       </section>
     </PageFrame>
   );
@@ -455,6 +489,183 @@ function StaleBacklogPanel({ data }: { data: IntelligenceOverviewResponse }) {
             ))}
           </div>
           <Link href="/tickets" className="inline-flex items-center gap-1 text-xs font-semibold text-semantic-primary hover:underline">Review in All Tickets <ArrowRight className="h-3.5 w-3.5" /></Link>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function ServiceQualityPanels({ query }: { query: UseQueryResult<ServiceQualityResponse, Error> }) {
+  if (query.isLoading) {
+    return <div className="grid gap-6 lg:grid-cols-2" aria-label="Loading service assurance"><Skeleton className="h-96" /><Skeleton className="h-96" /><Skeleton className="h-96" /><Skeleton className="h-96" /></div>;
+  }
+  if (query.isError || !query.data) {
+    return <ErrorState title="Service-quality guardrails unavailable" description="Routing, level, friction, and clarification signals could not be refreshed." onRetry={() => void query.refetch()} retrying={query.isFetching} />;
+  }
+  const data = query.data;
+  const mismatches = data.level_assessments.filter((item) => item.mismatch);
+  return (
+    <div className="space-y-4">
+      {data.scope.truncated && <SamplingNotice analyzed={data.scope.analyzed_tickets} total={data.scope.total_active_tickets} />}
+      <Alert variant="info" title="Advisory guardrail — no automatic routing" className="text-xs">
+        These signals never reassign, reprioritize, or reply to a ticket. Resolver-team and assigned-level comparisons are confidence-gated against 12 months of completed group history.
+      </Alert>
+      <SummaryStrip label="Service-quality exceptions">
+        <AssuranceMetric label="Possible misroutes" value={data.summary.routing_mismatches} detail={`${data.summary.routing_profiled_tickets} tickets calibrated`} warning={data.summary.routing_mismatches > 0} />
+        <AssuranceMetric label="Level mismatch" value={data.summary.level_mismatches} detail={`${data.summary.assigned_level_profiled_tickets} assigned levels inferred`} warning={data.summary.level_mismatches > 0} />
+        <AssuranceMetric label="Customer friction" value={data.summary.customer_friction} detail="frustration, delay, or excess turns" warning={data.summary.customer_friction > 0} />
+        <AssuranceMetric label="Needs clarification" value={data.summary.clarification_needed} detail="insufficient diagnostic detail" warning={data.summary.clarification_needed > 0} />
+      </SummaryStrip>
+      <div className="grid min-w-0 gap-6 xl:grid-cols-2">
+        <Panel title="Routing guardrail" description="Flags a likely functional-team mismatch only when the current group has enough consistent historical evidence." icon={<Waypoints className="h-4 w-4" />} action={<Badge variant={data.routing_alerts.length ? "warning" : "success"} dot>{data.routing_alerts.length} alerts</Badge>}>
+          {data.routing_alerts.length === 0 ? (
+            <EmptyPanel
+              title={data.summary.routing_profiled_tickets ? "No calibrated routing mismatch" : "Group calibration not ready"}
+              description={data.summary.routing_profiled_tickets ? "Evaluated tickets align with the functional profile of their current group." : "No active ticket has both a supported recommendation and a sufficiently consistent historical group profile yet."}
+            />
+          ) : (
+            <div className="space-y-2">
+              {data.routing_alerts.slice(0, 6).map((alert) => (
+                <Link key={alert.ticket_id} href={`/tickets/${alert.ticket_id}`} className="block min-w-0 rounded-xl border border-amber-400/35 bg-[var(--color-warning-soft)] p-3 transition-colors hover:border-amber-400/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]">
+                  <div className="flex flex-wrap items-center gap-1.5"><Badge variant={alert.severity === "high" ? "danger" : "warning"}>{alert.priority}</Badge><Badge>{Math.round(alert.profile_confidence * 100)}% group profile</Badge>{!alert.directory_name_available && <Badge variant="warning">Directory name missing</Badge>}</div>
+                  <ListText text={alert.subject} lines={2} className="mt-2 text-sm font-semibold leading-5 text-ink-700" />
+                  <p className="mt-1 text-xs leading-5 text-ink-500"><strong className="text-ink-600">Current:</strong> {alert.current_group_name} ({alert.group_profile_team}) <ArrowRight className="mx-1 inline h-3 w-3" /> <strong className="text-ink-600">Review for:</strong> {alert.recommended_team}</p>
+                  <p className="mt-1 text-[11px] leading-4 text-ink-400">{alert.profile_samples} historical classifications · {formatHours(alert.dormant_hours)} since provider activity</p>
+                </Link>
+              ))}
+            </div>
+          )}
+        </Panel>
+
+        <Panel title="Level 0–3 alignment" description="AI-informed support-level need compared with the current group’s inferred delivery level. Freshservice does not currently define assigned tiers." icon={<Layers3 className="h-4 w-4" />} action={<Badge variant={mismatches.length ? "warning" : "info"}>{mismatches.length} mismatches</Badge>}>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {([0, 1, 2, 3] as const).map((level) => <CompactMetric key={level} label={`Level ${level}`} value={data.level_distribution[String(level) as "0" | "1" | "2" | "3"] ?? 0} icon={level === 0 ? <Bot className="h-3.5 w-3.5" /> : <Layers3 className="h-3.5 w-3.5" />} />)}
+          </div>
+          <Alert variant="info" title="Assigned level is inferred" className="mt-4 text-xs">Until provider tiers exist, Tickety learns a group’s typical level from completed work and only calls a mismatch when the sample is large and consistent enough.</Alert>
+          {mismatches.length === 0 ? <EmptyPanel title="No confident level mismatch" description="No calibrated active ticket is clearly above or below its current group’s inferred level." /> : (
+            <div className="mt-4 space-y-2">
+              {mismatches.slice(0, 6).map((item) => (
+                <Link key={item.ticket_id} href={`/tickets/${item.ticket_id}`} className="flex min-w-0 items-start justify-between gap-3 rounded-xl border border-linen-300 p-3 transition-colors hover:bg-linen-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]">
+                  <span className="min-w-0"><span className="flex flex-wrap gap-1.5"><Badge variant={item.mismatch_direction === "under-tiered" ? "danger" : "warning"}>{item.mismatch_direction}</Badge><Badge>{item.priority}</Badge></span><ListText text={item.subject} lines={2} className="mt-2 text-xs font-semibold leading-5 text-ink-700" /><ListText text={item.basis} lines={2} className="mt-1 text-[11px] leading-4 text-ink-400" /></span>
+                  <span className="shrink-0 text-right text-xs text-ink-500"><strong className="block text-ink-700">{item.inferred_assigned_name}</strong><ArrowRight className="my-1 ml-auto h-3.5 w-3.5" /><strong className="block text-semantic-primary">{item.recommended_name}</strong></span>
+                </Link>
+              ))}
+            </div>
+          )}
+        </Panel>
+
+        <Panel title="Customer friction" description="Requester frustration, long requester-to-agent response gaps, and excessive correspondence cycles." icon={<MessageSquare className="h-4 w-4" />} action={<Badge variant={data.friction_alerts.length ? "warning" : "success"} dot>{data.friction_alerts.length} flagged</Badge>}>
+          {data.friction_alerts.length === 0 ? <EmptyPanel title="No friction threshold crossed" description="No analyzed conversation shows a material frustration, delay, or back-and-forth signal." /> : (
+            <div className="space-y-2">
+              {data.friction_alerts.slice(0, 6).map((alert) => (
+                <Link key={alert.ticket_id} href={`/tickets/${alert.ticket_id}`} className="block min-w-0 rounded-xl border border-linen-300 p-3 transition-colors hover:bg-linen-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]">
+                  <div className="flex flex-wrap gap-1.5"><Badge variant={alert.severity === "high" ? "danger" : "warning"}>{alert.priority}</Badge>{alert.frustration_detected && <Badge variant="warning">Frustration</Badge>}{alert.long_response_gap && <Badge variant="danger">{formatHours(alert.current_unanswered_gap_hours)} waiting</Badge>}{alert.excessive_back_and_forth && <Badge>{alert.public_message_count} messages</Badge>}</div>
+                  <ListText text={alert.subject} lines={2} className="mt-2 text-sm font-semibold leading-5 text-ink-700" />
+                  <ListText text={alert.evidence.join(" · ")} lines={2} className="mt-1 text-xs leading-5 text-ink-500" />
+                </Link>
+              ))}
+            </div>
+          )}
+        </Panel>
+
+        <Panel title="Clarification needed" description="Finds vague requests before agents lose time guessing, and proposes the missing diagnostic questions." icon={<CircleHelp className="h-4 w-4" />} action={<Badge variant={data.clarification_alerts.length ? "warning" : "success"} dot>{data.clarification_alerts.length} flagged</Badge>}>
+          {data.clarification_alerts.length === 0 ? <EmptyPanel title="Requests are actionable" description="No analyzed request is currently below the diagnostic-detail threshold." /> : (
+            <div className="space-y-2">
+              {data.clarification_alerts.slice(0, 6).map((alert) => (
+                <Link key={alert.ticket_id} href={`/tickets/${alert.ticket_id}`} className="block min-w-0 rounded-xl border border-linen-300 p-3 transition-colors hover:bg-linen-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]">
+                  <div className="flex items-center justify-between gap-2"><Badge variant="warning">{alert.priority}</Badge><span className="font-mono text-[11px] tabular-nums text-ink-400">Detail {alert.detail_score}/100</span></div>
+                  <ListText text={alert.subject} lines={2} className="mt-2 text-sm font-semibold leading-5 text-ink-700" />
+                  {alert.suggested_questions[0] && <p className="mt-2 rounded-lg bg-linen-200 px-3 py-2 text-xs leading-5 text-ink-600"><strong>Ask next:</strong> {alert.suggested_questions[0]}</p>}
+                </Link>
+              ))}
+            </div>
+          )}
+        </Panel>
+      </div>
+    </div>
+  );
+}
+
+function AssuranceMetric({ label, value, detail, warning }: { label: string; value: number; detail: string; warning: boolean }) {
+  return <div className={cn("rounded-xl border p-4", warning ? "border-amber-400/40 bg-[var(--color-warning-soft)]" : "border-linen-300 bg-linen-100")}><p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-400">{label}</p><p className="mt-2 font-mono text-2xl tabular-nums text-ink-700">{value}</p><p className="mt-1 text-[11px] leading-4 text-ink-500">{detail}</p></div>;
+}
+
+function SlaMonitoringPanel({ query }: { query: UseQueryResult<SlaMonitoringResponse, Error> }) {
+  const [view, setView] = useState<"reactive" | "proactive">("proactive");
+  const data = query.data;
+  const rows = data ? (view === "reactive" ? data.reactive : data.proactive) : [];
+  return (
+    <Panel title="SLA breach monitoring" description="First-response and resolution clocks by priority, with proactive and reactive drill-down kept separate." icon={<Timer className="h-4 w-4" />} data-intelligence-section="sla-monitoring">
+      {query.isLoading ? <PanelLoading /> : query.isError || !data ? <PanelError title="SLA monitoring unavailable" onRetry={() => void query.refetch()} retrying={query.isFetching} /> : (
+        <div className="space-y-5">
+          <SamplingNotice analyzed={data.scope.analyzed_tickets} total={data.scope.total_tickets} />
+          <div className="grid gap-2 sm:grid-cols-4">
+            <AssuranceMetric label="Approaching" value={data.summary.approaching_breaches} detail="act before due" warning={data.summary.approaching_breaches > 0} />
+            <AssuranceMetric label="Active breach" value={data.summary.active_breaches} detail="currently overdue" warning={data.summary.active_breaches > 0} />
+            <AssuranceMetric label="Historical breach" value={data.summary.historical_breaches} detail="completed after due" warning={data.summary.historical_breaches > 0} />
+            <AssuranceMetric label="Unmeasured" value={data.scope.unmeasured_clocks} detail="source evidence unavailable" warning={false} />
+          </div>
+          <div className="overflow-x-auto rounded-xl border border-linen-300">
+            <table className="min-w-[650px] w-full text-xs">
+              <thead><tr className="border-b border-linen-300 bg-linen-100 text-left text-[10px] uppercase tracking-[0.1em] text-ink-400"><th className="px-3 py-2">Priority</th><th className="px-3 py-2">First response breached</th><th className="px-3 py-2">First response approaching</th><th className="px-3 py-2">Resolution breached</th><th className="px-3 py-2">Resolution approaching</th></tr></thead>
+              <tbody>{Object.entries(data.by_priority).sort(([a], [b]) => a.localeCompare(b)).map(([priority, metrics]) => <tr key={priority} className="border-b border-linen-200 last:border-0"><td className="px-3 py-2 font-semibold text-ink-700">{priority}</td><td className="px-3 py-2 font-mono tabular-nums text-ink-600">{metrics.first_response.breached}</td><td className="px-3 py-2 font-mono tabular-nums text-ink-600">{metrics.first_response.approaching}</td><td className="px-3 py-2 font-mono tabular-nums text-ink-600">{metrics.resolution.breached}</td><td className="px-3 py-2 font-mono tabular-nums text-ink-600">{metrics.resolution.approaching}</td></tr>)}</tbody>
+            </table>
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div role="group" aria-label="SLA monitoring view" className="inline-flex rounded-lg border border-linen-400 bg-linen-100 p-1">
+              <button type="button" aria-pressed={view === "proactive"} onClick={() => setView("proactive")} className={cn("min-h-8 rounded-md px-3 text-xs font-semibold", view === "proactive" ? "bg-ink-700 text-white" : "text-ink-500 hover:bg-linen-300")}>Approaching ({data.summary.approaching_breaches})</button>
+              <button type="button" aria-pressed={view === "reactive"} onClick={() => setView("reactive")} className={cn("min-h-8 rounded-md px-3 text-xs font-semibold", view === "reactive" ? "bg-ink-700 text-white" : "text-ink-500 hover:bg-linen-300")}>Breached ({data.summary.reactive_breaches})</button>
+            </div>
+            <span className="text-[11px] text-ink-400">Provider deadlines are used when available; policy clocks are labeled explicitly.</span>
+          </div>
+          {rows.length === 0 ? <EmptyPanel title={view === "proactive" ? "No approaching breach" : "No recorded breach"} description={view === "proactive" ? "No measured first-response or resolution clock is currently inside the proactive risk threshold." : "No measured clock in this window finished or remains past due."} /> : (
+            <div className="grid gap-2 lg:grid-cols-2">
+              {rows.slice(0, 12).map((item) => <Link key={`${item.ticket_id}-${item.metric}`} href={`/tickets/${item.ticket_id}`} className="flex min-w-0 items-start justify-between gap-3 rounded-xl border border-linen-300 p-3 transition-colors hover:bg-linen-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"><span className="min-w-0"><span className="flex flex-wrap gap-1.5"><Badge variant={view === "reactive" ? "danger" : "warning"}>{item.priority}</Badge><Badge>{item.metric === "first_response" ? "First response" : "Resolution"}</Badge>{item.breach_state && <Badge>{item.breach_state}</Badge>}</span><ListText text={item.subject} lines={2} className="mt-2 text-xs font-semibold leading-5 text-ink-700" /><span className="mt-1 block text-[10px] text-ink-400">{item.target_source === "provider_due_at" ? "Provider SLA" : "Policy SLA"} · due {formatLocalDateTime(item.due_at)}</span></span><span className={cn("shrink-0 text-right font-mono text-xs tabular-nums", view === "reactive" ? "text-semantic-danger" : "text-semantic-warning")}>{view === "reactive" ? `${formatHours(item.overdue_hours)} overdue` : `${formatHours(item.remaining_hours)} left`}</span></Link>)}
+            </div>
+          )}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function LevelZeroStudyPanel() {
+  const [months, setMonths] = useState<6 | 12>(12);
+  const queryClient = useQueryClient();
+  const query = useQuery({
+    queryKey: ["intelligence", "level-zero-study", months],
+    queryFn: () => api.getLevelZeroStudy(months),
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+  });
+  const run = useMutation({
+    mutationFn: () => api.runLevelZeroStudy(months),
+    onSuccess: (study: LevelZeroStudy) => {
+      queryClient.setQueryData(["intelligence", "level-zero-study", months], { study });
+    },
+  });
+  const study = query.data?.study;
+  return (
+    <Panel
+      title="Level Zero opportunity study"
+      description="One persisted snapshot of resolved work that may have been safely handled through self-service or a future support bot. It never runs on the live refresh cycle."
+      icon={<Bot className="h-4 w-4" />}
+      action={<div className="flex flex-wrap items-center gap-2"><div role="group" aria-label="Level Zero study period" className="inline-flex rounded-lg border border-linen-400 bg-linen-100 p-1">{([6, 12] as const).map((value) => <button key={value} type="button" aria-pressed={months === value} onClick={() => setMonths(value)} className={cn("min-h-8 rounded-md px-3 text-xs font-semibold", months === value ? "bg-ink-700 text-white" : "text-ink-500 hover:bg-linen-300")}>{value} months</button>)}</div><Button size="sm" leadingIcon={<Play className="h-3.5 w-3.5" />} pending={run.isPending} pendingLabel="Analyzing" onClick={() => run.mutate()}>{study ? "Run new snapshot" : "Run study"}</Button></div>}
+    >
+      {query.isLoading ? <PanelLoading rows={3} /> : query.isError ? <PanelError title="Level Zero snapshot unavailable" onRetry={() => void query.refetch()} retrying={query.isFetching} /> : run.isError ? <Alert variant="danger" title="Study could not be completed">The existing snapshot is unchanged. Retry when historical ticket data is available.</Alert> : !study ? <EmptyPanel title={`No ${months}-month study has been run`} description="Run the one-time assessment to review every resolved, non-portal ticket in this period. The resulting snapshot is retained until an authorized user deliberately creates another." /> : (
+        <div className="space-y-5">
+          <div className="flex flex-wrap items-center gap-2"><Badge variant="info">Complete, unsampled review</Badge><Badge>{study.period_months} months</Badge><span className="text-[11px] text-ink-400">Created {formatLocalDateTime(study.created_at)} · source through {study.source_data_through_at ? formatLocalDateTime(study.source_data_through_at) : "no completed data"}</span></div>
+          <div className="grid gap-2 sm:grid-cols-4">
+            <AssuranceMetric label="Reviewed" value={study.analyzed_tickets} detail="resolved tickets" warning={false} />
+            <AssuranceMetric label="L0 candidates" value={study.eligible_tickets} detail={`${(study.opportunity_rate * 100).toFixed(1)}% opportunity rate`} warning={study.eligible_tickets > 0} />
+            <AssuranceMetric label="High confidence" value={study.high_confidence_tickets} detail="resolution evidence found" warning={false} />
+            <AssuranceMetric label="Annualized" value={study.estimated_annualized_opportunities} detail="potential cases / year" warning={false} />
+          </div>
+          <div className="grid min-w-0 gap-6 lg:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]">
+            <div><h3 className="text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-400">Opportunity themes</h3><div className="mt-3 space-y-2">{study.by_theme.length ? study.by_theme.map((theme) => <div key={theme.theme} className="flex items-center justify-between gap-3 rounded-lg bg-linen-100 px-3 py-2 text-xs"><span className="text-ink-600">{theme.theme}</span><strong className="font-mono tabular-nums text-ink-700">{theme.count}</strong></div>) : <p className="text-xs text-ink-400">No safe automation theme met the study criteria.</p>}</div></div>
+            <div><h3 className="text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-400">Evidence drill-down</h3>{study.items.length ? <div className="mt-3 space-y-2">{study.items.slice(0, 6).map((item) => <Link key={item.ticket_id} href={`/tickets/${item.ticket_id}`} className="flex min-w-0 items-start justify-between gap-3 rounded-xl border border-linen-300 p-3 transition-colors hover:bg-linen-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"><span className="min-w-0"><span className="flex flex-wrap gap-1.5"><Badge variant={item.confidence === "high" ? "success" : "info"}>{item.confidence} confidence</Badge><Badge>{item.theme}</Badge></span><ListText text={item.subject} lines={2} className="mt-2 text-xs font-semibold leading-5 text-ink-700" /><ListText text={item.evidence} lines={2} className="mt-1 text-[11px] leading-4 text-ink-400" /></span><ArrowRight className="mt-1 h-4 w-4 shrink-0 text-ink-400" /></Link>)}</div> : <EmptyPanel title="No candidate evidence" description="The study completed but did not find a safely bounded Level Zero pattern." />}</div>
+          </div>
+          <Alert variant="info" title="Safety boundary" className="text-xs">{study.safeguards.join(" ")}</Alert>
         </div>
       )}
     </Panel>

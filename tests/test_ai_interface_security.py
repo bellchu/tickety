@@ -25,7 +25,9 @@ from app.backend.database import (
     Base,
     ExternalGroupMembershipRecord,
     ExternalGroupRecord,
+    ExternalConversationRecord,
     ExternalUserRecord,
+    IntelligenceStudyRecord,
     KbArticleRecord,
     ProblemRecord,
     ProblemTicketLinkRecord,
@@ -790,6 +792,10 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
                 ("POST", "/ticket-intelligence/backfill"),
                 ("POST", "/tickets/own-ticket/intelligence/refresh"),
                 ("GET", "/admin/llm/metrics"),
+                ("GET", "/intelligence/service-quality"),
+                ("GET", "/intelligence/sla-monitoring"),
+                ("GET", "/intelligence/level-zero-study"),
+                ("POST", "/intelligence/level-zero-study"),
             )
             for method, path in requests:
                 with self.subTest(path=path):
@@ -1147,6 +1153,211 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
         self.assertEqual(agent["open_tickets"], 1)
         self.assertEqual(agent["p1_open_tickets"], 1)
         self.assertEqual(agent["group_names"], ["Network Operations"])
+
+    def test_service_quality_flags_misrouting_level_friction_and_clarification(self):
+        now = datetime.utcnow()
+        with self.session_factory() as db:
+            for index in range(12):
+                db.add(TicketRecord(
+                    id=f"app-history-{index}",
+                    subject="Completed application request",
+                    description="Routine E1 application assistance",
+                    status="Resolved",
+                    priority="P3",
+                    complexity=1,
+                    binding_id="quality-binding",
+                    external_source="freshservice",
+                    external_group_id="application-group",
+                    external_category="E1 App",
+                    external_created_at=now - timedelta(days=60 + index),
+                    external_updated_at=now - timedelta(days=20 + index),
+                    external_resolved_at=now - timedelta(days=20 + index),
+                ))
+            db.add(TicketRecord(
+                id="misrouted-frustrated-vague",
+                subject="Computer not working",
+                description="",
+                status="Open",
+                priority="P1",
+                complexity=5,
+                ai_status="completed",
+                ai_suggested_team="Network Operations",
+                binding_id="quality-binding",
+                external_source="freshservice",
+                external_group_id="application-group",
+                external_category="Infrastructure",
+                external_created_at=now - timedelta(days=3),
+                external_updated_at=now - timedelta(hours=1),
+                external_conversations_synced_at=now,
+            ))
+            db.add(ExternalConversationRecord(
+                id="frustrated-conversation",
+                binding_id="quality-binding",
+                provider="freshservice",
+                ticket_id="misrouted-frustrated-vague",
+                provider_ticket_id="provider-ticket-1",
+                external_id="conversation-1",
+                body="Still not working. This is frustrating. Any update?",
+                body_hash="a" * 64,
+                is_private=False,
+                incoming=True,
+                provider_created_at=now - timedelta(days=2),
+                revision_hash="b" * 64,
+            ))
+            db.commit()
+
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
+        with patch.object(main, "_reserve_analytics_request"):
+            response = self.client.get("/intelligence/service-quality?window_days=30")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertTrue(payload["alert_only"])
+        route = next(
+            item for item in payload["routing_alerts"]
+            if item["ticket_id"] == "misrouted-frustrated-vague"
+        )
+        self.assertEqual(route["recommended_team"], "Network Operations")
+        self.assertEqual(route["group_profile_team"], "Application Support")
+        self.assertGreaterEqual(route["profile_samples"], 10)
+        level = next(
+            item for item in payload["level_assessments"]
+            if item["ticket_id"] == "misrouted-frustrated-vague"
+        )
+        self.assertEqual(level["recommended_level"], 3)
+        self.assertEqual(level["inferred_assigned_level"], 1)
+        self.assertTrue(level["mismatch"])
+        self.assertEqual(level["mismatch_direction"], "under-tiered")
+        friction_ids = {item["ticket_id"] for item in payload["friction_alerts"]}
+        clarification_ids = {item["ticket_id"] for item in payload["clarification_alerts"]}
+        self.assertIn("misrouted-frustrated-vague", friction_ids)
+        self.assertIn("misrouted-frustrated-vague", clarification_ids)
+        with self.session_factory() as db:
+            ticket = db.get(TicketRecord, "misrouted-frustrated-vague")
+            self.assertEqual(ticket.external_group_id, "application-group")
+
+    def test_sla_monitoring_separates_reactive_and_proactive_clocks(self):
+        now = datetime.utcnow()
+        with self.session_factory() as db:
+            db.add_all([
+                TicketRecord(
+                    id="active-sla-breach",
+                    subject="Active breach",
+                    status="Open",
+                    priority="P1",
+                    external_source="freshservice",
+                    external_created_at=now - timedelta(hours=5),
+                    external_updated_at=now - timedelta(minutes=5),
+                    external_fr_due_by=now - timedelta(hours=3),
+                    external_due_by=now - timedelta(hours=1),
+                    external_conversations_synced_at=now,
+                ),
+                TicketRecord(
+                    id="approaching-sla",
+                    subject="Approaching breach",
+                    status="Open",
+                    priority="P2",
+                    external_source="freshservice",
+                    external_created_at=now - timedelta(hours=3, minutes=30),
+                    external_updated_at=now - timedelta(minutes=2),
+                    external_fr_due_by=now + timedelta(minutes=30),
+                    external_due_by=now + timedelta(minutes=30),
+                    external_conversations_synced_at=now,
+                ),
+                TicketRecord(
+                    id="historical-resolution-breach",
+                    subject="Resolved after due date",
+                    status="Resolved",
+                    priority="P2",
+                    external_source="freshservice",
+                    external_created_at=now - timedelta(days=4),
+                    external_updated_at=now - timedelta(days=1),
+                    external_resolved_at=now - timedelta(days=1),
+                    external_due_by=now - timedelta(days=2),
+                ),
+            ])
+            db.add(ExternalConversationRecord(
+                id="late-first-response",
+                binding_id="legacy",
+                provider="freshservice",
+                ticket_id="active-sla-breach",
+                provider_ticket_id="active-sla-breach",
+                external_id="late-response-1",
+                body="We are investigating.",
+                body_hash="c" * 64,
+                is_private=False,
+                incoming=False,
+                provider_created_at=now - timedelta(hours=2),
+                revision_hash="d" * 64,
+            ))
+            db.commit()
+
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
+        with patch.object(main, "_reserve_analytics_request"):
+            response = self.client.get("/intelligence/sla-monitoring?window_days=30")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        reactive = {(item["ticket_id"], item["metric"]): item for item in payload["reactive"]}
+        proactive = {(item["ticket_id"], item["metric"]): item for item in payload["proactive"]}
+        self.assertEqual(reactive[("active-sla-breach", "first_response")]["breach_state"], "historical")
+        self.assertEqual(reactive[("active-sla-breach", "resolution")]["breach_state"], "active")
+        self.assertEqual(reactive[("historical-resolution-breach", "resolution")]["breach_state"], "historical")
+        self.assertIn(("approaching-sla", "first_response"), proactive)
+        self.assertIn(("approaching-sla", "resolution"), proactive)
+        self.assertGreaterEqual(payload["by_priority"]["P1"]["resolution"]["breached"], 1)
+
+    def test_level_zero_study_is_complete_persisted_and_explicitly_rerun(self):
+        now = datetime.utcnow()
+        with self.session_factory() as db:
+            db.add(TicketRecord(
+                id="historical-password-reset",
+                subject="Password reset needed",
+                description="I forgot my password",
+                status="Resolved",
+                priority="P3",
+                complexity=1,
+                external_source="freshservice",
+                external_created_at=now - timedelta(days=40),
+                external_updated_at=now - timedelta(days=39),
+                external_resolved_at=now - timedelta(days=39),
+            ))
+            db.add(ExternalConversationRecord(
+                id="password-resolution",
+                binding_id="legacy",
+                provider="freshservice",
+                ticket_id="historical-password-reset",
+                provider_ticket_id="historical-password-reset",
+                external_id="password-resolution-1",
+                body="Password reset completed. Please sign in again.",
+                body_hash="e" * 64,
+                is_private=False,
+                incoming=False,
+                provider_created_at=now - timedelta(days=39),
+                revision_hash="f" * 64,
+            ))
+            db.commit()
+
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
+        with patch.object(main, "_reserve_analytics_request"):
+            before = self.client.get("/intelligence/level-zero-study?months=6")
+            run = self.client.post("/intelligence/level-zero-study?months=6")
+            after = self.client.get("/intelligence/level-zero-study?months=6")
+
+        self.assertEqual(before.status_code, 200, before.text)
+        self.assertIsNone(before.json()["study"])
+        self.assertEqual(run.status_code, 200, run.text)
+        result = run.json()
+        self.assertEqual(result["method"], "complete_unsampled_rule_assessment")
+        self.assertGreaterEqual(result["analyzed_tickets"], 1)
+        self.assertGreaterEqual(result["high_confidence_tickets"], 1)
+        self.assertIn(
+            "historical-password-reset",
+            {item["ticket_id"] for item in result["items"]},
+        )
+        self.assertEqual(after.json()["study"]["run_id"], result["run_id"])
+        with self.session_factory() as db:
+            self.assertEqual(db.query(IntelligenceStudyRecord).count(), 1)
 
     def test_admin_provider_and_maintenance_routes_reserve_user_quota(self):
         self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")

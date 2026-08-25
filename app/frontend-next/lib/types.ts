@@ -799,6 +799,178 @@ export interface IntelligenceOverviewResponse {
   };
 }
 
+export interface RoutingQualityAlert {
+  ticket_id: string;
+  subject: string;
+  priority: string;
+  severity: "high" | "medium";
+  current_group_id: string;
+  current_group_name: string;
+  directory_name_available: boolean;
+  group_profile_team: string;
+  recommended_team: string;
+  recommendation_source: "trusted_ai_recommendation" | "provider_category_policy" | "trusted_ai_category";
+  profile_confidence: number;
+  profile_samples: number;
+  dormant_hours: number;
+  evidence: string[];
+  alert_only: true;
+}
+
+export interface SupportLevelAssessment {
+  ticket_id: string;
+  subject: string;
+  priority: string;
+  recommended_level: 0 | 1 | 2 | 3;
+  recommended_name: string;
+  recommended_label: string;
+  classification_confidence: "high" | "medium";
+  basis: string;
+  inferred_assigned_level: 0 | 1 | 2 | 3 | null;
+  inferred_assigned_name: string | null;
+  inferred_from_group_history: boolean;
+  inferred_confidence: number;
+  inferred_samples: number;
+  mismatch: boolean;
+  mismatch_direction: "under-tiered" | "over-tiered" | null;
+}
+
+export interface CustomerFrictionAlert {
+  ticket_id: string;
+  subject: string;
+  priority: string;
+  flagged: true;
+  severity: "high" | "medium" | "low";
+  frustration_detected: boolean;
+  long_response_gap: boolean;
+  excessive_back_and_forth: boolean;
+  max_response_gap_hours: number;
+  current_unanswered_gap_hours: number;
+  gap_threshold_hours: number;
+  public_message_count: number;
+  requester_message_count: number;
+  agent_message_count: number;
+  unanswered_requester_turns: number;
+  conversation_coverage: boolean;
+  evidence: string[];
+}
+
+export interface ClarificationAlert {
+  ticket_id: string;
+  subject: string;
+  priority: string;
+  flagged: true;
+  detail_score: number;
+  evidence: string[];
+  suggested_questions: string[];
+}
+
+export interface ServiceQualityResponse {
+  generated_at: string;
+  window_days: number;
+  alert_only: true;
+  scope: {
+    total_active_tickets: number;
+    analyzed_tickets: number;
+    truncated: boolean;
+    group_profile_period_days: number;
+  };
+  summary: {
+    routing_mismatches: number;
+    routing_profiled_tickets: number;
+    level_mismatches: number;
+    assigned_level_profiled_tickets: number;
+    customer_friction: number;
+    clarification_needed: number;
+  };
+  routing_alerts: RoutingQualityAlert[];
+  level_distribution: Record<"0" | "1" | "2" | "3", number>;
+  level_assessments: SupportLevelAssessment[];
+  friction_alerts: CustomerFrictionAlert[];
+  clarification_alerts: ClarificationAlert[];
+  items_truncated: boolean;
+}
+
+export interface SlaMonitoringItem {
+  ticket_id: string;
+  subject: string;
+  priority: string;
+  metric: "first_response" | "resolution";
+  status: "breached" | "approaching" | "met" | "on_track" | "unmeasured";
+  breach_state: "active" | "historical" | null;
+  target_source: "provider_due_at" | "priority_policy";
+  target_hours: number;
+  started_at: string;
+  due_at: string;
+  completed_at: string | null;
+  remaining_hours: number;
+  overdue_hours: number;
+  is_open: boolean;
+}
+
+export interface SlaMonitoringResponse {
+  generated_at: string;
+  window_days: number;
+  scope: {
+    total_tickets: number;
+    analyzed_tickets: number;
+    truncated: boolean;
+    measured_clocks: number;
+    unmeasured_clocks: number;
+  };
+  summary: {
+    reactive_breaches: number;
+    active_breaches: number;
+    historical_breaches: number;
+    approaching_breaches: number;
+    first_response_breaches: number;
+    resolution_breaches: number;
+  };
+  by_priority: Record<string, {
+    first_response: { breached: number; approaching: number };
+    resolution: { breached: number; approaching: number };
+  }>;
+  reactive: SlaMonitoringItem[];
+  proactive: SlaMonitoringItem[];
+  items_truncated: boolean;
+}
+
+export interface LevelZeroStudyItem {
+  ticket_id: string;
+  subject: string;
+  theme: string;
+  confidence: "high" | "medium";
+  evidence: string;
+  resolved_at: string | null;
+  priority: string;
+}
+
+export interface LevelZeroStudy {
+  run_id: string;
+  study_type: "level_zero_opportunity";
+  period_months: number;
+  range_start_at: string;
+  range_end_at: string;
+  source_data_through_at: string | null;
+  created_at: string;
+  created_by: string | null;
+  method: "complete_unsampled_rule_assessment";
+  analyzed_tickets: number;
+  eligible_tickets: number;
+  high_confidence_tickets: number;
+  review_candidates: number;
+  estimated_annualized_opportunities: number;
+  opportunity_rate: number;
+  by_theme: Array<{ theme: string; count: number }>;
+  items: LevelZeroStudyItem[];
+  items_truncated: boolean;
+  safeguards: string[];
+}
+
+export interface LevelZeroStudyResponse {
+  study: LevelZeroStudy | null;
+}
+
 export interface TicketSummary {
   ticket_id: string;
   summary: string;
