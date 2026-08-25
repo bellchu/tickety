@@ -287,7 +287,7 @@ def _auto_triage_job():
                 ),
                 or_(
                     TicketRecord.ai_status.is_(None),
-                    TicketRecord.ai_status.notin_(["dead_letter", "failed"]),
+                    TicketRecord.ai_status.notin_(["dead_letter", "failed", "paused"]),
                 ),
             ).order_by(
                 priority_order.asc(),
@@ -314,7 +314,7 @@ def _auto_triage_job():
             or_(
                 TicketRecord.ai_status.is_(None),
                 TicketRecord.ai_status.notin_(
-                    ["dead_letter", "failed", "running", "queued"]
+                    ["dead_letter", "failed", "paused", "running", "queued"]
                 ),
             ),
             or_(
@@ -345,7 +345,7 @@ def _auto_triage_job():
             or_(
                 TicketRecord.ai_status.is_(None),
                 TicketRecord.ai_status.notin_(
-                    ["dead_letter", "failed", "running", "queued"]
+                    ["dead_letter", "failed", "paused", "running", "queued"]
                 ),
             ),
             or_(

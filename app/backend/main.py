@@ -56,7 +56,8 @@ from .ai_eligibility import (
 )
 from .schema import (
     Ticket, User, UserSummary, Recognition, SyncStatus,
-    AIStatusResponse, OperationalDiagnosticsResponse,
+    AIStatusResponse, AIRetryQueueActionResponse, AIRetryScheduleRequest,
+    OperationalDiagnosticsResponse,
     AutomaticAIEnableRequest, AutomaticAIPauseRequest,
     ExternalUser, ExternalUserSyncResult,
     EmailRecipient, EmailRecipientList, EmailProviderStatus,
@@ -5893,6 +5894,7 @@ _AI_ATTENTION_STATUSES = {
     "paused",
 }
 _AI_ARTIFACT_NAMES = {"triage", "summary", "route", "resolution", "refresh"}
+_AI_RETRY_CONTROL_STATUSES = {"queued", "paused"}
 _SAFE_OPERATIONAL_CODE = re.compile(
     r"^[a-z0-9_]+(?::[a-z0-9_]+)?(?:,[a-z0-9_]+(?::[a-z0-9_]+)?)*$"
 )
@@ -5942,11 +5944,83 @@ def _ai_task_lifecycle(
     return "unknown"
 
 
+def _utc_naive_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _active_provider_cooldown_until(
+    db: Session,
+    now: Optional[datetime] = None,
+) -> Optional[datetime]:
+    current = now or datetime.utcnow()
+    provider_name = getattr(engine.llm, "provider", None)
+    if not provider_name:
+        return None
+    row = db.query(LLMProviderCooldownRecord.retry_at).filter(
+        LLMProviderCooldownRecord.provider == provider_name,
+        LLMProviderCooldownRecord.retry_at > current,
+    ).first()
+    return row[0] if row else None
+
+
+def _audit_ai_retry_control(
+    db: Session,
+    ticket: TicketRecord,
+    user: UserRecord,
+    *,
+    old_value: Optional[str],
+    new_value: str,
+) -> None:
+    db.add(TicketAuditLogRecord(
+        ticket_id=ticket.id,
+        field="ai_retry_schedule",
+        old_value=old_value,
+        new_value=new_value,
+        changed_by=user.name or user.id,
+    ))
+
+
+def _retry_control_ticket(
+    db: Session,
+    ticket_id: str,
+) -> TicketRecord:
+    ticket = db.query(TicketRecord).filter(
+        TicketRecord.id == ticket_id
+    ).with_for_update().first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    if _is_terminal_status(db, ticket.status):
+        raise HTTPException(
+            status_code=409,
+            detail="Historical tickets cannot be added to the AI retry queue",
+        )
+    status = (ticket.ai_status or "").strip().lower().replace("-", "_")
+    if status not in _AI_RETRY_CONTROL_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail="Only queued or paused AI retries can be changed",
+        )
+    requested = {
+        artifact
+        for artifact in (ticket.ai_requested_artifacts or "").split(",")
+        if artifact in _AI_ARTIFACT_NAMES
+    }
+    if not requested:
+        raise HTTPException(
+            status_code=409,
+            detail="AI task has no pending artifacts to retry",
+        )
+    ticket.ai_requested_artifacts = ",".join(sorted(requested))
+    return ticket
+
+
 @app.get("/admin/settings/ai-status", response_model=AIStatusResponse)
 async def ai_task_status(
     view: str = Query(
         default="all",
-        pattern="^(all|active|attention|completed|not_analyzed|not_applicable)$",
+        pattern="^(all|active|retry_scheduled|attention|completed|not_analyzed|not_applicable)$",
     ),
     search: str = Query(default="", max_length=200),
     limit: int = Query(default=25, ge=1, le=100),
@@ -6037,6 +6111,12 @@ async def ai_task_status(
             active_ticket,
             TicketRecord.ai_status.in_(("queued", "running")),
         )
+    elif view == "retry_scheduled":
+        task_query = task_query.filter(
+            active_ticket,
+            TicketRecord.ai_status == "queued",
+            TicketRecord.ai_next_attempt_at > now,
+        )
     elif view == "attention":
         task_query = task_query.filter(active_ticket, or_(
             TicketRecord.ai_status.in_(tuple(_AI_ATTENTION_STATUSES)),
@@ -6092,11 +6172,18 @@ async def ai_task_status(
         value=normalized_status,
         else_=9,
     )
-    task_rows = task_query.order_by(
-        task_order.asc(),
-        TicketRecord.updated_at.desc(),
-        TicketRecord.id.asc(),
-    ).offset(offset).limit(limit).all()
+    if view == "retry_scheduled":
+        task_query = task_query.order_by(
+            TicketRecord.ai_next_attempt_at.asc(),
+            TicketRecord.id.asc(),
+        )
+    else:
+        task_query = task_query.order_by(
+            task_order.asc(),
+            TicketRecord.updated_at.desc(),
+            TicketRecord.id.asc(),
+        )
+    task_rows = task_query.offset(offset).limit(limit).all()
 
     tasks = []
     for ticket in task_rows:
@@ -6250,6 +6337,168 @@ async def ai_task_status(
             "average_latency_ms": int(round(float(call_summary[5] or 0))),
             "last_call_at": call_summary[6],
         },
+    }
+
+
+@app.post(
+    "/admin/settings/ai-status/retries/clear",
+    response_model=AIRetryQueueActionResponse,
+)
+def clear_scheduled_ai_retries(
+    user: UserRecord = Depends(require_protected_ai_role("admin")),
+    db: Session = Depends(get_db),
+):
+    """Pause every delayed retry without deleting tickets or AI artifacts."""
+    now = datetime.utcnow()
+    tickets = db.query(TicketRecord).filter(
+        active_ticket_filter(db),
+        TicketRecord.ai_status == "queued",
+        TicketRecord.ai_next_attempt_at > now,
+    ).with_for_update().all()
+    for ticket in tickets:
+        old_schedule = ticket.ai_next_attempt_at.isoformat() if ticket.ai_next_attempt_at else None
+        _audit_ai_retry_control(
+            db,
+            ticket,
+            user,
+            old_value=f"scheduled:{old_schedule}" if old_schedule else "scheduled",
+            new_value="paused:queue_cleared",
+        )
+        ticket.ai_status = "paused"
+        ticket.ai_claim_id = None
+        ticket.ai_lease_expires_at = None
+        ticket.ai_next_attempt_at = None
+        ticket.ai_error = "operator_retry_queue_cleared"
+    db.commit()
+    return {
+        "action": "clear",
+        "affected": len(tickets),
+        "dispatch_blocked_until": _active_provider_cooldown_until(db, now),
+    }
+
+
+@app.post(
+    "/admin/settings/ai-status/retries/retry-now",
+    response_model=AIRetryQueueActionResponse,
+)
+def retry_all_scheduled_ai_now(
+    user: UserRecord = Depends(require_protected_ai_role("admin")),
+    db: Session = Depends(get_db),
+):
+    """Make every delayed retry immediately eligible for a worker claim."""
+    now = datetime.utcnow()
+    tickets = db.query(TicketRecord).filter(
+        active_ticket_filter(db),
+        TicketRecord.ai_status == "queued",
+        TicketRecord.ai_next_attempt_at > now,
+    ).with_for_update().all()
+    for ticket in tickets:
+        old_schedule = ticket.ai_next_attempt_at.isoformat() if ticket.ai_next_attempt_at else None
+        _audit_ai_retry_control(
+            db,
+            ticket,
+            user,
+            old_value=f"scheduled:{old_schedule}" if old_schedule else "scheduled",
+            new_value="ready",
+        )
+        ticket.ai_claim_id = None
+        ticket.ai_lease_expires_at = None
+        ticket.ai_next_attempt_at = None
+        ticket.ai_error = None
+    db.commit()
+    return {
+        "action": "retry_all_now",
+        "affected": len(tickets),
+        "dispatch_blocked_until": _active_provider_cooldown_until(db, now),
+    }
+
+
+@app.post(
+    "/admin/settings/ai-status/{ticket_id}/retry-now",
+    response_model=AIRetryQueueActionResponse,
+)
+def retry_scheduled_ai_task_now(
+    ticket_id: str,
+    user: UserRecord = Depends(require_protected_ai_role("admin")),
+    db: Session = Depends(get_db),
+):
+    """Resume one scheduled or paused retry and make it immediately eligible."""
+    now = datetime.utcnow()
+    ticket = _retry_control_ticket(db, ticket_id)
+    old_schedule = (
+        f"scheduled:{ticket.ai_next_attempt_at.isoformat()}"
+        if ticket.ai_next_attempt_at
+        else (ticket.ai_status or "unknown")
+    )
+    _audit_ai_retry_control(
+        db,
+        ticket,
+        user,
+        old_value=old_schedule,
+        new_value="ready",
+    )
+    ticket.ai_status = "queued"
+    ticket.ai_claim_id = None
+    ticket.ai_lease_expires_at = None
+    ticket.ai_next_attempt_at = None
+    ticket.ai_error = None
+    db.commit()
+    return {
+        "action": "retry_now",
+        "affected": 1,
+        "ticket_id": ticket.id,
+        "dispatch_blocked_until": _active_provider_cooldown_until(db, now),
+    }
+
+
+@app.put(
+    "/admin/settings/ai-status/{ticket_id}/retry-schedule",
+    response_model=AIRetryQueueActionResponse,
+)
+def reschedule_ai_retry(
+    ticket_id: str,
+    payload: AIRetryScheduleRequest,
+    user: UserRecord = Depends(require_protected_ai_role("admin")),
+    db: Session = Depends(get_db),
+):
+    """Set one scheduled or paused retry to an explicit future UTC instant."""
+    now = datetime.utcnow()
+    scheduled_at = _utc_naive_datetime(payload.scheduled_at)
+    if scheduled_at <= now:
+        raise HTTPException(
+            status_code=422,
+            detail="scheduled_at must be in the future; use retry now for immediate work",
+        )
+    if scheduled_at > now + timedelta(days=365):
+        raise HTTPException(
+            status_code=422,
+            detail="scheduled_at cannot be more than 365 days in the future",
+        )
+    ticket = _retry_control_ticket(db, ticket_id)
+    old_schedule = (
+        f"scheduled:{ticket.ai_next_attempt_at.isoformat()}"
+        if ticket.ai_next_attempt_at
+        else (ticket.ai_status or "unknown")
+    )
+    _audit_ai_retry_control(
+        db,
+        ticket,
+        user,
+        old_value=old_schedule,
+        new_value=f"scheduled:{scheduled_at.isoformat()}",
+    )
+    ticket.ai_status = "queued"
+    ticket.ai_claim_id = None
+    ticket.ai_lease_expires_at = None
+    ticket.ai_next_attempt_at = scheduled_at
+    ticket.ai_error = None
+    db.commit()
+    return {
+        "action": "reschedule",
+        "affected": 1,
+        "ticket_id": ticket.id,
+        "scheduled_at": scheduled_at,
+        "dispatch_blocked_until": _active_provider_cooldown_until(db, now),
     }
 
 

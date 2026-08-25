@@ -1138,6 +1138,35 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         process.assert_awaited_once()
         self.assertTrue(process.await_args.kwargs["force"])
 
+    def test_worker_does_not_re_admit_an_operator_paused_retry(self):
+        with self.session_factory() as db:
+            ticket = db.get(TicketRecord, "ticket-1")
+            ticket.ai_status = "paused"
+            ticket.ai_requested_artifacts = "triage"
+            ticket.ai_error = "operator_retry_queue_cleared"
+            db.commit()
+        process = AsyncMock()
+        with (
+            patch.object(sync_worker, "SessionLocal", self.session_factory),
+            patch.object(
+                sync_worker,
+                "provider_capacity_retry_after",
+                return_value=0,
+            ),
+            patch.object(
+                sync_worker.settings_module,
+                "automation_enabled",
+                return_value=True,
+            ),
+            patch.object(main, "_auto_process", new=process),
+        ):
+            sync_worker._auto_triage_job()
+        process.assert_not_awaited()
+        with self.session_factory() as db:
+            ticket = db.get(TicketRecord, "ticket-1")
+            self.assertEqual(ticket.ai_status, "paused")
+            self.assertEqual(ticket.ai_requested_artifacts, "triage")
+
     def test_worker_caps_total_ai_tickets_per_sweep(self):
         with self.session_factory() as db:
             for index in range(6):

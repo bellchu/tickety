@@ -344,7 +344,8 @@ class AIStatusResponse(BaseModel):
     active_routing_backlog_enabled: bool = False
     queue: AIQueueStatusSummary
     view: Literal[
-        "all", "active", "attention", "completed", "not_analyzed", "not_applicable"
+        "all", "active", "retry_scheduled", "attention", "completed",
+        "not_analyzed", "not_applicable",
     ]
     search: str = ""
     tasks: List[AITaskStatusItem]
@@ -354,6 +355,18 @@ class AIStatusResponse(BaseModel):
     provider_cooldown: Optional[AIProviderCooldownStatus] = None
     recent_calls: List[AILLMCallStatusItem]
     calls_24h: AILLMCallSummary
+
+
+class AIRetryScheduleRequest(BaseModel):
+    scheduled_at: datetime
+
+
+class AIRetryQueueActionResponse(BaseModel):
+    action: Literal["clear", "retry_all_now", "retry_now", "reschedule"]
+    affected: int
+    ticket_id: Optional[str] = None
+    scheduled_at: Optional[datetime] = None
+    dispatch_blocked_until: Optional[datetime] = None
 
 
 class OperationalDiagnosticEntry(BaseModel):

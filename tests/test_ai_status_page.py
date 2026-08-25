@@ -1,5 +1,5 @@
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -15,6 +15,7 @@ from app.backend.database import (
     LLMProviderCooldownRecord,
     SessionRecord,
     SyncStateRecord,
+    TicketAuditLogRecord,
     TicketRecord,
     UserRecord,
     get_db,
@@ -360,6 +361,15 @@ class AIStatusPageApiTests(unittest.TestCase):
         self.assertEqual(active.json()["total_tasks"], 1)
         self.assertEqual(active.json()["tasks"][0]["ticket_id"], "queued-retry")
 
+        scheduled = self.client.get(
+            "/admin/settings/ai-status",
+            params={"view": "retry_scheduled"},
+            headers=self.headers,
+        )
+        self.assertEqual(scheduled.status_code, 200, scheduled.text)
+        self.assertEqual(scheduled.json()["total_tasks"], 1)
+        self.assertEqual(scheduled.json()["tasks"][0]["ticket_id"], "queued-retry")
+
         historical = self.client.get(
             "/admin/settings/ai-status",
             params={"view": "not_applicable"},
@@ -382,6 +392,105 @@ class AIStatusPageApiTests(unittest.TestCase):
                     422,
                 )
 
+    def test_admin_can_clear_reschedule_and_resume_a_scheduled_retry(self):
+        cleared = self.client.post(
+            "/admin/settings/ai-status/retries/clear",
+            headers=self.headers,
+        )
+        self.assertEqual(cleared.status_code, 200, cleared.text)
+        self.assertEqual(cleared.json()["action"], "clear")
+        self.assertEqual(cleared.json()["affected"], 1)
+        self.assertIsNotNone(cleared.json()["dispatch_blocked_until"])
+
+        with self.session_factory() as db:
+            ticket = db.get(TicketRecord, "queued-retry")
+            self.assertEqual(ticket.ai_status, "paused")
+            self.assertIsNone(ticket.ai_next_attempt_at)
+            self.assertEqual(ticket.ai_requested_artifacts, "resolution")
+            self.assertEqual(ticket.ai_error, "operator_retry_queue_cleared")
+            audit = db.query(TicketAuditLogRecord).filter(
+                TicketAuditLogRecord.ticket_id == "queued-retry",
+                TicketAuditLogRecord.field == "ai_retry_schedule",
+            ).one()
+            self.assertEqual(audit.changed_by, "Status Admin")
+            self.assertEqual(audit.new_value, "paused:queue_cleared")
+
+        scheduled_at = (self.now + timedelta(hours=4)).replace(tzinfo=timezone.utc)
+        rescheduled = self.client.put(
+            "/admin/settings/ai-status/queued-retry/retry-schedule",
+            json={"scheduled_at": scheduled_at.isoformat()},
+            headers=self.headers,
+        )
+        self.assertEqual(rescheduled.status_code, 200, rescheduled.text)
+        self.assertEqual(rescheduled.json()["action"], "reschedule")
+        with self.session_factory() as db:
+            ticket = db.get(TicketRecord, "queued-retry")
+            self.assertEqual(ticket.ai_status, "queued")
+            self.assertEqual(ticket.ai_next_attempt_at, scheduled_at.replace(tzinfo=None))
+            self.assertIsNone(ticket.ai_error)
+
+        retried = self.client.post(
+            "/admin/settings/ai-status/queued-retry/retry-now",
+            headers=self.headers,
+        )
+        self.assertEqual(retried.status_code, 200, retried.text)
+        self.assertEqual(retried.json()["action"], "retry_now")
+        with self.session_factory() as db:
+            ticket = db.get(TicketRecord, "queued-retry")
+            self.assertEqual(ticket.ai_status, "queued")
+            self.assertIsNone(ticket.ai_next_attempt_at)
+            self.assertEqual(ticket.ai_requested_artifacts, "resolution")
+            self.assertEqual(
+                db.query(TicketAuditLogRecord).filter(
+                    TicketAuditLogRecord.ticket_id == "queued-retry",
+                    TicketAuditLogRecord.field == "ai_retry_schedule",
+                ).count(),
+                3,
+            )
+
+    def test_admin_can_make_all_scheduled_retries_ready(self):
+        with self.session_factory() as db:
+            db.add(TicketRecord(
+                id="queued-retry-second",
+                subject="Second delayed retry",
+                ai_status="queued",
+                ai_requested_artifacts="summary",
+                ai_next_attempt_at=self.now + timedelta(hours=3),
+            ))
+            db.commit()
+
+        response = self.client.post(
+            "/admin/settings/ai-status/retries/retry-now",
+            headers=self.headers,
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["action"], "retry_all_now")
+        self.assertEqual(response.json()["affected"], 2)
+        with self.session_factory() as db:
+            for ticket_id in ("queued-retry", "queued-retry-second"):
+                ticket = db.get(TicketRecord, ticket_id)
+                self.assertEqual(ticket.ai_status, "queued")
+                self.assertIsNone(ticket.ai_next_attempt_at)
+
+    def test_retry_controls_reject_invalid_targets_and_times(self):
+        past = self.client.put(
+            "/admin/settings/ai-status/queued-retry/retry-schedule",
+            json={"scheduled_at": (self.now - timedelta(minutes=1)).isoformat()},
+            headers=self.headers,
+        )
+        too_far = self.client.put(
+            "/admin/settings/ai-status/queued-retry/retry-schedule",
+            json={"scheduled_at": (self.now + timedelta(days=366)).isoformat()},
+            headers=self.headers,
+        )
+        completed = self.client.post(
+            "/admin/settings/ai-status/complete/retry-now",
+            headers=self.headers,
+        )
+        self.assertEqual(past.status_code, 422, past.text)
+        self.assertEqual(too_far.status_code, 422, too_far.text)
+        self.assertEqual(completed.status_code, 409, completed.text)
+
     def test_status_requires_an_administrator(self):
         self.client.cookies.set(main.SESSION_COOKIE, "status-agent-session")
 
@@ -394,6 +503,23 @@ class AIStatusPageApiTests(unittest.TestCase):
             headers=self.headers,
         )
         self.assertEqual(diagnostic.status_code, 403)
+        for method, path, body in (
+            ("post", "/admin/settings/ai-status/retries/clear", None),
+            ("post", "/admin/settings/ai-status/retries/retry-now", None),
+            ("post", "/admin/settings/ai-status/queued-retry/retry-now", None),
+            (
+                "put",
+                "/admin/settings/ai-status/queued-retry/retry-schedule",
+                {"scheduled_at": (self.now + timedelta(hours=1)).isoformat()},
+            ),
+        ):
+            with self.subTest(path=path):
+                response = getattr(self.client, method)(
+                    path,
+                    json=body,
+                    headers=self.headers,
+                )
+                self.assertEqual(response.status_code, 403, response.text)
 
 
 if __name__ == "__main__":

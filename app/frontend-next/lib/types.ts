@@ -203,7 +203,7 @@ export interface SyncStatus {
   attachment_errors: number;
 }
 
-export type AITaskView = "all" | "active" | "attention" | "completed" | "not_analyzed" | "not_applicable";
+export type AITaskView = "all" | "active" | "retry_scheduled" | "attention" | "completed" | "not_analyzed" | "not_applicable";
 
 export type AITaskLifecycle =
   | "not_analyzed"
@@ -315,6 +315,14 @@ export interface AIStatusResponse {
     average_latency_ms: number;
     last_call_at: string | null;
   };
+}
+
+export interface AIRetryQueueActionResponse {
+  action: "clear" | "retry_all_now" | "retry_now" | "reschedule";
+  affected: number;
+  ticket_id: string | null;
+  scheduled_at: string | null;
+  dispatch_blocked_until: string | null;
 }
 
 export interface ReadinessStatus {

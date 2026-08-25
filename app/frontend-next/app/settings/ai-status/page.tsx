@@ -4,12 +4,13 @@ import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
   AlertTriangle,
   ArrowLeft,
   Bot,
+  CalendarClock,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
@@ -17,22 +18,24 @@ import {
   Cpu,
   ExternalLink,
   ListChecks,
+  Play,
   RefreshCw,
   Search,
   Sparkles,
+  Trash2,
 } from "lucide-react";
 import { api, APIError } from "@/lib/api";
 import { canAccessAdministration } from "@/lib/auth";
-import { formatLocalDateTime } from "@/lib/date-time";
+import { formatLocalDateTime, parseApiDateTime, resolvedLocalTimeZone, toLocalDateTimeInput } from "@/lib/date-time";
 import {
   aiArtifactLabel,
   aiCallStatusMeta,
   aiTaskLifecycleMeta,
   operationalCodeLabel,
 } from "@/lib/ai-status";
-import type { AILLMCallStatusItem, AITaskLifecycle, AITaskStatusItem, AITaskView, AIStatusResponse } from "@/lib/types";
+import type { AILLMCallStatusItem, AIRetryQueueActionResponse, AITaskLifecycle, AITaskStatusItem, AITaskView, AIStatusResponse } from "@/lib/types";
 import { formatTimeAgo } from "@/lib/utils";
-import { Alert, Badge, Button, EmptyState, ErrorState, ListText, Skeleton } from "@/components/ui";
+import { Alert, Badge, Button, ConfirmDialog, Dialog, EmptyState, ErrorState, ListText, Skeleton } from "@/components/ui";
 import { DiagnosticReveal } from "@/components/admin/DiagnosticReveal";
 import {
   ContentSurface,
@@ -57,6 +60,7 @@ const DIAGNOSTIC_LIFECYCLES = new Set<AITaskLifecycle>([
 
 const views: Array<{ value: AITaskView; label: string }> = [
   { value: "active", label: "Active" },
+  { value: "retry_scheduled", label: "Scheduled retries" },
   { value: "attention", label: "Needs attention" },
   { value: "completed", label: "Completed" },
   { value: "not_analyzed", label: "Not analyzed" },
@@ -75,11 +79,29 @@ function formatDate(value: string | null) {
 function viewCount(data: AIStatusResponse, view: AITaskView) {
   if (view === "all") return data.queue.total_tickets;
   if (view === "active") return data.queue.queued + data.queue.running;
+  if (view === "retry_scheduled") return data.queue.retry_scheduled;
   if (view === "attention") return data.queue.attention;
   if (view === "completed") return data.queue.completed;
   if (view === "not_analyzed") return data.queue.not_analyzed;
   return data.queue.not_applicable;
 }
+
+function retryActionNotice(result: AIRetryQueueActionResponse) {
+  const count = result.affected.toLocaleString();
+  const message = {
+    clear: `${count} scheduled retr${result.affected === 1 ? "y was" : "ies were"} paused and removed from the active queue.`,
+    retry_all_now: `${count} scheduled retr${result.affected === 1 ? "y is" : "ies are"} ready for worker claims.`,
+    retry_now: "The retry is ready for a worker claim.",
+    reschedule: `The retry was rescheduled for ${formatDate(result.scheduled_at)}.`,
+  }[result.action];
+  if (!result.dispatch_blocked_until) return message;
+  return `${message} Provider dispatch remains paused until ${formatDate(result.dispatch_blocked_until)}.`;
+}
+
+type BulkRetryAction = "retry_all_now" | "clear";
+type TaskRetryAction =
+  | { action: "retry_now"; ticketId: string }
+  | { action: "reschedule"; ticketId: string; scheduledAt: string };
 
 function taskTiming(task: AITaskStatusItem) {
   if (task.lifecycle === "retry_scheduled") return `Retry ${formatDate(task.next_attempt_at)}`;
@@ -99,10 +121,15 @@ function humanizeTaskName(value: string) {
 
 export default function AIStatusPage() {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const [view, setView] = useState<AITaskView>("active");
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [offset, setOffset] = useState(0);
+  const [bulkAction, setBulkAction] = useState<BulkRetryAction | null>(null);
+  const [scheduleTask, setScheduleTask] = useState<AITaskStatusItem | null>(null);
+  const [scheduleInput, setScheduleInput] = useState("");
+  const [actionResult, setActionResult] = useState<AIRetryQueueActionResponse | null>(null);
   const authQuery = useQuery({
     queryKey: ["auth-me"],
     queryFn: api.getAuthMe,
@@ -116,6 +143,30 @@ export default function AIStatusPage() {
     retry: false,
     refetchInterval: 10_000,
   });
+  const invalidateAIQueue = () => {
+    void queryClient.invalidateQueries({ queryKey: ["ai-task-status"] });
+    void queryClient.invalidateQueries({ queryKey: ["tickets"] });
+  };
+  const bulkMutation = useMutation({
+    mutationFn: (action: BulkRetryAction) => action === "clear"
+      ? api.clearScheduledAIRetries()
+      : api.retryAllScheduledAINow(),
+    onSuccess: (result) => {
+      setActionResult(result);
+      setBulkAction(null);
+      invalidateAIQueue();
+    },
+  });
+  const taskMutation = useMutation({
+    mutationFn: (input: TaskRetryAction) => input.action === "retry_now"
+      ? api.retryAITaskNow(input.ticketId)
+      : api.rescheduleAITask(input.ticketId, input.scheduledAt),
+    onSuccess: (result) => {
+      setActionResult(result);
+      setScheduleTask(null);
+      invalidateAIQueue();
+    },
+  });
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -125,7 +176,10 @@ export default function AIStatusPage() {
     return () => window.clearTimeout(timer);
   }, [searchInput]);
 
-  const authError = isAuthError(authQuery.error) || isAuthError(statusQuery.error);
+  const authError = isAuthError(authQuery.error)
+    || isAuthError(statusQuery.error)
+    || isAuthError(bulkMutation.error)
+    || isAuthError(taskMutation.error);
   useEffect(() => {
     if (authError) router.replace("/login?next=/settings/status/ai");
   }, [authError, router]);
@@ -138,6 +192,38 @@ export default function AIStatusPage() {
     event.preventDefault();
     setSearch(searchInput.trim());
     setOffset(0);
+  };
+  const openBulkAction = (action: BulkRetryAction) => {
+    bulkMutation.reset();
+    taskMutation.reset();
+    setActionResult(null);
+    setBulkAction(action);
+  };
+  const openSchedule = (task: AITaskStatusItem) => {
+    taskMutation.reset();
+    setActionResult(null);
+    setScheduleTask(task);
+    const snapshotNow = parseApiDateTime(statusQuery.data?.generated_at)
+      || parseApiDateTime(task.updated_at)
+      || new Date(0);
+    setScheduleInput(toLocalDateTimeInput(
+      task.next_attempt_at || new Date(snapshotNow.getTime() + 15 * 60_000),
+    ));
+  };
+  const retryTaskNow = (task: AITaskStatusItem) => {
+    taskMutation.reset();
+    setActionResult(null);
+    taskMutation.mutate({ action: "retry_now", ticketId: task.ticket_id });
+  };
+  const submitSchedule = () => {
+    if (!scheduleTask || !scheduleInput) return;
+    const scheduledAt = new Date(scheduleInput);
+    if (Number.isNaN(scheduledAt.getTime())) return;
+    taskMutation.mutate({
+      action: "reschedule",
+      ticketId: scheduleTask.ticket_id,
+      scheduledAt: scheduledAt.toISOString(),
+    });
   };
 
   if (authQuery.isLoading || (canAccess && statusQuery.isLoading)) return <AIStatusSkeleton />;
@@ -171,6 +257,18 @@ export default function AIStatusPage() {
   const hasNextPage = offset + data.tasks.length < data.total_tasks;
   const firstResult = data.total_tasks ? offset + 1 : 0;
   const lastResult = offset + data.tasks.length;
+  const snapshotNow = parseApiDateTime(data.generated_at) || new Date(0);
+  const snapshotNowMs = snapshotNow.getTime();
+  const maximumScheduleMs = snapshotNowMs + 365 * 24 * 60 * 60_000;
+  const minimumSchedule = toLocalDateTimeInput(new Date(snapshotNowMs + 60_000));
+  const maximumSchedule = toLocalDateTimeInput(new Date(maximumScheduleMs));
+  const parsedSchedule = scheduleInput ? new Date(scheduleInput) : null;
+  const scheduleIsValid = Boolean(
+    parsedSchedule
+    && !Number.isNaN(parsedSchedule.getTime())
+    && parsedSchedule.getTime() > snapshotNowMs
+    && parsedSchedule.getTime() <= maximumScheduleMs,
+  );
 
   return (
     <PageFrame width="wide" className="space-y-8">
@@ -244,6 +342,57 @@ export default function AIStatusPage() {
           tone="neutral"
         />
       </SummaryStrip>
+
+      <ContentSurface className="p-5 sm:p-6">
+        <SectionHeader
+          title="Scheduled retry controls"
+          description="Operate on delayed ticket-analysis retries without deleting tickets or generated AI artifacts."
+          actions={<Badge variant={data.queue.retry_scheduled ? "warning" : "success"} dot>{data.queue.retry_scheduled.toLocaleString()} delayed</Badge>}
+        />
+        <div className="mt-5 flex flex-col gap-4 rounded-xl border border-linen-400 bg-linen-100 p-4 lg:flex-row lg:items-center lg:justify-between">
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-ink-700">Queue-wide actions</p>
+            <p className="mt-1 max-w-3xl text-xs leading-5 text-ink-500">
+              Retry all makes every delayed task ready now. Clear queue moves delayed tasks to Paused so an administrator can reschedule or resume them individually later.
+            </p>
+            {data.provider_cooldown && (
+              <p className="mt-2 text-xs font-medium text-semantic-info">
+                Provider safety pause remains active until {formatDate(data.provider_cooldown.retry_at)} and is not bypassed by these controls.
+              </p>
+            )}
+          </div>
+          <div className="flex shrink-0 flex-col gap-2 sm:flex-row">
+            <Button
+              variant="secondary"
+              disabled={data.queue.retry_scheduled === 0}
+              onClick={() => openBulkAction("retry_all_now")}
+              leadingIcon={<Play className="h-4 w-4" />}
+            >
+              Retry all now
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={data.queue.retry_scheduled === 0}
+              onClick={() => openBulkAction("clear")}
+              leadingIcon={<Trash2 className="h-4 w-4" />}
+            >
+              Clear scheduled queue
+            </Button>
+          </div>
+        </div>
+        {actionResult && (
+          <Alert className="mt-4" variant="success" title="Retry queue updated">
+            {retryActionNotice(actionResult)}
+          </Alert>
+        )}
+        {(bulkMutation.error || taskMutation.error) && (
+          <Alert className="mt-4" variant="danger" title="Retry queue was not changed">
+            {(bulkMutation.error || taskMutation.error) instanceof Error
+              ? (bulkMutation.error || taskMutation.error)?.message
+              : "The administrator action could not be completed."}
+          </Alert>
+        )}
+      </ContentSurface>
 
       <ContentSurface className="p-5 sm:p-6">
         <SectionHeader
@@ -329,7 +478,17 @@ export default function AIStatusPage() {
         </div>
         {data.tasks.length ? (
           <div className="divide-y divide-linen-300">
-            {data.tasks.map((task) => <TaskRow key={task.ticket_id} task={task} />)}
+            {data.tasks.map((task) => (
+              <TaskRow
+                key={task.ticket_id}
+                task={task}
+                onRetryNow={() => retryTaskNow(task)}
+                onReschedule={() => openSchedule(task)}
+                pendingAction={taskMutation.isPending && taskMutation.variables?.ticketId === task.ticket_id
+                  ? taskMutation.variables.action
+                  : null}
+              />
+            ))}
           </div>
         ) : (
           <EmptyState
@@ -371,12 +530,87 @@ export default function AIStatusPage() {
           />
         )}
       </ContentSurface>
+
+      <ConfirmDialog
+        open={bulkAction !== null}
+        onOpenChange={(open) => {
+          if (!open) setBulkAction(null);
+        }}
+        title={bulkAction === "clear" ? "Clear all scheduled retries?" : "Retry all scheduled tasks now?"}
+        description={bulkAction === "clear"
+          ? `${data.queue.retry_scheduled.toLocaleString()} delayed task${data.queue.retry_scheduled === 1 ? "" : "s"} will move to Paused. Tickets, requested artifacts, attempt counts, and existing AI results are retained.`
+          : `${data.queue.retry_scheduled.toLocaleString()} delayed task${data.queue.retry_scheduled === 1 ? "" : "s"} will become ready for worker claims. The provider safety pause, if active, still controls actual dispatch.`}
+        confirmLabel={bulkAction === "clear" ? "Clear queue" : "Retry all now"}
+        destructive={bulkAction === "clear"}
+        pending={bulkMutation.isPending}
+        onConfirm={() => {
+          if (bulkAction) bulkMutation.mutate(bulkAction);
+        }}
+      />
+
+      <Dialog
+        open={scheduleTask !== null}
+        onOpenChange={(open) => {
+          if (!open && !taskMutation.isPending) setScheduleTask(null);
+        }}
+        title="Change retry time"
+        description={scheduleTask ? `Choose when “${scheduleTask.subject}” becomes eligible for another worker claim.` : undefined}
+        closeOnBackdrop={!taskMutation.isPending}
+        dismissible={!taskMutation.isPending}
+        footer={(
+          <>
+            <Button variant="secondary" disabled={taskMutation.isPending} onClick={() => setScheduleTask(null)}>Cancel</Button>
+            <Button
+              pending={taskMutation.isPending}
+              pendingLabel="Rescheduling…"
+              disabled={!scheduleIsValid}
+              onClick={submitSchedule}
+              leadingIcon={<CalendarClock className="h-4 w-4" />}
+            >
+              Save retry time
+            </Button>
+          </>
+        )}
+      >
+        <label className="block">
+          <span className="text-xs font-semibold uppercase tracking-[0.08em] text-ink-400">Scheduled time</span>
+          <input
+            type="datetime-local"
+            className="input-base mt-2"
+            value={scheduleInput}
+            min={minimumSchedule}
+            max={maximumSchedule}
+            onChange={(event) => setScheduleInput(event.target.value)}
+          />
+        </label>
+        <p className="mt-2 text-xs leading-5 text-ink-400">
+          Times are entered in {resolvedLocalTimeZone()} and stored as UTC. Use “Retry now” instead of selecting a past time.
+        </p>
+        {taskMutation.error && (
+          <Alert className="mt-4" variant="danger" title="Retry time was not changed">
+            {taskMutation.error instanceof Error ? taskMutation.error.message : "The retry could not be rescheduled."}
+          </Alert>
+        )}
+      </Dialog>
     </PageFrame>
   );
 }
 
-function TaskRow({ task }: { task: AITaskStatusItem }) {
+function TaskRow({
+  task,
+  onRetryNow,
+  onReschedule,
+  pendingAction,
+}: {
+  task: AITaskStatusItem;
+  onRetryNow: () => void;
+  onReschedule: () => void;
+  pendingAction: TaskRetryAction["action"] | null;
+}) {
   const lifecycle = aiTaskLifecycleMeta(task.lifecycle);
+  const canControlRetry = (
+    task.lifecycle === "retry_scheduled" || task.lifecycle === "paused"
+  ) && task.requested_artifacts.length > 0;
   return (
     <details className="group px-5 py-4 open:bg-linen-100 sm:px-6">
       <summary className="cursor-pointer list-none rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 [&::-webkit-details-marker]:hidden">
@@ -415,7 +649,30 @@ function TaskRow({ task }: { task: AITaskStatusItem }) {
         {DIAGNOSTIC_LIFECYCLES.has(task.lifecycle) && (
           <DiagnosticReveal ticketId={task.ticket_id} className="mt-4" />
         )}
-        <div className="mt-4 flex justify-end">
+        <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          {canControlRetry ? (
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <Button
+                size="sm"
+                pending={pendingAction === "retry_now"}
+                pendingLabel="Queueing…"
+                disabled={pendingAction !== null}
+                onClick={onRetryNow}
+                leadingIcon={<Play className="h-3.5 w-3.5" />}
+              >
+                Retry now
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={pendingAction !== null}
+                onClick={onReschedule}
+                leadingIcon={<CalendarClock className="h-3.5 w-3.5" />}
+              >
+                Change time
+              </Button>
+            </div>
+          ) : <span />}
           <Link href={`/tickets/${encodeURIComponent(task.ticket_id)}`} className="inline-flex min-h-9 items-center gap-2 rounded-md border border-linen-500 bg-linen-50 px-3 text-xs font-semibold text-ink-700 hover:bg-linen-200">
             Open ticket <ExternalLink className="h-3.5 w-3.5" />
           </Link>

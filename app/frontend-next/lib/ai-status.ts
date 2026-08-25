@@ -65,7 +65,7 @@ const lifecycleMeta: Record<AITaskLifecycle, AITaskLifecycleMeta> = {
   },
   paused: {
     label: "Paused",
-    description: "Automatic AI was paused for this integration.",
+    description: "The task was removed from active dispatch by an administrator or an integration safety control.",
     variant: "warning",
   },
   unknown: {

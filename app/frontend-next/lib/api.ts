@@ -151,6 +151,29 @@ export const api = {
       `/admin/settings/ai-status${params.size ? `?${params.toString()}` : ""}`
     );
   },
+  clearScheduledAIRetries: () =>
+    fetchAPI<import("./types").AIRetryQueueActionResponse>(
+      "/admin/settings/ai-status/retries/clear",
+      { method: "POST" },
+    ),
+  retryAllScheduledAINow: () =>
+    fetchAPI<import("./types").AIRetryQueueActionResponse>(
+      "/admin/settings/ai-status/retries/retry-now",
+      { method: "POST" },
+    ),
+  retryAITaskNow: (ticketId: string) =>
+    fetchAPI<import("./types").AIRetryQueueActionResponse>(
+      `/admin/settings/ai-status/${encodeURIComponent(ticketId)}/retry-now`,
+      { method: "POST" },
+    ),
+  rescheduleAITask: (ticketId: string, scheduledAt: string) =>
+    fetchAPI<import("./types").AIRetryQueueActionResponse>(
+      `/admin/settings/ai-status/${encodeURIComponent(ticketId)}/retry-schedule`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ scheduled_at: scheduledAt }),
+      },
+    ),
   getTicketIntelligenceStatus: () =>
     fetchAPI<import("./types").TicketIntelligenceStatus>("/ticket-intelligence/status"),
   getStatusDiagnostics: (area: import("./types").OperationalDiagnosticArea) =>
