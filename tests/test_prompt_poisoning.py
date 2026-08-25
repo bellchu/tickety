@@ -47,6 +47,7 @@ class _RecordingLLM:
                 "priority": "P3",
                 "mood": "neutral",
                 "action": "respond",
+                "recommended_team": "Application Support",
                 "reasoning": "scope: single user; the request needs review",
             }
         if response_model is SuggestedReply:
@@ -84,7 +85,13 @@ class PromptContainmentTests(unittest.IsolatedAsyncioTestCase):
         description = _ATTACK + ("x" * 100_000)
 
         await IntelligenceEngine(llm).process_ticket(
-            {"subject": "Untrusted request", "description": description},
+            {
+                "subject": "Untrusted request",
+                "description": description,
+                "freshservice_category": "E1 App",
+                "freshservice_subcategory": "Order entry",
+                "freshservice_item_category": "Desktop client",
+            },
             kb_info="Approved evidence only.",
         )
 
@@ -94,6 +101,9 @@ class PromptContainmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(triage_prompt), 4_000)
         self.assertTrue(triage_data["description_truncated"])
         self.assertTrue(triage_data["description"].startswith(_ATTACK))
+        self.assertEqual(triage_data["freshservice_category"], "E1 App")
+        self.assertEqual(triage_data["freshservice_subcategory"], "Order entry")
+        self.assertEqual(triage_data["freshservice_item_category"], "Desktop client")
         self.assertEqual(triage_kwargs["system_prompt"], TRIAGE_SYSTEM_PROMPT)
         self.assertNotIn(_ATTACK, triage_kwargs["system_prompt"])
         self.assertNotIn("Return exactly", triage_prompt)

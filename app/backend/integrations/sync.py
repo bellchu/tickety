@@ -137,7 +137,9 @@ def _missing_automatic_artifacts(
         "provenance_unknown",
     }
     missing: set[str] = set()
-    if "triage" in generated and (stale or not ticket.ai_reasoning):
+    if "triage" in generated and (
+        stale or not ticket.ai_reasoning or not ticket.ai_suggested_team
+    ):
         missing = {"triage"}
     elif "summary" in generated and (stale or not ticket.summary):
         missing = {"summary"}
@@ -160,7 +162,9 @@ def _staged_automatic_artifacts(
     stale = (ticket.ai_status or "").strip().lower() in {
         "stale", "legacy_stale", "provenance_unknown",
     }
-    if "triage" in requested and (stale or not ticket.ai_reasoning):
+    if "triage" in requested and (
+        stale or not ticket.ai_reasoning or not ticket.ai_suggested_team
+    ):
         stage = {"triage"}
     elif "summary" in requested and (stale or not ticket.summary):
         stage = {"summary"}
@@ -206,7 +210,10 @@ def queue_recent_automatic_ai(
     unavailable_statuses = ("queued", "running", "failed", "dead_letter", "paused")
     gap_filters = []
     if "triage" in generated:
-        gap_filters.append(TicketRecord.ai_reasoning.is_(None))
+        gap_filters.extend((
+            TicketRecord.ai_reasoning.is_(None),
+            TicketRecord.ai_suggested_team.is_(None),
+        ))
     if "summary" in generated:
         gap_filters.append(TicketRecord.summary.is_(None))
     if "resolution" in generated:
@@ -265,12 +272,6 @@ def queue_active_routing_backlog(
     if not result["enabled"] or not {"triage", "route"}.issubset(enabled):
         return result
 
-    # Tickets covered by the authoritative exact-match source catalog are
-    # already routed deterministically and must not consume provider capacity.
-    # Keep the import local so the sync module's low-level projection helpers
-    # remain independent from the higher-level intelligence module.
-    from ..intelligence import SOURCE_CATEGORY_TEAMS
-
     limit = max(1, min(int(batch_size), 25))
     states = db.query(SyncStateRecord).filter(
         SyncStateRecord.automatic_ai_enabled.is_(True),
@@ -290,25 +291,13 @@ def queue_active_routing_backlog(
                 TicketRecord.status.is_(None),
                 func.lower(TicketRecord.status).notin_(("closed", "resolved", "cancelled")),
             ),
-            # A provider group assignment is already the authoritative route.
-            # Do not spend AI capacity generating a replacement route merely
-            # because the credential cannot read the optional group catalog.
-            or_(
-                TicketRecord.external_group_id.is_(None),
-                func.length(func.trim(TicketRecord.external_group_id)) == 0,
-            ),
-            or_(
-                TicketRecord.external_category.is_(None),
-                TicketRecord.external_category.notin_(
-                    tuple(SOURCE_CATEGORY_TEAMS)
-                ),
-            ),
             or_(
                 TicketRecord.ai_status.is_(None),
                 TicketRecord.ai_status.notin_(unavailable_statuses),
             ),
             or_(
                 TicketRecord.ai_reasoning.is_(None),
+                TicketRecord.ai_suggested_team.is_(None),
                 TicketRecord.ai_status.in_(stale_statuses),
             ),
         ).order_by(

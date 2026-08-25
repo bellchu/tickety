@@ -343,10 +343,13 @@ export function sourceKindLabel(ticket: Pick<Ticket, "external_source" | "ticket
 export function routingLabel(ticket: Pick<Ticket, "recommended_team" | "recommended_team_basis">): string {
   if (ticket.recommended_team_basis === "not_applicable") return "No active route - ticket closed";
   if (ticket.recommended_team_basis === "source_group") {
-    return `Assigned route - ${ticket.recommended_team}`;
+    return "AI team analysis pending";
   }
   if (ticket.recommended_team_basis === "source_category") {
     return `Suggested team - ${ticket.recommended_team} (Freshservice category)`;
+  }
+  if (ticket.recommended_team_basis === "ai_team") {
+    return `AI recommended team - ${ticket.recommended_team}`;
   }
   if (ticket.recommended_team_basis === "ai_category") {
     return `Suggested team - ${ticket.recommended_team} (catalog validation pending)`;

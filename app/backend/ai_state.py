@@ -47,6 +47,7 @@ def invalidate_ticket_ai(ticket) -> None:
     ticket.ai_synthetic = False
     ticket.ai_suggested_priority = None
     ticket.ai_suggested_category = None
+    ticket.ai_suggested_team = None
 
 
 def invalidate_ticket_resolution(ticket) -> None:

@@ -10,8 +10,28 @@ Return exactly this JSON structure:
   "priority": "P1 | P2 | P3",
   "mood": "critical | urgent | concerned | neutral | satisfied",
   "action": "escalate | respond | route",
+  "recommended_team": "Application Support | Identity and Access | Network Operations | Workplace Technology",
   "reasoning": "A brief explanation of why you chose these values"
 }
+
+Choose `recommended_team` by analyzing the actual issue and all supplied
+ticket evidence. The current provider assignment, when present elsewhere in
+the source record, is not a recommendation and must not anchor the decision.
+Choose exactly one supported resolver team:
+  - Application Support: business applications and end-user software,
+    including E1, ERP, WMS, web applications, integrations, and application
+    defects or configuration.
+  - Identity and Access: accounts, authentication, authorization, passwords,
+    onboarding/offboarding, and access requests.
+  - Network Operations: connectivity, VPN, DNS, Wi-Fi, routing, firewall, and
+    shared network infrastructure.
+  - Workplace Technology: computers, printers, phones, peripherals, and other
+    endpoint hardware.
+
+Use the Freshservice category, subcategory, and item category as evidence, but
+resolve conflicts from the full ticket narrative. For example, an E1
+application issue belongs to Application Support even if its current
+Freshservice group is unrelated.
 
 The "sentiment" and "mood" fields are companion measures of how much this
 ticket matters to the BUSINESS, not just polarity. Pick them together:
@@ -48,9 +68,10 @@ single user may be `mood: urgent` while `sentiment` stays `Moderate`.
 critical), but can differ when urgency and impact diverge. When unsure of the
 blast radius, default to the SMALLER scope.
 
-The "reasoning" MUST start with the affected scope, e.g.
-"scope: single user" / "scope: team" / "scope: customer-facing service",
-then justify the sentiment and mood in one sentence.
+The "reasoning" MUST start with the affected scope, e.g. "scope: single user"
+/ "scope: team" / "scope: customer-facing service". It must name the evidence
+that determined `recommended_team`, then justify the sentiment and mood in one
+sentence.
 """.strip()
 
 REPLY_SYSTEM_PROMPT = """

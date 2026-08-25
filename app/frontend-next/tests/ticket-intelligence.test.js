@@ -48,7 +48,8 @@ test("analysis lifecycle renders every operational state without exposing raw st
 });
 
 test("routing, source, and related labels preserve their derivation", () => {
-  assert.equal(routingLabel({ recommended_team: "Freshservice group 2000241178", recommended_team_basis: "source_group" }), "Assigned route - Freshservice group 2000241178");
+  assert.equal(routingLabel({ recommended_team: "Freshservice group 2000241178", recommended_team_basis: "source_group" }), "AI team analysis pending");
+  assert.equal(routingLabel({ recommended_team: "Application Support", recommended_team_basis: "ai_team" }), "AI recommended team - Application Support");
   assert.equal(routingLabel({ recommended_team: "Network Operations", recommended_team_basis: "ai_category" }), "Suggested team - Network Operations (catalog validation pending)");
   assert.equal(routingLabel({ recommended_team: "Application Support", recommended_team_basis: "source_category" }), "Suggested team - Application Support (Freshservice category)");
   assert.equal(routingLabel({ recommended_team: "No active routing", recommended_team_basis: "not_applicable" }), "No active route - ticket closed");
@@ -86,6 +87,7 @@ function freshAnalysis(overrides = {}) {
       mood: "concerned",
       complexity: 3,
       action: "respond",
+      recommended_team: "Application Support",
       reasoning: "scope: single user; contained impact",
       suggested_response: null,
       escalation_risk: 41,

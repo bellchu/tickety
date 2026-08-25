@@ -48,12 +48,24 @@ class IntelligenceEngine:
                 "subject": redact_text(ticket_data.get("subject") or ""),
                 "description": redact_text(ticket_data.get("description") or ""),
                 "public_thread": redact_text(ticket_data.get("public_thread") or ""),
+                "freshservice_category": redact_text(
+                    ticket_data.get("freshservice_category") or ""
+                ),
+                "freshservice_subcategory": redact_text(
+                    ticket_data.get("freshservice_subcategory") or ""
+                ),
+                "freshservice_item_category": redact_text(
+                    ticket_data.get("freshservice_item_category") or ""
+                ),
             },
             max_chars=prompt_char_limit(self.llm),
             field_limits={
                 "subject": 1_000,
                 "description": 10_000,
                 "public_thread": 12_000,
+                "freshservice_category": 255,
+                "freshservice_subcategory": 255,
+                "freshservice_item_category": 255,
             },
         )
         analysis = await self.llm.analyze(

@@ -30,9 +30,10 @@ export interface Ticket {
   ai_synthetic: boolean;
   ai_suggested_priority: string | null;
   ai_suggested_category: string | null;
+  ai_suggested_team: string | null;
   recommended_team: string;
-  recommended_team_basis: "source_group" | "ai_category" | "source_category" | "not_applicable" | "unrouted_review";
-  routing_status: "source_group_assignment" | "legacy_ai_category" | "source_category_suggestion" | "not_applicable" | "unrouted_review";
+  recommended_team_basis: "source_group" | "ai_team" | "ai_category" | "source_category" | "not_applicable" | "unrouted_review";
+  routing_status: "source_group_assignment" | "ai_team_recommendation" | "legacy_ai_category" | "source_category_suggestion" | "not_applicable" | "unrouted_review";
   routing_abstention_reason: "missing_ai_category" | "unsupported_ai_category" | "untrusted_ai_status" | null;
   routing_catalog_validated: boolean;
   ticket_type: string;
@@ -358,6 +359,7 @@ export interface TriageResult {
   mood: string;
   complexity: number;
   action: string;
+  recommended_team: string;
   reasoning: string;
   suggested_response: string | null;
   escalation_risk: number;

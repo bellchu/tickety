@@ -143,7 +143,8 @@ class LLMContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_oversized_raw_prompt_fails_closed_before_provider_dispatch(self):
         provider = AsyncMock(return_value=_completion(
             '{"sentiment":"Neutral","category":"Other","priority":"P3",'
-            '"mood":"neutral","action":"respond","reasoning":"scope: single user; routine request"}'
+            '"mood":"neutral","action":"respond","recommended_team":"Application Support",'
+            '"reasoning":"scope: single user; routine request"}'
         ))
         with (
             patch.dict(
@@ -170,7 +171,8 @@ class LLMContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_custom_provider_receives_json_object_mode(self):
         provider = AsyncMock(return_value=_completion(
             '{"sentiment":"Neutral","category":"Other","priority":"P3",'
-            '"mood":"neutral","action":"respond","reasoning":"scope: single user; routine request"}'
+            '"mood":"neutral","action":"respond","recommended_team":"Application Support",'
+            '"reasoning":"scope: single user; routine request"}'
         ))
         with (
             patch.dict(os.environ, {
@@ -274,7 +276,8 @@ class LLMContractTests(unittest.IsolatedAsyncioTestCase):
             active -= 1
             return _completion(
                 '{"sentiment":"Neutral","category":"Other","priority":"P3",'
-                '"mood":"neutral","action":"respond","reasoning":"scope: single user; routine request"}'
+                '"mood":"neutral","action":"respond","recommended_team":"Application Support",'
+                '"reasoning":"scope: single user; routine request"}'
             )
 
         with (
@@ -348,6 +351,7 @@ class LLMContractTests(unittest.IsolatedAsyncioTestCase):
             _completion(
                 '{"sentiment":"Neutral","category":"Other","priority":"P3",'
                 '"mood":"neutral","action":"respond",'
+                '"recommended_team":"Application Support",'
                 '"reasoning":"scope: single user; routine request"}'
             ),
         ])

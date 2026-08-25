@@ -49,6 +49,7 @@ function isTriageResult(value: unknown): value is TriageResult {
     && typeof value.mood === "string"
     && isFiniteNumber(value.complexity)
     && typeof value.action === "string"
+    && typeof value.recommended_team === "string"
     && typeof value.reasoning === "string"
     && isNullableString(value.suggested_response)
     && isFiniteNumber(value.escalation_risk);

@@ -32,7 +32,7 @@ function analysis(overrides = {}) {
     ticket_id: "ticket-1",
     triage: {
       ticket_id: "ticket-1", sentiment: "Neutral", category: "Other", priority: "P3",
-      mood: "neutral", complexity: 1, action: "respond", reasoning: "Review logs",
+      mood: "neutral", complexity: 1, action: "respond", recommended_team: "Application Support", reasoning: "Review logs",
       suggested_response: null, escalation_risk: 10,
     },
     summary: null,

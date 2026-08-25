@@ -1395,6 +1395,7 @@ class LLMManager:
                         "priority": "P2",
                         "mood": "concerned",
                         "action": "route",
+                        "recommended_team": "Network Operations",
                         "reasoning": "scope: single user; VPN access is blocking one requester without evidence of wider impact.",
                     }
                 return {
@@ -1403,6 +1404,7 @@ class LLMManager:
                     "priority": "P1",
                     "mood": "urgent",
                     "action": "escalate",
+                    "recommended_team": "Network Operations",
                     "reasoning": "scope: organization-wide; VPN instability is affecting business operations.",
                 }
             if ("database" in text or "production" in text) and wide_scope:
@@ -1412,6 +1414,7 @@ class LLMManager:
                     "priority": "P1",
                     "mood": "critical",
                     "action": "escalate",
+                    "recommended_team": "Application Support",
                     "reasoning": "scope: customer-facing service; a production outage requires immediate escalation.",
                 }
             if "password" in text or "access" in text:
@@ -1421,6 +1424,7 @@ class LLMManager:
                     "priority": "P3",
                     "mood": "concerned",
                     "action": "respond",
+                    "recommended_team": "Identity and Access",
                     "reasoning": "scope: single user; this is a standard access request.",
                 }
             return {
@@ -1429,6 +1433,7 @@ class LLMManager:
                 "priority": "P3",
                 "mood": "neutral",
                 "action": "respond",
+                "recommended_team": "Application Support",
                 "reasoning": "scope: single user; this is a routine support request.",
             }
         elif (
@@ -1472,5 +1477,6 @@ class LLMManager:
             "priority": "P3",
             "mood": "neutral",
             "action": "respond",
+            "recommended_team": "Application Support",
             "reasoning": "Mock response.",
         }

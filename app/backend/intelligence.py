@@ -31,7 +31,7 @@ from sqlalchemy.orm import Session
 
 from .database import TicketRecord, UserRecord
 from .llm_manager import LLMInvalidOutputError, LLMManager
-from .ai_contracts import ResolutionAnalysis, TicketSummary
+from .ai_contracts import AI_RESOLVER_TEAMS, ResolutionAnalysis, TicketSummary
 from .ai_input import (
     UnsafeAIAdviceError,
     canonical_bounded_json,
@@ -233,16 +233,19 @@ _TRUSTED_AI_ROUTING_STATUSES = {"completed", "partial", "triage_completed"}
 
 @dataclass(frozen=True)
 class TeamRoutingDecision:
-    """Compatibility projection until catalog-bound group routing is enabled.
+    """AI resolver-team projection until catalog-bound group routing is enabled.
 
-    ``ai_category`` is only a legacy team suggestion. It is deliberately not
-    represented as a validated resolver-group route. Every untrusted or
-    unmapped outcome fails closed to an explicit review state.
+    ``ai_team`` is selected from Tickety's closed set of resolver teams, while
+    ``ai_category`` remains a compatibility fallback for older artifacts.
+    Neither is represented as a validated Freshservice resolver-group route.
+    Every untrusted or unmapped outcome fails closed to an explicit review
+    state.
     """
 
     recommended_team: str
     basis: Literal[
         "source_group",
+        "ai_team",
         "ai_category",
         "source_category",
         "not_applicable",
@@ -250,6 +253,7 @@ class TeamRoutingDecision:
     ]
     status: Literal[
         "source_group_assignment",
+        "ai_team_recommendation",
         "legacy_ai_category",
         "source_category_suggestion",
         "not_applicable",
@@ -269,12 +273,18 @@ def team_routing_decision(
     ai_suggested_category: Optional[str],
     ai_status: Optional[str],
     *,
+    ai_suggested_team: Optional[str] = None,
     source_group_id: Optional[str] = None,
     source_category: Optional[str] = None,
     ticket_status: Optional[str] = None,
     ai_evidence_current: bool = False,
 ) -> TeamRoutingDecision:
-    """Return a fail-closed routing projection with explicit provenance."""
+    """Return an AI-first, fail-closed routing projection with provenance.
+
+    ``source_group_id`` is accepted for compatibility with existing callers,
+    but it represents the provider's current assignment and never influences
+    Tickety's recommendation.
+    """
     if (ticket_status or "").strip().lower() in {"closed", "resolved", "cancelled"}:
         return TeamRoutingDecision(
             recommended_team=NO_ACTIVE_ROUTING_TEAM,
@@ -282,23 +292,22 @@ def team_routing_decision(
             status="not_applicable",
             abstention_reason=None,
         )
-    # An assigned provider group is the authoritative current route in this
-    # read-only Freshservice sidecar. Group-directory access is a separate
-    # permission and may be unavailable, so retain the exact provider ID
-    # instead of guessing a friendly name or falling back to AI.
-    normalized_group_id = (source_group_id or "").strip()
-    if normalized_group_id:
-        return TeamRoutingDecision(
-            recommended_team=f"Freshservice group {normalized_group_id}",
-            basis="source_group",
-            status="source_group_assignment",
-            abstention_reason=None,
-        )
     normalized_status = (ai_status or "").strip().lower().replace("-", "_")
     ai_routing_trusted = (
         normalized_status in _TRUSTED_AI_ROUTING_STATUSES
         or ai_evidence_current
     )
+    normalized_ai_team = (ai_suggested_team or "").strip()
+    if ai_routing_trusted and normalized_ai_team in AI_RESOLVER_TEAMS:
+        return TeamRoutingDecision(
+            recommended_team=normalized_ai_team,
+            basis="ai_team",
+            status="ai_team_recommendation",
+            abstention_reason=None,
+        )
+
+    # Preserve recommendations generated before the explicit AI team contract
+    # while those tickets are refreshed through the bounded worker queues.
     if ai_routing_trusted and ai_suggested_category:
         team = AI_CATEGORY_TEAMS.get(ai_suggested_category)
         if team:
@@ -333,10 +342,16 @@ def team_routing_decision(
 
 
 def recommended_team(
-    ai_suggested_category: Optional[str], ai_status: Optional[str]
+    ai_suggested_category: Optional[str],
+    ai_status: Optional[str],
+    ai_suggested_team: Optional[str] = None,
 ) -> tuple[str, str]:
     """Return the legacy tuple shape without restoring an implicit fallback."""
-    decision = team_routing_decision(ai_suggested_category, ai_status)
+    decision = team_routing_decision(
+        ai_suggested_category,
+        ai_status,
+        ai_suggested_team=ai_suggested_team,
+    )
     return decision.recommended_team, decision.basis
 
 

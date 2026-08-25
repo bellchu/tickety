@@ -762,6 +762,7 @@ _PUBLIC_DEMO_AI_FIELDS = {
     "ai_synthetic": False,
     "ai_suggested_priority": None,
     "ai_suggested_category": None,
+    "ai_suggested_team": None,
     "recommended_team": "Unrouted / Review",
     "recommended_team_basis": "unrouted_review",
     "routing_status": "unrouted_review",
@@ -776,7 +777,7 @@ def _enrich_ticket_team(
     decision = intel.team_routing_decision(
         ticket.ai_suggested_category,
         ticket.ai_status,
-        source_group_id=ticket.external_group_id,
+        ai_suggested_team=ticket.ai_suggested_team,
         source_category=ticket.external_category,
         ticket_status=ticket.workflow_status or ticket.status,
         ai_evidence_current=ai_evidence_current,
@@ -2331,6 +2332,7 @@ def _apply_ticket_analysis(ticket: TicketRecord, analysis_data: Dict[str, Any], 
     # update may change the canonical category used by routing and retrieval.
     ticket.ai_suggested_category = analysis_data.get("category")
     ticket.ai_suggested_priority = analysis_data.get("priority")
+    ticket.ai_suggested_team = analysis_data.get("recommended_team")
     ticket.mood = analysis_data.get("mood")
     ticket.complexity = analysis_data.get("complexity", 1)
     ticket.ai_reasoning = analysis_data.get("reasoning")
@@ -2359,6 +2361,9 @@ def _triage_result_payload(ticket: TicketRecord, analysis_data: Dict[str, Any]) 
         "mood": analysis_data.get("mood", "neutral"),
         "complexity": analysis_data.get("complexity", 1),
         "action": analysis_data.get("action", "respond"),
+        "recommended_team": analysis_data.get("recommended_team")
+        or ticket.ai_suggested_team
+        or intel.UNROUTED_REVIEW_TEAM,
         "reasoning": analysis_data.get("reasoning", ""),
         "suggested_response": analysis_data.get("suggested_response"),
         "escalation_risk": ticket.escalation_risk or 0,
@@ -2377,6 +2382,9 @@ def _ticket_analysis_hash(ticket: TicketRecord) -> str:
         "subject": ticket.subject or "",
         "description": ticket.description or "",
         "public_thread": ticket.external_conversation_text or "",
+        "freshservice_category": ticket.external_category or "",
+        "freshservice_subcategory": ticket.external_subcategory or "",
+        "freshservice_item_category": ticket.external_item_category or "",
         "model": _llm_cache_identity(),
         "pipeline": AI_PIPELINE_VERSION,
     }
@@ -2509,6 +2517,9 @@ def _cached_analysis_payload(ticket: TicketRecord, db: Session) -> Dict[str, Any
         "mood": ticket.mood or "neutral",
         "complexity": ticket.complexity or 1,
         "action": "escalate" if ticket.ai_review_state in {"Escalated", "Escalation Suggested"} else "respond",
+        "recommended_team": ticket.ai_suggested_team
+        or intel.AI_CATEGORY_TEAMS.get(ticket.ai_suggested_category or "")
+        or intel.UNROUTED_REVIEW_TEAM,
         "reasoning": ticket.ai_reasoning or "",
         "suggested_response": ticket.suggested_response,
     }
@@ -2659,6 +2670,9 @@ async def _run_ticket_analysis(
         "mood": ticket.mood or "neutral",
         "complexity": ticket.complexity or 1,
         "action": "escalate" if ticket.ai_review_state == "Escalation Suggested" else "respond",
+        "recommended_team": ticket.ai_suggested_team
+        or intel.AI_CATEGORY_TEAMS.get(ticket.ai_suggested_category or "")
+        or intel.UNROUTED_REVIEW_TEAM,
         "reasoning": ticket.ai_reasoning or "",
         "suggested_response": ticket.suggested_response,
     }
@@ -2674,6 +2688,9 @@ async def _run_ticket_analysis(
                         "subject": ticket.subject,
                         "description": ticket.description,
                         "public_thread": ticket.external_conversation_text or "",
+                        "freshservice_category": ticket.external_category or "",
+                        "freshservice_subcategory": ticket.external_subcategory or "",
+                        "freshservice_item_category": ticket.external_item_category or "",
                     },
                     kb_info=_ticket_kb_context(ticket),
                 ),

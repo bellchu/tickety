@@ -51,6 +51,7 @@ class TicketRecord(Base):
     ai_synthetic = Column(Boolean, nullable=False, default=False)
     ai_suggested_priority = Column(String, nullable=True)
     ai_suggested_category = Column(String, nullable=True)
+    ai_suggested_team = Column(String, nullable=True)
 
     # Standalone ticketing fields
     ticket_type = Column(String, default="incident")  # incident | request
@@ -1108,6 +1109,7 @@ def _ensure_columns():
         "ai_synthetic": "BOOLEAN DEFAULT 0",
         "ai_suggested_priority": "VARCHAR",
         "ai_suggested_category": "VARCHAR",
+        "ai_suggested_team": "VARCHAR",
         "ticket_type": "VARCHAR DEFAULT 'incident'",
         "impact": "VARCHAR",
         "urgency": "VARCHAR",

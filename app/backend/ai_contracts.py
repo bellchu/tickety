@@ -36,6 +36,18 @@ RoutingAbstentionReason = Literal[
     "untrusted_ai_status",
     "workspace_mismatch",
 ]
+AI_RESOLVER_TEAMS = (
+    "Application Support",
+    "Identity and Access",
+    "Network Operations",
+    "Workplace Technology",
+)
+ResolverTeam = Literal[
+    "Application Support",
+    "Identity and Access",
+    "Network Operations",
+    "Workplace Technology",
+]
 
 
 class StrictAIModel(BaseModel):
@@ -48,6 +60,7 @@ class TriageAnalysis(StrictAIModel):
     priority: Literal["P1", "P2", "P3"]
     mood: Literal["critical", "urgent", "concerned", "neutral", "satisfied"]
     action: Literal["escalate", "respond", "route"]
+    recommended_team: ResolverTeam
     reasoning: ShortText
 
 

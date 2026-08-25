@@ -249,17 +249,18 @@ class TicketListApiTests(unittest.TestCase):
             ("Unrouted / Review", "unrouted_review"),
         )
 
-    def test_routing_uses_exact_source_fallback_and_skips_closed_tickets(self):
+    def test_routing_prefers_ai_team_over_source_group_and_skips_closed_tickets(self):
         assigned = main.intel.team_routing_decision(
-            "Network",
+            "Software",
             "completed",
-            source_group_id="2000241178",
-            source_category="Hardware - Printers",
+            ai_suggested_team="Application Support",
+            source_group_id="2000245797",
+            source_category="E1 App",
             ticket_status="Open",
         )
-        self.assertEqual(assigned.recommended_team, "Freshservice group 2000241178")
-        self.assertEqual(assigned.basis, "source_group")
-        self.assertEqual(assigned.status, "source_group_assignment")
+        self.assertEqual(assigned.recommended_team, "Application Support")
+        self.assertEqual(assigned.basis, "ai_team")
+        self.assertEqual(assigned.status, "ai_team_recommendation")
         self.assertIsNone(assigned.abstention_reason)
 
         source = main.intel.team_routing_decision(

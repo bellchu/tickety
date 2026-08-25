@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { KeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Bookmark,
@@ -35,10 +36,33 @@ import {
 } from "@/lib/ticket-display";
 
 const SAVED_VIEWS_KEY = "tickety.ticket-queue.views.v1";
+const COLUMN_WIDTHS_KEY = "tickety.ticket-queue.column-widths.v1";
 const STATUS_FILTERS = ["Open", "Escalated", "Awaiting Review", "Closed"];
 const PRIORITIES = ["P1", "P2", "P3", "P4"];
 const PAGE_SIZES = [25, 50, 100];
 const EMPTY_TICKETS: Ticket[] = [];
+const TABLE_COLUMN_KEYS = ["ticket", "requester", "priority", "routing", "status", "created", "lastContact"] as const;
+type TableColumnKey = (typeof TABLE_COLUMN_KEYS)[number];
+type TableColumnWidths = Record<TableColumnKey, number>;
+const DEFAULT_COLUMN_WIDTHS: TableColumnWidths = {
+  ticket: 320,
+  requester: 230,
+  priority: 110,
+  routing: 280,
+  status: 130,
+  created: 130,
+  lastContact: 140,
+};
+const MIN_COLUMN_WIDTHS: TableColumnWidths = {
+  ticket: 220,
+  requester: 170,
+  priority: 90,
+  routing: 190,
+  status: 100,
+  created: 110,
+  lastContact: 120,
+};
+const MAX_COLUMN_WIDTH = 720;
 const SORT_OPTIONS: Array<{ value: TicketListSort; label: string }> = [
   { value: "newest", label: "Newest created" },
   { value: "updated", label: "Recently communicated" },
@@ -57,6 +81,39 @@ interface SavedView {
   sort: TicketListSort;
   limit: number;
   builtIn?: boolean;
+}
+
+function ResizableColumnHeader({
+  column,
+  label,
+  onResizeStart,
+  onNudge,
+}: {
+  column: TableColumnKey;
+  label: string;
+  onResizeStart: (column: TableColumnKey, event: ReactPointerEvent<HTMLButtonElement>) => void;
+  onNudge: (column: TableColumnKey, delta: number) => void;
+}) {
+  const handleKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const step = event.shiftKey ? 50 : 10;
+    onNudge(column, event.key === "ArrowRight" ? step : -step);
+  };
+
+  return (
+    <th scope="col" className="group relative px-4 py-3">
+      <span>{label}</span>
+      <button
+        type="button"
+        aria-label={`Resize ${label} column`}
+        title={`Drag to resize ${label}; use arrow keys for precise control`}
+        onPointerDown={(event) => onResizeStart(column, event)}
+        onKeyDown={handleKeyDown}
+        className="absolute inset-y-0 right-0 z-10 w-3 cursor-col-resize touch-none outline-none after:absolute after:inset-y-2 after:left-1/2 after:w-px after:bg-linen-400 after:transition-colors hover:after:bg-semantic-primary focus-visible:after:w-0.5 focus-visible:after:bg-semantic-primary"
+      />
+    </th>
+  );
 }
 
 const BUILT_IN_VIEWS: SavedView[] = [
@@ -164,6 +221,7 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
   const [closeConfirmOpen, setCloseConfirmOpen] = useState(false);
   const [moreFiltersOpen, setMoreFiltersOpen] = useState(false);
   const [bulkNotice, setBulkNotice] = useState<{ variant: "success" | "danger"; message: string } | null>(null);
+  const [columnWidths, setColumnWidths] = useState<TableColumnWidths>(DEFAULT_COLUMN_WIDTHS);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -200,6 +258,72 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
       // A corrupt or unavailable local store should not block the queue.
     }
   }, []);
+
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(COLUMN_WIDTHS_KEY);
+      if (!stored) return;
+      const parsed = JSON.parse(stored) as Partial<Record<TableColumnKey, unknown>>;
+      const restored = { ...DEFAULT_COLUMN_WIDTHS };
+      for (const column of TABLE_COLUMN_KEYS) {
+        const value = parsed[column];
+        if (typeof value === "number" && Number.isFinite(value)) {
+          restored[column] = Math.max(
+            MIN_COLUMN_WIDTHS[column],
+            Math.min(MAX_COLUMN_WIDTH, Math.round(value)),
+          );
+        }
+      }
+      setColumnWidths(restored);
+    } catch {
+      // Invalid or unavailable browser storage should not block the queue.
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(COLUMN_WIDTHS_KEY, JSON.stringify(columnWidths));
+    } catch {
+      // Resizing still works for this session when storage is unavailable.
+    }
+  }, [columnWidths]);
+
+  const resizeColumn = (column: TableColumnKey, width: number) => {
+    setColumnWidths((current) => ({
+      ...current,
+      [column]: Math.max(
+        MIN_COLUMN_WIDTHS[column],
+        Math.min(MAX_COLUMN_WIDTH, Math.round(width)),
+      ),
+    }));
+  };
+
+  const beginColumnResize = (
+    column: TableColumnKey,
+    event: ReactPointerEvent<HTMLButtonElement>,
+  ) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = columnWidths[column];
+    const priorCursor = document.body.style.cursor;
+    const priorUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
+    const move = (pointerEvent: PointerEvent) => {
+      resizeColumn(column, startWidth + pointerEvent.clientX - startX);
+    };
+    const finish = () => {
+      document.body.style.cursor = priorCursor;
+      document.body.style.userSelect = priorUserSelect;
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+  };
 
   const pageQuery = useQuery({
     queryKey: ["ticket-page", { status, priority, assigneeId, category, search, sort, limit, offset }],
@@ -320,6 +444,10 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
 
   const start = pageQuery.data && tickets.length ? pageQuery.data.offset + 1 : 0;
   const end = pageQuery.data ? pageQuery.data.offset + tickets.length : 0;
+  const tableWidth = TABLE_COLUMN_KEYS.reduce(
+    (total, column) => total + columnWidths[column],
+    canBulk ? 48 : 0,
+  );
 
   return (
     <PageFrame width="wide">
@@ -428,12 +556,28 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
         <>
           <div className="hidden overflow-hidden rounded-2xl border border-linen-400 bg-linen-50 shadow-sm md:block">
             <div className="overflow-x-auto">
-	              <table className="w-full min-w-[1180px] table-fixed text-left">
-                <caption className="sr-only">Tickets in the current server-filtered page</caption>
+	              <table className="table-fixed text-left" style={{ width: tableWidth }}>
+                <caption className="sr-only">Tickets in the current server-filtered page. Drag a column divider or focus it and use the arrow keys to resize columns.</caption>
+                <colgroup>
+                  {canBulk && <col style={{ width: 48 }} />}
+                  <col style={{ width: columnWidths.ticket }} />
+                  <col style={{ width: columnWidths.requester }} />
+                  <col style={{ width: columnWidths.priority }} />
+                  <col style={{ width: columnWidths.routing }} />
+                  <col style={{ width: columnWidths.status }} />
+                  <col style={{ width: columnWidths.created }} />
+                  <col style={{ width: columnWidths.lastContact }} />
+                </colgroup>
                 <thead className="border-b border-linen-300 bg-linen-100 text-[11px] font-semibold uppercase tracking-[0.09em] text-ink-400">
                   <tr>
                     {canBulk && <th scope="col" className="w-12 px-4 py-3"><input ref={selectAllRef} type="checkbox" checked={allOnPageSelected} onChange={togglePage} aria-label="Select all tickets on this page" className="h-4 w-4" /></th>}
-	                    <th scope="col" className="w-[26%] px-4 py-3">Ticket</th><th scope="col" className="w-[20%] px-4 py-3">Requester</th><th scope="col" className="w-[8%] px-4 py-3">Priority</th><th scope="col" className="w-[17%] px-4 py-3">Routing</th><th scope="col" className="w-[11%] px-4 py-3">Status</th><th scope="col" className="w-[9%] px-4 py-3">Created</th><th scope="col" className="w-[9%] px-4 py-3">Last contact</th>
+                    <ResizableColumnHeader column="ticket" label="Ticket" onResizeStart={beginColumnResize} onNudge={(column, delta) => resizeColumn(column, columnWidths[column] + delta)} />
+                    <ResizableColumnHeader column="requester" label="Requester" onResizeStart={beginColumnResize} onNudge={(column, delta) => resizeColumn(column, columnWidths[column] + delta)} />
+                    <ResizableColumnHeader column="priority" label="Priority" onResizeStart={beginColumnResize} onNudge={(column, delta) => resizeColumn(column, columnWidths[column] + delta)} />
+                    <ResizableColumnHeader column="routing" label="Routing" onResizeStart={beginColumnResize} onNudge={(column, delta) => resizeColumn(column, columnWidths[column] + delta)} />
+                    <ResizableColumnHeader column="status" label="Status" onResizeStart={beginColumnResize} onNudge={(column, delta) => resizeColumn(column, columnWidths[column] + delta)} />
+                    <ResizableColumnHeader column="created" label="Created" onResizeStart={beginColumnResize} onNudge={(column, delta) => resizeColumn(column, columnWidths[column] + delta)} />
+                    <ResizableColumnHeader column="lastContact" label="Last contact" onResizeStart={beginColumnResize} onNudge={(column, delta) => resizeColumn(column, columnWidths[column] + delta)} />
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-linen-300">
@@ -443,7 +587,7 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
 	                      <td className="min-w-0 px-4 py-4"><div className="flex min-w-0 items-baseline gap-2"><Link href={`/tickets/${ticket.id}`} title={ticket.subject} className="min-w-0 flex-1 truncate text-sm font-semibold text-ink-700 hover:text-semantic-primary hover:underline">{ticket.subject}</Link><span className="shrink-0 whitespace-nowrap font-mono text-[11px] text-ink-400">#{ticket.external_id || ticket.id}</span></div><div className="mt-1 flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap text-[11px] text-ink-400"><span>{sourceKindLabel(ticket)}</span>{ticket.ai_suggested_category && <span className="truncate">· AI issue: {ticket.ai_suggested_category}</span>}<span className="shrink-0">· {analysisLifecycleLabel(ticket)}</span></div></td>
 	                      <td className="min-w-0 px-4 py-4"><span className="block truncate text-xs font-semibold text-ink-700" title={requesterName(ticket)}>{requesterName(ticket)}</span>{requesterEmail(ticket) && <span className="mt-1 block truncate text-[11px] text-ink-500" title={requesterEmail(ticket) || undefined}>{requesterEmail(ticket)}</span>}<span className="mt-0.5 block truncate text-[10px] text-ink-400">{ticket.requester_title || "Title not provided"}</span></td>
 	                      <td className="px-4 py-4"><Badge variant={badgeForPriority(ticket.priority)}>{ticket.priority}</Badge>{ticket.ai_suggested_priority && ticket.ai_suggested_priority !== ticket.priority && <span className="mt-1 block whitespace-nowrap text-[10px] font-medium text-ink-400">AI suggests {ticket.ai_suggested_priority}</span>}</td>
-                      <td className="min-w-0 px-4 py-4"><span className="block truncate text-xs font-semibold text-ink-600">{routingLabel(ticket)}</span><span className="mt-1 block truncate text-[11px] text-ink-400">{ticket.external_assignee_name || ticket.assignee_name || "Unassigned"}</span></td>
+                      <td className="min-w-0 px-4 py-4"><span className="block truncate text-xs font-semibold text-ink-600" title={routingLabel(ticket)}>{routingLabel(ticket)}</span><span className="mt-1 block truncate text-[11px] text-ink-400" title={ticket.external_assignee_name || ticket.assignee_name || "Unassigned"}>{ticket.external_assignee_name || ticket.assignee_name || "Unassigned"}</span></td>
                       <td className="px-4 py-4"><Badge variant={badgeForStatus(ticket.status)} dot>{ticket.status}</Badge></td>
 	                      <td className="px-4 py-4"><TimelineValue value={ticketCreatedAt(ticket)} label="Created" /></td>
 	                      <td className="px-4 py-4"><TimelineValue value={ticketLastCommunicationAt(ticket)} label="Last contact" /></td>
@@ -462,7 +606,7 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
                   <div className="min-w-0 flex-1"><div className="flex flex-wrap gap-1.5"><Badge variant={badgeForPriority(ticket.priority)}>{ticket.priority}</Badge>{ticket.ai_suggested_priority && ticket.ai_suggested_priority !== ticket.priority && <span className="self-center text-[10px] font-medium text-ink-400">AI suggests {ticket.ai_suggested_priority}</span>}</div><Link href={`/tickets/${ticket.id}`} className="mt-3 block truncate text-sm font-semibold leading-5 text-ink-700 hover:text-semantic-primary">{ticket.subject}</Link><p className="mt-1 truncate font-mono text-[11px] text-ink-400">#{ticket.external_id || ticket.id}</p></div>
                 </div>
                 <div className="mt-3 flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap text-[11px] text-ink-400"><span>{sourceKindLabel(ticket)}</span>{ticket.ai_suggested_category && <span className="truncate">· AI issue: {ticket.ai_suggested_category}</span>}<span className="shrink-0">· {analysisLifecycleLabel(ticket)}</span></div>
-	                <dl className="mt-4 space-y-3 border-t border-linen-300 pt-3 text-xs"><div><dt className="text-ink-400">Requester</dt><dd className="mt-1 truncate font-semibold text-ink-600">{requesterName(ticket)}</dd>{requesterEmail(ticket) && <dd className="mt-0.5 flex min-w-0 items-center gap-1 text-ink-400"><Mail className="h-3 w-3 shrink-0" aria-hidden="true" /><span className="truncate">{requesterEmail(ticket)}</span></dd>}<dd className="mt-0.5 truncate text-ink-400">{ticket.requester_title || "Title not provided"}</dd></div><div><dt className="text-ink-400">Routing</dt><dd className="mt-1 truncate font-semibold text-ink-600">{routingLabel(ticket)}</dd><dd className="mt-0.5 truncate text-ink-400">{ticket.external_assignee_name || ticket.assignee_name || "Unassigned"}</dd></div><div><dt className="text-ink-400">Status</dt><dd className="mt-1"><Badge variant={badgeForStatus(ticket.status)} dot>{ticket.status}</Badge></dd></div></dl>
+	                <dl className="mt-4 space-y-3 border-t border-linen-300 pt-3 text-xs"><div><dt className="text-ink-400">Requester</dt><dd className="mt-1 truncate font-semibold text-ink-600">{requesterName(ticket)}</dd>{requesterEmail(ticket) && <dd className="mt-0.5 flex min-w-0 items-center gap-1 text-ink-400"><Mail className="h-3 w-3 shrink-0" aria-hidden="true" /><span className="truncate">{requesterEmail(ticket)}</span></dd>}<dd className="mt-0.5 truncate text-ink-400">{ticket.requester_title || "Title not provided"}</dd></div><div><dt className="text-ink-400">Routing</dt><dd className="mt-1 break-words font-semibold text-ink-600">{routingLabel(ticket)}</dd><dd className="mt-0.5 break-words text-ink-400">{ticket.external_assignee_name || ticket.assignee_name || "Unassigned"}</dd></div><div><dt className="text-ink-400">Status</dt><dd className="mt-1"><Badge variant={badgeForStatus(ticket.status)} dot>{ticket.status}</Badge></dd></div></dl>
 	                <div className="mt-3 grid grid-cols-2 gap-2 rounded-xl bg-linen-100 p-3 text-[11px] text-ink-400"><div><span className="mb-1 flex items-center gap-1"><CalendarDays className="h-3 w-3" aria-hidden="true" />Created</span><TimelineValue value={ticketCreatedAt(ticket)} label="Created" /></div><div><span className="mb-1 flex items-center gap-1"><Clock3 className="h-3 w-3" aria-hidden="true" />Last contact</span><TimelineValue value={ticketLastCommunicationAt(ticket)} label="Last contact" /></div></div>
               </article>
             ))}

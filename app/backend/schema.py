@@ -88,9 +88,11 @@ class Ticket(BaseModel):
     ai_synthetic: bool = False
     ai_suggested_priority: Optional[str] = None
     ai_suggested_category: Optional[str] = None
+    ai_suggested_team: Optional[str] = None
     recommended_team: str = "Unrouted / Review"
     recommended_team_basis: Literal[
         "source_group",
+        "ai_team",
         "ai_category",
         "source_category",
         "not_applicable",
@@ -98,6 +100,7 @@ class Ticket(BaseModel):
     ] = "unrouted_review"
     routing_status: Literal[
         "source_group_assignment",
+        "ai_team_recommendation",
         "legacy_ai_category",
         "source_category_suggestion",
         "not_applicable",
@@ -131,6 +134,7 @@ class TriageResult(BaseModel):
     mood: str
     complexity: int
     action: str
+    recommended_team: str
     reasoning: str
     suggested_response: Optional[str] = None
     escalation_risk: int = 0

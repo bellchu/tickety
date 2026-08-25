@@ -174,13 +174,16 @@ class CorpusMutationControlsTests(unittest.TestCase):
             "complexity": 2,
             "reasoning": "scope: single user",
             "action": "route",
+            "recommended_team": "Application Support",
         }, None)
         self.assertEqual(ticket.category, "Network")
         self.assertEqual(ticket.ai_suggested_category, "Software")
+        self.assertEqual(ticket.ai_suggested_team, "Application Support")
 
         invalidate_ticket_ai(ticket)
         self.assertEqual(ticket.category, "Network")
         self.assertIsNone(ticket.ai_suggested_category)
+        self.assertIsNone(ticket.ai_suggested_team)
 
     def test_anonymous_portal_text_is_excluded_from_global_text_analytics(self):
         with self.session_factory() as db:

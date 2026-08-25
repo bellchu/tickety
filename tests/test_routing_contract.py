@@ -2,7 +2,7 @@ import unittest
 
 from pydantic import ValidationError
 
-from app.backend.ai_contracts import RoutingRecommendation
+from app.backend.ai_contracts import RoutingRecommendation, TriageAnalysis
 
 
 class RoutingContractTests(unittest.TestCase):
@@ -38,6 +38,25 @@ class RoutingContractTests(unittest.TestCase):
 
         self.assertEqual(result.candidates[0].group_id, "group-wms")
         self.assertEqual(result.candidates[0].workspace_id, result.workspace_id)
+
+    def test_triage_team_is_required_and_closed_to_supported_resolvers(self):
+        payload = {
+            "sentiment": "Moderate",
+            "category": "Software",
+            "priority": "P2",
+            "mood": "concerned",
+            "action": "route",
+            "recommended_team": "Application Support",
+            "reasoning": "scope: single user; E1 evidence requires application support",
+        }
+        result = TriageAnalysis.model_validate(payload)
+        self.assertEqual(result.recommended_team, "Application Support")
+
+        with self.assertRaises(ValidationError):
+            TriageAnalysis.model_validate({
+                **payload,
+                "recommended_team": "Freshservice group 2000245797",
+            })
 
     def test_unrouted_result_requires_reason_and_forbids_candidates(self):
         result = RoutingRecommendation.model_validate(

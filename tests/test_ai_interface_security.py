@@ -2025,6 +2025,7 @@ class LLMInterfaceContractTests(unittest.TestCase):
             "priority": "P3",
             "mood": "neutral",
             "action": "respond",
+            "recommended_team": "Application Support",
             "reasoning": "scope: single user; routine request",
             "tool_calls": [{"name": "delete_ticket"}],
         }
@@ -2136,6 +2137,7 @@ class PromptContainmentTests(unittest.IsolatedAsyncioTestCase):
             "priority": "P3",
             "mood": "neutral",
             "action": "route",
+            "recommended_team": "Application Support",
             "reasoning": "scope: single user; untrusted instructions were ignored",
         })
 

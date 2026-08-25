@@ -573,7 +573,7 @@ class FreshserviceRealtimeBoundaryTests(unittest.TestCase):
             ):
                 self.assertEqual(
                     sync.queue_active_routing_backlog(db),
-                    {"enabled": True, "queued": 1},
+                    {"enabled": True, "queued": 3},
                 )
 
             active = db.get(TicketRecord, "old-active")
@@ -583,12 +583,13 @@ class FreshserviceRealtimeBoundaryTests(unittest.TestCase):
                 {"triage", "route"},
             )
             self.assertIsNone(db.get(TicketRecord, "old-closed").ai_status)
-            self.assertIsNone(
-                db.get(TicketRecord, "old-source-routed").ai_status
-            )
-            self.assertIsNone(
-                db.get(TicketRecord, "old-group-routed").ai_status
-            )
+            for ticket_id in ("old-source-routed", "old-group-routed"):
+                ticket = db.get(TicketRecord, ticket_id)
+                self.assertEqual(ticket.ai_status, "queued")
+                self.assertEqual(
+                    set(ticket.ai_requested_artifacts.split(",")),
+                    {"triage", "route"},
+                )
 
     def test_worker_processes_recent_external_gap_without_manual_queueing(self):
         now = datetime.utcnow().replace(microsecond=0)
