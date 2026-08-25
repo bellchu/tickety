@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional
 
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, case, func, or_
 from sqlalchemy.orm import Session
 
 from ..database import (
@@ -313,6 +313,13 @@ def queue_active_routing_backlog(
                 TicketRecord.ai_status.in_(stale_statuses),
             ),
         ).order_by(
+            # Recovery work must not be starved by a continuously replenished
+            # stream of newer, never-analyzed tickets. Explicit stale states
+            # are bounded repair signals and therefore lead each sweep.
+            case(
+                (TicketRecord.ai_status.in_(stale_statuses), 0),
+                else_=1,
+            ).asc(),
             TicketRecord.external_updated_at.desc().nullslast(),
             TicketRecord.updated_at.desc().nullslast(),
             TicketRecord.id.asc(),

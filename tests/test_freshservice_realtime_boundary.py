@@ -591,6 +591,63 @@ class FreshserviceRealtimeBoundaryTests(unittest.TestCase):
                     {"triage", "route"},
                 )
 
+    def test_active_routing_backlog_prioritizes_stale_recovery(self):
+        now = datetime.utcnow().replace(microsecond=0)
+        with self.session_factory() as db:
+            db.add(SyncStateRecord(
+                binding_id="binding-1",
+                provider="freshservice",
+                automatic_ai_enabled=True,
+                automatic_ai_generation=1,
+                automatic_ai_cutover_at=now,
+                automatic_ai_enabled_at=now,
+            ))
+            db.add_all([
+                TicketRecord(
+                    id="newer-gap",
+                    binding_id="binding-1",
+                    external_source="freshservice",
+                    external_id="newer-gap",
+                    subject="Newer ticket missing routing",
+                    status="Open",
+                    external_created_at=now - timedelta(days=30),
+                    external_updated_at=now,
+                ),
+                TicketRecord(
+                    id="older-stale",
+                    binding_id="binding-1",
+                    external_source="freshservice",
+                    external_id="older-stale",
+                    subject="Older stale ticket with prior output",
+                    status="Open",
+                    external_created_at=now - timedelta(days=90),
+                    external_updated_at=now - timedelta(days=60),
+                    ai_status="stale",
+                    ai_reasoning="Prior triage output",
+                    ai_suggested_team="IT Support",
+                ),
+            ])
+            db.commit()
+
+            with (
+                patch.dict(
+                    "os.environ",
+                    {"AI_ACTIVE_ROUTING_BACKLOG_ENABLED": "true"},
+                    clear=False,
+                ),
+                patch.object(sync.settings_module, "automation_enabled", return_value=True),
+            ):
+                result = sync.queue_active_routing_backlog(db, batch_size=1)
+
+            self.assertEqual(result, {"enabled": True, "queued": 1})
+            stale = db.get(TicketRecord, "older-stale")
+            self.assertEqual(stale.ai_status, "queued")
+            self.assertEqual(
+                set(stale.ai_requested_artifacts.split(",")),
+                {"triage", "route"},
+            )
+            self.assertIsNone(db.get(TicketRecord, "newer-gap").ai_status)
+
     def test_worker_processes_recent_external_gap_without_manual_queueing(self):
         now = datetime.utcnow().replace(microsecond=0)
         with self.session_factory() as db:
