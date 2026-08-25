@@ -525,6 +525,17 @@ class FreshserviceRealtimeBoundaryTests(unittest.TestCase):
                     external_created_at=now - timedelta(days=90),
                     external_updated_at=now,
                 ),
+                TicketRecord(
+                    id="old-source-routed",
+                    binding_id="binding-1",
+                    external_source="freshservice",
+                    external_id="old-source-routed",
+                    subject="Old ticket with authoritative source route",
+                    status="Open",
+                    external_category="Hardware - Computers",
+                    external_created_at=now - timedelta(days=90),
+                    external_updated_at=now - timedelta(days=1),
+                ),
             ])
             db.commit()
 
@@ -561,6 +572,9 @@ class FreshserviceRealtimeBoundaryTests(unittest.TestCase):
                 {"triage", "route"},
             )
             self.assertIsNone(db.get(TicketRecord, "old-closed").ai_status)
+            self.assertIsNone(
+                db.get(TicketRecord, "old-source-routed").ai_status
+            )
 
     def test_worker_processes_recent_external_gap_without_manual_queueing(self):
         now = datetime.utcnow().replace(microsecond=0)

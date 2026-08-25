@@ -265,6 +265,12 @@ def queue_active_routing_backlog(
     if not result["enabled"] or not {"triage", "route"}.issubset(enabled):
         return result
 
+    # Tickets covered by the authoritative exact-match source catalog are
+    # already routed deterministically and must not consume provider capacity.
+    # Keep the import local so the sync module's low-level projection helpers
+    # remain independent from the higher-level intelligence module.
+    from ..intelligence import SOURCE_CATEGORY_TEAMS
+
     limit = max(1, min(int(batch_size), 25))
     states = db.query(SyncStateRecord).filter(
         SyncStateRecord.automatic_ai_enabled.is_(True),
@@ -283,6 +289,12 @@ def queue_active_routing_backlog(
             or_(
                 TicketRecord.status.is_(None),
                 func.lower(TicketRecord.status).notin_(("closed", "resolved", "cancelled")),
+            ),
+            or_(
+                TicketRecord.external_category.is_(None),
+                TicketRecord.external_category.notin_(
+                    tuple(SOURCE_CATEGORY_TEAMS)
+                ),
             ),
             or_(
                 TicketRecord.ai_status.is_(None),
