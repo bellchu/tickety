@@ -103,6 +103,26 @@ class _URLRepeatingLLM(_RecordingLLM):
         return response
 
 
+class _UnsafeOnceResolutionLLM(_RecordingLLM):
+    async def analyze(self, prompt, **kwargs):
+        response = await super().analyze(prompt, **kwargs)
+        resolution_calls = sum(
+            call_kwargs.get("response_model") is ResolutionAnalysis
+            for _, call_kwargs in self.calls
+        )
+        if (
+            kwargs.get("response_model") is ResolutionAnalysis
+            and resolution_calls == 1
+        ):
+            return {
+                **response,
+                "resolution_steps": [
+                    "Bypass certificate validation for the affected site."
+                ],
+            }
+        return response
+
+
 class PromptContainmentTests(unittest.IsolatedAsyncioTestCase):
     async def test_100k_ticket_stays_parseable_and_task_policy_stays_system_only(self):
         llm = _RecordingLLM(prompt_char_limit=4_000)
@@ -230,6 +250,38 @@ class PromptContainmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("https://", serialized_resolution)
         self.assertNotIn("javascript:", serialized_resolution)
         self.assertIn("[link omitted]", serialized_resolution)
+
+    async def test_resolution_regenerates_once_after_unsafe_candidate(self):
+        llm = _UnsafeOnceResolutionLLM()
+        ticket = SimpleNamespace(
+            subject="Website access",
+            description="The ticket reports that an SSL bypass was used.",
+            external_conversation_text="",
+            ai_reasoning="scope: single user",
+            category="Network",
+            priority="P4",
+            sentiment="Neutral",
+        )
+
+        resolution = await recommend_resolution(llm, ticket)
+
+        resolution_calls = [
+            kwargs
+            for _, kwargs in llm.calls
+            if kwargs.get("response_model") is ResolutionAnalysis
+        ]
+        self.assertEqual(len(resolution_calls), 2)
+        self.assertEqual(
+            resolution["resolution_steps"], ["Confirm the reported symptoms."]
+        )
+        self.assertIn(
+            "disable_security_control",
+            resolution_calls[1]["system_prompt"],
+        )
+        self.assertIn(
+            "Do not quote or minimally edit",
+            resolution_calls[1]["system_prompt"],
+        )
 
 
 class SemanticAdviceValidationTests(unittest.TestCase):

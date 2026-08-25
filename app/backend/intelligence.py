@@ -486,6 +486,22 @@ async def summarize_ticket(
 # escalate. Cached on the ticket as `recommended_solution` (JSON string).
 
 
+def _semantic_retry_system_prompt(
+    system_prompt: str, violations: tuple[str, ...]
+) -> str:
+    """Ask once for a clean replacement after deterministic policy rejection."""
+    classifications = ", ".join(sorted(violations)) or "unsafe_advice"
+    return (
+        f"{system_prompt}\n\n"
+        "The prior candidate output was rejected by deterministic safety "
+        f"validation ({classifications}). Produce a completely new answer. "
+        "Do not quote or minimally edit the rejected answer. Do not request "
+        "credentials, include links or executable commands, or propose "
+        "disabling, bypassing, or weakening any security control. Keep every "
+        "step reversible and suitable for human review."
+    )
+
+
 async def recommend_resolution(
     llm: LLMManager, ticket: TicketRecord
 ) -> Dict[str, Any]:
@@ -526,9 +542,21 @@ async def recommend_resolution(
     try:
         validate_semantic_advice(plan)
     except UnsafeAIAdviceError as exc:
-        raise LLMInvalidOutputError(
-            "AI provider returned unsafe resolution advice"
-        ) from exc
+        plan = await llm.analyze(
+            prompt,
+            response_model=ResolutionAnalysis,
+            system_prompt=_semantic_retry_system_prompt(
+                RESOLUTION_SYSTEM_PROMPT, exc.violations
+            ),
+            max_tokens=1_200,
+        )
+        plan = neutralize_generated_uris(plan)
+        try:
+            validate_semantic_advice(plan)
+        except UnsafeAIAdviceError as retry_exc:
+            raise LLMInvalidOutputError(
+                "AI provider returned unsafe resolution advice"
+            ) from retry_exc
     return plan
 
 
