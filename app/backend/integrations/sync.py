@@ -39,7 +39,12 @@ from ..ticket_vectors import (
     refresh_ticket_documents_background,
     refresh_ticket_documents_if_indexed,
 )
-from ..ai_state import invalidate_ticket_ai, invalidate_ticket_resolution
+from ..ai_state import (
+    automatic_ai_policy_eligible_filter,
+    has_terminal_ai_policy_outcome,
+    invalidate_ticket_ai,
+    invalidate_ticket_resolution,
+)
 from ..ai_eligibility import (
     active_ticket_filter,
     mark_terminal_ai_not_applicable,
@@ -142,6 +147,8 @@ def _missing_automatic_artifacts(
     accompanies a generated artifact instead of making an otherwise-complete
     ticket recur in every lookback sweep.
     """
+    if has_terminal_ai_policy_outcome(ticket):
+        return set()
     generated = enabled & {"triage", "summary", "resolution"}
     if not generated:
         return set()
@@ -169,6 +176,8 @@ def _staged_automatic_artifacts(
     eligible: set[str],
 ) -> set[str]:
     """Admit every missing eligible stage as one durable ticket pipeline."""
+    if has_terminal_ai_policy_outcome(ticket):
+        return set()
     enabled = _enabled_analysis_artifacts()
     requested = eligible & enabled
     if not requested:
@@ -243,6 +252,7 @@ def queue_recent_automatic_ai(
             TicketRecord.binding_id == state.binding_id,
             TicketRecord.external_source == state.provider,
             active_ticket_filter(db),
+            automatic_ai_policy_eligible_filter(),
             ticket_created_within_filter(cutoff),
             or_(
                 TicketRecord.ai_status.is_(None),
@@ -305,6 +315,7 @@ def queue_active_routing_backlog(
             TicketRecord.binding_id == state.binding_id,
             TicketRecord.external_source == state.provider,
             active_ticket_filter(db),
+            automatic_ai_policy_eligible_filter(),
             or_(
                 TicketRecord.ai_status.is_(None),
                 TicketRecord.ai_status.notin_(unavailable_statuses),

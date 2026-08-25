@@ -1167,6 +1167,37 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(ticket.ai_status, "paused")
             self.assertEqual(ticket.ai_requested_artifacts, "triage")
 
+    def test_worker_does_not_re_admit_terminal_content_filter(self):
+        with self.session_factory() as db:
+            ticket = db.get(TicketRecord, "ticket-1")
+            ticket.ai_reasoning = "current triage"
+            ticket.recommended_solution = "{}"
+            ticket.ai_status = "triage_completed"
+            ticket.ai_error = "summary:content_filtered"
+            db.commit()
+        process = AsyncMock()
+        with (
+            patch.object(sync_worker, "SessionLocal", self.session_factory),
+            patch.object(
+                sync_worker,
+                "provider_capacity_retry_after",
+                return_value=0,
+            ),
+            patch.object(
+                sync_worker.settings_module,
+                "automation_enabled",
+                return_value=True,
+            ),
+            patch.object(main, "_auto_process", new=process),
+        ):
+            sync_worker._auto_triage_job()
+        process.assert_not_awaited()
+        with self.session_factory() as db:
+            ticket = db.get(TicketRecord, "ticket-1")
+            self.assertEqual(ticket.ai_status, "triage_completed")
+            self.assertEqual(ticket.ai_error, "summary:content_filtered")
+            self.assertIsNone(ticket.ai_requested_artifacts)
+
     def test_worker_caps_total_ai_tickets_per_sweep(self):
         with self.session_factory() as db:
             for index in range(6):
@@ -1572,12 +1603,14 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
             summary="generated",
             recommended_solution="{}",
             ai_status="completed",
+            ai_error="summary:content_filtered",
             workflow_status="Escalated",
         )
         invalidate_ticket_ai(ticket)
         self.assertIsNone(ticket.ai_reasoning)
         self.assertIsNone(ticket.summary)
         self.assertEqual(ticket.ai_status, "stale")
+        self.assertIsNone(ticket.ai_error)
         self.assertEqual(ticket.workflow_status, "Escalated")
 
     def test_priority_change_invalidates_resolution_without_discarding_triage(self):

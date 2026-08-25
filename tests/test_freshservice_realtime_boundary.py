@@ -493,6 +493,61 @@ class FreshserviceRealtimeBoundaryTests(unittest.TestCase):
             )
             self.assertIsNone(db.get(TicketRecord, "paused").ai_status)
 
+    def test_recent_scanner_skips_terminal_content_filter_without_starving_batch(self):
+        now = datetime.utcnow().replace(microsecond=0)
+        with self.session_factory() as db:
+            db.add(SyncStateRecord(
+                binding_id="binding-1",
+                provider="freshservice",
+                automatic_ai_enabled=True,
+                automatic_ai_generation=1,
+                automatic_ai_cutover_at=now,
+                automatic_ai_enabled_at=now,
+            ))
+            db.add_all([
+                TicketRecord(
+                    id="policy-terminal",
+                    binding_id="binding-1",
+                    external_source="freshservice",
+                    external_id="policy-terminal",
+                    subject="Policy terminal",
+                    ai_reasoning="current triage",
+                    recommended_solution="{}",
+                    ai_status="triage_completed",
+                    ai_error="summary:content_filtered",
+                    external_created_at=now - timedelta(days=1),
+                    external_updated_at=now - timedelta(hours=2),
+                ),
+                TicketRecord(
+                    id="eligible-gap",
+                    binding_id="binding-1",
+                    external_source="freshservice",
+                    external_id="eligible-gap",
+                    subject="Eligible gap",
+                    external_created_at=now - timedelta(days=1),
+                    external_updated_at=now - timedelta(hours=1),
+                ),
+            ])
+            db.commit()
+
+            with patch.object(
+                sync.settings_module,
+                "automation_enabled",
+                return_value=True,
+            ):
+                result = sync.queue_recent_automatic_ai(
+                    db, now=now, batch_size=1
+                )
+
+            self.assertEqual(result, {"lookback_days": 7, "queued": 1})
+            terminal = db.get(TicketRecord, "policy-terminal")
+            self.assertEqual(terminal.ai_status, "triage_completed")
+            self.assertEqual(terminal.ai_error, "summary:content_filtered")
+            self.assertIsNone(terminal.ai_requested_artifacts)
+            eligible = db.get(TicketRecord, "eligible-gap")
+            self.assertEqual(eligible.ai_status, "queued")
+            self.assertIn("summary", eligible.ai_requested_artifacts.split(","))
+
     def test_active_routing_backlog_requires_explicit_opt_in_and_is_staged(self):
         now = datetime.utcnow().replace(microsecond=0)
         with self.session_factory() as db:

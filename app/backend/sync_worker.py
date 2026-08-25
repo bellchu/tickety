@@ -14,6 +14,7 @@ from .database import (
     TicketRecord,
 )
 from .ai_eligibility import active_ticket_filter, mark_terminal_ai_not_applicable
+from .ai_state import automatic_ai_policy_eligible_filter
 from .attachment_storage import attachment_storage_configured
 from .integrations.sync import (
     AUTOMATIC_FETCH_DAYS,
@@ -278,6 +279,7 @@ def _auto_triage_job():
         untriaged = (
             db.query(TicketRecord).filter(
                 active_ticket_filter(db),
+                automatic_ai_policy_eligible_filter(),
                 internal_automatic_source,
                 or_(
                     TicketRecord.ai_reasoning.is_(None),
@@ -308,6 +310,7 @@ def _auto_triage_job():
 
         summary_query = db.query(TicketRecord).filter(
             active_ticket_filter(db),
+            automatic_ai_policy_eligible_filter(),
             internal_automatic_source,
             TicketRecord.ai_reasoning.isnot(None),
             TicketRecord.summary.is_(None),
@@ -338,6 +341,7 @@ def _auto_triage_job():
 
         resolution_query = db.query(TicketRecord).filter(
             active_ticket_filter(db),
+            automatic_ai_policy_eligible_filter(),
             internal_automatic_source,
             TicketRecord.ai_reasoning.isnot(None),
             TicketRecord.summary.isnot(None),
