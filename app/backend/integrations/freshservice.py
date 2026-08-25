@@ -346,7 +346,10 @@ class FreshserviceAdapter(BaseITSMAdapter):
         )
         return ExternalTicket(
             external_id=str(raw.get("id", "")),
-            subject=raw.get("subject", "(no subject)"),
+            # Freshservice permits an explicitly empty subject on legacy
+            # records.  Normalize that provider value so one historical
+            # record cannot poison an otherwise valid inventory page.
+            subject=raw.get("subject") or "(no subject)",
             description=raw.get("description_text", raw.get("description", "")) or "",
             description_html=(
                 str(raw.get("description"))

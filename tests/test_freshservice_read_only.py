@@ -112,6 +112,15 @@ class FreshserviceReadOnlyContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "stable ID"):
             adapter._parse_conversation({"body_text": "missing identity"})
 
+    def test_ticket_parser_normalizes_explicitly_empty_legacy_subject(self):
+        parsed = FreshserviceAdapter()._parse_ticket({
+            "id": 1002,
+            "subject": "",
+            "description_text": "Legacy provider record",
+        })
+
+        self.assertEqual(parsed.subject, "(no subject)")
+
     def test_ticket_inventory_enumerates_every_configured_workspace(self):
         adapter = FreshserviceAdapter({
             "FRESHSERVICE_DOMAIN": "readonly.freshservice.com",
