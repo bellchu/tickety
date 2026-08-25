@@ -152,6 +152,12 @@ class LLMProviderRejectedError(LLMAnalysisError):
     pass
 
 
+class LLMContentFilteredError(LLMProviderRejectedError):
+    """The provider intentionally blocked ticket content under its safety policy."""
+
+    pass
+
+
 class LLMInvalidOutputError(LLMAnalysisError):
     pass
 
@@ -1260,6 +1266,22 @@ class LLMManager:
                 max(60.0, last_retry_delay),
             ) from last_err
         if isinstance(last_status, int) and 400 <= last_status < 500:
+            rejection_parts = [str(last_err or "")]
+            rejection_message = getattr(last_err, "message", None)
+            if rejection_message:
+                rejection_parts.append(str(rejection_message))
+            rejection_response = getattr(last_err, "response", None)
+            rejection_text = getattr(rejection_response, "text", None)
+            if rejection_text:
+                rejection_parts.append(str(rejection_text))
+            rejection_diagnostic = "\n".join(rejection_parts).lower()[:16_000]
+            if (
+                "content_filter" in rejection_diagnostic
+                or "content filter" in rejection_diagnostic
+            ):
+                raise LLMContentFilteredError(
+                    "AI provider blocked the request under its content policy"
+                ) from last_err
             raise LLMProviderRejectedError(
                 "AI provider rejected the request"
             ) from last_err

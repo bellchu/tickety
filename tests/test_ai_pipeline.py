@@ -34,6 +34,7 @@ from app.backend.database import (
 from app.backend.schema import TicketIntelligenceAnalysisRequest
 from app.backend.llm_manager import (
     LLMCapacityError,
+    LLMContentFilteredError,
     LLMInvalidInputError,
     LLMInvalidOutputError,
     LLMManager,
@@ -411,6 +412,25 @@ class LLMContractTests(unittest.IsolatedAsyncioTestCase):
                 )
         provider.assert_awaited_once()
 
+    async def test_provider_content_filter_is_classified_without_replay(self):
+        rejected = RuntimeError("content_filter blocked this prompt")
+        rejected.status_code = 400
+        rejected.response = SimpleNamespace(status_code=400, headers={}, text="")
+        provider = AsyncMock(side_effect=rejected)
+        with (
+            patch.dict(os.environ, {
+                "APP_MODE": "production",
+                "DEFAULT_MODEL": "custom/test-model",
+                "CUSTOM_API_KEY": "configured-key",
+            }, clear=False),
+            patch.object(llm_module, "acompletion", new=provider),
+        ):
+            with self.assertRaises(LLMContentFilteredError):
+                await LLMManager().analyze(
+                    "ticket", response_model=TicketSummary
+                )
+        provider.assert_awaited_once()
+
 
 class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -587,6 +607,50 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(ticket.summary)
             self.assertIsNotNone(ticket.recommended_solution)
             self.assertIsNotNone(ticket.ai_reasoning)
+
+    async def test_content_filtered_artifact_preserves_completed_triage_without_attention(self):
+        class ContentFilteredLLM:
+            model_name = "custom/test"
+            is_mock = False
+            allow_synthetic = False
+
+            async def analyze(self, _prompt, *, response_model=None, **_kwargs):
+                if response_model is not TicketSummary:
+                    raise AssertionError(response_model)
+                raise LLMContentFilteredError("content policy")
+
+        fake = ContentFilteredLLM()
+        old_llm = main.engine.llm
+        main.engine.llm = fake
+        try:
+            with self.session_factory() as db:
+                ticket = db.get(TicketRecord, "ticket-1")
+                ticket.ai_reasoning = "scope: one user; triage remains useful"
+                db.commit()
+                with (
+                    patch.object(
+                        ticket_vectors,
+                        "refresh_ticket_documents",
+                        new=AsyncMock(return_value=0),
+                    ),
+                    self.assertRaises(LLMUnavailableError),
+                ):
+                    await main._run_ticket_analysis(
+                        ticket,
+                        db,
+                        force=True,
+                        artifacts={"summary"},
+                    )
+        finally:
+            main.engine.llm = old_llm
+
+        with self.session_factory() as db:
+            ticket = db.get(TicketRecord, "ticket-1")
+            self.assertEqual(ticket.ai_status, "triage_completed")
+            self.assertEqual(ticket.ai_error, "summary:content_filtered")
+            self.assertEqual(ticket.ai_attempts, 0)
+            self.assertIsNone(ticket.ai_requested_artifacts)
+            self.assertIsNone(ticket.ai_next_attempt_at)
 
     async def test_refresh_failure_uses_the_same_targeted_retry_boundary(self):
         old_llm = main.engine.llm

@@ -80,6 +80,7 @@ from .attachment_storage import AzureBlobAttachmentStore, AttachmentStorageError
 from .llm_manager import (
     LLMAnalysisError,
     LLMCapacityError,
+    LLMContentFilteredError,
     LLMInvalidInputError,
     LLMInvalidOutputError,
     LLMProviderRejectedError,
@@ -2203,6 +2204,8 @@ def _analysis_step_error_code(exc: BaseException) -> str:
         return "invalid_output"
     if isinstance(exc, LLMCapacityError):
         return "provider_capacity"
+    if isinstance(exc, LLMContentFilteredError):
+        return "content_filtered"
     if isinstance(exc, LLMProviderRejectedError):
         return "provider_rejected"
     if isinstance(exc, LLMUnavailableError):
@@ -2898,7 +2901,31 @@ async def _run_ticket_analysis(
         error["step"] for error in errors if error["step"] in artifacts
     }
     if failed_artifacts:
-        if failed_artifacts.issubset(capacity_deferrals):
+        content_filtered_artifacts = {
+            error["step"]
+            for error in errors
+            if error["step"] in artifacts and error["error"] == "content_filtered"
+        }
+        if failed_artifacts == content_filtered_artifacts:
+            # A provider safety filter is an intentional terminal outcome, not
+            # an unhealthy workflow or a reason to bypass policy with retries.
+            # Keep any completed triage/routing useful and surface the bounded
+            # diagnostic on the ticket without adding it to AI attention.
+            filtered = db.query(TicketRecord).filter(
+                TicketRecord.id == ticket.id
+            ).with_for_update().first()
+            if filtered:
+                filtered.ai_status = (
+                    "triage_completed" if filtered.ai_reasoning else "partial"
+                )
+                filtered.ai_error = error_signature
+                filtered.ai_attempts = 0
+                filtered.ai_requested_artifacts = None
+                filtered.ai_next_attempt_at = None
+                filtered.ai_claim_id = None
+                filtered.ai_lease_expires_at = None
+                db.commit()
+        elif failed_artifacts.issubset(capacity_deferrals):
             _defer_ai_capacity(
                 db,
                 ticket.id,
