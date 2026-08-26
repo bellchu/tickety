@@ -26,6 +26,12 @@ test("intelligence cockpit is decision-first and isolates backlog hygiene", () =
   assert.ok(capacity > assurance, "team capacity follows live service assurance");
   assert.ok(patterns > capacity, "patterns are supporting context, not the lead");
   assert.ok(automation > patterns, "one-time automation discovery is separated from live operations");
+  assert.match(page, /eyebrow="Tickety Operations"/);
+  assert.match(page, /title="OPS Tower"/);
+  assert.match(page, /Command the Queue\. The intelligence behind every ticket\./);
+  assert.match(page, /A decision-first view of current service risk, queue health, team capacity, and emerging demand\. Legacy records are isolated from live operational signals\./);
+  assert.match(page, /Powered by CommandIQ\./);
+  assert.doesNotMatch(page, /Helpdesk Command IQ|PulseIQ|ControlIQ/);
   assert.match(page, /Legacy records are isolated from live operational signals/);
   assert.match(page, /do not inflate current SLA, trend, workload, or systemic signals/);
   assert.match(page, /Review in All Tickets/);
@@ -68,6 +74,31 @@ test("service assurance exposes the requested human-review guardrails", () => {
   assert.match(types, /export interface SlaMonitoringResponse/);
   assert.match(api, /getIntelServiceQuality/);
   assert.match(api, /getIntelSlaMonitoring/);
+});
+
+test("cockpit exception counts open bounded ticket evidence", () => {
+  assert.match(page, /function TicketEvidenceDialog/);
+  assert.match(page, /Returned evidence is bounded/);
+  assert.match(page, /View tickets/);
+  assert.match(page, /function SlaCountButton/);
+  assert.match(page, /Breached tickets by assignee/);
+  assert.match(page, /groupSlaBreachesByAssignee\(data\.by_assignee\)/);
+  assert.match(page, /item\.assignee_source === agent\.source && item\.assignee_id === agent\.user_id/);
+  assert.match(page, /breachSummary\?\.breached_ticket_count/);
+  assert.match(page, /getIntelSlaAssigneeEvidence/);
+  assert.match(page, /result\.scope\.truncated/);
+  assert.match(page, /Assignee scope is sampled/);
+  assert.match(page, /SLA breach indicators unavailable/);
+  assert.match(page, /Missing breach links do not mean an agent has zero breaches/);
+  assert.match(page, /data\.unassigned_evidence\.items/);
+  assert.match(page, /View \{cluster\.ticket_ids\.length\} evidence ticket/);
+  assert.match(types, /assignee_id: string \| null/);
+  assert.match(types, /assignee_name: string \| null/);
+  assert.match(types, /assignee_source: "provider" \| "tickety" \| null/);
+  assert.match(types, /by_assignee: SlaAssigneeBreachSummary\[\]/);
+  assert.match(types, /export interface SlaAssigneeEvidenceResponse/);
+  assert.match(types, /unassigned_evidence:/);
+  assert.match(api, /sla-monitoring\/assignee-evidence/);
 });
 
 test("Level Zero study is persisted, deliberate, and outside live refresh", () => {

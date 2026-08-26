@@ -60,6 +60,7 @@ test("mobile context labels cover nested and utility routes", () => {
   assert.equal(getCurrentNavigationItem("/tickets/123")?.label, "All Tickets");
   assert.equal(getCurrentNavigationItem("/agent")?.label, "Agent");
   assert.equal(getCurrentNavigationItem("/email")?.label, "Email");
+  assert.equal(getCurrentNavigationItem("/intelligence")?.label, "OPS Tower");
   assert.equal(getCurrentNavigationItem("/settings/security")?.label, "Settings");
   assert.equal(getCurrentNavigationItem("/settings/status/ai")?.label, "Status");
   assert.equal(getCurrentNavigationItem("/profile")?.label, "My profile");

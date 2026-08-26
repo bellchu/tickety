@@ -313,6 +313,20 @@ export const api = {
     fetchAPI<import("./types").SlaMonitoringResponse>(
       `/intelligence/sla-monitoring?window_days=${windowDays}`
     ),
+  getIntelSlaAssigneeEvidence: (
+    windowDays: number,
+    assigneeSource: "provider" | "tickety" | "unmapped",
+    assigneeId?: string | null,
+  ) => {
+    const params = new URLSearchParams({
+      window_days: String(windowDays),
+      assignee_source: assigneeSource,
+    });
+    if (assigneeId) params.set("assignee_id", assigneeId);
+    return fetchAPI<import("./types").SlaAssigneeEvidenceResponse>(
+      `/intelligence/sla-monitoring/assignee-evidence?${params.toString()}`
+    );
+  },
   getLevelZeroStudy: (months = 12) =>
     fetchAPI<import("./types").LevelZeroStudyResponse>(
       `/intelligence/level-zero-study?months=${months}`

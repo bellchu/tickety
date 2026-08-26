@@ -68,7 +68,7 @@ export const navigationSections: readonly NavigationSection[] = [
       { href: "/reports", label: "Reports", icon: "reports", visibility: "all" },
       {
         href: "/intelligence",
-        label: "Intelligence",
+        label: "OPS Tower",
         icon: "intelligence",
         visibility: "intelligence",
       },

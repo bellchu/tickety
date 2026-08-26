@@ -12,7 +12,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
@@ -9271,6 +9271,7 @@ async def refresh_models(
 
 _INTELLIGENCE_ROW_LIMIT = 500
 _INTELLIGENCE_SLA_ROW_LIMIT = 5_000
+_INTELLIGENCE_EVIDENCE_ROW_LIMIT = 100
 _INTELLIGENCE_DEFAULT_WINDOW_DAYS = 30
 
 
@@ -9288,6 +9289,181 @@ def _ticket_created_expression():
 
 def _ticket_resolved_expression():
     return func.coalesce(TicketRecord.external_resolved_at, TicketRecord.resolved_at)
+
+
+def _intelligence_assignee_identities(
+    db: Session,
+    tickets: list[TicketRecord],
+) -> dict[str, dict[str, Optional[str]]]:
+    """Resolve stable assignee identities without crossing provider boundaries."""
+    provider_keys = {
+        (ticket.binding_id, ticket.external_source, ticket.external_assignee_id)
+        for ticket in tickets
+        if ticket.external_source and ticket.external_assignee_id
+    }
+    provider_profiles: dict[tuple[str, str, str], tuple[str, str]] = {}
+    if provider_keys:
+        binding_ids = {key[0] for key in provider_keys}
+        providers = {key[1] for key in provider_keys}
+        external_ids = {key[2] for key in provider_keys}
+        profile_rows = db.query(
+            ExternalUserRecord.id,
+            ExternalUserRecord.binding_id,
+            ExternalUserRecord.provider,
+            ExternalUserRecord.external_id,
+            ExternalUserRecord.name,
+        ).filter(
+            ExternalUserRecord.binding_id.in_(binding_ids),
+            ExternalUserRecord.provider.in_(providers),
+            ExternalUserRecord.external_id.in_(external_ids),
+            ExternalUserRecord.active.is_(True),
+            func.lower(ExternalUserRecord.user_type) == "agent",
+        ).all()
+        provider_profiles = {
+            (binding_id, provider, external_id): (record_id, name)
+            for record_id, binding_id, provider, external_id, name in profile_rows
+            if (binding_id, provider, external_id) in provider_keys
+        }
+
+    local_ids = {
+        ticket.assignee_id
+        for ticket in tickets
+        if ticket.assignee_id and not ticket.external_assignee_id
+    }
+    local_profiles = dict(
+        db.query(UserRecord.id, UserRecord.name)
+        .filter(UserRecord.id.in_(local_ids))
+        .all()
+    ) if local_ids else {}
+
+    identities: dict[str, dict[str, Optional[str]]] = {}
+    for ticket in tickets:
+        if ticket.external_assignee_id:
+            profile = provider_profiles.get((
+                ticket.binding_id,
+                ticket.external_source or "",
+                ticket.external_assignee_id,
+            ))
+            if profile:
+                identities[ticket.id] = {
+                    "assignee_id": profile[0],
+                    "assignee_name": profile[1],
+                    "assignee_source": "provider",
+                }
+                continue
+            # Do not expose a provider's raw identifier or silently resolve it
+            # against a different binding/provider identity domain.
+            identities[ticket.id] = {
+                "assignee_id": None,
+                "assignee_name": None,
+                "assignee_source": None,
+            }
+            continue
+
+        local_name = local_profiles.get(ticket.assignee_id)
+        identities[ticket.id] = {
+            "assignee_id": ticket.assignee_id if local_name is not None else None,
+            "assignee_name": local_name,
+            "assignee_source": "tickety" if local_name is not None else None,
+        }
+    return identities
+
+
+def _sla_monitoring_ticket_query(db: Session, cutoff: datetime):
+    return db.query(TicketRecord).filter(
+        _ticket_activity_expression() >= cutoff,
+        TicketRecord.portal_access_token_hash.is_(None),
+    )
+
+
+def _sla_monitoring_rows(
+    db: Session,
+    tickets: list[TicketRecord],
+    *,
+    now: datetime,
+    terminal_statuses: set[str],
+) -> list[Dict[str, Any]]:
+    assignee_identities = _intelligence_assignee_identities(db, tickets)
+    conversation_facts = intel.public_conversation_sla_facts(
+        db, [ticket.id for ticket in tickets]
+    )
+    rows: list[Dict[str, Any]] = []
+    for ticket in tickets:
+        responded_at, has_public_conversation = conversation_facts.get(
+            ticket.id, (None, False)
+        )
+        first_response = intel.first_response_sla_status(
+            ticket,
+            [],
+            now=now,
+            terminal_statuses=terminal_statuses,
+            responded_at=responded_at,
+            conversation_coverage=bool(
+                has_public_conversation
+                or ticket.external_conversations_synced_at
+                or not ticket.external_source
+            ),
+        )
+        first_response.update(assignee_identities[ticket.id])
+        rows.append(first_response)
+        resolution = intel.resolution_sla_monitor_status(
+            ticket,
+            now=now,
+            terminal_statuses=terminal_statuses,
+        )
+        resolution.update(assignee_identities[ticket.id])
+        rows.append(resolution)
+    return rows
+
+
+def _sla_monitoring_partitions(
+    rows: list[Dict[str, Any]],
+) -> tuple[list[Dict[str, Any]], list[Dict[str, Any]], list[Dict[str, Any]]]:
+    measured = [row for row in rows if row["status"] != "unmeasured"]
+    reactive = [row for row in measured if row["status"] == "breached"]
+    proactive = [row for row in measured if row["status"] == "approaching"]
+    reactive.sort(key=lambda row: (
+        -row["overdue_hours"], row["ticket_id"], row["metric"]
+    ))
+    proactive.sort(key=lambda row: (
+        row["remaining_hours"], row["ticket_id"], row["metric"]
+    ))
+    return measured, reactive, proactive
+
+
+def _unmapped_intelligence_assignee_filter():
+    external_assignment = func.nullif(
+        TicketRecord.external_assignee_id, ""
+    ).isnot(None)
+    no_external_assignment = func.nullif(
+        TicketRecord.external_assignee_id, ""
+    ).is_(None)
+    provider_source_present = func.nullif(
+        TicketRecord.external_source, ""
+    ).isnot(None)
+    provider_identity_exists = select(ExternalUserRecord.id).where(
+        ExternalUserRecord.binding_id == TicketRecord.binding_id,
+        ExternalUserRecord.provider == TicketRecord.external_source,
+        ExternalUserRecord.external_id == TicketRecord.external_assignee_id,
+        ExternalUserRecord.active.is_(True),
+        func.lower(ExternalUserRecord.user_type) == "agent",
+    ).exists()
+    local_identity_exists = select(UserRecord.id).where(
+        UserRecord.id == TicketRecord.assignee_id,
+    ).exists()
+    return or_(
+        and_(
+            external_assignment,
+            or_(~provider_source_present, ~provider_identity_exists),
+        ),
+        and_(
+            no_external_assignment,
+            or_(
+                func.nullif(TicketRecord.assignee_id, "").is_(None),
+                ~local_identity_exists,
+            ),
+        ),
+    )
 
 
 def _ticket_is_unassigned(ticket: TicketRecord) -> bool:
@@ -9423,10 +9599,19 @@ async def intel_overview(
     candidates = active_query.order_by(
         *_intelligence_candidate_order()
     ).limit(_INTELLIGENCE_ROW_LIMIT).all()
+    unassigned_candidates = active_query.filter(
+        _unassigned_ticket_filter()
+    ).order_by(
+        *_intelligence_candidate_order()
+    ).limit(_INTELLIGENCE_EVIDENCE_ROW_LIMIT).all()
 
     attention = [
         _serialize_attention_ticket(ticket, now, terminal_statuses)
         for ticket in candidates
+    ]
+    unassigned_items = [
+        _serialize_attention_ticket(ticket, now, terminal_statuses)
+        for ticket in unassigned_candidates
     ]
     attention.sort(key=lambda item: (
         item["sla"]["status"] == "breached",
@@ -9511,6 +9696,10 @@ async def intel_overview(
         },
         "age_bands": age_bands,
         "attention_queue": attention[:15],
+        "unassigned_evidence": {
+            "items": unassigned_items,
+            "items_truncated": unassigned_open > len(unassigned_items),
+        },
         "stale_backlog": {
             "count": stale_open,
             "p1_count": stale_p1,
@@ -9661,45 +9850,44 @@ def intel_sla_monitoring(
     now = datetime.utcnow()
     terminal_statuses = _terminal_status_names(db)
     cutoff = _intelligence_cutoff(now, window_days)
-    query = db.query(TicketRecord).filter(
-        _ticket_activity_expression() >= cutoff,
-        TicketRecord.portal_access_token_hash.is_(None),
-    )
+    query = _sla_monitoring_ticket_query(db, cutoff)
     total = query.count()
     tickets = query.order_by(
         _ticket_activity_expression().desc(), TicketRecord.id.asc()
     ).limit(_INTELLIGENCE_SLA_ROW_LIMIT).all()
-    conversation_facts = intel.public_conversation_sla_facts(
-        db, [ticket.id for ticket in tickets]
+    rows = _sla_monitoring_rows(
+        db,
+        tickets,
+        now=now,
+        terminal_statuses=terminal_statuses,
     )
-    rows = []
-    for ticket in tickets:
-        responded_at, has_public_conversation = conversation_facts.get(
-            ticket.id, (None, False)
-        )
-        rows.append(intel.first_response_sla_status(
-            ticket,
-            [],
-            now=now,
-            terminal_statuses=terminal_statuses,
-            responded_at=responded_at,
-            conversation_coverage=bool(
-                has_public_conversation
-                or ticket.external_conversations_synced_at
-                or not ticket.external_source
-            ),
-        ))
-        rows.append(intel.resolution_sla_monitor_status(
-            ticket,
-            now=now,
-            terminal_statuses=terminal_statuses,
-        ))
-
-    measured = [row for row in rows if row["status"] != "unmeasured"]
-    reactive = [row for row in measured if row["status"] == "breached"]
-    proactive = [row for row in measured if row["status"] == "approaching"]
-    reactive.sort(key=lambda row: (-row["overdue_hours"], row["ticket_id"], row["metric"]))
-    proactive.sort(key=lambda row: (row["remaining_hours"], row["ticket_id"], row["metric"]))
+    measured, reactive, proactive = _sla_monitoring_partitions(rows)
+    assignee_buckets: dict[tuple[Optional[str], Optional[str]], Dict[str, Any]] = {}
+    for row in reactive:
+        key = (row["assignee_source"], row["assignee_id"])
+        bucket = assignee_buckets.setdefault(key, {
+            "assignee_id": row["assignee_id"],
+            "assignee_name": row["assignee_name"],
+            "assignee_source": row["assignee_source"],
+            "ticket_ids": set(),
+            "breached_clock_count": 0,
+        })
+        bucket["ticket_ids"].add(row["ticket_id"])
+        bucket["breached_clock_count"] += 1
+    by_assignee = [{
+        "assignee_id": bucket["assignee_id"],
+        "assignee_name": bucket["assignee_name"],
+        "assignee_source": bucket["assignee_source"],
+        "breached_ticket_count": len(bucket["ticket_ids"]),
+        "breached_clock_count": bucket["breached_clock_count"],
+    } for bucket in assignee_buckets.values()]
+    by_assignee.sort(key=lambda row: (
+        -row["breached_ticket_count"],
+        -row["breached_clock_count"],
+        (row["assignee_name"] or "").lower(),
+        row["assignee_source"] or "",
+        row["assignee_id"] or "",
+    ))
     by_priority: Dict[str, Any] = {}
     for row in measured:
         priority = row["priority"]
@@ -9728,9 +9916,113 @@ def intel_sla_monitoring(
             "resolution_breaches": sum(row["metric"] == "resolution" for row in reactive),
         },
         "by_priority": by_priority,
+        "by_assignee": by_assignee,
         "reactive": reactive[:100],
         "proactive": proactive[:100],
         "items_truncated": len(reactive) > 100 or len(proactive) > 100,
+    }
+
+
+@app.get("/intelligence/sla-monitoring/assignee-evidence")
+def intel_sla_assignee_evidence(
+    window_days: int = Query(_INTELLIGENCE_DEFAULT_WINDOW_DAYS, ge=7, le=365),
+    assignee_source: Literal["provider", "tickety", "unmapped"] = Query(...),
+    assignee_id: Optional[str] = Query(None, min_length=1, max_length=255),
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
+):
+    """Return bounded breached-clock evidence for one resolved assignee identity."""
+    requested_id = assignee_id.strip() if assignee_id is not None else None
+    if assignee_source in {"provider", "tickety"} and not requested_id:
+        raise HTTPException(
+            status_code=422,
+            detail="assignee_id is required for mapped assignee sources",
+        )
+    if assignee_source == "unmapped" and assignee_id is not None:
+        raise HTTPException(
+            status_code=422,
+            detail="assignee_id must be omitted for unmapped assignees",
+        )
+
+    _reserve_analytics_request(db, _user.id)
+    now = datetime.utcnow()
+    cutoff = _intelligence_cutoff(now, window_days)
+    terminal_statuses = _terminal_status_names(db)
+    query = _sla_monitoring_ticket_query(db, cutoff)
+
+    response_id: Optional[str] = None
+    response_name: Optional[str] = None
+    response_source: Optional[str] = None
+    if assignee_source == "provider":
+        profile = db.query(ExternalUserRecord).filter(
+            ExternalUserRecord.id == requested_id,
+            ExternalUserRecord.active.is_(True),
+            func.lower(ExternalUserRecord.user_type) == "agent",
+        ).first()
+        if profile is None:
+            raise HTTPException(status_code=404, detail="Assignee identity not found")
+        response_id = profile.id
+        response_name = profile.name
+        response_source = "provider"
+        query = query.filter(
+            TicketRecord.binding_id == profile.binding_id,
+            TicketRecord.external_source == profile.provider,
+            TicketRecord.external_assignee_id == profile.external_id,
+        )
+    elif assignee_source == "tickety":
+        local_profile = db.query(UserRecord).filter(
+            UserRecord.id == requested_id,
+        ).first()
+        if local_profile is None:
+            raise HTTPException(status_code=404, detail="Assignee identity not found")
+        response_id = local_profile.id
+        response_name = local_profile.name
+        response_source = "tickety"
+        query = query.filter(
+            TicketRecord.assignee_id == local_profile.id,
+            func.nullif(TicketRecord.external_assignee_id, "").is_(None),
+        )
+    else:
+        query = query.filter(_unmapped_intelligence_assignee_filter())
+
+    total = query.count()
+    tickets = query.order_by(
+        _ticket_activity_expression().desc(), TicketRecord.id.asc()
+    ).limit(_INTELLIGENCE_SLA_ROW_LIMIT).all()
+    rows = _sla_monitoring_rows(
+        db,
+        tickets,
+        now=now,
+        terminal_statuses=terminal_statuses,
+    )
+    _measured, reactive, _proactive = _sla_monitoring_partitions(rows)
+    if assignee_source == "unmapped":
+        matching = [
+            row for row in reactive
+            if row["assignee_id"] is None and row["assignee_source"] is None
+        ]
+    else:
+        matching = [
+            row for row in reactive
+            if row["assignee_id"] == response_id
+            and row["assignee_source"] == response_source
+        ]
+
+    return {
+        "generated_at": now.isoformat(),
+        "window_days": window_days,
+        "assignee_id": response_id,
+        "assignee_name": response_name,
+        "assignee_source": response_source,
+        "breached_ticket_count": len({row["ticket_id"] for row in matching}),
+        "breached_clock_count": len(matching),
+        "items": matching[:_INTELLIGENCE_EVIDENCE_ROW_LIMIT],
+        "items_truncated": len(matching) > _INTELLIGENCE_EVIDENCE_ROW_LIMIT,
+        "scope": {
+            "total_tickets": total,
+            "analyzed_tickets": len(tickets),
+            "truncated": total > len(tickets),
+        },
     }
 
 

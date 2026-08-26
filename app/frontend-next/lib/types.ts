@@ -797,6 +797,10 @@ export interface IntelligenceOverviewResponse {
     over_seven_days: number;
   };
   attention_queue: IntelligenceAttentionTicket[];
+  unassigned_evidence: {
+    items: IntelligenceAttentionTicket[];
+    items_truncated: boolean;
+  };
   stale_backlog: {
     count: number;
     p1_count: number;
@@ -905,6 +909,9 @@ export interface SlaMonitoringItem {
   ticket_id: string;
   subject: string;
   priority: string;
+  assignee_id: string | null;
+  assignee_name: string | null;
+  assignee_source: "provider" | "tickety" | null;
   metric: "first_response" | "resolution";
   status: "breached" | "approaching" | "met" | "on_track" | "unmeasured";
   breach_state: "active" | "historical" | null;
@@ -916,6 +923,14 @@ export interface SlaMonitoringItem {
   remaining_hours: number;
   overdue_hours: number;
   is_open: boolean;
+}
+
+export interface SlaAssigneeBreachSummary {
+  assignee_id: string | null;
+  assignee_name: string | null;
+  assignee_source: "provider" | "tickety" | null;
+  breached_ticket_count: number;
+  breached_clock_count: number;
 }
 
 export interface SlaMonitoringResponse {
@@ -940,9 +955,27 @@ export interface SlaMonitoringResponse {
     first_response: { breached: number; approaching: number };
     resolution: { breached: number; approaching: number };
   }>;
+  by_assignee: SlaAssigneeBreachSummary[];
   reactive: SlaMonitoringItem[];
   proactive: SlaMonitoringItem[];
   items_truncated: boolean;
+}
+
+export interface SlaAssigneeEvidenceResponse {
+  generated_at: string;
+  window_days: number;
+  assignee_id: string | null;
+  assignee_name: string | null;
+  assignee_source: "provider" | "tickety" | null;
+  breached_ticket_count: number;
+  breached_clock_count: number;
+  items: SlaMonitoringItem[];
+  items_truncated: boolean;
+  scope: {
+    total_tickets: number;
+    analyzed_tickets: number;
+    truncated: boolean;
+  };
 }
 
 export interface LevelZeroStudyItem {

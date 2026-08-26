@@ -63,6 +63,27 @@ test("getComments supports bounded history pagination without changing the defau
   }
 });
 
+test("assignee SLA evidence keeps the identity source and encodes provider IDs", async () => {
+  const { api } = loadApi();
+  const originalFetch = global.fetch;
+  const calls = [];
+  global.fetch = async (url) => {
+    calls.push(String(url));
+    return new Response("{}", { status: 200 });
+  };
+
+  try {
+    await api.getIntelSlaAssigneeEvidence(90, "provider", "agent / one & two");
+    await api.getIntelSlaAssigneeEvidence(30, "unmapped", null);
+    assert.deepEqual(calls, [
+      "/api/intelligence/sla-monitoring/assignee-evidence?window_days=90&assignee_source=provider&assignee_id=agent+%2F+one+%26+two",
+      "/api/intelligence/sla-monitoring/assignee-evidence?window_days=30&assignee_source=unmapped",
+    ]);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
 test("every report request and CSV export use the same encoded criteria", async () => {
   const { api } = loadApi();
   const originalFetch = global.fetch;

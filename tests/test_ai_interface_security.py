@@ -993,6 +993,11 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
                 ("GET", "/admin/llm/metrics"),
                 ("GET", "/intelligence/service-quality"),
                 ("GET", "/intelligence/sla-monitoring"),
+                (
+                    "GET",
+                    "/intelligence/sla-monitoring/assignee-evidence"
+                    "?assignee_source=tickety&assignee_id=prod-agent",
+                ),
                 ("GET", "/intelligence/level-zero-study"),
                 ("POST", "/intelligence/level-zero-study"),
             )
@@ -1336,6 +1341,58 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
         self.assertNotIn("Legacy archive", trends.json()["by_category"])
         self.assertIn("Current operations", trends.json()["by_category"])
 
+    def test_intelligence_overview_returns_bounded_exact_unassigned_evidence(self):
+        now = datetime.utcnow()
+        with self.session_factory() as db:
+            db.add_all([
+                TicketRecord(
+                    id=f"unassigned-evidence-{index:03d}",
+                    subject=f"Unassigned evidence {index}",
+                    status="Open",
+                    priority="P3",
+                    assignee_id=None,
+                    created_at=now - timedelta(hours=4),
+                    updated_at=now - timedelta(minutes=index),
+                )
+                for index in range(105)
+            ])
+            db.add(TicketRecord(
+                id="stale-unassigned-evidence",
+                subject="Stale unassigned evidence",
+                status="Open",
+                priority="P1",
+                external_source="freshservice",
+                external_created_at=now - timedelta(days=90),
+                external_updated_at=now - timedelta(days=60),
+            ))
+            db.commit()
+
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
+        with patch.object(main, "_reserve_analytics_request"):
+            response = self.client.get("/intelligence/overview?window_days=30")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        evidence = payload["unassigned_evidence"]
+        # The fixture already has one current unassigned ticket. The stale
+        # provider ticket is excluded from both the exact count and evidence.
+        self.assertEqual(payload["posture_metrics"]["unassigned_open"], 106)
+        self.assertEqual(len(evidence["items"]), 100)
+        self.assertTrue(evidence["items_truncated"])
+        self.assertEqual(
+            evidence["items_truncated"],
+            payload["posture_metrics"]["unassigned_open"] > len(evidence["items"]),
+        )
+        self.assertNotIn(
+            "stale-unassigned-evidence",
+            {item["ticket_id"] for item in evidence["items"]},
+        )
+        for item in evidence["items"]:
+            self.assertTrue(item["is_unassigned"])
+            self.assertIn("Unassigned", item["reasons"])
+            self.assertIn("sla", item)
+            self.assertIn("priority_score", item)
+
     def test_intelligence_window_is_bounded_and_workload_uses_current_assignee(self):
         self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
         with patch.object(main, "_reserve_analytics_request"):
@@ -1632,6 +1689,557 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
         self.assertEqual(len(selects), 1, selects)
         self.assertIn("min(case", selects[0])
         self.assertNotIn("external_conversations.body", selects[0])
+
+    def test_sla_monitoring_maps_assignees_in_batches_and_isolates_providers(self):
+        now = datetime.utcnow()
+        with self.session_factory() as db:
+            db.add_all([
+                ExternalUserRecord(
+                    # Deliberately collides with the local UserRecord ID. The
+                    # source discriminator must keep the aggregates separate.
+                    id="prod-agent",
+                    binding_id="sla-binding",
+                    provider="freshservice",
+                    external_id="shared-sla-agent",
+                    user_type="agent",
+                    name="SLA Provider Agent",
+                    active=True,
+                ),
+                ExternalUserRecord(
+                    id="sla-provider-wrong-binding",
+                    binding_id="other-sla-binding",
+                    provider="freshservice",
+                    external_id="shared-sla-agent",
+                    user_type="agent",
+                    name="Wrong Binding Secret",
+                    active=True,
+                ),
+                ExternalUserRecord(
+                    id="sla-provider-wrong-provider",
+                    binding_id="sla-binding",
+                    provider="zendesk",
+                    external_id="shared-sla-agent",
+                    user_type="agent",
+                    name="Wrong Provider Secret",
+                    active=True,
+                ),
+                TicketRecord(
+                    id="local-assignee-sla-risk",
+                    subject="Local assignee approaching breach",
+                    status="Open",
+                    priority="P2",
+                    assignee_id="prod-agent",
+                    created_at=now - timedelta(hours=3, minutes=30),
+                    updated_at=now - timedelta(minutes=1),
+                    response_due_at=now + timedelta(minutes=30),
+                    resolution_due_at=now + timedelta(minutes=30),
+                ),
+                TicketRecord(
+                    id="local-assignee-sla-breach",
+                    subject="Local assignee breach",
+                    status="Open",
+                    priority="P1",
+                    assignee_id="prod-agent",
+                    created_at=now - timedelta(hours=5),
+                    updated_at=now - timedelta(minutes=1),
+                    response_due_at=now - timedelta(hours=3),
+                    resolution_due_at=now - timedelta(hours=1),
+                ),
+                TicketRecord(
+                    id="provider-assignee-sla-breach",
+                    subject="Provider assignee breach",
+                    status="Open",
+                    priority="P1",
+                    binding_id="sla-binding",
+                    external_source="freshservice",
+                    external_assignee_id="shared-sla-agent",
+                    external_created_at=now - timedelta(hours=5),
+                    external_updated_at=now - timedelta(minutes=1),
+                    external_fr_due_by=now - timedelta(hours=3),
+                    external_due_by=now - timedelta(hours=1),
+                    external_conversations_synced_at=now,
+                ),
+                TicketRecord(
+                    id="unmapped-provider-sla-breach",
+                    subject="Unmapped provider breach",
+                    status="Open",
+                    priority="P1",
+                    binding_id="other-sla-binding",
+                    external_source="zendesk",
+                    external_assignee_id="shared-sla-agent",
+                    external_created_at=now - timedelta(hours=5),
+                    external_updated_at=now - timedelta(minutes=1),
+                    external_fr_due_by=now - timedelta(hours=3),
+                    external_due_by=now - timedelta(hours=1),
+                    external_conversations_synced_at=now,
+                ),
+            ])
+            db.commit()
+
+        external_user_selects = []
+
+        def capture(_connection, _cursor, statement, _parameters, _context, _many):
+            normalized = " ".join(statement.lower().split())
+            if normalized.startswith("select") and " from external_users" in normalized:
+                external_user_selects.append(normalized)
+
+        event.listen(self.engine, "before_cursor_execute", capture)
+        try:
+            self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
+            with patch.object(main, "_reserve_analytics_request"):
+                response = self.client.get(
+                    "/intelligence/sla-monitoring?window_days=30"
+                )
+        finally:
+            event.remove(self.engine, "before_cursor_execute", capture)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        items = payload["reactive"] + payload["proactive"]
+        self.assertTrue(items)
+        for item in items:
+            self.assertIn("assignee_id", item)
+            self.assertIn("assignee_name", item)
+            self.assertIn("assignee_source", item)
+
+        self.assertIn(
+            "local-assignee-sla-risk",
+            {item["ticket_id"] for item in payload["proactive"]},
+        )
+        self.assertIn(
+            "provider-assignee-sla-breach",
+            {item["ticket_id"] for item in payload["reactive"]},
+        )
+        resolution_items = {
+            item["ticket_id"]: item
+            for item in items
+            if item["metric"] == "resolution"
+        }
+        self.assertEqual(
+            {
+                key: resolution_items["local-assignee-sla-risk"][key]
+                for key in ("assignee_id", "assignee_name", "assignee_source")
+            },
+            {
+                "assignee_id": "prod-agent",
+                "assignee_name": "Agent",
+                "assignee_source": "tickety",
+            },
+        )
+        self.assertEqual(
+            {
+                key: resolution_items["provider-assignee-sla-breach"][key]
+                for key in ("assignee_id", "assignee_name", "assignee_source")
+            },
+            {
+                "assignee_id": "prod-agent",
+                "assignee_name": "SLA Provider Agent",
+                "assignee_source": "provider",
+            },
+        )
+        self.assertEqual(
+            {
+                key: resolution_items["unmapped-provider-sla-breach"][key]
+                for key in ("assignee_id", "assignee_name", "assignee_source")
+            },
+            {
+                "assignee_id": None,
+                "assignee_name": None,
+                "assignee_source": None,
+            },
+        )
+        self.assertNotIn("Wrong Binding Secret", response.text)
+        self.assertNotIn("Wrong Provider Secret", response.text)
+        self.assertEqual(len(external_user_selects), 1, external_user_selects)
+        by_assignee = {
+            (item["assignee_source"], item["assignee_id"]): item
+            for item in payload["by_assignee"]
+        }
+        self.assertEqual(
+            by_assignee[("tickety", "prod-agent")],
+            {
+                "assignee_id": "prod-agent",
+                "assignee_name": "Agent",
+                "assignee_source": "tickety",
+                "breached_ticket_count": 1,
+                "breached_clock_count": 2,
+            },
+        )
+        self.assertEqual(
+            by_assignee[("provider", "prod-agent")],
+            {
+                "assignee_id": "prod-agent",
+                "assignee_name": "SLA Provider Agent",
+                "assignee_source": "provider",
+                "breached_ticket_count": 1,
+                "breached_clock_count": 2,
+            },
+        )
+
+    def test_sla_assignee_aggregates_use_all_rows_before_evidence_cap(self):
+        now = datetime.utcnow()
+        with self.session_factory() as db:
+            db.add_all([
+                TicketRecord(
+                    id=f"capped-assignee-breach-{index:03d}",
+                    subject=f"Capped assignee breach {index}",
+                    status="Open",
+                    priority="P1",
+                    assignee_id="other-agent",
+                    created_at=now - timedelta(hours=6),
+                    updated_at=now - timedelta(minutes=1),
+                    response_due_at=now - timedelta(hours=2),
+                    resolution_due_at=now - timedelta(hours=1),
+                )
+                for index in range(101)
+            ])
+            db.commit()
+
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
+        with patch.object(main, "_reserve_analytics_request"):
+            response = self.client.get(
+                "/intelligence/sla-monitoring?window_days=30"
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        aggregate = next(
+            item for item in payload["by_assignee"]
+            if item["assignee_source"] == "tickety"
+            and item["assignee_id"] == "other-agent"
+        )
+        self.assertEqual(aggregate, {
+            "assignee_id": "other-agent",
+            "assignee_name": "Other",
+            "assignee_source": "tickety",
+            "breached_ticket_count": 101,
+            "breached_clock_count": 202,
+        })
+        returned = [
+            item for item in payload["reactive"]
+            if item["assignee_source"] == "tickety"
+            and item["assignee_id"] == "other-agent"
+        ]
+        self.assertEqual(payload["summary"]["reactive_breaches"], 202)
+        self.assertEqual(len(payload["reactive"]), 100)
+        self.assertEqual(len(returned), 100)
+        self.assertLess(
+            len({item["ticket_id"] for item in returned}),
+            aggregate["breached_ticket_count"],
+        )
+        self.assertTrue(payload["items_truncated"])
+
+    def test_sla_assignee_evidence_recovers_capped_rows_and_isolates_sources(self):
+        now = datetime.utcnow()
+        with self.session_factory() as db:
+            db.add_all([
+                UserRecord(
+                    id="evidence-collision-agent",
+                    name="Local Collision Agent",
+                    role="agent",
+                    is_active=True,
+                ),
+                ExternalUserRecord(
+                    id="evidence-collision-agent",
+                    binding_id="evidence-binding",
+                    provider="freshservice",
+                    external_id="shared-evidence-agent",
+                    user_type="agent",
+                    name="Provider Collision Agent",
+                    active=True,
+                ),
+                ExternalUserRecord(
+                    id="other-domain-provider-agent",
+                    binding_id="other-evidence-binding",
+                    provider="freshservice",
+                    external_id="shared-evidence-agent",
+                    user_type="agent",
+                    name="Other Domain Provider Agent",
+                    active=True,
+                ),
+            ])
+            db.add_all([
+                TicketRecord(
+                    id=f"dominant-evidence-breach-{index:03d}",
+                    subject=f"Dominant evidence breach {index}",
+                    status="Open",
+                    priority="P1",
+                    assignee_id="other-agent",
+                    created_at=now - timedelta(hours=48),
+                    updated_at=now - timedelta(minutes=1),
+                    response_due_at=now - timedelta(hours=24),
+                    resolution_due_at=now - timedelta(hours=23),
+                )
+                for index in range(51)
+            ])
+            db.add_all([
+                TicketRecord(
+                    id="capped-local-assignee-evidence",
+                    subject="Local evidence outside global cap",
+                    status="Open",
+                    priority="P1",
+                    assignee_id="evidence-collision-agent",
+                    created_at=now - timedelta(hours=5),
+                    updated_at=now - timedelta(minutes=1),
+                    response_due_at=now - timedelta(hours=2),
+                    resolution_due_at=now - timedelta(hours=1),
+                ),
+                TicketRecord(
+                    id="capped-provider-assignee-evidence",
+                    subject="Provider evidence outside global cap",
+                    status="Open",
+                    priority="P1",
+                    # The local ID deliberately collides, but an external
+                    # assignment is authoritative for identity resolution.
+                    assignee_id="evidence-collision-agent",
+                    binding_id="evidence-binding",
+                    external_source="freshservice",
+                    external_assignee_id="shared-evidence-agent",
+                    external_created_at=now - timedelta(hours=5),
+                    external_updated_at=now - timedelta(minutes=1),
+                    external_fr_due_by=now - timedelta(hours=2),
+                    external_due_by=now - timedelta(hours=1),
+                    external_conversations_synced_at=now,
+                ),
+                TicketRecord(
+                    id="other-domain-provider-evidence",
+                    subject="Other provider domain evidence",
+                    status="Open",
+                    priority="P1",
+                    assignee_id="evidence-collision-agent",
+                    binding_id="other-evidence-binding",
+                    external_source="freshservice",
+                    external_assignee_id="shared-evidence-agent",
+                    external_created_at=now - timedelta(hours=5),
+                    external_updated_at=now - timedelta(minutes=1),
+                    external_fr_due_by=now - timedelta(hours=2),
+                    external_due_by=now - timedelta(hours=1),
+                    external_conversations_synced_at=now,
+                ),
+                TicketRecord(
+                    id="unassigned-assignee-evidence",
+                    subject="Unassigned breach evidence",
+                    status="Open",
+                    priority="P1",
+                    created_at=now - timedelta(hours=5),
+                    updated_at=now - timedelta(minutes=1),
+                    response_due_at=now - timedelta(hours=2),
+                    resolution_due_at=now - timedelta(hours=1),
+                ),
+                TicketRecord(
+                    id="orphan-provider-assignee-evidence",
+                    subject="Orphan provider breach evidence",
+                    status="Open",
+                    priority="P1",
+                    binding_id="orphan-evidence-binding",
+                    external_source="zendesk",
+                    external_assignee_id="raw-provider-assignee-secret",
+                    external_created_at=now - timedelta(hours=5),
+                    external_updated_at=now - timedelta(minutes=1),
+                    external_fr_due_by=now - timedelta(hours=2),
+                    external_due_by=now - timedelta(hours=1),
+                    external_conversations_synced_at=now,
+                ),
+            ])
+            db.commit()
+
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
+        with patch.object(main, "_reserve_analytics_request") as reserve:
+            global_response = self.client.get(
+                "/intelligence/sla-monitoring?window_days=30"
+            )
+            local_response = self.client.get(
+                "/intelligence/sla-monitoring/assignee-evidence"
+                "?window_days=30&assignee_source=tickety"
+                "&assignee_id=evidence-collision-agent"
+            )
+            provider_response = self.client.get(
+                "/intelligence/sla-monitoring/assignee-evidence"
+                "?window_days=30&assignee_source=provider"
+                "&assignee_id=evidence-collision-agent"
+            )
+            dominant_response = self.client.get(
+                "/intelligence/sla-monitoring/assignee-evidence"
+                "?window_days=30&assignee_source=tickety&assignee_id=other-agent"
+            )
+            unmapped_response = self.client.get(
+                "/intelligence/sla-monitoring/assignee-evidence"
+                "?window_days=30&assignee_source=unmapped"
+            )
+
+        for response in (
+            global_response,
+            local_response,
+            provider_response,
+            dominant_response,
+            unmapped_response,
+        ):
+            self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(reserve.call_count, 5)
+
+        global_payload = global_response.json()
+        globally_returned = {
+            item["ticket_id"] for item in global_payload["reactive"]
+        }
+        self.assertNotIn("capped-local-assignee-evidence", globally_returned)
+        self.assertNotIn("capped-provider-assignee-evidence", globally_returned)
+        global_assignees = {
+            (item["assignee_source"], item["assignee_id"]): item
+            for item in global_payload["by_assignee"]
+        }
+        self.assertEqual(
+            global_assignees[
+                ("tickety", "evidence-collision-agent")
+            ]["breached_ticket_count"],
+            1,
+        )
+        self.assertEqual(
+            global_assignees[
+                ("provider", "evidence-collision-agent")
+            ]["breached_ticket_count"],
+            1,
+        )
+
+        local_payload = local_response.json()
+        self.assertEqual(
+            {
+                key: local_payload[key]
+                for key in (
+                    "assignee_id",
+                    "assignee_name",
+                    "assignee_source",
+                    "breached_ticket_count",
+                    "breached_clock_count",
+                )
+            },
+            {
+                "assignee_id": "evidence-collision-agent",
+                "assignee_name": "Local Collision Agent",
+                "assignee_source": "tickety",
+                "breached_ticket_count": 1,
+                "breached_clock_count": 2,
+            },
+        )
+        self.assertEqual(local_payload["scope"], {
+            "total_tickets": 1,
+            "analyzed_tickets": 1,
+            "truncated": False,
+        })
+        self.assertEqual(
+            {item["ticket_id"] for item in local_payload["items"]},
+            {"capped-local-assignee-evidence"},
+        )
+        self.assertTrue(all(
+            item["assignee_source"] == "tickety"
+            for item in local_payload["items"]
+        ))
+
+        provider_payload = provider_response.json()
+        self.assertEqual(
+            {
+                key: provider_payload[key]
+                for key in (
+                    "assignee_id",
+                    "assignee_name",
+                    "assignee_source",
+                    "breached_ticket_count",
+                    "breached_clock_count",
+                )
+            },
+            {
+                "assignee_id": "evidence-collision-agent",
+                "assignee_name": "Provider Collision Agent",
+                "assignee_source": "provider",
+                "breached_ticket_count": 1,
+                "breached_clock_count": 2,
+            },
+        )
+        self.assertEqual(provider_payload["scope"], {
+            "total_tickets": 1,
+            "analyzed_tickets": 1,
+            "truncated": False,
+        })
+        self.assertEqual(
+            {item["ticket_id"] for item in provider_payload["items"]},
+            {"capped-provider-assignee-evidence"},
+        )
+        self.assertTrue(all(
+            item["assignee_source"] == "provider"
+            for item in provider_payload["items"]
+        ))
+
+        dominant_payload = dominant_response.json()
+        self.assertEqual(dominant_payload["breached_ticket_count"], 51)
+        self.assertEqual(dominant_payload["breached_clock_count"], 102)
+        self.assertEqual(len(dominant_payload["items"]), 100)
+        self.assertTrue(dominant_payload["items_truncated"])
+
+        unmapped_payload = unmapped_response.json()
+        self.assertIsNone(unmapped_payload["assignee_id"])
+        self.assertIsNone(unmapped_payload["assignee_name"])
+        self.assertIsNone(unmapped_payload["assignee_source"])
+        self.assertEqual(unmapped_payload["breached_ticket_count"], 2)
+        self.assertEqual(unmapped_payload["breached_clock_count"], 4)
+        self.assertEqual(
+            {item["ticket_id"] for item in unmapped_payload["items"]},
+            {
+                "unassigned-assignee-evidence",
+                "orphan-provider-assignee-evidence",
+            },
+        )
+        self.assertTrue(all(
+            item["assignee_id"] is None
+            and item["assignee_source"] is None
+            for item in unmapped_payload["items"]
+        ))
+        self.assertNotIn("raw-provider-assignee-secret", unmapped_response.text)
+
+    def test_sla_assignee_evidence_parameters_fail_closed(self):
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
+        with patch.object(main, "_reserve_analytics_request") as reserve:
+            invalid_responses = (
+                self.client.get(
+                    "/intelligence/sla-monitoring/assignee-evidence"
+                ),
+                self.client.get(
+                    "/intelligence/sla-monitoring/assignee-evidence"
+                    "?assignee_source=unknown"
+                ),
+                self.client.get(
+                    "/intelligence/sla-monitoring/assignee-evidence"
+                    "?assignee_source=provider"
+                ),
+                self.client.get(
+                    "/intelligence/sla-monitoring/assignee-evidence"
+                    "?assignee_source=tickety&assignee_id=%20%20"
+                ),
+                self.client.get(
+                    "/intelligence/sla-monitoring/assignee-evidence"
+                    "?assignee_source=unmapped&assignee_id=prod-agent"
+                ),
+                self.client.get(
+                    "/intelligence/sla-monitoring/assignee-evidence"
+                    "?window_days=6&assignee_source=unmapped"
+                ),
+            )
+
+        for response in invalid_responses:
+            self.assertEqual(response.status_code, 422, response.text)
+        reserve.assert_not_called()
+
+        with patch.object(main, "_reserve_analytics_request") as reserve:
+            missing_provider = self.client.get(
+                "/intelligence/sla-monitoring/assignee-evidence"
+                "?assignee_source=provider&assignee_id=missing-provider"
+            )
+            missing_local = self.client.get(
+                "/intelligence/sla-monitoring/assignee-evidence"
+                "?assignee_source=tickety&assignee_id=missing-local"
+            )
+
+        self.assertEqual(missing_provider.status_code, 404, missing_provider.text)
+        self.assertEqual(missing_local.status_code, 404, missing_local.text)
+        self.assertEqual(reserve.call_count, 2)
 
     def test_sla_monitoring_separates_reactive_and_proactive_clocks(self):
         now = datetime.utcnow()
