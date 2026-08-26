@@ -89,7 +89,7 @@ export interface TicketCreateInput {
   asset_id?: string | null;
 }
 
-export type TicketListSort = "newest" | "oldest" | "priority" | "updated" | "complexity";
+export type TicketListSort = "newest" | "oldest" | "priority" | "queue" | "updated" | "complexity";
 
 export interface TicketListParams {
   status?: string;
@@ -107,6 +107,15 @@ export interface TicketPage {
   limit: number;
   offset: number;
   hasMore: boolean;
+}
+
+export interface DashboardSummary {
+  total_tickets: number;
+  active_tickets: number;
+  inactive_tickets: number;
+  p1_active: number;
+  escalated_active: number;
+  unassigned_active: number;
 }
 
 export type AgentWorkspaceScope = "mine" | "team";
@@ -161,6 +170,7 @@ export interface AgentWorkspaceTicket extends Ticket {
 export interface AgentWorkspaceTicketParams {
   scope?: AgentWorkspaceScope;
   teamId?: string;
+  ticketId?: string;
   folder?: AgentWorkspaceFolder;
   search?: string;
   limit?: number;
@@ -1410,6 +1420,20 @@ export interface ServiceItem {
   updated_at: string | null;
 }
 
+export interface ServicePage {
+  services: ServiceItem[];
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+  summary: {
+    total: number;
+    active: number;
+    categoryCount: number;
+    categoryOptions: string[];
+    categoryOptionsTruncated: boolean;
+  };
+}
+
 export interface ServiceRequest {
   id: string;
   ticket_id: string;
@@ -1425,6 +1449,20 @@ export interface ServiceRequest {
   fulfilled_by: string | null;
   fulfilled_at: string | null;
   created_at: string | null;
+}
+
+export interface ServiceRequestPage {
+  requests: ServiceRequest[];
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+  summary: {
+    total: number;
+    open: number;
+    pending: number;
+    pendingApproval: number;
+    awaitingFulfillment: number;
+  };
 }
 
 // ── Problem Management ──────────────────────────────────────────
@@ -1472,15 +1510,34 @@ export interface ChangeRecord {
   updated_at: string | null;
 }
 
+export interface ChangePage {
+  changes: ChangeRecord[];
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+  summary: {
+    awaitingReview: number;
+    inProgress: number;
+    highRisk: number;
+  };
+}
+
 export interface ChangeApproval {
   id: number;
   change_id: string;
-  approver_id: string;
+  approver_id: string | null;
   approver_name: string | null;
   decision: string | null;
   comment: string | null;
   decided_at: string | null;
   created_at: string | null;
+}
+
+export interface ChangeApprovalPage {
+  approvals: ChangeApproval[];
+  limit: number;
+  offset: number;
+  hasMore: boolean;
 }
 
 // ── Asset / CMDB ────────────────────────────────────────────────
@@ -1504,6 +1561,13 @@ export interface Asset {
   updated_at: string | null;
 }
 
+export interface AssetPage {
+  assets: Asset[];
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+}
+
 // ── Surveys / CSAT ──────────────────────────────────────────────
 
 export interface SurveyTemplate {
@@ -1518,9 +1582,26 @@ export interface SurveyOut {
   ticket_id: string;
   template_id: number | null;
   ticket_subject: string | null;
+  recipient_email: string | null;
+  recipient_name: string | null;
+  response_expires_at: string | null;
+  delivery_status: "pending" | "uncertain" | "accepted" | "failed" | "legacy";
+  delivery_message_id: string | null;
+  delivery_error: string | null;
+  delivery_attempted_at: string | null;
+  sent_by: string | null;
   sent_at: string | null;
   responded_at: string | null;
   created_at: string | null;
+}
+
+export interface PortalSurveyQuestion {
+  question: string;
+  expires_at: string;
+}
+
+export interface PortalSurveySubmitted {
+  status: "submitted";
 }
 
 // ── Time Tracking ───────────────────────────────────────────────
@@ -1534,6 +1615,13 @@ export interface TimeEntry {
   minutes: number;
   entry_date: string | null;
   created_at: string | null;
+}
+
+export interface TimeEntryPage {
+  entries: TimeEntry[];
+  limit: number;
+  offset: number;
+  hasMore: boolean;
 }
 
 // ── Self-Service Portal ─────────────────────────────────────────

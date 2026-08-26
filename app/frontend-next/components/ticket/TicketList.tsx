@@ -25,11 +25,17 @@ import { TicketPriorityIndicator } from "@/components/ticket/TicketPriorityIndic
 import { TicketSentimentSubtitle } from "@/components/ticket/TicketSentimentSubtitle";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
-import { canAccessProtectedIntelligence, isDemoContext } from "@/lib/auth";
+import { canCreateTickets } from "@/lib/auth";
 import type { Ticket, TicketListSort } from "@/lib/types";
 import { analysisLifecycleLabel, routingLabel, sourceKindLabel, ticketSentimentPresentation, ticketSignalRatings } from "@/lib/ticket-intelligence";
 import { cn, formatTimeAgo } from "@/lib/utils";
 import { localDateKey } from "@/lib/date-time";
+import {
+  preserveTicketConfigValue,
+  ticketListStatusOptions,
+  ticketPriorityOptions,
+  visibleTicketStatusOptions,
+} from "@/lib/ticket-config-options";
 import {
   formatOperationalTimestamp,
   requesterEmail,
@@ -40,9 +46,7 @@ import {
 
 const SAVED_VIEWS_KEY = "tickety.ticket-queue.views.v1";
 const COLUMN_WIDTHS_KEY = "tickety.ticket-queue.column-widths.v3";
-const STATUS_FILTERS = ["Open", "Escalated", "Awaiting Review", "Closed"];
-const PRIORITIES = ["P1", "P2", "P3", "P4"];
-const PAGE_SIZES = [25, 50, 100];
+const PAGE_SIZES = [10, 25, 50, 100];
 const EMPTY_TICKETS: Ticket[] = [];
 const TABLE_COLUMN_KEYS = ["ticket", "requester", "priority", "routing", "status", "created", "lastContact"] as const;
 type TableColumnKey = (typeof TABLE_COLUMN_KEYS)[number];
@@ -120,10 +124,10 @@ function ResizableColumnHeader({
 }
 
 const BUILT_IN_VIEWS: SavedView[] = [
-  { id: "all", name: "All tickets", status: "", priority: "", assigneeId: "", category: "", sort: "newest", limit: 25, builtIn: true },
-  { id: "open", name: "Open queue", status: "Open", priority: "", assigneeId: "", category: "", sort: "priority", limit: 25, builtIn: true },
-  { id: "p1", name: "P1 incidents", status: "", priority: "P1", assigneeId: "", category: "", sort: "oldest", limit: 25, builtIn: true },
-  { id: "escalated", name: "Escalations", status: "Escalated", priority: "", assigneeId: "", category: "", sort: "updated", limit: 25, builtIn: true },
+  { id: "all", name: "All tickets", status: "", priority: "", assigneeId: "", category: "", sort: "newest", limit: 10, builtIn: true },
+  { id: "open", name: "Open queue", status: "Open", priority: "", assigneeId: "", category: "", sort: "priority", limit: 10, builtIn: true },
+  { id: "p1", name: "P1 incidents", status: "", priority: "P1", assigneeId: "", category: "", sort: "oldest", limit: 10, builtIn: true },
+  { id: "escalated", name: "Escalations", status: "Escalated", priority: "", assigneeId: "", category: "", sort: "updated", limit: 10, builtIn: true },
 ];
 
 function badgeForStatus(status: string): "success" | "warning" | "info" | "neutral" {
@@ -207,7 +211,7 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
   const [assigneeId, setAssigneeId] = useState("");
   const [category, setCategory] = useState("");
   const [sort, setSort] = useState<TicketListSort>("newest");
-  const [limit, setLimit] = useState(25);
+  const [limit, setLimit] = useState(10);
   const [offset, setOffset] = useState(0);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [activeViewId, setActiveViewId] = useState("all");
@@ -247,7 +251,7 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
             assigneeId: safeText(view.assigneeId, 255),
             category: safeText(view.category, 100),
             sort: validSorts.has(view.sort) ? view.sort : "newest",
-            limit: PAGE_SIZES.includes(view.limit) ? view.limit : 25,
+            limit: PAGE_SIZES.includes(view.limit) ? view.limit : 10,
           }];
         });
         setCustomViews(normalized.slice(0, 20));
@@ -329,9 +333,36 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
     placeholderData: (previous) => previous,
   });
   const meQuery = useQuery({ queryKey: ["auth-me"], queryFn: api.getAuthMe, retry: false });
-  const canBulk = canAccessProtectedIntelligence(meQuery.data) && isDemoContext(meQuery.data);
+  const canBulk = !meQuery.isError && canCreateTickets(meQuery.data);
   const categoriesQuery = useQuery({ queryKey: queryKeys.ticketCategories, queryFn: api.getCategories, retry: false });
   const usersQuery = useQuery({ queryKey: ["users"], queryFn: api.getUsers, enabled: canBulk, retry: false });
+  const statusConfigQuery = useQuery({ queryKey: ["status-config"], queryFn: api.getStatusConfig, retry: false });
+  const priorityConfigQuery = useQuery({ queryKey: ["priority-config"], queryFn: api.getPriorityConfig, retry: false });
+
+  const configuredStatusOptions = useMemo(
+    () => ticketListStatusOptions(statusConfigQuery.isError ? undefined : statusConfigQuery.data),
+    [statusConfigQuery.data, statusConfigQuery.isError],
+  );
+  const configuredPriorityOptions = useMemo(
+    () => ticketPriorityOptions(priorityConfigQuery.isError ? undefined : priorityConfigQuery.data),
+    [priorityConfigQuery.data, priorityConfigQuery.isError],
+  );
+  const statusOptions = useMemo(
+    () => preserveTicketConfigValue(configuredStatusOptions, status),
+    [configuredStatusOptions, status],
+  );
+  const priorityOptions = useMemo(
+    () => preserveTicketConfigValue(configuredPriorityOptions, priority),
+    [configuredPriorityOptions, priority],
+  );
+  const bulkPriorityOptions = useMemo(
+    () => preserveTicketConfigValue(configuredPriorityOptions, bulkAction === "set_priority" ? bulkValue : ""),
+    [bulkAction, bulkValue, configuredPriorityOptions],
+  );
+  const visibleStatusFilters = useMemo(
+    () => visibleTicketStatusOptions(configuredStatusOptions, status),
+    [configuredStatusOptions, status],
+  );
 
   const tickets = pageQuery.data?.tickets ?? EMPTY_TICKETS;
   const pageTransitioning = pageQuery.isPlaceholderData && pageQuery.isFetching;
@@ -487,7 +518,7 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
           <div className="flex flex-wrap items-center gap-2">
             <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-ink-500"><Filter className="h-3.5 w-3.5" aria-hidden="true" />Status</span>
             <button type="button" aria-pressed={!status} onClick={() => { setStatus(""); markFiltersChanged(); }} className={cn("min-h-11 rounded-full border px-3 text-xs font-semibold sm:min-h-8", !status ? "border-clay-300 bg-[var(--color-primary-soft)] text-semantic-primary" : "border-linen-400 text-ink-500 hover:bg-linen-200")}>All</button>
-            {STATUS_FILTERS.map((item) => <button key={item} type="button" aria-pressed={status === item} onClick={() => { setStatus(item); markFiltersChanged(); }} className={cn("min-h-11 rounded-full border px-3 text-xs font-semibold sm:min-h-8", status === item ? "border-clay-300 bg-[var(--color-primary-soft)] text-semantic-primary" : "border-linen-400 text-ink-500 hover:bg-linen-200")}>{item}</button>)}
+            {visibleStatusFilters.map((item) => <button key={item.value} type="button" aria-pressed={status === item.value} title={item.label} onClick={() => { setStatus(item.value); markFiltersChanged(); }} className={cn("min-h-11 max-w-48 rounded-full border px-3 text-xs font-semibold sm:min-h-8", status === item.value ? "border-clay-300 bg-[var(--color-primary-soft)] text-semantic-primary" : "border-linen-400 text-ink-500 hover:bg-linen-200")}><span className="block truncate">{item.label}</span></button>)}
           </div>
           <Button
             variant="secondary"
@@ -500,10 +531,11 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
             More filters{activeFilterCount > (status ? 1 : 0) ? ` (${activeFilterCount - (status ? 1 : 0)})` : ""}
           </Button>
         </div>
-        {moreFiltersOpen && <div id="ticket-more-filters" className="grid gap-3 border-t border-linen-300 pt-3 sm:grid-cols-2 lg:grid-cols-4">
-          <label><span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-ink-400">Priority</span><select value={priority} onChange={(event) => { setPriority(event.target.value); markFiltersChanged(); }} className="input-base"><option value="">Any priority</option>{PRIORITIES.map((item) => <option key={item}>{item}</option>)}</select></label>
+        {moreFiltersOpen && <div id="ticket-more-filters" className="grid gap-3 border-t border-linen-300 pt-3 sm:grid-cols-2 xl:grid-cols-5">
+          <label><span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-ink-400">Status</span><select value={status} onChange={(event) => { setStatus(event.target.value); markFiltersChanged(); }} className="input-base"><option value="">Any status</option>{statusOptions.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
+          <label><span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-ink-400">Priority</span><select value={priority} onChange={(event) => { setPriority(event.target.value); markFiltersChanged(); }} className="input-base"><option value="">Any priority</option>{priorityOptions.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
           <label><span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-ink-400">Category</span><select value={category} disabled={categoriesQuery.isError} onChange={(event) => { setCategory(event.target.value); markFiltersChanged(); }} className="input-base"><option value="">{categoriesQuery.isError ? "Categories unavailable" : "Any category"}</option>{(categoriesQuery.data ?? []).map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select></label>
-          <label><span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-ink-400">Assignee</span><select value={assigneeId} disabled={!canBulk || usersQuery.isError} onChange={(event) => { setAssigneeId(event.target.value); markFiltersChanged(); }} className="input-base"><option value="">{!canBulk ? "Supervisor access required" : usersQuery.isError ? "Assignees unavailable" : "Any assignee"}</option>{(usersQuery.data ?? []).filter((user) => user.is_active).map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label>
+          <label><span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-ink-400">Assignee</span><select value={assigneeId} disabled={!canBulk || usersQuery.isError} onChange={(event) => { setAssigneeId(event.target.value); markFiltersChanged(); }} className="input-base"><option value="">{!canBulk ? "Demo administrator access required" : usersQuery.isError ? "Assignees unavailable" : "Any assignee"}</option>{(usersQuery.data ?? []).filter((user) => user.is_active).map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label>
           <label><span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-ink-400">Rows per page</span><select value={limit} onChange={(event) => { setLimit(Number(event.target.value)); markFiltersChanged(); }} className="input-base">{PAGE_SIZES.map((size) => <option key={size} value={size}>{size} rows</option>)}</select></label>
         </div>}
         {(activeFilterCount > 0 || searchInput) && (
@@ -521,6 +553,16 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
         </div>
       </DataToolbar>
 
+      {(statusConfigQuery.isError || priorityConfigQuery.isError) && (
+        <Alert
+          variant="warning"
+          title="Custom ticket choices are unavailable"
+          action={<Button variant="secondary" size="sm" onClick={() => { void statusConfigQuery.refetch(); void priorityConfigQuery.refetch(); }} pending={statusConfigQuery.isFetching || priorityConfigQuery.isFetching} pendingLabel="Retrying…">Retry</Button>}
+        >
+          The queue remains available with the built-in status and priority choices.
+        </Alert>
+      )}
+
       {(categoriesQuery.isError || (canBulk && usersQuery.isError)) && (
         <Alert
           variant="warning"
@@ -536,7 +578,7 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
           <div className="min-w-32"><p className="text-sm font-semibold text-ink-700">{selected.size} selected</p><button type="button" onClick={() => setSelected(new Set())} className="mt-0.5 text-xs font-medium text-semantic-primary hover:underline">Clear selection</button></div>
           <div className="grid flex-1 gap-2 sm:grid-cols-2">
             <label><span className="sr-only">Bulk action</span><select value={bulkAction} onChange={(event) => { setBulkAction(event.target.value); setBulkValue(""); }} className="input-base bg-white"><option value="">Choose bulk action</option><option value="close">Close tickets</option><option value="set_priority">Set priority</option><option value="set_category">Set category</option><option value="assign">Assign owner</option></select></label>
-            {bulkAction === "set_priority" && <label><span className="sr-only">New priority</span><select value={bulkValue} onChange={(event) => setBulkValue(event.target.value)} className="input-base bg-white"><option value="">Choose priority</option>{PRIORITIES.map((item) => <option key={item}>{item}</option>)}</select></label>}
+            {bulkAction === "set_priority" && <label><span className="sr-only">New priority</span><select value={bulkValue} onChange={(event) => setBulkValue(event.target.value)} className="input-base bg-white"><option value="">Choose priority</option>{bulkPriorityOptions.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>}
             {bulkAction === "set_category" && <label><span className="sr-only">New category</span><select value={bulkValue} onChange={(event) => setBulkValue(event.target.value)} className="input-base bg-white"><option value="">Choose category</option>{(categoriesQuery.data ?? []).map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select></label>}
             {bulkAction === "assign" && <label><span className="sr-only">New assignee</span><select value={bulkValue} onChange={(event) => setBulkValue(event.target.value)} className="input-base bg-white"><option value="">Choose assignee</option>{(usersQuery.data ?? []).filter((user) => user.is_active).map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label>}
           </div>
@@ -601,11 +643,27 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
               <DataListCard key={ticket.id} className={cn("rounded-2xl border-linen-400", selected.has(ticket.id) && "border-clay-300 bg-[var(--color-primary-soft)]/50")}>
                 <div className="flex items-start gap-3">
                   {canBulk && <input type="checkbox" checked={selected.has(ticket.id)} onChange={() => toggleTicket(ticket.id)} aria-label={`Select ${ticket.subject}`} className="mt-1 h-4 w-4 shrink-0" />}
-                  <div className="min-w-0 flex-1"><TicketPriorityIndicator ticket={ticket} /><Link href={`/tickets/${ticket.id}`} className="mt-3 block text-ink-700 hover:text-semantic-primary"><ListText text={ticket.subject} lines={2} className="text-sm font-semibold leading-5" /></Link><TicketSentimentSubtitle ticket={ticket} /><ListText text={`#${ticket.external_id || ticket.id}`} lines="wrap" className="mt-1 font-mono text-[11px] text-ink-400" /></div>
+                  <div className="min-w-0 flex-1">
+                    <Link href={`/tickets/${ticket.id}`} className="block text-ink-700 hover:text-semantic-primary hover:underline"><ListText text={ticket.subject} lines={2} className="text-sm font-semibold leading-5" /></Link>
+                    <div className="mt-2 flex min-w-0 flex-wrap items-start gap-2">
+                      <TicketPriorityIndicator ticket={ticket} compact />
+                      <Badge variant={badgeForStatus(ticket.status)} dot>{ticket.status}</Badge>
+                    </div>
+                  </div>
                 </div>
-                <div className="mt-3 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px] text-ink-400"><span className="whitespace-nowrap">{sourceKindLabel(ticket)}</span>{ticket.ai_suggested_category && <ListText text={`AI issue: ${ticket.ai_suggested_category}`} lines={2} className="w-full xs:w-auto xs:max-w-[16rem]" />}<span className="whitespace-nowrap">{analysisLifecycleLabel(ticket)}</span></div>
-	                <dl className="mt-4 space-y-3 border-t border-linen-300 pt-3 text-xs"><div className="min-w-0"><dt className="text-ink-400">Requester</dt><dd className="mt-1"><ListText text={requesterName(ticket)} lines={2} className="font-semibold text-ink-600" /></dd>{requesterEmail(ticket) && <dd className="mt-0.5 flex min-w-0 items-start gap-1 text-ink-400"><Mail className="mt-0.5 h-3 w-3 shrink-0" aria-hidden="true" /><ListText text={requesterEmail(ticket) || ""} lines="wrap" className="min-w-0 flex-1" /></dd>}<dd className="mt-0.5"><ListText text={ticket.requester_title || "Title not provided"} lines={2} className="text-ink-400" /></dd></div><div className="min-w-0"><dt className="text-ink-400">Routing</dt><dd className="mt-1"><ListText text={routingLabel(ticket)} lines="wrap" className="font-semibold text-ink-600" /></dd><dd className="mt-0.5"><ListText text={ticket.external_assignee_name || ticket.assignee_name || "Unassigned"} lines="wrap" className="text-ink-400" /></dd></div><div><dt className="text-ink-400">Status</dt><dd className="mt-1"><Badge variant={badgeForStatus(ticket.status)} dot>{ticket.status}</Badge></dd></div></dl>
-	                <div className="mt-3 grid grid-cols-1 gap-3 rounded-xl bg-linen-100 p-3 text-[11px] text-ink-400 sm:grid-cols-2"><div className="min-w-0"><span className="mb-1 flex items-center gap-1"><CalendarDays className="h-3 w-3" aria-hidden="true" />Created</span><TimelineValue value={ticketCreatedAt(ticket)} label="Created" /></div><div className="min-w-0"><span className="mb-1 flex items-center gap-1"><Clock3 className="h-3 w-3" aria-hidden="true" />Last contact</span><TimelineValue value={ticketLastCommunicationAt(ticket)} label="Last contact" /></div></div>
+                <dl className="mt-3 grid grid-cols-2 gap-3 border-t border-linen-300 pt-3 text-xs">
+                  <div className="min-w-0"><dt className="text-ink-400">Assignee</dt><dd className="mt-1"><ListText text={ticket.external_assignee_name || ticket.assignee_name || "Unassigned"} lines={2} className="font-semibold text-ink-600" /></dd></div>
+                  <div className="min-w-0"><dt className="text-ink-400">Updated</dt><dd className="mt-1"><TimelineValue value={ticketLastCommunicationAt(ticket)} label="Updated" /></dd></div>
+                </dl>
+                <details className="mt-3 border-t border-linen-300 pt-3">
+                  <summary className="min-h-11 cursor-pointer rounded-lg px-2 py-2 text-xs font-semibold text-semantic-primary hover:bg-linen-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] sm:min-h-9">More ticket details</summary>
+                  <div className="mt-2 rounded-xl bg-linen-100 p-3">
+                    <TicketSentimentSubtitle ticket={ticket} />
+                    <div className="mt-2 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px] text-ink-400"><ListText text={`#${ticket.external_id || ticket.id}`} lines="wrap" className="w-full font-mono" /><span className="whitespace-nowrap">{sourceKindLabel(ticket)}</span>{ticket.ai_suggested_category && <ListText text={`AI issue: ${ticket.ai_suggested_category}`} lines={2} className="w-full xs:w-auto xs:max-w-[16rem]" />}<span className="whitespace-nowrap">{analysisLifecycleLabel(ticket)}</span></div>
+                    <dl className="mt-3 space-y-3 border-t border-linen-300 pt-3 text-xs"><div className="min-w-0"><dt className="text-ink-400">Requester</dt><dd className="mt-1"><ListText text={requesterName(ticket)} lines={2} className="font-semibold text-ink-600" /></dd>{requesterEmail(ticket) && <dd className="mt-0.5 flex min-w-0 items-start gap-1 text-ink-400"><Mail className="mt-0.5 h-3 w-3 shrink-0" aria-hidden="true" /><ListText text={requesterEmail(ticket) || ""} lines="wrap" className="min-w-0 flex-1" /></dd>}<dd className="mt-0.5"><ListText text={ticket.requester_title || "Title not provided"} lines={2} className="text-ink-400" /></dd></div><div className="min-w-0"><dt className="text-ink-400">Routing</dt><dd className="mt-1"><ListText text={routingLabel(ticket)} lines="wrap" className="font-semibold text-ink-600" /></dd></div></dl>
+                    <div className="mt-3 grid grid-cols-1 gap-3 rounded-xl border border-linen-300 bg-linen-50 p-3 text-[11px] text-ink-400 sm:grid-cols-2"><div className="min-w-0"><span className="mb-1 flex items-center gap-1"><CalendarDays className="h-3 w-3" aria-hidden="true" />Created</span><TimelineValue value={ticketCreatedAt(ticket)} label="Created" /></div><div className="min-w-0"><span className="mb-1 flex items-center gap-1"><Clock3 className="h-3 w-3" aria-hidden="true" />Last contact</span><TimelineValue value={ticketLastCommunicationAt(ticket)} label="Last contact" /></div></div>
+                  </div>
+                </details>
               </DataListCard>
             ))}
           </div>

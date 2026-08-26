@@ -269,6 +269,26 @@ export default function ReportsPage() {
     filters.resolutionState ? `State: ${titleCase(filters.resolutionState)}` : "",
     filters.slaState ? `SLA: ${titleCase(filters.slaState)}` : "",
   ].filter(Boolean) : [];
+  const appliedCriteria = report && filters ? [
+    `Period: ${reportPeriodLabel(filters)}`,
+    `Time basis: ${filters.dateField === "created" ? "Created" : "Resolved"}`,
+    ...appliedDimensions,
+    ...(showSeries ? [`Grouped by: ${groupLabel}`] : []),
+    ...(report.type === "breakdown" ? [`Visualization: ${report.chartStyle === "bar" ? "Horizontal bars" : "Donut chart"}`] : []),
+  ] : [];
+  const draftActiveFilterCount = draft ? [
+    draft.status,
+    draft.priority,
+    draft.category.trim(),
+    draft.assigneeId,
+    draft.source,
+    draft.ticketType,
+    draft.resolutionState,
+    draft.slaState,
+  ].filter(Boolean).length : 0;
+  const draftPeriodDays = draft
+    ? Math.round((new Date(draft.endLocal).getTime() - new Date(draft.startLocal).getTime()) / (24 * 60 * 60 * 1000))
+    : null;
 
   const applyDraft = () => {
     if (!draft) return;
@@ -342,7 +362,7 @@ export default function ReportsPage() {
             </div>
             <p className="mt-1 text-xs leading-5 text-ink-400">
               {report && filters
-                ? `${REPORT_TYPES[report.type].label} · ${filters.dateField === "created" ? "Created" : "Resolved"} ${reportPeriodLabel(filters)}${appliedDimensions.length ? ` · ${appliedDimensions.join(" · ")}` : ""}${summary ? ` · ${summary.total_tickets.toLocaleString()} matching tickets` : ""}`
+                ? `${REPORT_TYPES[report.type].label}${summary ? ` · ${summary.total_tickets.toLocaleString()} matching tickets` : ""}`
                 : "Preparing the default 30-day reporting window…"}
             </p>
           </div>
@@ -351,7 +371,7 @@ export default function ReportsPage() {
           </Button>
         </div>
 
-        <div className="grid gap-4 rounded-xl border border-linen-300 bg-linen-100 p-4 sm:grid-cols-2 xl:grid-cols-3">
+        <div className="grid gap-5 rounded-xl border border-linen-300 bg-linen-100 p-4 lg:grid-cols-[minmax(16rem,0.8fr)_minmax(0,1.2fr)] lg:items-start">
           <label>
             <span className="mb-1.5 block text-xs font-semibold text-ink-500">Report type</span>
             <select className="input-base" value={draft?.reportType ?? "overview"} disabled={!draft} onChange={(event) => updateDraft("reportType", event.target.value as ReportType)}>
@@ -359,65 +379,85 @@ export default function ReportsPage() {
             </select>
             <span className="mt-1.5 block text-xs leading-5 text-ink-400">{REPORT_TYPES[draft?.reportType ?? "overview"].description}</span>
           </label>
-          <label>
-            <span className="mb-1.5 block text-xs font-semibold text-ink-500">Group results by</span>
-            <select className="input-base" value={draft?.groupBy ?? "status"} disabled={!draft || draft.reportType === "overview" || draft.reportType === "volume"} onChange={(event) => updateDraft("groupBy", event.target.value as ReportGroupBy)}>
-              {GROUP_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-            </select>
-            <span className="mt-1.5 block text-xs leading-5 text-ink-400">Available for breakdown, resolution, and SLA reports.</span>
-          </label>
-          <label>
-            <span className="mb-1.5 block text-xs font-semibold text-ink-500">Visualization</span>
-            <select className="input-base" value={draft?.chartStyle ?? "bar"} disabled={!draft || draft.reportType !== "breakdown"} onChange={(event) => updateDraft("chartStyle", event.target.value as ChartStyle)}>
-              <option value="bar">Horizontal bars</option>
-              <option value="donut">Donut chart</option>
-            </select>
-            <span className="mt-1.5 block text-xs leading-5 text-ink-400">Ticket breakdowns can switch between comparison and composition views.</span>
-          </label>
+          <fieldset>
+            <legend className="mb-1.5 text-xs font-semibold text-ink-500">Quick range</legend>
+            <div className="flex flex-wrap gap-2" aria-label="Quick date ranges">
+              {REPORT_PRESETS.map(([days, label]) => <Button key={days} size="sm" variant="ghost" aria-pressed={draftPeriodDays === days} onClick={() => applyPreset(days)}>{label}</Button>)}
+            </div>
+            <p className="mt-2 text-xs leading-5 text-ink-400">Choose a common period now, or set exact dates under Refine report.</p>
+          </fieldset>
         </div>
 
-        <div className="flex flex-wrap gap-2" aria-label="Quick date ranges">
-          {REPORT_PRESETS.map(([days, label]) => <Button key={days} size="sm" variant="ghost" onClick={() => applyPreset(days)}>{label}</Button>)}
+        <div className="flex min-w-0 flex-wrap items-center gap-2" aria-label="Applied report criteria">
+          <span className="text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-400">Applied</span>
+          {appliedCriteria.length > 0
+            ? appliedCriteria.map((criterion) => <span key={criterion} className="max-w-full whitespace-normal break-words rounded-full border border-linen-400 bg-linen-100 px-3 py-1.5 text-[11px] font-semibold leading-4 text-ink-500 [overflow-wrap:anywhere]">{criterion}</span>)
+            : <span className="text-xs text-ink-400">Preparing report criteria…</span>}
         </div>
 
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-          <SelectField label="Time basis" value={draft?.dateField ?? "created"} disabled={!draft} onChange={(value) => updateDraft("dateField", value as ReportDateField)} options={[["created", "Ticket created time"], ["resolved", "Ticket resolved time"]]} />
-          <label>
-            <span className="mb-1.5 block text-xs font-semibold text-ink-500">From</span>
-            <input type="datetime-local" className="input-base" value={draft?.startLocal ?? ""} disabled={!draft} onChange={(event) => updateDraft("startLocal", event.target.value)} />
-          </label>
-          <label>
-            <span className="mb-1.5 block text-xs font-semibold text-ink-500">Through</span>
-            <input type="datetime-local" className="input-base" value={draft?.endLocal ?? ""} disabled={!draft} onChange={(event) => updateDraft("endLocal", event.target.value)} />
-          </label>
-          <SelectField label="Status" value={draft?.status ?? ""} disabled={!draft} onChange={(value) => updateDraft("status", value)} options={[["", "All statuses"], ...(optionsQuery.data?.statuses ?? []).map((value) => [value, value] as [string, string])]} />
-          <SelectField label="Priority" value={draft?.priority ?? ""} disabled={!draft} onChange={(value) => updateDraft("priority", value)} options={[["", "All priorities"], ...(optionsQuery.data?.priorities ?? []).map((value) => [value, value] as [string, string])]} />
-          <SelectField label="Category" value={draft?.category ?? ""} disabled={!draft} onChange={(value) => updateDraft("category", value)} options={[["", "All categories"], ...(optionsQuery.data?.categories ?? []).map((value) => [value, value] as [string, string])]} />
-        </div>
-
-        <details className="rounded-xl border border-linen-300 px-4 py-3">
-          <summary className="cursor-pointer text-xs font-semibold text-ink-600">More criteria</summary>
-          <div className="mt-4 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-            <SelectField label="Assignee" value={draft?.assigneeId ?? ""} disabled={!draft} onChange={(value) => updateDraft("assigneeId", value)} options={[
-              ["", "All assignees"],
-              ...(optionsQuery.data?.has_unassigned ? [["__unassigned__", "Unassigned"] as [string, string]] : []),
-              ...(optionsQuery.data?.assignees ?? []).map((item) => [item.id, item.name] as [string, string]),
-            ]} />
-            <SelectField label="Source" value={draft?.source ?? ""} disabled={!draft} onChange={(value) => updateDraft("source", value)} options={[["", "All sources"], ...(optionsQuery.data?.sources ?? []).map((value) => [value, value] as [string, string])]} />
-            <SelectField label="Ticket type" value={draft?.ticketType ?? ""} disabled={!draft} onChange={(value) => updateDraft("ticketType", value)} options={[["", "All ticket types"], ...(optionsQuery.data?.ticket_types ?? []).map((value) => [value, titleCase(value)] as [string, string])]} />
-            <SelectField label="Resolution state" value={draft?.resolutionState ?? ""} disabled={!draft} onChange={(value) => updateDraft("resolutionState", value)} options={[["", "Open and resolved"], ["open", "Open only"], ["resolved", "Resolved only"]]} />
-            <SelectField label="SLA state" value={draft?.slaState ?? ""} disabled={!draft} onChange={(value) => updateDraft("slaState", value)} options={[["", "All SLA states"], ["breached", "Breached"], ["within_sla", "Within SLA"], ["not_tracked", "Not tracked or paused"]]} />
+        <details className="group rounded-xl border border-linen-300 bg-linen-50">
+          <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 rounded-xl px-4 py-3 text-sm font-semibold text-ink-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] [&::-webkit-details-marker]:hidden">
+            <span className="inline-flex items-center gap-2"><Filter className="h-4 w-4 text-semantic-primary" aria-hidden="true" />Refine report</span>
+            <span className="text-xs font-normal text-ink-400">{draftActiveFilterCount ? `${draftActiveFilterCount} optional ${draftActiveFilterCount === 1 ? "filter" : "filters"}` : "Dates, grouping, and optional filters"}</span>
+          </summary>
+          <div className="space-y-5 border-t border-linen-300 p-4">
+            {draft && draft.reportType !== "overview" && draft.reportType !== "volume" && (
+              <div className="grid gap-4 sm:grid-cols-2">
+                <label>
+                  <span className="mb-1.5 block text-xs font-semibold text-ink-500">Group results by</span>
+                  <select className="input-base" value={draft.groupBy} onChange={(event) => updateDraft("groupBy", event.target.value as ReportGroupBy)}>
+                    {GROUP_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                  </select>
+                </label>
+                {draft.reportType === "breakdown" && <label>
+                  <span className="mb-1.5 block text-xs font-semibold text-ink-500">Visualization</span>
+                  <select className="input-base" value={draft.chartStyle} onChange={(event) => updateDraft("chartStyle", event.target.value as ChartStyle)}>
+                    <option value="bar">Horizontal bars</option>
+                    <option value="donut">Donut chart</option>
+                  </select>
+                </label>}
+              </div>
+            )}
+            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+              <SelectField label="Time basis" value={draft?.dateField ?? "created"} disabled={!draft} onChange={(value) => updateDraft("dateField", value as ReportDateField)} options={[["created", "Ticket created time"], ["resolved", "Ticket resolved time"]]} />
+              <label>
+                <span className="mb-1.5 block text-xs font-semibold text-ink-500">From</span>
+                <input type="datetime-local" className="input-base" value={draft?.startLocal ?? ""} disabled={!draft} onChange={(event) => updateDraft("startLocal", event.target.value)} />
+              </label>
+              <label>
+                <span className="mb-1.5 block text-xs font-semibold text-ink-500">Through</span>
+                <input type="datetime-local" className="input-base" value={draft?.endLocal ?? ""} disabled={!draft} onChange={(event) => updateDraft("endLocal", event.target.value)} />
+              </label>
+            </div>
+            <div className="border-t border-linen-300 pt-5">
+              <h3 className="text-xs font-semibold text-ink-600">Optional ticket filters</h3>
+              <div className="mt-3 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                <SelectField label="Status" value={draft?.status ?? ""} disabled={!draft} onChange={(value) => updateDraft("status", value)} options={[["", "All statuses"], ...(optionsQuery.data?.statuses ?? []).map((value) => [value, value] as [string, string])]} />
+                <SelectField label="Priority" value={draft?.priority ?? ""} disabled={!draft} onChange={(value) => updateDraft("priority", value)} options={[["", "All priorities"], ...(optionsQuery.data?.priorities ?? []).map((value) => [value, value] as [string, string])]} />
+                <SelectField label="Category" value={draft?.category ?? ""} disabled={!draft} onChange={(value) => updateDraft("category", value)} options={[["", "All categories"], ...(optionsQuery.data?.categories ?? []).map((value) => [value, value] as [string, string])]} />
+                <SelectField label="Assignee" value={draft?.assigneeId ?? ""} disabled={!draft} onChange={(value) => updateDraft("assigneeId", value)} options={[
+                  ["", "All assignees"],
+                  ...(optionsQuery.data?.has_unassigned ? [["__unassigned__", "Unassigned"] as [string, string]] : []),
+                  ...(optionsQuery.data?.assignees ?? []).map((item) => [item.id, item.name] as [string, string]),
+                ]} />
+                <SelectField label="Source" value={draft?.source ?? ""} disabled={!draft} onChange={(value) => updateDraft("source", value)} options={[["", "All sources"], ...(optionsQuery.data?.sources ?? []).map((value) => [value, value] as [string, string])]} />
+                <SelectField label="Ticket type" value={draft?.ticketType ?? ""} disabled={!draft} onChange={(value) => updateDraft("ticketType", value)} options={[["", "All ticket types"], ...(optionsQuery.data?.ticket_types ?? []).map((value) => [value, titleCase(value)] as [string, string])]} />
+                <SelectField label="Resolution state" value={draft?.resolutionState ?? ""} disabled={!draft} onChange={(value) => updateDraft("resolutionState", value)} options={[["", "Open and resolved"], ["open", "Open only"], ["resolved", "Resolved only"]]} />
+                <SelectField label="SLA state" value={draft?.slaState ?? ""} disabled={!draft} onChange={(value) => updateDraft("slaState", value)} options={[["", "All SLA states"], ["breached", "Breached"], ["within_sla", "Within SLA"], ["not_tracked", "Not tracked or paused"]]} />
+              </div>
+            </div>
+            <div className="flex flex-col gap-3 border-t border-linen-300 pt-4 sm:flex-row sm:items-center sm:justify-between">
+              <p className="text-xs leading-5 text-ink-400">Times are entered in {timeZone} and sent to the report service as UTC.</p>
+              <Button size="sm" variant="ghost" leadingIcon={<RotateCcw className="h-3.5 w-3.5" />} onClick={resetReport}>Reset all criteria</Button>
+            </div>
           </div>
         </details>
 
         <div className="flex flex-col gap-3 border-t border-linen-300 pt-4 sm:flex-row sm:items-center sm:justify-between">
           <p className={cn("text-xs", hasUnappliedChanges ? "font-semibold text-semantic-warning" : "text-ink-400")}>
-            {hasUnappliedChanges ? "The report definition has changed. Generate it to refresh the result and export." : `Times are entered in ${timeZone} and sent to the report service as UTC.`}
+            {hasUnappliedChanges ? "The report definition has changed. Generate it to refresh the result and export." : "The generated result matches the applied criteria above."}
           </p>
-          <div className="flex gap-2">
-            <Button size="sm" variant="ghost" leadingIcon={<RotateCcw className="h-3.5 w-3.5" />} onClick={resetReport}>Reset</Button>
-            <Button size="sm" onClick={applyDraft} disabled={!draft || !hasUnappliedChanges}>Generate report</Button>
-          </div>
+          <Button size="sm" onClick={applyDraft} disabled={!draft || !hasUnappliedChanges}>Generate report</Button>
         </div>
       </section>
 

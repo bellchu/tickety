@@ -11,6 +11,7 @@ import {
   BarChart3,
   Bot,
   CheckCircle2,
+  ChevronDown,
   CircleHelp,
   Gauge,
   Layers3,
@@ -31,7 +32,7 @@ import {
   Waypoints,
 } from "lucide-react";
 import { Alert, Badge, Button, EmptyState, ErrorState, ListText, Skeleton } from "@/components/ui";
-import { PageFrame, PageHeader, SectionHeader, SummaryStrip } from "@/components/layout/PageLayout";
+import { PageFrame, PageHeader, SummaryStrip } from "@/components/layout/PageLayout";
 import { api } from "@/lib/api";
 import { canAccessProtectedIntelligence, isDemoContext } from "@/lib/auth";
 import { formatLocalDateTime } from "@/lib/date-time";
@@ -183,6 +184,7 @@ function IntelligenceCockpit() {
         <CockpitLoading />
       ) : overviewQuery.isError || !overview ? (
         <ErrorState
+          density="compact"
           title="Operational posture unavailable"
           description="The primary cockpit signal could not be loaded. Supporting panels remain independently refreshable."
           onRetry={() => void overviewQuery.refetch()}
@@ -202,53 +204,98 @@ function IntelligenceCockpit() {
             <div data-intelligence-section="attention-queue">
               <AttentionQueue data={overview} />
             </div>
-            <div className="min-w-0 space-y-6">
-              <div data-intelligence-section="age-flow"><AgeAndFlowPanel data={overview} /></div>
-              <div data-intelligence-section="stale-backlog"><StaleBacklogPanel data={overview} /></div>
-            </div>
+            <details className="group min-w-0 rounded-2xl border border-linen-400 bg-linen-50 shadow-sm">
+              <CockpitDisclosureSummary
+                title="Backlog context"
+                description="Age, flow, and stale records that support queue decisions."
+                status="View details"
+              />
+              <div className="min-w-0 space-y-6 border-t border-linen-400 p-4">
+                <div data-intelligence-section="age-flow"><AgeAndFlowPanel data={overview} /></div>
+                <div data-intelligence-section="stale-backlog"><StaleBacklogPanel data={overview} /></div>
+              </div>
+            </details>
           </div>
         </>
       )}
 
-      <section data-intelligence-section="service-assurance" className="space-y-4">
-        <SectionHeader
-          title="Service assurance"
-          description={`Human-review guardrails for routing, support level, customer friction, request quality, and SLA exposure in the last ${windowDays} days.`}
-        />
-        <ServiceQualityPanels query={qualityQuery} />
-        <SlaMonitoringPanel query={slaMonitoringQuery} />
-      </section>
+      <div role="group" aria-label="Supporting intelligence views" className="space-y-4">
+        <details data-intelligence-section="service-assurance" className="group rounded-2xl border border-linen-400 bg-linen-50 shadow-sm">
+          <CockpitDisclosureSummary
+            title="Service assurance"
+            description={`Human-review guardrails for routing, support level, customer friction, request quality, and SLA exposure in the last ${windowDays} days.`}
+            status={qualityQuery.isError || slaMonitoringQuery.isError ? "Needs retry" : qualityQuery.isLoading || slaMonitoringQuery.isLoading ? "Loading" : "Ready"}
+            warning={qualityQuery.isError || slaMonitoringQuery.isError}
+          />
+          <div className="space-y-4 border-t border-linen-400 p-4 sm:p-5">
+            <ServiceQualityPanels query={qualityQuery} />
+            <SlaMonitoringPanel query={slaMonitoringQuery} />
+          </div>
+        </details>
 
-      <section data-intelligence-section="team-capacity" className="space-y-4">
-        <SectionHeader
-          title="Team capacity"
-          description={`Current assignments and delivery outcomes within the last ${windowDays} days.`}
-        />
-        <div className="grid min-w-0 gap-6 xl:grid-cols-[minmax(0,1.2fr)_minmax(20rem,0.8fr)]">
-          <WorkloadPanel query={workloadQuery} />
-          <AccountHealthPanel windowDays={windowDays} />
-        </div>
-      </section>
+        <details data-intelligence-section="team-capacity" className="group rounded-2xl border border-linen-400 bg-linen-50 shadow-sm">
+          <CockpitDisclosureSummary
+            title="Team capacity"
+            description={`Current assignments and delivery outcomes within the last ${windowDays} days.`}
+            status={workloadQuery.isError ? "Needs retry" : workloadQuery.isLoading ? "Loading" : "Ready"}
+            warning={workloadQuery.isError}
+          />
+          <div className="grid min-w-0 gap-6 border-t border-linen-400 p-4 sm:p-5 xl:grid-cols-[minmax(0,1.2fr)_minmax(20rem,0.8fr)]">
+            <WorkloadPanel query={workloadQuery} />
+            <AccountHealthPanel windowDays={windowDays} />
+          </div>
+        </details>
 
-      <section data-intelligence-section="demand-patterns" className="space-y-4">
-        <SectionHeader
-          title="Demand and systemic patterns"
-          description={`Only tickets active in the selected ${windowDays}-day window contribute to these signals.`}
-        />
-        <div className="grid min-w-0 gap-6 lg:grid-cols-2">
-          <TrendsPanel query={trendsQuery} />
-          <SystemicPanel query={systemicQuery} />
-        </div>
-      </section>
+        <details data-intelligence-section="demand-patterns" className="group rounded-2xl border border-linen-400 bg-linen-50 shadow-sm">
+          <CockpitDisclosureSummary
+            title="Demand and systemic patterns"
+            description={`Only tickets active in the selected ${windowDays}-day window contribute to these signals.`}
+            status={trendsQuery.isError || systemicQuery.isError ? "Needs retry" : trendsQuery.isLoading || systemicQuery.isLoading ? "Loading" : "Ready"}
+            warning={trendsQuery.isError || systemicQuery.isError}
+          />
+          <div className="grid min-w-0 gap-6 border-t border-linen-400 p-4 sm:p-5 lg:grid-cols-2">
+            <TrendsPanel query={trendsQuery} />
+            <SystemicPanel query={systemicQuery} />
+          </div>
+        </details>
 
-      <section data-intelligence-section="automation-discovery" className="space-y-4">
-        <SectionHeader
-          title="Automation discovery"
-          description="A deliberate historical study, kept separate from the live operating window and never rerun automatically."
-        />
-        <LevelZeroStudyPanel />
-      </section>
+        <details data-intelligence-section="automation-discovery" className="group rounded-2xl border border-linen-400 bg-linen-50 shadow-sm">
+          <CockpitDisclosureSummary
+            title="Automation discovery"
+            description="A deliberate historical study, kept separate from the live operating window and never rerun automatically."
+            status="On demand"
+          />
+          <div className="border-t border-linen-400 p-4 sm:p-5">
+            <LevelZeroStudyPanel />
+          </div>
+        </details>
+      </div>
     </PageFrame>
+  );
+}
+
+function CockpitDisclosureSummary({
+  title,
+  description,
+  status,
+  warning = false,
+}: {
+  title: string;
+  description: string;
+  status: string;
+  warning?: boolean;
+}) {
+  return (
+    <summary className="flex min-h-14 cursor-pointer list-none items-center justify-between gap-4 rounded-2xl px-4 py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] sm:px-5 [&::-webkit-details-marker]:hidden">
+      <span className="min-w-0">
+        <span className="block text-sm font-semibold text-ink-700">{title}</span>
+        <span className="mt-1 block break-words text-xs leading-5 text-ink-500 [overflow-wrap:anywhere]">{description}</span>
+      </span>
+      <span className="flex shrink-0 items-center gap-2">
+        <Badge variant={warning ? "warning" : "neutral"} dot={warning}>{status}</Badge>
+        <ChevronDown className="h-4 w-4 text-ink-400 transition-transform group-open:rotate-180" aria-hidden="true" />
+      </span>
+    </summary>
   );
 }
 
@@ -500,7 +547,7 @@ function ServiceQualityPanels({ query }: { query: UseQueryResult<ServiceQualityR
     return <div className="grid gap-6 lg:grid-cols-2" aria-label="Loading service assurance"><Skeleton className="h-96" /><Skeleton className="h-96" /><Skeleton className="h-96" /><Skeleton className="h-96" /></div>;
   }
   if (query.isError || !query.data) {
-    return <ErrorState title="Service-quality guardrails unavailable" description="Routing, level, friction, and clarification signals could not be refreshed." onRetry={() => void query.refetch()} retrying={query.isFetching} />;
+    return <ErrorState density="compact" title="Service-quality guardrails unavailable" description="Routing, level, friction, and clarification signals could not be refreshed." onRetry={() => void query.refetch()} retrying={query.isFetching} />;
   }
   const data = query.data;
   const mismatches = data.level_assessments.filter((item) => item.mismatch);
@@ -781,7 +828,7 @@ function PanelLoading({ rows = 4 }: { rows?: number }) {
 }
 
 function PanelError({ title, onRetry, retrying }: { title: string; onRetry: () => void; retrying: boolean }) {
-  return <ErrorState className="min-h-48" title={title} description="This signal could not be refreshed. Other cockpit panels remain independent." onRetry={onRetry} retrying={retrying} />;
+  return <ErrorState density="compact" title={title} description="This signal could not be refreshed. Other cockpit panels remain independent." onRetry={onRetry} retrying={retrying} />;
 }
 
 function EmptyPanel({ title, description }: { title: string; description: string }) {

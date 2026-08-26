@@ -8,14 +8,17 @@ const config: Config = {
   ],
   theme: {
     extend: {
+      screens: {
+        xs: "480px",
+      },
       fontFamily: {
         sans: [
-          '"DM Sans"', '"Inter"', "-apple-system", "BlinkMacSystemFont",
+          "var(--font-dm-sans)", '"Inter"', "-apple-system", "BlinkMacSystemFont",
           '"Segoe UI"', "Roboto", '"Helvetica Neue"', "Arial",
           "sans-serif",
         ],
-        serif: ['"DM Sans"', '"Inter"', "sans-serif"],
-        mono: ['"DM Mono"', '"JetBrains Mono"', '"SF Mono"', '"Fira Code"', "monospace"],
+        serif: ["var(--font-dm-sans)", '"Inter"', "sans-serif"],
+        mono: ["var(--font-dm-mono)", '"JetBrains Mono"', '"SF Mono"', '"Fira Code"', "monospace"],
       },
       colors: {
         semantic: {
@@ -62,7 +65,7 @@ const config: Config = {
           600: "#B4233B",
         },
         ink: {
-          400: "#7E8691",
+          400: "#626B76",
           500: "#595D66",
           600: "#303037",
           700: "#010D1B",

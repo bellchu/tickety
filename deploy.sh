@@ -2,33 +2,18 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-CHART_DIR="$ROOT_DIR/deploy/helm/tickety"
+readonly LOCAL_DOCKER_HOST=unix:///var/run/docker.sock
+DOCKER=(docker --host "$LOCAL_DOCKER_HOST")
+COMPOSE=("${DOCKER[@]}" compose --project-directory "$ROOT_DIR" -f "$ROOT_DIR/docker-compose.yml")
 
 usage() {
   cat <<'EOF'
 Usage:
   ./deploy.sh docker
-  ./deploy.sh kubernetes --registry REGISTRY_PREFIX [options]
-  ./deploy.sh aks --acr ACR_NAME [options]
 
-Docker options:
-  No flags are required. Configure optional settings in .env.
-
-Kubernetes and AKS options:
-  --registry PREFIX   Registry path, for example ghcr.io/acme/tickety
-  --acr NAME          Azure Container Registry name (AKS mode only)
-  --tag TAG           Immutable image tag (default: Git SHA plus timestamp)
-  --namespace NAME    Kubernetes namespace (default: tickety)
-  --release NAME      Helm release name (default: tickety)
-  --values FILE       Additional Helm values file
-  --platform VALUE    Buildx target platform (default: linux/amd64)
-  --timeout VALUE     Helm timeout (default: 10m)
-  --skip-build        Deploy images that already exist in the registry
-
-Examples:
-  ./deploy.sh docker
-  ./deploy.sh kubernetes --registry ghcr.io/acme/tickety --values tickety-values.yaml
-  ./deploy.sh aks --acr myregistry --values tickety-values.yaml
+The only supported production release path is Docker Compose to
+https://tickety.nexora.com through the audited local Cloudflare Tunnel mapping.
+No flags are accepted; configure reviewed production settings in .env.
 EOF
 }
 
@@ -39,42 +24,168 @@ require_command() {
   fi
 }
 
-validate_kubernetes_name() {
-  local value=$1
-  local label=$2
-  local max_length=${3:-63}
-  if [[ ! $value =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || ((${#value} > max_length)); then
-    echo "$label must be a valid DNS label with at most $max_length characters: $value" >&2
+validate_local_docker_target() {
+  local active_context
+  local context_endpoint
+
+  if [[ -n ${DOCKER_HOST:-} || -n ${DOCKER_CONTEXT:-} ]]; then
+    echo "Docker production deployment rejected: DOCKER_HOST and DOCKER_CONTEXT overrides are forbidden." >&2
+    exit 1
+  fi
+  if [[ ! -S /var/run/docker.sock ]]; then
+    echo "Docker production deployment rejected: local Docker Unix socket is unavailable." >&2
+    exit 1
+  fi
+  active_context=$(docker context show)
+  context_endpoint=$(docker context inspect --format '{{.Endpoints.docker.Host}}' "$active_context")
+  if [[ $context_endpoint != "$LOCAL_DOCKER_HOST" ]]; then
+    echo "Docker production deployment rejected: active context $active_context targets $context_endpoint, not $LOCAL_DOCKER_HOST." >&2
+    exit 1
+  fi
+  if ! "${DOCKER[@]}" info >/dev/null 2>&1; then
+    echo "Docker production deployment rejected: local Docker Engine is unavailable." >&2
+    exit 1
+  fi
+  echo "Local Docker target verified: context=$active_context endpoint=$context_endpoint."
+}
+
+require_clean_git_tree() {
+  local worktree_status
+
+  require_command git
+  if ! git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "Docker production deployment requires an auditable Git worktree." >&2
+    exit 1
+  fi
+  worktree_status=$(git -C "$ROOT_DIR" status --porcelain=v1 --untracked-files=normal)
+  if [[ -n $worktree_status ]]; then
+    echo "Docker production deployment rejected: the Git worktree is dirty." >&2
+    echo "$worktree_status" >&2
     exit 1
   fi
 }
 
-source_sha() {
-  if command -v git >/dev/null 2>&1 && git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    git -C "$ROOT_DIR" rev-parse --short=12 HEAD
-  else
-    printf 'local'
+require_expected_git_head() {
+  local expected_full_sha=$1
+  local current_full_sha
+
+  current_full_sha=$(git -C "$ROOT_DIR" rev-parse HEAD)
+  if [[ $current_full_sha != "$expected_full_sha" ]]; then
+    echo "Docker production deployment rejected: Git HEAD changed during the build." >&2
+    echo "Expected: $expected_full_sha" >&2
+    echo "Current:  $current_full_sha" >&2
+    exit 1
+  fi
+}
+
+validate_docker_context_policy() {
+  local pattern
+
+  for pattern in '.env' '.env.*' 'backups/' '*.dump' '*.backup' '*.bak' '*.sql' '*.sql.gz'; do
+    if ! grep -Fqx -- "$pattern" "$ROOT_DIR/.dockerignore"; then
+      echo "Docker production deployment rejected: .dockerignore must exclude $pattern" >&2
+      exit 1
+    fi
+  done
+}
+
+validate_backend_image_contents() {
+  local backend_image=tickety-backend:latest
+  local expected_image_id=$1
+  local actual_image_id
+  local configured_count
+
+  configured_count=$("${COMPOSE[@]}" config --images | \
+    grep -Fxc -- "$backend_image" || true)
+  if [[ $configured_count != 3 ]]; then
+    echo "Docker production deployment rejected: migrate, backend, and worker must share $backend_image." >&2
+    exit 1
+  fi
+  if ! actual_image_id=$("${DOCKER[@]}" image inspect --format '{{.Id}}' "$backend_image" 2>/dev/null); then
+    echo "Docker production deployment rejected: backend image was not built." >&2
+    exit 1
+  fi
+  if [[ $actual_image_id != "$expected_image_id" ]]; then
+    echo "Docker production deployment rejected: backend image tag changed after the audited build." >&2
+    exit 1
+  fi
+  "${DOCKER[@]}" run --rm --entrypoint python "$expected_image_id" -c '
+from pathlib import Path
+
+root = Path("/app")
+blocked = []
+for path in root.rglob("*"):
+    if not path.is_file():
+        continue
+    relative = path.relative_to(root)
+    name = path.name
+    if (
+        "backups" in relative.parts
+        or name == ".env"
+        or (name.startswith(".env.") and name != ".env.example")
+        or name.endswith((".dump", ".backup", ".bak", ".sql", ".sql.gz", ".db", ".sqlite"))
+    ):
+        blocked.append(str(relative))
+if blocked:
+    raise SystemExit("backend image contains files forbidden by the production context policy")
+print("Backend image context verified: no environment files or database backups.")
+'
+}
+
+validate_image_tag_id() {
+  local image_tag=$1
+  local expected_image_id=$2
+  local actual_image_id
+
+  if ! actual_image_id=$("${DOCKER[@]}" image inspect --format '{{.Id}}' "$image_tag" 2>/dev/null); then
+    echo "Docker production deployment rejected: $image_tag was not built." >&2
+    exit 1
+  fi
+  if [[ $actual_image_id != "$expected_image_id" ]]; then
+    echo "Docker production deployment rejected: $image_tag changed after the audited build." >&2
+    exit 1
   fi
 }
 
 deploy_docker() {
+  local build_full_sha
+  local backend_image_id
+  local frontend_image_id
   require_command docker
-  if ! docker compose version >/dev/null 2>&1; then
+  validate_local_docker_target
+  if ! "${COMPOSE[@]}" version >/dev/null 2>&1; then
     echo "Docker Compose 2.24 or later is required (run it as 'docker compose')." >&2
     exit 1
   fi
 
-  docker compose -f "$ROOT_DIR/docker-compose.yml" config --quiet
   local build_sha
   local build_time
-  build_sha=$(source_sha)
+  local frontend_binding
+
+  require_clean_git_tree
+  validate_docker_context_policy
+  build_full_sha=$(git -C "$ROOT_DIR" rev-parse HEAD)
+  build_sha=$(git -C "$ROOT_DIR" rev-parse --short=12 HEAD)
+  "$ROOT_DIR/scripts/verify-compose-production.sh" --mapping-only
   build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  docker compose -f "$ROOT_DIR/docker-compose.yml" build \
+  "${COMPOSE[@]}" build \
     --build-arg "BUILD_SHA=$build_sha" \
     --build-arg "BUILD_TIME=$build_time"
-  docker compose -f "$ROOT_DIR/docker-compose.yml" up --detach --no-build --wait
-  FRONTEND_BINDING=$(docker compose -f "$ROOT_DIR/docker-compose.yml" port frontend 3000)
-  echo "Tickety is ready on $FRONTEND_BINDING (build $build_sha)"
+  backend_image_id=$("${DOCKER[@]}" image inspect --format '{{.Id}}' tickety-backend:latest)
+  frontend_image_id=$("${DOCKER[@]}" image inspect --format '{{.Id}}' tickety-frontend:latest)
+  validate_backend_image_contents "$backend_image_id"
+  validate_image_tag_id tickety-frontend:latest "$frontend_image_id"
+  require_clean_git_tree
+  require_expected_git_head "$build_full_sha"
+  "$ROOT_DIR/scripts/verify-compose-production.sh" --mapping-only
+  validate_backend_image_contents "$backend_image_id"
+  validate_image_tag_id tickety-frontend:latest "$frontend_image_id"
+  "${COMPOSE[@]}" up --detach --no-build --wait
+  "$ROOT_DIR/scripts/verify-compose-production.sh" \
+    --expected-full-sha "$build_full_sha" \
+    --expected-short-sha "$build_sha"
+  frontend_binding=$("${COMPOSE[@]}" port frontend 3000)
+  echo "Tickety production is verified at https://tickety.nexora.com (local binding $frontend_binding, build $build_sha)"
 }
 
 MODE=${1:-}
@@ -84,195 +195,15 @@ if [[ -z $MODE || $MODE == "-h" || $MODE == "--help" ]]; then
 fi
 shift
 
-if [[ $MODE == docker ]]; then
-  if (($#)); then
-    echo "The docker mode does not accept command-line options; use .env." >&2
-    exit 1
-  fi
-  deploy_docker
-  exit 0
-fi
-
-if [[ $MODE != kubernetes && $MODE != aks ]]; then
-  echo "Unknown deployment mode: $MODE" >&2
+if [[ $MODE != docker ]]; then
+  echo "Unsupported deployment mode: $MODE" >&2
+  echo "Tickety production must use ./deploy.sh docker and the fixed Compose/Cloudflare mapping." >&2
   usage >&2
   exit 1
 fi
-
-REGISTRY_PREFIX=""
-ACR_NAME=""
-IMAGE_TAG=""
-TAG_WAS_PROVIDED=false
-NAMESPACE=tickety
-RELEASE=tickety
-VALUES_FILE=""
-PLATFORM=linux/amd64
-HELM_TIMEOUT=10m
-SKIP_BUILD=false
-
-while (($#)); do
-  case "$1" in
-    --registry)
-      REGISTRY_PREFIX=${2:?--registry requires a value}
-      shift 2
-      ;;
-    --acr)
-      ACR_NAME=${2:?--acr requires a value}
-      shift 2
-      ;;
-    --tag)
-      IMAGE_TAG=${2:?--tag requires a value}
-      TAG_WAS_PROVIDED=true
-      shift 2
-      ;;
-    --namespace)
-      NAMESPACE=${2:?--namespace requires a value}
-      shift 2
-      ;;
-    --release)
-      RELEASE=${2:?--release requires a value}
-      shift 2
-      ;;
-    --values)
-      VALUES_FILE=${2:?--values requires a value}
-      shift 2
-      ;;
-    --platform)
-      PLATFORM=${2:?--platform requires a value}
-      shift 2
-      ;;
-    --timeout)
-      HELM_TIMEOUT=${2:?--timeout requires a value}
-      shift 2
-      ;;
-    --skip-build)
-      SKIP_BUILD=true
-      shift
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      echo "Unknown option: $1" >&2
-      usage >&2
-      exit 1
-      ;;
-  esac
-done
-
-validate_kubernetes_name "$NAMESPACE" Namespace
-validate_kubernetes_name "$RELEASE" Release 53
-
-if [[ -n $VALUES_FILE && ! -r $VALUES_FILE ]]; then
-  echo "Values file is not readable: $VALUES_FILE" >&2
+if (($#)); then
+  echo "The docker mode does not accept command-line options; use .env." >&2
   exit 1
 fi
 
-BUILD_SHA=$(source_sha)
-BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-if [[ -z $IMAGE_TAG ]]; then
-  IMAGE_TAG="${BUILD_SHA}-$(date -u +%Y%m%d%H%M%S)"
-fi
-if [[ $SKIP_BUILD == true && $TAG_WAS_PROVIDED == false ]]; then
-  echo "--skip-build requires --tag so the existing images are unambiguous." >&2
-  exit 1
-fi
-if [[ ! $IMAGE_TAG =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]]; then
-  echo "Invalid container image tag: $IMAGE_TAG" >&2
-  exit 1
-fi
-
-if [[ $MODE == aks ]]; then
-  if [[ -z $ACR_NAME ]]; then
-    echo "AKS mode requires --acr ACR_NAME." >&2
-    exit 1
-  fi
-elif [[ -z $REGISTRY_PREFIX ]]; then
-  echo "Kubernetes mode requires --registry REGISTRY_PREFIX." >&2
-  exit 1
-fi
-
-require_command kubectl
-require_command helm
-KUBE_CONTEXT=$(kubectl config current-context)
-kubectl cluster-info >/dev/null
-echo "Kubernetes context: $KUBE_CONTEXT"
-
-if [[ $MODE == aks ]]; then
-  require_command az
-  REGISTRY_SERVER=$(az acr show --name "$ACR_NAME" --query loginServer --output tsv)
-  if [[ -z $REGISTRY_SERVER ]]; then
-    echo "Could not resolve the login server for ACR: $ACR_NAME" >&2
-    exit 1
-  fi
-  REGISTRY_PREFIX="${REGISTRY_SERVER%/}/tickety"
-fi
-
-REGISTRY_PREFIX=${REGISTRY_PREFIX%/}
-if [[ -z $REGISTRY_PREFIX || $REGISTRY_PREFIX =~ [[:space:]] ]]; then
-  echo "Registry prefix must be non-empty and contain no whitespace." >&2
-  exit 1
-fi
-BACKEND_REPOSITORY="$REGISTRY_PREFIX/backend"
-FRONTEND_REPOSITORY="$REGISTRY_PREFIX/frontend"
-
-HELM_VALUE_ARGS=()
-if [[ -n $VALUES_FILE ]]; then
-  HELM_VALUE_ARGS+=(--values "$VALUES_FILE")
-fi
-HELM_VALUE_ARGS+=(
-  --set-string "backend.image.repository=$BACKEND_REPOSITORY"
-  --set-string "backend.image.tag=$IMAGE_TAG"
-  --set-string "frontend.image.repository=$FRONTEND_REPOSITORY"
-  --set-string "frontend.image.tag=$IMAGE_TAG"
-)
-
-echo "Validating Helm configuration..."
-helm lint "$CHART_DIR" "${HELM_VALUE_ARGS[@]}"
-helm template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
-  "${HELM_VALUE_ARGS[@]}" >/dev/null
-
-if [[ $SKIP_BUILD == false && $MODE == aks ]]; then
-  echo "Building backend and frontend images in Azure Container Registry..."
-  az acr build --registry "$ACR_NAME" --target backend \
-    --image "tickety/backend:$IMAGE_TAG" \
-    --build-arg "BUILD_SHA=$BUILD_SHA" --build-arg "BUILD_TIME=$BUILD_TIME" \
-    "$ROOT_DIR"
-  az acr build --registry "$ACR_NAME" --target frontend \
-    --image "tickety/frontend:$IMAGE_TAG" \
-    --build-arg "BUILD_SHA=$BUILD_SHA" --build-arg "BUILD_TIME=$BUILD_TIME" \
-    "$ROOT_DIR"
-elif [[ $SKIP_BUILD == false ]]; then
-  require_command docker
-  if ! docker buildx version >/dev/null 2>&1; then
-    echo "Docker Buildx is required to build portable Kubernetes images." >&2
-    exit 1
-  fi
-  echo "Building and pushing backend and frontend images..."
-  docker buildx build --platform "$PLATFORM" --target backend --push \
-    --tag "$BACKEND_REPOSITORY:$IMAGE_TAG" \
-    --build-arg "BUILD_SHA=$BUILD_SHA" --build-arg "BUILD_TIME=$BUILD_TIME" \
-    "$ROOT_DIR"
-  docker buildx build --platform "$PLATFORM" --target frontend --push \
-    --tag "$FRONTEND_REPOSITORY:$IMAGE_TAG" \
-    --build-arg "BUILD_SHA=$BUILD_SHA" --build-arg "BUILD_TIME=$BUILD_TIME" \
-    "$ROOT_DIR"
-fi
-
-HELM_ARGS=(
-  upgrade --install "$RELEASE" "$CHART_DIR"
-  --namespace "$NAMESPACE"
-  --create-namespace
-  "${HELM_VALUE_ARGS[@]}"
-  --wait
-  --wait-for-jobs
-  --timeout "$HELM_TIMEOUT"
-)
-
-echo "Deploying Helm release $RELEASE to namespace $NAMESPACE..."
-helm "${HELM_ARGS[@]}"
-helm test "$RELEASE" --namespace "$NAMESPACE" --timeout 2m
-
-echo "Deployment complete."
-kubectl get pods,jobs,service,ingress --namespace "$NAMESPACE"
+deploy_docker

@@ -31,7 +31,7 @@ Tickety — a read-only AI sidekick for an existing ITSM system. Freshservice is
 | Frontend | Next.js 16.3 · Tailwind CSS · TanStack Query · Recharts |
 | AI | LiteLLM (Microsoft Foundry · Custom OpenAI-compatible API) |
 | Database | PostgreSQL |
-| Infra | Docker Compose · Kubernetes · Helm · AKS |
+| Infra | Docker Compose · Cloudflare Tunnel · Caddy |
 
 ## Quick start
 
@@ -44,13 +44,15 @@ uv pip compile requirements.txt --universal --python-version 3.11 --output-file 
 ```
 
 ```bash
-./deploy.sh docker
+docker compose up --build --wait
 open http://localhost:3000
 ```
 
 This starts the demo configuration, including PostgreSQL and migrations. For
-production Docker, Kubernetes/Helm, AKS/ACR, external PostgreSQL, upgrades, or
-data-retention instructions, see the [deployment guide](docs/deployment.md).
+the fail-closed Docker Compose production entrypoint, fixed Cloudflare Tunnel
+mapping, upgrades, or data-retention instructions, see the
+[deployment guide](docs/deployment.md). Tickety has one production target:
+`https://tickety.nexora.com`.
 
 > **Demo mode is on by default.** Public browsing does not require login. Sign in
 > with the seeded administrator to configure the workspace and use protected AI,
@@ -166,6 +168,7 @@ LLM_PROVIDER_REQUESTS_PER_MINUTE=120
 LLM_PROVIDER_TOKENS_PER_MINUTE=250000
 AI_PIPELINE_TIMEOUT_SECONDS=900
 AI_BACKGROUND_TICKETS_PER_SWEEP=5
+AI_RISK_BACKFILL_PER_SWEEP=25
 TICKET_EMBEDDING_MAX_COMMENTS_PER_REFRESH=50
 AI_USER_REQUESTS_PER_MINUTE=10
 AI_USER_REQUESTS_PER_DAY=200
@@ -188,6 +191,9 @@ The background worker admits at most `AI_BACKGROUND_TICKETS_PER_SWEEP` tickets
 per scan (default 5, bounded to 1-25). Set the provider RPM/TPM values at or
 below the actual Foundry deployment allocation; 429 retries honor both
 `Retry-After` and Foundry's `retry-after-ms` response hint.
+Legacy escalation-risk repair is separately capped by
+`AI_RISK_BACKFILL_PER_SWEEP` (default 25, bounded to 1-100), records an explicit
+completion marker, and never treats a legitimate zero score as missing.
 Provider base URLs must use public HTTPS endpoints unless deployment-owned
 private/insecure endpoint exceptions are deliberately enabled. Foundry URLs
 must use a Microsoft Azure hostname and end in `/openai/v1`. In production,
@@ -216,12 +222,13 @@ embedding, and Freshservice settings through the Settings page. Production
 loads only overrides carrying an admin-approval marker, so stale demo rows do
 not become active after a mode change. Secret values remain masked, destination
 validation remains enforced, and workers refresh approved changes from the
-database without requiring a pod restart.
+database without requiring a worker-container restart.
 
 Runtime mode, database and proxy URLs, private-network/provider allowlists,
 CORS, cookie/login enforcement, Jira destinations, and SSO remain
 deployment-managed trust boundaries. Change those values in the workload
-environment/Secret and roll out the affected workloads.
+environment through the ignored `.env` file, then use the audited
+`./deploy.sh docker` release path.
 
 ## Production mode
 
@@ -433,13 +440,13 @@ app/
     │   ├── login/             Authentication
     │   └── profile/           User profile
     ├── components/
-    │   ├── layout/            Sidebar, footer, logo, sync indicator
+    │   ├── layout/            Sidebar, shell, footer, logo, and error boundaries
     │   ├── dashboard/         KPI cards
-    │   ├── engagement/        Sentiment, momentum, recognitions, tiers
     │   ├── ticket/            AI stream, ticket list, modals
     │   └── ui/                Shared UI (searchable select)
     └── lib/                   API client, types, utilities, WebSocket, stores
-k8s/                           Namespace, workloads, database, and secret setup guidance
+deploy/local-tunnel/           Fixed production TLS proxy configuration
+scripts/                       Compose production validation and verification
 ```
 
 Production schema changes use forward-only Alembic migrations. See

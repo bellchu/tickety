@@ -9,6 +9,8 @@ from sqlalchemy.pool import StaticPool
 from app.backend import main
 from app.backend.database import (
     Base,
+    ChangeApprovalRecord,
+    ChangeRecord,
     RecognitionRecord,
     SessionRecord,
     TicketCategoryRecord,
@@ -32,6 +34,7 @@ class RouteAuthorizationTests(unittest.TestCase):
                 UserRecord(id="admin", name="Admin", role="admin", is_active=True),
                 UserRecord(id="supervisor", name="Supervisor", role="supervisor", is_active=True),
                 UserRecord(id="agent", name="Agent", role="agent", is_active=True),
+                UserRecord(id="auditor", name="Unknown Role", role="auditor", is_active=True),
                 UserRecord(id="inactive", name="Inactive", role="agent", is_active=False),
                 TicketRecord(
                     id="ticket-1",
@@ -90,6 +93,7 @@ class RouteAuthorizationTests(unittest.TestCase):
                 return db.get(UserRecord, role)
 
         main.app.dependency_overrides[main.get_current_user] = current_user
+        main.app.dependency_overrides[main.get_authenticated_user] = current_user
         main.app.dependency_overrides[main.get_protected_ai_user] = current_user
 
     def test_agent_cannot_permanently_delete_ticket(self):
@@ -125,13 +129,40 @@ class RouteAuthorizationTests(unittest.TestCase):
         response = self.client.get("/users")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual({user["id"] for user in response.json()}, {"admin", "supervisor", "agent", "inactive"})
+        self.assertEqual(
+            {user["id"] for user in response.json()},
+            {"admin", "supervisor", "agent", "auditor", "inactive"},
+        )
 
     def test_only_admin_can_purge_a_deactivated_user(self):
         with self.session_factory() as db:
             db.add_all([
                 SessionRecord(token="inactive-session", user_id="inactive"),
                 RecognitionRecord(user_id="inactive", recognition_key="inactive-award"),
+                ChangeRecord(
+                    id="approved-change",
+                    title="Completed CAB review",
+                    status="Approved",
+                    requested_by="agent",
+                ),
+                ChangeRecord(
+                    id="pending-change",
+                    title="Awaiting CAB review",
+                    status="CAB Review",
+                    requested_by="agent",
+                ),
+            ])
+            db.flush()
+            db.add_all([
+                ChangeApprovalRecord(
+                    change_id="approved-change",
+                    approver_id="inactive",
+                    decision="approved",
+                ),
+                ChangeApprovalRecord(
+                    change_id="pending-change",
+                    approver_id="inactive",
+                ),
             ])
             db.commit()
 
@@ -143,6 +174,8 @@ class RouteAuthorizationTests(unittest.TestCase):
         response = self.client.delete("/users/inactive/purge")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "purged")
+        self.assertEqual(response.json()["removed_pending_approvals"], 1)
+        self.assertEqual(response.json()["anonymized_decided_approvals"], 1)
         with self.session_factory() as db:
             self.assertIsNone(db.get(UserRecord, "inactive"))
             self.assertIsNone(db.get(SessionRecord, "inactive-session"))
@@ -152,6 +185,19 @@ class RouteAuthorizationTests(unittest.TestCase):
             )
             self.assertIsNotNone(db.get(TicketRecord, "ticket-1"))
             self.assertIsNone(db.get(TicketRecord, "ticket-1").assignee_id)
+            decided = db.query(ChangeApprovalRecord).filter(
+                ChangeApprovalRecord.change_id == "approved-change"
+            ).one()
+            self.assertIsNone(decided.approver_id)
+            self.assertEqual(decided.decision, "approved")
+            self.assertEqual(db.get(ChangeRecord, "approved-change").status, "Approved")
+            self.assertEqual(
+                db.query(ChangeApprovalRecord).filter(
+                    ChangeApprovalRecord.change_id == "pending-change"
+                ).count(),
+                0,
+            )
+            self.assertEqual(db.get(ChangeRecord, "pending-change").status, "CAB Review")
 
     def test_active_user_must_be_deactivated_before_purge(self):
         self._as_role("admin")
@@ -159,6 +205,68 @@ class RouteAuthorizationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         with self.session_factory() as db:
             self.assertIsNotNone(db.get(UserRecord, "agent"))
+
+    def test_last_active_admin_cannot_be_deactivated(self):
+        self._as_role("admin")
+
+        patched = self.client.patch("/users/admin", json={"is_active": False})
+        deleted = self.client.delete("/users/admin")
+
+        self.assertEqual(patched.status_code, 400, patched.text)
+        self.assertEqual(deleted.status_code, 400, deleted.text)
+        self.assertEqual(
+            patched.json(),
+            {"detail": "Cannot deactivate the last active admin"},
+        )
+        with self.session_factory() as db:
+            self.assertTrue(db.get(UserRecord, "admin").is_active)
+
+    def test_stale_admin_request_cannot_demote_the_only_active_admin(self):
+        # This models the second half of a concurrent cross-admin mutation:
+        # authorization completed while the actor was active, but the first
+        # serialized transaction has since removed that actor from the active
+        # admin set.
+        stale_actor = UserRecord(
+            id="stale-admin",
+            name="Stale Admin",
+            role="admin",
+            is_active=True,
+        )
+        main.app.dependency_overrides[main.get_current_user] = lambda: stale_actor
+        main.app.dependency_overrides[main.get_authenticated_user] = lambda: stale_actor
+
+        response = self.client.patch("/users/admin", json={"role": "agent"})
+
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(
+            response.json(),
+            {"detail": "Cannot deactivate the last active admin"},
+        )
+        with self.session_factory() as db:
+            self.assertEqual(db.get(UserRecord, "admin").role, "admin")
+
+    def test_canonical_email_identity_is_unique_across_user_writes(self):
+        self._as_role("supervisor")
+
+        created = self.client.post("/users", json={
+            "name": "First Account",
+            "email": " Shared@Example.COM ",
+            "role": "agent",
+        })
+        duplicate = self.client.post("/users", json={
+            "name": "Second Account",
+            "email": "shared@example.com",
+            "role": "agent",
+        })
+        conflicting_update = self.client.patch(
+            "/users/agent",
+            json={"email": "SHARED@example.com"},
+        )
+
+        self.assertEqual(created.status_code, 201, created.text)
+        self.assertEqual(created.json()["email"], "shared@example.com")
+        self.assertEqual(duplicate.status_code, 409, duplicate.text)
+        self.assertEqual(conflicting_update.status_code, 409, conflicting_update.text)
 
     def test_agent_cannot_bulk_update_tickets(self):
         self._as_role("agent")
@@ -171,6 +279,49 @@ class RouteAuthorizationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
         with self.session_factory() as db:
             self.assertNotEqual(db.get(TicketRecord, "ticket-1").status, "Closed")
+
+    def test_agent_can_read_ticket_option_config(self):
+        self._as_role("agent")
+
+        statuses = self.client.get("/config/statuses")
+        priorities = self.client.get("/config/priorities")
+
+        self.assertEqual(statuses.status_code, 200)
+        self.assertEqual(priorities.status_code, 200)
+
+    def test_unknown_active_role_cannot_read_operational_collections(self):
+        self._as_role("auditor")
+
+        for path in (
+            "/projects",
+            "/services",
+            "/service-requests",
+            "/problems",
+            "/problems/missing",
+            "/assets",
+            "/assets/stats",
+            "/assets/missing",
+        ):
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 403, response.text)
+
+    def test_recognitions_are_self_scoped_for_agents(self):
+        self._as_role("agent")
+
+        own = self.client.get("/recognitions/agent")
+        another_user = self.client.get("/recognitions/admin")
+
+        self.assertEqual(own.status_code, 200)
+        self.assertEqual(another_user.status_code, 403)
+
+    def test_leaderboard_excludes_inactive_users(self):
+        self._as_role("agent")
+
+        response = self.client.get("/leaderboard")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("inactive", {row["id"] for row in response.json()})
 
     def test_supervisor_bulk_update_validates_references(self):
         self._as_role("supervisor")
@@ -219,6 +370,16 @@ class RouteAuthorizationTests(unittest.TestCase):
         self.assertEqual(
             self.roles_policy("/email/send", "POST"),
             {"admin", "supervisor", "agent"},
+        )
+        self.assertIsNone(self.roles_policy("/config/statuses", "GET"))
+        self.assertIsNone(self.roles_policy("/config/priorities", "GET"))
+        self.assertEqual(
+            self.roles_policy("/config/statuses", "POST"),
+            {"admin", "supervisor"},
+        )
+        self.assertEqual(
+            self.roles_policy("/config/notifications", "GET"),
+            {"admin", "supervisor"},
         )
 
 

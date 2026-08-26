@@ -27,13 +27,12 @@ const nextConfig = {
   // NOTE: do NOT use `rewrites()` to proxy /api/* to the backend.
   // Next.js evaluates `rewrites()` at `next build` time and bakes the
   // destination (including the env-derived host) into routes-manifest.json,
-  // so a runtime NEXT_PUBLIC_API_URL change is ignored. That breaks the
-  // in-cluster frontend pod, which only knows the backend address
-  // (`http://backend-service:8000`) at pod-startup time.
+  // so a runtime backend-address change is ignored. The Compose frontend only
+  // receives its private `http://backend:8000` address when the container starts.
   //
   // API proxying is instead handled at runtime by the catch-all route handler
-  // in app/api/[...path]/route.ts, which reads process.env.NEXT_PUBLIC_API_URL
-  // on every request.
+  // in app/api/[...path]/route.ts, which reads the server-only BACKEND_URL on
+  // every request.
 };
 
 module.exports = nextConfig;

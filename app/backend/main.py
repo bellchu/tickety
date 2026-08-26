@@ -17,15 +17,15 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
-from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query, Request, Response, Cookie, Body, Header
+from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query, Path, Request, Response, Cookie, Body, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
-from sqlalchemy.orm import Session
-from sqlalchemy import and_, case, desc, func, or_, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, aliased
+from sqlalchemy import and_, case, desc, extract, func, or_, select, text
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from .database import (
-    Base, init_db, get_db, SessionLocal,
+    Base, init_db, get_db, SessionLocal, normalize_user_email,
     TicketRecord, UserRecord, RecognitionRecord,
     ExternalUserRecord, ExternalGroupRecord, ExternalGroupMembershipRecord,
     IntelligenceStudyRecord,
@@ -61,6 +61,7 @@ from .ai_eligibility import (
     terminal_status_names as shared_terminal_status_names,
 )
 from .sla_policy import sla_eligible_filter, ticket_is_sla_exempt
+from .portable_keys import portable_ascii_lower, portable_ascii_lower_expression
 from .schema import (
     Ticket, User, UserSummary, Recognition, SyncStatus,
     AIStatusResponse, AIRetryQueueActionResponse, AIRetryScheduleRequest,
@@ -86,12 +87,14 @@ from .schema import (
     NotificationConfig, NotificationConfigUpdate,
     ReportSummary,
     Project, ProjectCreate, ProjectUpdate,
-    ServiceItem, ServiceItemCreate, ServiceRequest, ServiceRequestCreate,
+    ServiceItem, ServiceItemCreate, ServiceItemUpdate, ServiceRequest, ServiceRequestCreate,
     ServiceRequestApprovalDecision, ServiceRequestFulfillmentUpdate,
     Problem, ProblemCreate, ProblemUpdate,
     ChangeRecordOut, ChangeCreate, ChangeUpdate, ChangeApprovalOut, ChangeApprovalCreate, ChangeApprovalDecision,
     Asset, AssetCreate, AssetUpdate,
     SurveyTemplate, SurveyOut, SurveySend, SurveyResponseCreate,
+    SurveyPortalLookupRequest, SurveyPortalQuestion,
+    SurveyPortalResponseRequest, SurveyPortalSubmitted,
     TimeEntry, TimeEntryCreate,
     PortalTicketCreate, PortalTicketOut, PortalTicketCreated,
     IntegrationBindingCreate, IntegrationBindingSuspend,
@@ -104,6 +107,7 @@ from .email_service import (
     EmailConfigurationError,
     EmailDeliveryError,
     normalize_email_address,
+    normalize_sender_name,
     send_email as send_sendgrid_email,
     sendgrid_status,
 )
@@ -293,6 +297,9 @@ _LOGIN_FAILURE_WINDOW = timedelta(minutes=15)
 _LOGIN_FAILURE_LIMIT = 5
 PORTAL_ACCESS_TOKEN_BYTES = 32
 PORTAL_ACCESS_TOKEN_TTL_DAYS = 90
+SURVEY_RESPONSE_TOKEN_BYTES = 32
+SURVEY_RESPONSE_TOKEN_TTL_DAYS = 30
+SURVEY_PRODUCTION_ORIGIN = "https://tickety.nexora.com"
 _PUBLIC_HTTP_PATHS = {
     "/health",
     "/health/live",
@@ -366,7 +373,11 @@ def _roles_required_for_request(path: str, method: str) -> Optional[set[str]]:
         return {"admin"}
     if path.startswith("/admin/"):
         return {"admin", "supervisor"}
-    if path.startswith("/config/"):
+    if path.startswith("/config/") and (
+        unsafe or path.startswith("/config/notifications")
+    ):
+        return {"admin", "supervisor"}
+    if path == "/surveys" or path.startswith("/surveys/"):
         return {"admin", "supervisor"}
     if path == "/email" or path.startswith("/email/"):
         return {"admin", "supervisor", "agent"}
@@ -377,6 +388,14 @@ def _roles_required_for_request(path: str, method: str) -> Optional[set[str]]:
     if path == "/users" or (unsafe and path.startswith("/users/")):
         return {"admin", "supervisor"}
     if unsafe and path.startswith("/kb/") and path.endswith("/feedback"):
+        return None
+    # A change approver may be an agent. Let the exact decision endpoint reach
+    # its handler, which requires a real session and verifies that the caller is
+    # the assigned approver (or an admin). Keep every other change mutation on
+    # the admin/supervisor middleware boundary below.
+    if method.upper() == "PATCH" and re.fullmatch(
+        r"/changes/[^/]+/approvals/[^/]+", path
+    ):
         return None
     if unsafe and path.startswith((
         "/categories",
@@ -391,6 +410,9 @@ def _roles_required_for_request(path: str, method: str) -> Optional[set[str]]:
     )):
         return {"admin", "supervisor"}
     return None
+
+
+_OPERATIONAL_USER_ROLES = frozenset({"admin", "supervisor", "agent"})
 
 
 def _resolve_request_user(request: Request, db: Session, allow_demo: bool) -> Optional[UserRecord]:
@@ -637,8 +659,27 @@ def _clear_login_failures(payload: LoginRequest, request: Request):
     _LOGIN_FAILURES.pop(_login_key(payload, request), None)
 
 
+def _request_target_contains_nul(request: Request) -> bool:
+    if "\x00" in str(request.scope.get("path", "")):
+        return True
+    return any(
+        "\x00" in part
+        for key, value in request.query_params.multi_items()
+        for part in (key, value)
+    )
+
+
 @app.middleware("http")
 async def require_auth_by_default(request: Request, call_next):
+    # PostgreSQL rejects NUL-containing string bind parameters.  Reject them
+    # once at the decoded request-target boundary so every current and future
+    # path/query SQL filter returns a stable client error instead of a 500.
+    if _request_target_contains_nul(request):
+        return JSONResponse(
+            {"detail": "Request path and query parameters must not contain NUL characters"},
+            status_code=422,
+        )
+
     # Unsafe methods must always pass the origin gate, even in no-login demo
     # mode: anonymous POSTs would otherwise execute as the demo fallback
     # identity with no cross-site protection at all.
@@ -661,12 +702,18 @@ async def require_auth_by_default(request: Request, call_next):
         user = _resolve_request_user(request, db, allow_demo=False)
         if not user:
             return JSONResponse({"detail": "Not authenticated"}, status_code=401)
-        if roles and user.role not in roles:
+        normalized_role = (user.role or "").lower()
+        # Authentication alone is not authorization. Unknown or legacy role
+        # strings must fail closed on every non-public route, including routes
+        # whose handlers only declare authentication rather than a role.
+        if normalized_role not in _OPERATIONAL_USER_ROLES:
+            return JSONResponse({"detail": "Insufficient permissions"}, status_code=403)
+        if roles and normalized_role not in roles:
             return JSONResponse({"detail": "Insufficient permissions"}, status_code=403)
         if (
             roles
             and settings_module.is_demo_mode()
-            and (user.role or "").lower() != "admin"
+            and normalized_role != "admin"
         ):
             return JSONResponse({"detail": "Insufficient permissions"}, status_code=403)
         request.state.current_user = user
@@ -798,7 +845,7 @@ async def health_ready(response: Response, db: Session = Depends(get_db)):
 @app.get("/version")
 async def version():
     """Build/version info for the footer. Lets you identify exactly which
-    image a running pod is running (version + git SHA + build timestamp)."""
+    image a running container uses (version + git SHA + build timestamp)."""
     return {
         "app": "Tickety",
         "component": "backend",
@@ -846,15 +893,19 @@ _PUBLIC_DEMO_AI_FIELDS = {
 
 
 def _enrich_ticket_team(
-    ticket: TicketRecord, *, ai_evidence_current: bool = False
+    ticket: TicketRecord,
+    *,
+    ai_evidence_current: bool = False,
+    terminal_statuses: Optional[set[str]] = None,
 ) -> None:
     decision = intel.team_routing_decision(
         ticket.ai_suggested_category,
         ticket.ai_status,
         ai_suggested_team=ticket.ai_suggested_team,
         source_category=ticket.external_category,
-        ticket_status=ticket.workflow_status or ticket.status,
+        ticket_status=ticket.status or ticket.workflow_status,
         ai_evidence_current=ai_evidence_current,
+        terminal_statuses=terminal_statuses,
     )
     ticket.__dict__["recommended_team"] = decision.recommended_team
     ticket.__dict__["recommended_team_basis"] = decision.basis
@@ -877,6 +928,7 @@ def _enrich_tickets(db: Session, tickets: list[TicketRecord]) -> None:
     if not tickets:
         return
     ticket_ids = [ticket.id for ticket in tickets]
+    terminal_statuses = _terminal_status_names(db)
 
     assignee_ids = {ticket.assignee_id for ticket in tickets if ticket.assignee_id}
     assignee_names = {}
@@ -1000,6 +1052,7 @@ def _enrich_tickets(db: Session, tickets: list[TicketRecord]) -> None:
         _enrich_ticket_team(
             ticket,
             ai_evidence_current=ticket.id in current_triage_ids,
+            terminal_statuses=terminal_statuses,
         )
 
 
@@ -1117,7 +1170,7 @@ async def list_tickets(
     assignee_id: Optional[str] = Query(default=None, max_length=255),
     category: Optional[str] = Query(default=None, max_length=100),
     search: Optional[str] = Query(default=None, max_length=200),
-    sort: str = Query(default="newest", pattern="^(newest|oldest|priority|updated|complexity)$"),
+    sort: str = Query(default="newest", pattern="^(newest|oldest|priority|queue|updated|complexity)$"),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0, le=1_000_000),
 ):
@@ -1183,18 +1236,14 @@ async def list_tickets(
     )
     if sort == "oldest":
         q = q.order_by(source_created_at.asc(), TicketRecord.id.asc())
-    elif sort == "priority":
-        priority_rank = {
-            "P1": 1, "Urgent": 1,
-            "P2": 2, "High": 2,
-            "P3": 3, "Medium": 3,
-            "P4": 4, "Low": 4,
-        }
+    elif sort in {"priority", "queue"}:
         # SQLAlchemy's portable CASE expression keeps semantic priority order
-        # across SQLite (tests) and PostgreSQL (production).
+        # across SQLite (tests) and PostgreSQL (production), while the
+        # correlated config lookup makes administrator-defined priorities
+        # participate in the same queue instead of falling to the bottom.
         q = q.order_by(
-            case(priority_rank, value=TicketRecord.priority, else_=5),
-            source_created_at.desc(),
+            _priority_weight_expression(),
+            source_created_at.asc() if sort == "queue" else source_created_at.desc(),
             TicketRecord.id.asc(),
         )
     elif sort == "updated":
@@ -1217,7 +1266,11 @@ async def list_tickets(
     direct: set[tuple[str, str, str]] = set()
     groups: dict[tuple[str, str, str], ExternalGroupRecord] = {}
     if (user.role or "").lower() == "agent":
-        direct, groups = _agent_assignment_context(db, user)
+        direct, groups = _agent_assignment_context(
+            db,
+            user,
+            [ticket.id for ticket in tickets],
+        )
     return [
         _ticket_for_request(
             request,
@@ -1229,6 +1282,40 @@ async def list_tickets(
         )
         for ticket in tickets
     ]
+
+
+@app.get("/dashboard/summary")
+async def dashboard_summary(
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(get_current_user),
+):
+    """Return complete operational counts without downloading the ticket corpus."""
+    _authorize_ticket_view(user)
+    terminal = _terminal_status_names(db)
+    normalized_status = portable_ascii_lower_expression(TicketRecord.status)
+    active = normalized_status.notin_(terminal)
+    critical = portable_ascii_lower_expression(TicketRecord.priority).in_(("p1", "urgent"))
+    unassigned = and_(
+        func.nullif(TicketRecord.assignee_id, "").is_(None),
+        func.nullif(TicketRecord.external_assignee_id, "").is_(None),
+    )
+    total, active_count, p1_count, escalated_count, unassigned_count = db.query(
+        func.count(TicketRecord.id),
+        func.sum(case((active, 1), else_=0)),
+        func.sum(case((and_(active, critical), 1), else_=0)),
+        func.sum(case((and_(active, normalized_status == "escalated"), 1), else_=0)),
+        func.sum(case((and_(active, unassigned), 1), else_=0)),
+    ).one()
+    total = int(total or 0)
+    active_count = int(active_count or 0)
+    return {
+        "total_tickets": total,
+        "active_tickets": active_count,
+        "inactive_tickets": max(0, total - active_count),
+        "p1_active": int(p1_count or 0),
+        "escalated_active": int(escalated_count or 0),
+        "unassigned_active": int(unassigned_count or 0),
+    }
 
 
 def _agent_conversation_subqueries(db: Session):
@@ -1279,16 +1366,69 @@ def _agent_sla_deadline_expression(needs_reply):
     )
 
 
+_DEFAULT_PRIORITY_WEIGHTS = {
+    "p1": 1,
+    "urgent": 1,
+    "p2": 5,
+    "high": 5,
+    "p3": 10,
+    "medium": 10,
+    "p4": 20,
+    "low": 20,
+}
+
+
+def _priority_weight_expression():
+    """Return the configured queue weight for the outer ticket row.
+
+    The scalar lookup avoids an extra request-level query and preserves the
+    ticket-list endpoint's bounded query count. Legacy aliases remain ordered
+    sensibly when a deployment has not seeded configuration yet.
+    """
+    normalized_priority = portable_ascii_lower_expression(TicketRecord.priority)
+    configured_weight = (
+        select(TicketPriorityConfigRecord.weight)
+        .where(TicketPriorityConfigRecord.name_key == normalized_priority)
+        .limit(1)
+        .scalar_subquery()
+    )
+    fallback_weight = case(
+        _DEFAULT_PRIORITY_WEIGHTS,
+        value=normalized_priority,
+        else_=1_000,
+    )
+    return func.coalesce(configured_weight, fallback_weight)
+
+
+def _priority_score_from_weight(weight: int) -> int:
+    if weight <= 1:
+        return 40
+    if weight <= 5:
+        return 24
+    if weight <= 10:
+        return 12
+    return 4
+
+
+def _priority_weights(db: Session) -> dict[str, int]:
+    weights = dict(_DEFAULT_PRIORITY_WEIGHTS)
+    for name_key, weight in db.query(
+        TicketPriorityConfigRecord.name_key,
+        TicketPriorityConfigRecord.weight,
+    ).all():
+        if name_key and weight is not None:
+            weights[name_key] = int(weight)
+    return weights
+
+
 def _agent_next_best_score_expression(needs_reply, now: datetime):
     """Portable SQL approximation of the score shown in the reading pane."""
     deadline = _agent_sla_deadline_expression(needs_reply)
+    priority_weight = _priority_weight_expression()
     priority_score = case(
-        {
-            "P1": 40, "Urgent": 40,
-            "P2": 24, "High": 24,
-            "P3": 12, "Medium": 12,
-        },
-        value=TicketRecord.priority,
+        (priority_weight <= 1, 40),
+        (priority_weight <= 5, 24),
+        (priority_weight <= 10, 12),
         else_=4,
     )
     sla_eligible = sla_eligible_filter()
@@ -1336,11 +1476,17 @@ def _agent_next_best_score(
     *,
     needs_reply: bool,
     now: datetime,
+    priority_weights: Optional[dict[str, int]] = None,
 ) -> tuple[int, list[str], bool]:
     score = 0
     reasons: list[str] = []
-    priority_points = {"P1": 40, "Urgent": 40, "P2": 24, "High": 24, "P3": 12, "Medium": 12}
-    points = priority_points.get(ticket.priority or "", 4)
+    weights = priority_weights or _DEFAULT_PRIORITY_WEIGHTS
+    # Match the SQL trim() contract exactly. Config names are migration- and
+    # schema-constrained to portable ASCII without surrounding whitespace;
+    # tabs or Unicode whitespace in provider-owned ticket values stay unknown
+    # on both code paths instead of receiving different ranks.
+    weight = weights.get(portable_ascii_lower(ticket.priority), 1_000)
+    points = _priority_score_from_weight(weight)
     score += points
     if points >= 24:
         reasons.append(f"{ticket.priority} priority")
@@ -1380,22 +1526,25 @@ def _agent_next_best_score(
 def _agent_assignment_context(
     db: Session,
     user: UserRecord,
+    ticket_ids: list[str],
 ) -> tuple[set[tuple[str, str, str]], dict[tuple[str, str, str], ExternalGroupRecord]]:
-    direct = {
-        (
-            item.link.binding_id,
-            item.link.provider.lower(),
-            item.external_user.external_id,
-        )
-        for item in agent_workspace.linked_identities(db, user.id)
-    }
+    """Build redaction context from joins scoped to the bounded ticket page."""
+    direct = agent_workspace.linked_identity_keys_for_tickets(
+        db,
+        user.id,
+        ticket_ids,
+    )
     groups = {
         (
-            item.group.binding_id,
-            item.group.provider.lower(),
-            item.group.external_id,
-        ): item.group
-        for item in agent_workspace.accessible_groups(db, user.id)
+            group.binding_id,
+            group.provider.lower(),
+            group.external_id,
+        ): group
+        for group in agent_workspace.accessible_groups_for_tickets(
+            db,
+            user.id,
+            ticket_ids,
+        )
     }
     return direct, groups
 
@@ -1423,52 +1572,97 @@ def _agent_ticket_scope_from_context(
     return ("team", group) if group is not None else (None, None)
 
 
+def _latest_agent_public_conversation_directions(
+    db: Session,
+    ticket_ids: list[str],
+) -> dict[str, bool]:
+    """Return only the newest public conversation direction for each ticket."""
+    if not ticket_ids:
+        return {}
+    conversation_at = func.coalesce(
+        ExternalConversationRecord.provider_created_at,
+        ExternalConversationRecord.provider_updated_at,
+        ExternalConversationRecord.received_at,
+    )
+    ranked = db.query(
+        ExternalConversationRecord.ticket_id.label("ticket_id"),
+        ExternalConversationRecord.incoming.label("incoming"),
+        func.row_number().over(
+            partition_by=ExternalConversationRecord.ticket_id,
+            order_by=(
+                conversation_at.desc(),
+                ExternalConversationRecord.external_id.desc(),
+                ExternalConversationRecord.id.desc(),
+            ),
+        ).label("conversation_rank"),
+    ).filter(
+        ExternalConversationRecord.ticket_id.in_(ticket_ids),
+        ExternalConversationRecord.is_private.is_(False),
+        ExternalConversationRecord.deleted.is_(False),
+        ExternalConversationRecord.public_tombstone.is_(False),
+    ).subquery()
+    return {
+        ticket_id: bool(incoming)
+        for ticket_id, incoming in db.query(
+            ranked.c.ticket_id,
+            ranked.c.incoming,
+        ).filter(ranked.c.conversation_rank == 1).all()
+    }
+
+
 def _agent_ticket_payloads(
     db: Session,
     user: UserRecord,
     tickets: list[TicketRecord],
+    *,
+    scope: str,
 ) -> list[AgentWorkspaceTicket]:
     if not tickets:
         return []
     _enrich_tickets(db, tickets)
-    direct, groups = _agent_assignment_context(db, user)
+    ticket_ids = [ticket.id for ticket in tickets]
+    groups = {
+        (
+            group.binding_id,
+            group.provider.lower(),
+            group.external_id,
+        ): group
+        for group in (
+            agent_workspace.accessible_groups_for_tickets(db, user.id, ticket_ids)
+            if scope == "team"
+            else []
+        )
+    }
     states = {
         row.ticket_id: row
         for row in db.query(AgentTicketStateRecord).filter(
             AgentTicketStateRecord.user_id == user.id,
-            AgentTicketStateRecord.ticket_id.in_([ticket.id for ticket in tickets]),
+            AgentTicketStateRecord.ticket_id.in_(ticket_ids),
         ).all()
     }
-    latest_conversations: dict[str, ExternalConversationRecord] = {}
-    conversation_rows = db.query(ExternalConversationRecord).filter(
-        ExternalConversationRecord.ticket_id.in_([ticket.id for ticket in tickets]),
-        ExternalConversationRecord.is_private.is_(False),
-        ExternalConversationRecord.deleted.is_(False),
-        ExternalConversationRecord.public_tombstone.is_(False),
-    ).order_by(
-        ExternalConversationRecord.ticket_id,
-        func.coalesce(
-            ExternalConversationRecord.provider_created_at,
-            ExternalConversationRecord.provider_updated_at,
-            ExternalConversationRecord.received_at,
-        ),
-        ExternalConversationRecord.external_id,
-    ).all()
-    for conversation in conversation_rows:
-        latest_conversations[conversation.ticket_id] = conversation
+    latest_conversations = _latest_agent_public_conversation_directions(
+        db,
+        ticket_ids,
+    )
 
     now = datetime.utcnow()
+    priority_weights = _priority_weights(db)
     payloads: list[AgentWorkspaceTicket] = []
     for ticket in tickets:
         state = states.get(ticket.id)
         latest = latest_conversations.get(ticket.id)
-        needs_reply = latest is None or bool(latest.incoming)
+        needs_reply = latest is None or latest
         score, reasons, sla_at_risk = _agent_next_best_score(
-            ticket, needs_reply=needs_reply, now=now
+            ticket,
+            needs_reply=needs_reply,
+            now=now,
+            priority_weights=priority_weights,
         )
-        scope, group = _agent_ticket_scope_from_context(
-            user, ticket, direct, groups
-        )
+        group = groups.get((
+            ticket.binding_id,
+            (ticket.external_source or "").lower(),
+            ticket.external_group_id or "",
+        )) if scope == "team" else None
         last_activity = getattr(ticket, "last_communication_at", None) or ticket.updated_at or ticket.created_at
         is_unread = bool(
             state is None
@@ -1494,11 +1688,18 @@ def _agent_ticket_payloads(
 
 @app.get("/agent-workspace/bootstrap", response_model=AgentWorkspaceBootstrap)
 async def get_agent_workspace_bootstrap(
+    response: Response,
     db: Session = Depends(get_db),
     user: UserRecord = Depends(require_authenticated_role("admin", "supervisor", "agent")),
 ):
-    identities = agent_workspace.linked_identities(db, user.id)
-    groups = agent_workspace.accessible_groups(db, user.id)
+    identities = agent_workspace.linked_identities(db, user.id, limit=1)
+    groups, teams_truncated = agent_workspace.accessible_groups_page(
+        db,
+        user.id,
+        limit=agent_workspace.MAX_ACCESSIBLE_GROUPS,
+    )
+    response.headers["X-Teams-Limit"] = str(agent_workspace.MAX_ACCESSIBLE_GROUPS)
+    response.headers["X-Teams-Truncated"] = str(teams_truncated).lower()
     mine_filter = agent_workspace.assignment_filter(db, user, scope="mine")
     team_filter = agent_workspace.assignment_filter(db, user, scope="team")
     _latest_incoming, _latest_outgoing, needs_reply = _agent_conversation_subqueries(db)
@@ -1506,43 +1707,76 @@ async def get_agent_workspace_bootstrap(
     sla_deadline = _agent_sla_deadline_expression(needs_reply)
     active = active_ticket_filter(db)
     sla_eligible = sla_eligible_filter(_terminal_status_names(db))
+    starred = select(1).select_from(AgentTicketStateRecord).where(
+        AgentTicketStateRecord.ticket_id == TicketRecord.id,
+        AgentTicketStateRecord.user_id == user.id,
+        AgentTicketStateRecord.starred_at.isnot(None),
+    ).correlate(TicketRecord).exists()
+    aggregate = db.query(
+        func.sum(case((and_(mine_filter, active), 1), else_=0)),
+        func.sum(case((and_(mine_filter, active, needs_reply), 1), else_=0)),
+        func.sum(case((and_(
+            mine_filter,
+            active,
+            sla_eligible,
+            sla_deadline.isnot(None),
+            sla_deadline <= now + timedelta(hours=4),
+        ), 1), else_=0)),
+        func.sum(case((and_(mine_filter, active, starred), 1), else_=0)),
+        func.sum(case((and_(team_filter, active), 1), else_=0)),
+        func.sum(case((and_(
+            team_filter,
+            active,
+            TicketRecord.external_assignee_id.is_(None),
+        ), 1), else_=0)),
+    ).one()
     counts = {
-        "inbox": db.query(TicketRecord).filter(mine_filter, active).count(),
-        "needs_reply": db.query(TicketRecord).filter(mine_filter, active, needs_reply).count(),
-        "sla_at_risk": db.query(TicketRecord).filter(
-            mine_filter, active, sla_eligible,
-            sla_deadline.isnot(None), sla_deadline <= now + timedelta(hours=4)
-        ).count(),
-        "starred": db.query(TicketRecord).join(
-            AgentTicketStateRecord,
-            and_(
-                AgentTicketStateRecord.ticket_id == TicketRecord.id,
-                AgentTicketStateRecord.user_id == user.id,
-            ),
-        ).filter(mine_filter, active, AgentTicketStateRecord.starred_at.isnot(None)).count(),
-        "team_inbox": db.query(TicketRecord).filter(team_filter, active).count(),
-        "team_unassigned": db.query(TicketRecord).filter(
-            team_filter, active, TicketRecord.external_assignee_id.is_(None)
-        ).count(),
+        "inbox": int(aggregate[0] or 0),
+        "needs_reply": int(aggregate[1] or 0),
+        "sla_at_risk": int(aggregate[2] or 0),
+        "starred": int(aggregate[3] or 0),
+        "team_inbox": int(aggregate[4] or 0),
+        "team_unassigned": int(aggregate[5] or 0),
     }
+    group_counts: dict[str, tuple[int, int]] = {}
+    group_ids = [item.group.id for item in groups]
+    if group_ids:
+        group_rows = db.query(
+            ExternalGroupRecord.id,
+            func.count(TicketRecord.id),
+            func.sum(case((and_(
+                TicketRecord.id.isnot(None),
+                TicketRecord.external_assignee_id.is_(None),
+            ), 1), else_=0)),
+        ).select_from(ExternalGroupRecord).outerjoin(
+            TicketRecord,
+            and_(
+                TicketRecord.binding_id == ExternalGroupRecord.binding_id,
+                TicketRecord.external_source == ExternalGroupRecord.provider,
+                TicketRecord.external_group_id == ExternalGroupRecord.external_id,
+                active,
+            ),
+        ).filter(
+            ExternalGroupRecord.id.in_(group_ids)
+        ).group_by(
+            ExternalGroupRecord.id
+        ).all()
+        group_counts = {
+            group_id: (int(ticket_count or 0), int(unassigned_count or 0))
+            for group_id, ticket_count, unassigned_count in group_rows
+        }
     team_payloads: list[AgentWorkspaceTeam] = []
     for item in groups:
         group = item.group
-        group_filter = and_(
-            TicketRecord.binding_id == group.binding_id,
-            TicketRecord.external_source == group.provider,
-            TicketRecord.external_group_id == group.external_id,
-        )
+        ticket_count, unassigned_count = group_counts.get(group.id, (0, 0))
         team_payloads.append(AgentWorkspaceTeam(
             id=group.id,
             external_id=group.external_id,
             name=group.name,
             workspace_id=group.workspace_id,
-            membership_kind="member",
-            ticket_count=db.query(TicketRecord).filter(group_filter, active).count(),
-            unassigned_count=db.query(TicketRecord).filter(
-                group_filter, active, TicketRecord.external_assignee_id.is_(None)
-            ).count(),
+            membership_kind=item.membership_kind,
+            ticket_count=ticket_count,
+            unassigned_count=unassigned_count,
         ))
     identity = identities[0] if identities else None
     return AgentWorkspaceBootstrap(
@@ -1556,6 +1790,7 @@ async def get_agent_workspace_bootstrap(
             provider=identity.link.provider,
         ) if identity else None),
         teams=team_payloads,
+        teams_truncated=teams_truncated,
         counts=counts,
     )
 
@@ -1565,6 +1800,12 @@ async def list_agent_workspace_tickets(
     response: Response,
     scope: str = Query(default="mine", pattern="^(mine|team)$"),
     team_id: Optional[str] = Query(default=None, max_length=36),
+    ticket_id: Optional[str] = Query(
+        default=None,
+        min_length=1,
+        max_length=255,
+        pattern=r"^[^\x00]*$",
+    ),
     folder: str = Query(
         default="inbox",
         pattern="^(inbox|needs_reply|sla_at_risk|starred|follow_up|closed|unassigned)$",
@@ -1618,7 +1859,9 @@ async def list_agent_workspace_tickets(
         if scope != "team":
             raise HTTPException(status_code=422, detail="Unassigned is a team inbox folder")
         q = q.filter(TicketRecord.external_assignee_id.is_(None))
-    if search:
+    if ticket_id:
+        q = q.filter(TicketRecord.id == ticket_id)
+    elif search:
         escaped = search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         if escaped:
             pattern = f"%{escaped}%"
@@ -1644,7 +1887,7 @@ async def list_agent_workspace_tickets(
     response.headers["X-Page-Limit"] = str(limit)
     response.headers["X-Page-Offset"] = str(offset)
     response.headers["X-Has-More"] = str(has_more).lower()
-    return _agent_ticket_payloads(db, user, tickets)
+    return _agent_ticket_payloads(db, user, tickets, scope=scope)
 
 
 @app.put("/agent-workspace/tickets/{ticket_id}/state")
@@ -1722,14 +1965,19 @@ async def get_related_tickets(
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
     _authorize_ticket_analysis(user, ticket, db)
-    allowed_assignee_id = _ticket_scope_assignee_id(user)
     _reserve_ai_request(db, user.id, "related_tickets")
+    ticket, user = _lock_authorized_ticket_analysis(db, ticket_id, user)
+    allowed_assignee_id = _ticket_scope_assignee_id(user)
     query = " ".join(
         value.strip() for value in (ticket.subject or "", ticket.description or "")
         if value and value.strip()
     )[:1000]
     if not query:
         query = ticket.id[:1000]
+    # Authorization has been serialized with assignment. Related-ticket
+    # retrieval may invoke an embedding provider, so release the row lock
+    # before crossing that boundary.
+    db.commit()
     try:
         retrieval = await ticket_vectors.retrieve_ticket_context(
             db,
@@ -1746,6 +1994,12 @@ async def get_related_tickets(
             status_code=503,
             detail="related_tickets_unavailable",
         ) from exc
+
+    # Retrieval deliberately runs without locks. Before any result is exposed,
+    # bind the response to the actor's current account and assignment again.
+    ticket, user = _lock_authorized_ticket_analysis(db, ticket_id, user)
+    allowed_assignee_id = _ticket_scope_assignee_id(user)
+    db.commit()
 
     ranked: list[dict[str, Any]] = []
     seen_ids = {ticket_id}
@@ -1846,6 +2100,119 @@ def _portal_tracking_url(request: Request, token: str) -> str:
     return f"{origin}/portal#token={urllib.parse.quote(token, safe='')}"
 
 
+def _survey_response_ttl() -> timedelta:
+    try:
+        days = int(
+            os.getenv(
+                "SURVEY_RESPONSE_TOKEN_TTL_DAYS",
+                str(SURVEY_RESPONSE_TOKEN_TTL_DAYS),
+            )
+        )
+    except (TypeError, ValueError):
+        days = SURVEY_RESPONSE_TOKEN_TTL_DAYS
+    return timedelta(days=max(1, min(days, 90)))
+
+
+def _normalized_http_origin(value: str) -> Optional[str]:
+    candidate = (value or "").strip().rstrip("/")
+    parsed = urllib.parse.urlparse(candidate)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _survey_response_url(request: Request, token: str) -> str:
+    configured = (os.getenv("FRONTEND_URL") or "").strip().rstrip("/")
+    if settings_module.is_production_mode():
+        # Production survey capabilities may only be delivered to Tickety's
+        # fixed public origin. Missing, alternate, or path-bearing config is a
+        # hard failure rather than a Host-header-derived fallback.
+        if configured != SURVEY_PRODUCTION_ORIGIN:
+            raise HTTPException(
+                status_code=503,
+                detail="Survey response origin is not configured safely",
+            )
+        origin = SURVEY_PRODUCTION_ORIGIN
+    else:
+        origin = _normalized_http_origin(configured or str(request.base_url))
+        if origin is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Survey response origin is not configured safely",
+            )
+    # URL fragments are never transmitted in the HTTP request target, keeping
+    # bearer material out of ordinary proxy and access logs.
+    return f"{origin}/portal/survey#token={urllib.parse.quote(token, safe='')}"
+
+
+def _require_public_survey_origin(request: Request) -> None:
+    if settings_module.is_production_mode():
+        supplied = _normalized_http_origin(request.headers.get("origin", ""))
+        allowed = supplied == SURVEY_PRODUCTION_ORIGIN
+    else:
+        allowed = _request_origin_allowed(request, require_explicit=True)
+    if not allowed:
+        raise HTTPException(
+            status_code=403,
+            detail="Invalid request origin",
+            headers={"Cache-Control": "no-store"},
+        )
+
+
+def _survey_token_digest(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _survey_delivery_key(ticket_id: str, template_id: int, recipient_email: str) -> str:
+    identity = json.dumps(
+        [ticket_id, template_id, recipient_email],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def _survey_for_token(db: Session, token: str) -> Optional[SurveyRecord]:
+    # Preserve one public error surface for malformed, random, expired, and
+    # undelivered capabilities. The dummy compare also avoids an obvious fast
+    # path for malformed input.
+    if not token or not 40 <= len(token) <= 128 or not re.fullmatch(
+        r"[A-Za-z0-9_-]+", token
+    ):
+        hmac.compare_digest("0" * 64, _survey_token_digest("invalid"))
+        return None
+    digest = _survey_token_digest(token)
+    survey = db.query(SurveyRecord).filter(
+        SurveyRecord.response_token_hash == digest,
+    ).first()
+    if not survey or not survey.response_token_hash:
+        hmac.compare_digest("0" * 64, digest)
+        return None
+    if not hmac.compare_digest(survey.response_token_hash, digest):
+        return None
+    if survey.delivery_status not in {"pending", "uncertain", "accepted"}:
+        return None
+    if survey.delivery_attempted_at is None:
+        return None
+    if survey.delivery_status == "accepted" and survey.sent_at is None:
+        return None
+    if (
+        survey.response_expires_at is None
+        or survey.response_expires_at <= datetime.utcnow()
+    ):
+        return None
+    return survey
+
+
 def _portal_bearer_token(request: Request) -> Optional[str]:
     authorization = request.headers.get("authorization", "")
     scheme, separator, token = authorization.partition(" ")
@@ -1877,17 +2244,18 @@ def _portal_ticket_for_token(db: Session, token: Optional[str]) -> Optional[Tick
 
 
 def _priority_sla_hours(db: Session, priority: str) -> int:
+    normalized_priority = portable_ascii_lower(priority)
     configured = db.query(TicketPriorityConfigRecord).filter(
-        TicketPriorityConfigRecord.name == priority
+        TicketPriorityConfigRecord.name_key == normalized_priority
     ).first()
     if configured and configured.sla_hours:
         return int(configured.sla_hours)
-    env_key = f"SLA_{priority}_HOURS"
-    raw = os.getenv(env_key)
+    env_key = f"SLA_{normalized_priority.upper()}_HOURS"
+    raw = os.getenv(env_key) if normalized_priority.isascii() else None
     if raw and raw.isdigit():
         return int(raw)
-    defaults = {"P1": 4, "P2": 24, "P3": 72, "P4": 168}
-    return defaults.get(priority, 72)
+    defaults = {"p1": 4, "p2": 24, "p3": 72, "p4": 168}
+    return defaults.get(normalized_priority, 72)
 
 
 def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -2163,28 +2531,48 @@ def _reserve_portal_ticket_request(
     db.commit()
 
 
-def _reserve_survey_response_request(db: Session, survey_id: str) -> None:
-    """Durably bound survey submissions without storing attacker-controlled IDs."""
+def _reserve_survey_public_request(
+    db: Session,
+    action: str,
+    *,
+    token: Optional[str] = None,
+) -> None:
+    """Durably bound public CSAT traffic without retaining capability material.
+
+    Invalid random capabilities consume only the low-cardinality global
+    buckets. A digest-scoped bucket is created only after the capability has
+    resolved to a real survey, preventing unauthenticated storage amplification.
+    """
+    if action not in {"lookup", "respond"}:
+        raise ValueError("Unknown survey public action")
     now = datetime.utcnow()
-    per_survey_id = "survey:" + hashlib.sha256(
-        survey_id.encode("utf-8")
-    ).hexdigest()[:32]
-    limits = (
-        (
-            per_survey_id,
-            "survey_response_minute",
-            "survey_response_day",
-            5,
-            100,
-        ),
-        (
-            "survey-global",
-            "survey_response_global_minute",
-            "survey_response_global_day",
-            _bounded_env_int("SURVEY_RESPONSES_GLOBAL_PER_MINUTE", 100, 1, 10_000),
-            _bounded_env_int("SURVEY_RESPONSES_GLOBAL_PER_DAY", 5_000, 1, 1_000_000),
-        ),
-    )
+    if token is None:
+        limits = ((
+            f"survey-{action}-global",
+            f"survey_{action}_global_minute",
+            f"survey_{action}_global_day",
+            _bounded_env_int(
+                f"SURVEY_{action.upper()}_GLOBAL_PER_MINUTE",
+                600 if action == "lookup" else 100,
+                1,
+                10_000,
+            ),
+            _bounded_env_int(
+                f"SURVEY_{action.upper()}_GLOBAL_PER_DAY",
+                50_000 if action == "lookup" else 5_000,
+                1,
+                1_000_000,
+            ),
+        ),)
+    else:
+        candidate_digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        limits = ((
+            f"survey-{action}:" + candidate_digest[:32],
+            f"survey_{action}_minute",
+            f"survey_{action}_day",
+            30 if action == "lookup" else 5,
+            500 if action == "lookup" else 20,
+        ),)
     for actor_id, minute_kind, day_kind, minute_limit, day_limit in limits:
         minute_count = _increment_request_bucket(
             db, actor_id, minute_kind, now.replace(second=0, microsecond=0)
@@ -2199,8 +2587,8 @@ def _reserve_survey_response_request(db: Session, survey_id: str) -> None:
                 detail="survey_rate_limit_exceeded",
                 headers={"Retry-After": "60" if minute_count > minute_limit else "3600"},
             )
-    # Persist before checking the survey state so failed submissions cannot
-    # evade the rate limit through a later 404/409 response.
+    # Persist before capability lookup so invalid and replayed requests consume
+    # the same durable allowance as successful requests across API replicas.
     db.commit()
 
 
@@ -2257,6 +2645,141 @@ def _require_demo_ticketing() -> None:
         )
 
 
+def _lock_ticket_record(db: Session, ticket_id: str) -> TicketRecord:
+    """Serialize a local ticket mutation and refresh any waiting snapshot."""
+    matched = db.query(TicketRecord).filter(
+        TicketRecord.id == ticket_id
+    ).update(
+        {TicketRecord.updated_at: TicketRecord.updated_at},
+        synchronize_session=False,
+    )
+    if matched != 1:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    ticket = db.query(TicketRecord).filter(
+        TicketRecord.id == ticket_id
+    ).populate_existing().first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    return ticket
+
+
+def _lock_authorized_ticket_analysis(
+    db: Session,
+    ticket_id: str,
+    user: UserRecord,
+) -> tuple[TicketRecord, UserRecord]:
+    """Bind an AI operation's authorization to the current ticket owner.
+
+    Durable quota reservations commit before this point. The no-op ticket
+    write serializes with assignment changes; refreshing and authorizing while
+    that lock is held gives the subsequent analysis claim one unambiguous
+    linearization point. The claim commit releases the lock before any LLM
+    call, so provider latency never extends the critical section.
+    """
+    try:
+        actor = _lock_user_record(db, user.id)
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+        raise HTTPException(
+            status_code=403,
+            detail="Ticket analysis permission changed",
+        ) from exc
+    if (
+        not actor.is_active
+        or (actor.role or "").lower() not in _OPERATIONAL_USER_ROLES
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Ticket analysis permission changed",
+        )
+    ticket = _lock_ticket_record(db, ticket_id)
+    _authorize_ticket_analysis(actor, ticket, db)
+    return ticket, actor
+
+
+def _lock_active_service_reference(
+    db: Session,
+    service_id: str,
+) -> ServiceItemRecord:
+    """Lock a catalog reference and reject a concurrent deactivation."""
+    if "\x00" in service_id:
+        raise HTTPException(status_code=422, detail="Service ID must not contain NUL")
+    matched = db.query(ServiceItemRecord).filter(
+        ServiceItemRecord.id == service_id,
+        ServiceItemRecord.is_active.is_(True),
+    ).update(
+        {
+            ServiceItemRecord.is_active: ServiceItemRecord.is_active,
+            ServiceItemRecord.updated_at: ServiceItemRecord.updated_at,
+        },
+        synchronize_session=False,
+    )
+    service = db.query(ServiceItemRecord).filter(
+        ServiceItemRecord.id == service_id
+    ).populate_existing().first()
+    if not service:
+        raise HTTPException(status_code=404, detail="Service item not found")
+    if matched != 1 or not service.is_active:
+        raise HTTPException(status_code=409, detail="Service item must be active")
+    return service
+
+
+def _lock_usable_asset_reference(
+    db: Session,
+    asset_id: str,
+) -> AssetRecord:
+    """Lock a CMDB reference and reject records retired from the catalog."""
+    if "\x00" in asset_id:
+        raise HTTPException(status_code=422, detail="Asset ID must not contain NUL")
+    matched = db.query(AssetRecord).filter(
+        AssetRecord.id == asset_id,
+        portable_ascii_lower_expression(AssetRecord.status) != "retired",
+    ).update(
+        {
+            AssetRecord.status: AssetRecord.status,
+            AssetRecord.updated_at: AssetRecord.updated_at,
+        },
+        synchronize_session=False,
+    )
+    asset = db.query(AssetRecord).filter(
+        AssetRecord.id == asset_id
+    ).populate_existing().first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    if matched != 1 or portable_ascii_lower(asset.status) == "retired":
+        raise HTTPException(status_code=409, detail="Asset is not usable")
+    return asset
+
+
+def _ticket_has_resolution_history(ticket: TicketRecord) -> bool:
+    return bool(
+        ticket.resolved_at is not None
+        or ticket.resolved_by
+        or int(ticket.points_awarded or 0) > 0
+        or ticket.points_awarded_sent
+    )
+
+
+def _ticket_retained_dependency(
+    db: Session,
+    ticket_id: str,
+) -> Optional[str]:
+    """Return one retained FK table that makes ticket deletion unsafe."""
+    for table in sorted(Base.metadata.tables.values(), key=lambda value: value.name):
+        ticket_columns = [
+            foreign_key.parent
+            for foreign_key in table.foreign_keys
+            if foreign_key.target_fullname == "tickets.id"
+        ]
+        for column in ticket_columns:
+            if db.execute(
+                select(1).select_from(table).where(column == ticket_id).limit(1)
+            ).first():
+                return table.name
+    return None
+
+
 @app.patch("/tickets/{ticket_id}", response_model=Ticket)
 async def update_ticket(
     ticket_id: str,
@@ -2270,10 +2793,11 @@ async def update_ticket(
     ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
+    payload_changes = payload.model_dump(exclude_unset=True)
     supplied_changes = {
         field
-        for field, value in payload.model_dump(exclude_unset=True).items()
-        if value is not None and getattr(ticket, field, None) != value
+        for field, value in payload_changes.items()
+        if getattr(ticket, field, None) != value
     }
     _authorize_ticket_mutation(
         user,
@@ -2320,6 +2844,121 @@ async def update_ticket(
         "ticket_update_embedding",
         eligible=document_input_changed,
     )
+
+    # Every reservation above is deliberately durable and may commit. Acquire
+    # a changed assignee first (User -> Ticket is also the purge order), then
+    # the mutation lock. Recompute and re-authorize from the winner's state so
+    # a waiting PATCH cannot overwrite a stale snapshot.
+    assignee_lock_acquired = False
+    if (
+        "assignee_id" in payload_changes
+        and payload.assignee_id is not None
+        and payload.assignee_id != ticket.assignee_id
+    ):
+        _lock_active_user_reference(
+            db,
+            payload.assignee_id,
+            label="Ticket assignee",
+        )
+        assignee_lock_acquired = True
+    ticket = _lock_ticket_record(db, ticket_id)
+    if (
+        "assignee_id" in payload_changes
+        and payload.assignee_id is not None
+        and payload.assignee_id != ticket.assignee_id
+        and not assignee_lock_acquired
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Ticket assignee changed while saving; retry the update",
+        )
+    supplied_changes = {
+        field
+        for field, value in payload_changes.items()
+        if getattr(ticket, field, None) != value
+    }
+    _authorize_ticket_mutation(
+        user,
+        ticket,
+        db=db,
+        changed_fields=supplied_changes,
+        requested_assignee_id=payload.assignee_id,
+    )
+    document_input_changed = any(
+        field in payload_changes
+        and payload_changes[field] is not None
+        and getattr(ticket, field, None) != payload_changes[field]
+        for field in document_fields
+    )
+    analysis_input_changed = any(
+        field in payload_changes
+        and payload_changes[field] is not None
+        and getattr(ticket, field, None) != payload_changes[field]
+        for field in {"subject", "description"}
+    )
+    resolution_input_changed = any(
+        field in payload_changes
+        and payload_changes[field] is not None
+        and getattr(ticket, field, None) != payload_changes[field]
+        for field in {"priority", "category"}
+    )
+
+    if _ticket_has_resolution_history(ticket):
+        for lifecycle_field in ("status", "workflow_status"):
+            proposed = payload_changes.get(lifecycle_field)
+            if (
+                proposed is not None
+                and proposed != getattr(ticket, lifecycle_field)
+                and not _is_terminal_status(db, proposed)
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Resolved tickets require a dedicated audited reopen workflow",
+                )
+
+    proposed_type = payload_changes.get("ticket_type")
+    service_request_protected_fields = {
+        "ticket_type", "status", "workflow_status", "service_id",
+    }
+    if (
+        payload.model_fields_set.intersection(service_request_protected_fields)
+        and db.query(ServiceRequestRecord.id).filter(
+            ServiceRequestRecord.ticket_id == ticket.id
+        ).first()
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Service request lifecycle fields require the dedicated workflow",
+        )
+    if (
+        proposed_type is not None
+        and proposed_type != ticket.ticket_type
+        and portable_ascii_lower(proposed_type) != "incident"
+        and db.query(ProblemTicketLinkRecord.id).filter(
+            ProblemTicketLinkRecord.ticket_id == ticket.id
+        ).first()
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Tickets linked to a problem must remain incidents",
+        )
+
+    # Ticket -> Service -> Asset is the canonical reference-lock order. An
+    # unchanged historical inactive/retired reference remains readable, while
+    # a new value must still be usable after any concurrent status change.
+    if (
+        "service_id" in payload_changes
+        and payload.service_id is not None
+        and payload.service_id != ticket.service_id
+    ):
+        _lock_active_service_reference(db, payload.service_id)
+    if (
+        "asset_id" in payload_changes
+        and payload.asset_id is not None
+        and payload.asset_id != ticket.asset_id
+    ):
+        _lock_usable_asset_reference(db, payload.asset_id)
+
     actor_name = user.name
     # Track changes for audit log
     for field in [
@@ -2328,13 +2967,17 @@ async def update_ticket(
         "asset_id", "category", "tags", "response_due_at", "resolution_due_at", "due_by",
     ]:
         val = getattr(payload, field, None)
-        if val is not None:
+        supplied = val is not None or (
+            field in {"service_id", "asset_id"}
+            and field in payload.model_fields_set
+        )
+        if supplied:
             old = getattr(ticket, field, None)
             if old != val:
                 db.add(TicketAuditLogRecord(
                     ticket_id=ticket.id, field=field,
                     old_value=str(old) if old else None,
-                    new_value=str(val),
+                    new_value=str(val) if val is not None else None,
                     changed_by=actor_name,
                 ))
                 setattr(ticket, field, val)
@@ -2350,7 +2993,14 @@ async def update_ticket(
         if not ticket.resolved_at:
             ticket.resolved_at = datetime.utcnow()
         mark_terminal_ai_not_applicable(ticket)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Ticket references changed while saving",
+        ) from exc
     db.refresh(ticket)
     if document_input_changed:
         await ticket_vectors.refresh_ticket_documents(db, ticket)
@@ -2364,12 +3014,34 @@ async def delete_ticket(
     _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
     _require_demo_ticketing()
-    ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
-    if not ticket:
+    if not db.query(TicketRecord.id).filter(TicketRecord.id == ticket_id).first():
         raise HTTPException(status_code=404, detail="Ticket not found")
-    ticket_vectors.delete_ticket_documents(db, ticket_id)
+    if _ticket_retained_dependency(db, ticket_id):
+        raise HTTPException(
+            status_code=409,
+            detail="Ticket has retained history and cannot be deleted",
+        )
+
+    ticket = _lock_ticket_record(db, ticket_id)
+    # Recheck after waiting for a concurrent ticket owner (notably service-
+    # request creation) so a dependent committed while we waited returns 409.
+    if _ticket_retained_dependency(db, ticket_id):
+        raise HTTPException(
+            status_code=409,
+            detail="Ticket has retained history and cannot be deleted",
+        )
     db.delete(ticket)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Ticket gained retained history while deletion was pending",
+        ) from exc
+    # Search evidence is removed only after the relational delete succeeds;
+    # failed FK/history checks must never erase the surviving ticket's index.
+    ticket_vectors.delete_ticket_documents(db, ticket_id)
     return {"status": "deleted", "ticket_id": ticket_id}
 
 
@@ -2516,14 +3188,12 @@ async def add_comment(
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
     _authorize_ticket_mutation(user, ticket, db=db)
+
+    # Admission records are intentionally durable and may commit the current
+    # transaction. Finish every reservation before taking the ticket lock, so
+    # no quota commit can release the serialization boundary underneath the
+    # evidence write.
     _reserve_index_write_request(db, user.id)
-    _reject_duplicate_recent_comment(
-        db,
-        ticket_id=ticket_id,
-        author_id=user.id,
-        body=payload.body,
-        is_private=payload.is_private,
-    )
     _reserve_embedding_request(
         db,
         user,
@@ -2532,6 +3202,19 @@ async def add_comment(
             not payload.is_private
             or ticket_vectors.private_comment_indexing_enabled()
         ),
+    )
+
+    # A reservation may have waited while the ticket was reassigned. Refresh
+    # under the same mutation lock used by PATCH/bulk assignment, then enforce
+    # authorization and duplicate detection against the winning state.
+    ticket = _lock_ticket_record(db, ticket_id)
+    _authorize_ticket_mutation(user, ticket, db=db)
+    _reject_duplicate_recent_comment(
+        db,
+        ticket_id=ticket_id,
+        author_id=user.id,
+        body=payload.body,
+        is_private=payload.is_private,
     )
     comment = TicketCommentRecord(
         ticket_id=ticket_id,
@@ -2612,15 +3295,28 @@ async def bulk_action(
     tickets = db.query(TicketRecord).filter(TicketRecord.id.in_(ticket_ids)).all()
     if len(tickets) != len(ticket_ids):
         raise HTTPException(status_code=404, detail="One or more tickets were not found")
+    if (
+        payload.action == "close"
+        and db.query(ServiceRequestRecord.id).filter(
+            ServiceRequestRecord.ticket_id.in_(ticket_ids)
+        ).first()
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Service request tickets require the dedicated workflow",
+        )
 
     if payload.action != "close" and not payload.value:
         raise HTTPException(status_code=422, detail="A value is required for this bulk action")
     if payload.action == "assign":
         assignee = db.query(UserRecord).filter(
             UserRecord.id == payload.value,
-            UserRecord.is_active.is_(True),
         ).first()
-        if not assignee:
+        if (
+            not assignee
+            or not assignee.is_active
+            or (assignee.role or "").lower() not in _OPERATIONAL_USER_ROLES
+        ):
             raise HTTPException(status_code=422, detail="Assignee is not an active user")
     elif payload.action == "set_category":
         category = db.query(TicketCategoryRecord).filter(
@@ -2656,6 +3352,29 @@ async def bulk_action(
         and _automation_enabled("AUTO_RESOLVE_ENABLED")
     ):
         _reserve_ai_request(db, user.id, "ticket_bulk_auto_processing")
+
+    # Quota reservations above may commit. Reacquire every ticket in stable
+    # order, then recheck the SR invariant after any competing creator exits.
+    if payload.action == "assign" and payload.value:
+        _lock_active_user_reference(
+            db,
+            payload.value,
+            label="Ticket assignee",
+        )
+    tickets = [
+        _lock_ticket_record(db, ticket_id)
+        for ticket_id in sorted(ticket_ids)
+    ]
+    if (
+        payload.action == "close"
+        and db.query(ServiceRequestRecord.id).filter(
+            ServiceRequestRecord.ticket_id.in_(ticket_ids)
+        ).first()
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Service request tickets require the dedicated workflow",
+        )
 
     count = 0
     changed_ticket_ids: set[str] = set()
@@ -2716,6 +3435,14 @@ async def create_ticket(
         # path cannot bypass the per-user AI request budget.
         _reserve_ai_request(db, user.id, "ticket_create_auto_processing")
     _reserve_embedding_request(db, user, "ticket_create_embedding")
+    # Durable quota reservations above may commit, so acquire reference locks
+    # only after them and hold User -> Service -> Asset through the commit.
+    if (user.role or "").lower() == "agent":
+        _lock_active_user_reference(db, user.id, label="Ticket assignee")
+    if payload.service_id is not None:
+        _lock_active_service_reference(db, payload.service_id)
+    if payload.asset_id is not None:
+        _lock_usable_asset_reference(db, payload.asset_id)
     ticket = TicketRecord(
         id=str(_uuid.uuid4()),
         subject=payload.subject.strip(),
@@ -2734,7 +3461,14 @@ async def create_ticket(
     )
     _apply_sla_targets(ticket, db)
     db.add(ticket)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Ticket identity or references changed while saving",
+        ) from exc
     db.refresh(ticket)
     await ticket_vectors.refresh_ticket_documents(db, ticket)
     await _auto_process(ticket, db)
@@ -2933,7 +3667,11 @@ def _apply_ticket_analysis(ticket: TicketRecord, analysis_data: Dict[str, Any], 
     ticket.mood = analysis_data.get("mood")
     ticket.complexity = analysis_data.get("complexity", 1)
     ticket.ai_reasoning = analysis_data.get("reasoning")
-    ticket.escalation_risk = intel.escalation_risk(ticket)
+    ticket.escalation_risk = intel.escalation_risk(
+        ticket,
+        terminal_statuses=_terminal_status_names(db),
+    )
+    ticket.escalation_risk_backfilled_at = datetime.utcnow()
 
     if analysis_data.get("suggested_response"):
         ticket.suggested_response = analysis_data.get("suggested_response")
@@ -3166,9 +3904,58 @@ def _record_ai_artifact(
     ))
 
 
+def _release_analysis_claim_for_access_change(
+    ticket: TicketRecord,
+    db: Session,
+) -> None:
+    """Drop only the in-flight claim while preserving prior valid artifacts."""
+    ticket.ai_status = (
+        "completed"
+        if ticket.ai_reasoning and ticket.summary and ticket.recommended_solution
+        else "triage_completed"
+        if ticket.ai_reasoning
+        else None
+    )
+    ticket.ai_claim_id = None
+    ticket.ai_lease_expires_at = None
+    ticket.ai_requested_artifacts = None
+    ticket.ai_next_attempt_at = None
+    ticket.ai_error = None
+    db.commit()
+
+
 def _ensure_analysis_input_current(
-    ticket: TicketRecord, db: Session, source_hash: str, claim_id: str
+    ticket: TicketRecord,
+    db: Session,
+    source_hash: str,
+    claim_id: str,
+    *,
+    analysis_actor_id: Optional[str] = None,
 ) -> TicketRecord:
+    # Human-triggered work follows the same User -> Ticket order as assignment
+    # and account lifecycle writes. This catches deactivation, role changes,
+    # and reassignment while provider work was in flight without holding any
+    # database lock across that provider call.
+    actor: Optional[UserRecord] = None
+    if analysis_actor_id:
+        try:
+            actor = _lock_user_record(db, analysis_actor_id)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+            db.rollback()
+            claimed_ticket = db.query(TicketRecord).filter(
+                TicketRecord.id == ticket.id,
+                TicketRecord.ai_claim_id == claim_id,
+                TicketRecord.ai_status == "running",
+            ).with_for_update().populate_existing().first()
+            if claimed_ticket:
+                _release_analysis_claim_for_access_change(claimed_ticket, db)
+            raise HTTPException(
+                status_code=409,
+                detail="analysis_access_changed",
+            ) from exc
+
     ticket = db.query(TicketRecord).filter(
         TicketRecord.id == ticket.id,
         TicketRecord.ai_claim_id == claim_id,
@@ -3178,6 +3965,23 @@ def _ensure_analysis_input_current(
         raise HTTPException(status_code=409, detail="analysis_claim_lost")
     if ticket.ai_claim_id != claim_id or ticket.ai_status != "running":
         raise HTTPException(status_code=409, detail="analysis_claim_lost")
+    if actor is not None:
+        try:
+            if (
+                not actor.is_active
+                or (actor.role or "").lower() not in _OPERATIONAL_USER_ROLES
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Ticket analysis permission changed",
+                )
+            _authorize_ticket_analysis(actor, ticket, db)
+        except HTTPException as exc:
+            _release_analysis_claim_for_access_change(ticket, db)
+            raise HTTPException(
+                status_code=409,
+                detail="analysis_access_changed",
+            ) from exc
     if _ticket_analysis_hash(ticket) == source_hash:
         return ticket
     invalidate_ticket_ai(ticket)
@@ -3215,6 +4019,7 @@ async def _run_ticket_analysis(
     force: bool = False,
     artifacts: Optional[set[str]] = None,
     progress=None,
+    analysis_actor_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run claimed AI artifacts through one ownership-safe orchestrator."""
     requested_artifacts = set(
@@ -3242,7 +4047,12 @@ async def _run_ticket_analysis(
             for artifact in persisted_artifacts
         )
         if artifact_cached:
-            return _cached_analysis_payload(ticket, db)
+            cached = _cached_analysis_payload(ticket, db)
+            # API callers may hold the authorization/assignment lock here.
+            # Cached work crosses no provider boundary, so release it as soon
+            # as the response has been assembled.
+            db.commit()
+            return cached
     claimed, source_hash, claim_id = _claim_ticket_analysis(
         ticket,
         db,
@@ -3296,7 +4106,13 @@ async def _run_ticket_analysis(
             ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
             if not ticket:
                 raise HTTPException(status_code=404, detail="Ticket not found")
-            ticket = _ensure_analysis_input_current(ticket, db, source_hash, claim_id)
+            ticket = _ensure_analysis_input_current(
+                ticket,
+                db,
+                source_hash,
+                claim_id,
+                analysis_actor_id=analysis_actor_id,
+            )
             serialized_triage = json.dumps(
                 analysis_data, sort_keys=True, default=str, ensure_ascii=False
             )
@@ -3327,7 +4143,11 @@ async def _run_ticket_analysis(
                 pass
             claim_terminal = (
                 isinstance(exc, HTTPException)
-                and exc.detail in {"analysis_input_changed", "analysis_claim_lost"}
+                and exc.detail in {
+                    "analysis_input_changed",
+                    "analysis_claim_lost",
+                    "analysis_access_changed",
+                }
             )
             if not claim_terminal:
                 error_code = _analysis_step_error_code(exc)
@@ -3417,7 +4237,13 @@ async def _run_ticket_analysis(
         ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
         if not ticket:
             raise HTTPException(status_code=404, detail="Ticket not found")
-        ticket = _ensure_analysis_input_current(ticket, db, source_hash, claim_id)
+        ticket = _ensure_analysis_input_current(
+            ticket,
+            db,
+            source_hash,
+            claim_id,
+            analysis_actor_id=analysis_actor_id,
+        )
         if "summary" in task_results:
             result = task_results["summary"]
             if isinstance(result, Exception):
@@ -3527,7 +4353,13 @@ async def _run_ticket_analysis(
         )
         raise
     db.refresh(ticket)
-    ticket = _ensure_analysis_input_current(ticket, db, source_hash, claim_id)
+    ticket = _ensure_analysis_input_current(
+        ticket,
+        db,
+        source_hash,
+        claim_id,
+        analysis_actor_id=analysis_actor_id,
+    )
     ticket.ai_source_hash = source_hash
     ticket.ai_pipeline_version = AI_PIPELINE_VERSION
     ticket.ai_model = _llm_cache_identity()
@@ -3639,9 +4471,14 @@ async def trigger_triage(
         raise HTTPException(status_code=404, detail="Ticket not found")
     _authorize_ticket_analysis(_user, ticket, db)
     _reserve_ai_request(db, _user.id, "triage")
+    ticket, _user = _lock_authorized_ticket_analysis(db, ticket_id, _user)
 
     result = await _run_ticket_analysis(
-        ticket, db, force=force, artifacts={"triage"}
+        ticket,
+        db,
+        force=force,
+        artifacts={"triage"},
+        analysis_actor_id=_user.id,
     )
     return TriageResult(**result["triage"])
 
@@ -3658,7 +4495,13 @@ async def run_ticket_analysis(
         raise HTTPException(status_code=404, detail="Ticket not found")
     _authorize_ticket_analysis(_user, ticket, db)
     _reserve_ai_request(db, _user.id, "full_analysis")
-    return await _run_ticket_analysis(ticket, db, force=force)
+    ticket, _user = _lock_authorized_ticket_analysis(db, ticket_id, _user)
+    return await _run_ticket_analysis(
+        ticket,
+        db,
+        force=force,
+        analysis_actor_id=_user.id,
+    )
 
 
 # ── Authentication ─────────────────────────────────────────────
@@ -3799,8 +4642,11 @@ def _create_session(db: Session, user_id: str, request: Request) -> str:
 async def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)):
     if _login_blocked(payload, request):
         raise HTTPException(status_code=429, detail="Too many failed login attempts")
-    email = payload.email.strip().lower()
-    user = db.query(UserRecord).filter(func.lower(UserRecord.email) == email).first()
+    email = normalize_user_email(payload.email)
+    matches = db.query(UserRecord).filter(
+        UserRecord.email_key == email
+    ).limit(2).all()
+    user = matches[0] if len(matches) == 1 else None
     if not user or not user.is_active:
         # Burn the same PBKDF2 cost as a real verification so response
         # timing cannot be used to enumerate registered email addresses.
@@ -3924,8 +4770,11 @@ def _resolve_sso_user(
         linked.last_login_at = datetime.utcnow()
         return user, linked
 
+    identity_email = normalize_user_email(identity.email)
+    # Migration 0025 enforces both canonical equality and uniqueness in the
+    # database, so SSO never falls back to an unkeyed or drifted email row.
     matching_users = db.query(UserRecord).filter(
-        func.lower(UserRecord.email) == identity.email
+        UserRecord.email_key == identity_email,
     ).limit(2).all()
     if len(matching_users) > 1:
         raise PermissionError("identity_conflict")
@@ -3938,15 +4787,25 @@ def _resolve_sso_user(
         import uuid as _uuid
 
         user = UserRecord(
-            id=f"u-{_uuid.uuid4().hex[:8]}",
-            email=identity.email,
+            id=f"u-{_uuid.uuid4().hex}",
+            email=identity_email,
+            email_key=identity_email,
             name=identity.name or identity.email,
             role="agent",
             is_active=True,
             password_hash="",
         )
         db.add(user)
-        db.flush()
+        try:
+            db.flush()
+        except IntegrityError:
+            db.rollback()
+            user = db.query(UserRecord).filter(
+                UserRecord.email_key == identity_email,
+                UserRecord.is_active.is_(True),
+            ).first()
+            if not user:
+                raise PermissionError("identity_conflict")
 
     conflicting_link = db.query(SsoIdentityRecord).filter(
         SsoIdentityRecord.user_id == user.id,
@@ -4639,6 +5498,69 @@ async def delete_agent_identity_link(
     return {"status": "unlinked", "user_id": user_id, "link_id": link_id}
 
 
+_ADMIN_MEMBERSHIP_LOCK_NAMESPACE = 0x5449434B  # "TICK"
+_ADMIN_MEMBERSHIP_LOCK_KEY = 0x41444D4E  # "ADMN"
+
+
+def _lock_admin_membership_invariant(db: Session) -> None:
+    """Serialize changes that can alter the active-admin membership set.
+
+    PostgreSQL row locks cannot protect a predicate such as "at least one
+    active admin exists": two transactions can lock different users, observe
+    each other, and both remove an admin.  A transaction-scoped advisory lock
+    gives that invariant one shared serialization point.  SQLite already
+    permits only one writer; the following user-record write acquires its
+    database write lock.
+    """
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(
+            text("SELECT pg_advisory_xact_lock(:namespace, :lock_key)"),
+            {
+                "namespace": _ADMIN_MEMBERSHIP_LOCK_NAMESPACE,
+                "lock_key": _ADMIN_MEMBERSHIP_LOCK_KEY,
+            },
+        )
+
+
+def _lock_user_record(db: Session, user_id: str) -> UserRecord:
+    """Serialize account writes on SQLite and PostgreSQL with one contract."""
+    matched = db.query(UserRecord).filter(UserRecord.id == user_id).update(
+        {UserRecord.is_active: UserRecord.is_active},
+        synchronize_session=False,
+    )
+    if matched != 1:
+        raise HTTPException(status_code=404, detail="User not found")
+    user = db.query(UserRecord).filter(
+        UserRecord.id == user_id
+    ).populate_existing().first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+
+def _ensure_no_pending_change_approvals(db: Session, user_id: str) -> None:
+    """Keep inactive accounts from stranding undecided CAB work.
+
+    Callers already hold the User row. This deliberately performs a read only:
+    taking a Change lock here would invert the established Change -> User order
+    used by add/decide/purge. A concurrent add either commits first and is seen,
+    or waits for this User lock and then rejects the inactive approver.
+    """
+    pending = db.query(ChangeApprovalRecord.id).filter(
+        ChangeApprovalRecord.approver_id == user_id,
+        or_(
+            ChangeApprovalRecord.decision.is_(None),
+            ChangeApprovalRecord.decision == "pending",
+        ),
+        ChangeApprovalRecord.decided_at.is_(None),
+    ).first()
+    if pending:
+        raise HTTPException(
+            status_code=409,
+            detail="Reassign or decide pending change approvals before deactivation",
+        )
+
+
 @app.post("/users", response_model=UserOut, status_code=201)
 async def create_user(
     payload: UserCreate,
@@ -4647,8 +5569,10 @@ async def create_user(
 ):
     if payload.role == "admin" and _user.role != "admin":
         raise HTTPException(status_code=403, detail="Only admins can create admin users")
-    email = payload.email.strip().lower()
-    existing = db.query(UserRecord).filter(func.lower(UserRecord.email) == email).first()
+    if payload.role == "admin":
+        _lock_admin_membership_invariant(db)
+    email = normalize_user_email(payload.email)
+    existing = db.query(UserRecord).filter(UserRecord.email_key == email).first()
     if existing:
         raise HTTPException(status_code=409, detail="Email already in use")
     import uuid as _uuid
@@ -4656,15 +5580,20 @@ async def create_user(
     if len(password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
     user = UserRecord(
-        id=f"u-{_uuid.uuid4().hex[:8]}",
+        id=f"u-{_uuid.uuid4().hex}",
         name=payload.name,
         email=email,
+        email_key=email,
         title=payload.title,
         role=payload.role,
         password_hash=_hash_password(password),
     )
     db.add(user)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Email already in use") from exc
     db.refresh(user)
     return user
 
@@ -4676,9 +5605,9 @@ async def update_user(
     db: Session = Depends(get_db),
     _user: UserRecord = Depends(require_role("admin", "supervisor")),
 ):
-    user = db.query(UserRecord).filter(UserRecord.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+    if payload.role is not None or payload.is_active is not None:
+        _lock_admin_membership_invariant(db)
+    user = _lock_user_record(db, user_id)
     if payload.password and settings_module.is_demo_mode():
         raise HTTPException(
             status_code=403,
@@ -4698,7 +5627,15 @@ async def update_user(
                 status_code=403,
                 detail="Only admins can modify admin accounts",
             )
-    if payload.is_active is False and user.role == "admin":
+    removes_active_admin = (
+        user.role == "admin"
+        and user.is_active
+        and (
+            payload.is_active is False
+            or (payload.role is not None and payload.role != "admin")
+        )
+    )
+    if removes_active_admin:
         active_admins = db.query(UserRecord).filter(
             UserRecord.role == "admin",
             UserRecord.is_active.is_(True),
@@ -4706,15 +5643,19 @@ async def update_user(
         ).count()
         if active_admins == 0:
             raise HTTPException(status_code=400, detail="Cannot deactivate the last active admin")
+    if payload.is_active is False:
+        _ensure_no_pending_change_approvals(db, user.id)
     if payload.email is not None:
-        email = payload.email.strip().lower()
+        email = normalize_user_email(payload.email)
         existing = db.query(UserRecord).filter(
-            func.lower(UserRecord.email) == email,
+            UserRecord.email_key == email,
             UserRecord.id != user.id,
         ).first()
         if existing:
             raise HTTPException(status_code=409, detail="Email already in use")
-    for field in ["name", "email", "title", "role", "is_active"]:
+        user.email = email
+        user.email_key = email
+    for field in ["name", "title", "role", "is_active"]:
         val = getattr(payload, field, None)
         if val is not None:
             setattr(user, field, val.strip().lower() if field == "email" else val)
@@ -4722,7 +5663,11 @@ async def update_user(
         if len(payload.password) < 8:
             raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
         user.password_hash = _hash_password(payload.password)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Email already in use") from exc
     db.refresh(user)
     return user
 
@@ -4733,19 +5678,20 @@ async def delete_user(
     db: Session = Depends(get_db),
     _user: UserRecord = Depends(require_role("admin", "supervisor")),
 ):
-    user = db.query(UserRecord).filter(UserRecord.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+    _lock_admin_membership_invariant(db)
+    user = _lock_user_record(db, user_id)
     if user.role == "admin":
         if _user.role != "admin":
             raise HTTPException(status_code=403, detail="Only admins can deactivate admin users")
-        active_admins = db.query(UserRecord).filter(
-            UserRecord.role == "admin",
-            UserRecord.is_active.is_(True),
-            UserRecord.id != user.id,
-        ).count()
-        if active_admins == 0:
-            raise HTTPException(status_code=400, detail="Cannot deactivate the last active admin")
+        if user.is_active:
+            active_admins = db.query(UserRecord).filter(
+                UserRecord.role == "admin",
+                UserRecord.is_active.is_(True),
+                UserRecord.id != user.id,
+            ).count()
+            if active_admins == 0:
+                raise HTTPException(status_code=400, detail="Cannot deactivate the last active admin")
+    _ensure_no_pending_change_approvals(db, user.id)
     # Soft-delete: deactivate instead of removing (preserves ticket history)
     user.is_active = False
     db.commit()
@@ -4766,6 +5712,8 @@ async def purge_user(
 
     removed_owned_records = 0
     cleared_history_references = 0
+    removed_pending_approvals = 0
+    anonymized_decided_approvals = 0
     user_foreign_keys = [
         foreign_key
         for table in Base.metadata.sorted_tables
@@ -4773,6 +5721,58 @@ async def purge_user(
         if foreign_key.target_fullname == "users.id"
     ]
     try:
+        # Every change mutation takes the Change lock before touching its
+        # approvals.  Account purge must use the same order or it can deadlock
+        # with an approval decision (Approval -> Change versus Change ->
+        # Approval).  Stable ordering also keeps two concurrent purges acyclic.
+        affected_change_ids = {
+            row[0]
+            for row in db.query(ChangeApprovalRecord.change_id).filter(
+                ChangeApprovalRecord.approver_id == user_id
+            ).distinct().all()
+        }
+        affected_change_ids.update(
+            row[0]
+            for row in db.query(ChangeRecord.id).filter(or_(
+                ChangeRecord.assigned_to == user_id,
+                ChangeRecord.requested_by == user_id,
+            )).all()
+        )
+        for change_id in sorted(affected_change_ids):
+            db.query(ChangeRecord).filter(ChangeRecord.id == change_id).update(
+                {ChangeRecord.updated_at: ChangeRecord.updated_at},
+                synchronize_session=False,
+            )
+
+        # Serialize against a concurrent account reactivation only after the
+        # complete Change lock set. Change assignment already uses
+        # Change -> User through its foreign key, so this preserves one global
+        # lock order while ensuring an account cannot become active between
+        # the initial validation and deletion.
+        user = _lock_user_record(db, user_id)
+        if user.is_active:
+            raise HTTPException(
+                status_code=409,
+                detail="Deactivate the user before purging the account",
+            )
+
+        # Undecided work cannot be completed after its approver disappears.
+        # Decided rows remain as immutable, anonymized audit evidence.
+        removed_pending_approvals = db.query(ChangeApprovalRecord).filter(
+            ChangeApprovalRecord.approver_id == user_id,
+            or_(
+                ChangeApprovalRecord.decision.is_(None),
+                ChangeApprovalRecord.decision == "pending",
+            ),
+            ChangeApprovalRecord.decided_at.is_(None),
+        ).delete(synchronize_session=False)
+        anonymized_decided_approvals = db.query(ChangeApprovalRecord).filter(
+            ChangeApprovalRecord.approver_id == user_id,
+        ).update(
+            {ChangeApprovalRecord.approver_id: None},
+            synchronize_session=False,
+        )
+
         # Required references are account-owned records and cannot survive the
         # account. Nullable references are historical attribution and remain
         # available after their link to the purged identity is cleared.
@@ -4798,6 +5798,8 @@ async def purge_user(
         "user_id": user_id,
         "removed_owned_records": removed_owned_records,
         "cleared_history_references": cleared_history_references,
+        "removed_pending_approvals": int(removed_pending_approvals or 0),
+        "anonymized_decided_approvals": int(anonymized_decided_approvals or 0),
     }
 
 
@@ -4820,19 +5822,24 @@ async def list_kb_articles(
     offset: int = Query(default=0, ge=0, le=1_000_000),
     user: UserRecord = Depends(get_authenticated_user),
 ):
-    if status and status != "published" and user.role not in {"admin", "supervisor"}:
+    normalized_status = (status or "published").strip().lower()
+    if normalized_status not in {"all", "published", "draft", "archived"}:
+        raise HTTPException(status_code=422, detail="Unsupported knowledge article status")
+    if normalized_status != "published" and user.role not in {"admin", "supervisor"}:
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     q = db.query(KbArticleRecord)
-    if status:
-        q = q.filter(KbArticleRecord.status == status)
-    else:
-        q = q.filter(KbArticleRecord.status == "published")
+    if normalized_status != "all":
+        q = q.filter(KbArticleRecord.status == normalized_status)
     if category:
         q = q.filter(KbArticleRecord.category == category)
     if search:
         escaped_search = search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         if escaped_search:
-            q = q.filter(KbArticleRecord.title.ilike(f"%{escaped_search}%", escape="\\"))
+            pattern = f"%{escaped_search}%"
+            q = q.filter(or_(
+                KbArticleRecord.title.ilike(pattern, escape="\\"),
+                KbArticleRecord.content.ilike(pattern, escape="\\"),
+            ))
     page = q.order_by(
         desc(KbArticleRecord.updated_at), KbArticleRecord.id.asc()
     ).offset(offset).limit(limit + 1).all()
@@ -4854,12 +5861,18 @@ async def list_kb_articles(
 
 @app.get("/kb/categories")
 async def list_kb_categories(
+    status: str = Query(default="published", pattern="^(published|all)$"),
     db: Session = Depends(get_db),
-    _user: UserRecord = Depends(get_authenticated_user),
+    user: UserRecord = Depends(get_authenticated_user),
 ):
-    rows = db.query(KbArticleRecord.category).filter(
-        KbArticleRecord.category.isnot(None), KbArticleRecord.status == "published"
-    ).distinct().order_by(KbArticleRecord.category.asc()).limit(200).all()
+    if status == "all" and user.role not in {"admin", "supervisor"}:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    query = db.query(KbArticleRecord.category).filter(
+        KbArticleRecord.category.isnot(None)
+    )
+    if status == "published":
+        query = query.filter(KbArticleRecord.status == "published")
+    rows = query.distinct().order_by(KbArticleRecord.category.asc()).limit(200).all()
     return {"categories": [r[0] for r in rows if r[0]]}
 
 
@@ -4902,7 +5915,7 @@ async def create_kb_article(
         slug = f"{base_slug}-{i}"
         i += 1
     article = KbArticleRecord(
-        id=f"kb-{_uuid.uuid4().hex[:8]}",
+        id=f"kb-{_uuid.uuid4().hex}",
         title=payload.title,
         slug=slug,
         content=payload.content,
@@ -4915,7 +5928,14 @@ async def create_kb_article(
         review_due_at=payload.review_due_at,
     )
     db.add(article)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Article identity or slug changed while saving",
+        ) from exc
     db.refresh(article)
     await ticket_vectors.upsert_kb_document(db, article)
     return article
@@ -5139,24 +6159,45 @@ async def get_ticket_kb_links(
 # ── Custom ticket status / priority config ─────────────────────
 
 @app.get("/config/statuses", response_model=List[TicketStatusConfig])
-async def list_status_config(db: Session = Depends(get_db)):
+async def list_status_config(
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(get_current_user),
+):
+    _authorize_ticket_view(user)
     return db.query(TicketStatusConfigRecord).order_by(TicketStatusConfigRecord.sort_order).all()
 
 
 @app.post("/config/statuses", response_model=TicketStatusConfig, status_code=201)
-async def create_status_config(payload: TicketStatusConfigCreate, db: Session = Depends(get_db)):
-    existing = db.query(TicketStatusConfigRecord).filter(TicketStatusConfigRecord.name == payload.name).first()
+async def create_status_config(
+    payload: TicketStatusConfigCreate,
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(require_authenticated_role("admin", "supervisor")),
+):
+    existing = db.query(TicketStatusConfigRecord).filter(
+        TicketStatusConfigRecord.name_key == payload.name.lower()
+    ).first()
     if existing:
         raise HTTPException(status_code=409, detail="Status already exists")
-    rec = TicketStatusConfigRecord(**payload.model_dump())
+    rec = TicketStatusConfigRecord(
+        **payload.model_dump(),
+        name_key=payload.name.lower(),
+    )
     db.add(rec)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Status already exists")
     db.refresh(rec)
     return rec
 
 
 @app.delete("/config/statuses/{status_id}")
-async def delete_status_config(status_id: int, db: Session = Depends(get_db)):
+async def delete_status_config(
+    status_id: int,
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(require_authenticated_role("admin", "supervisor")),
+):
     rec = db.query(TicketStatusConfigRecord).filter(TicketStatusConfigRecord.id == status_id).first()
     if not rec:
         raise HTTPException(status_code=404, detail="Status not found")
@@ -5166,24 +6207,45 @@ async def delete_status_config(status_id: int, db: Session = Depends(get_db)):
 
 
 @app.get("/config/priorities", response_model=List[TicketPriorityConfig])
-async def list_priority_config(db: Session = Depends(get_db)):
+async def list_priority_config(
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(get_current_user),
+):
+    _authorize_ticket_view(user)
     return db.query(TicketPriorityConfigRecord).order_by(TicketPriorityConfigRecord.sort_order).all()
 
 
 @app.post("/config/priorities", response_model=TicketPriorityConfig, status_code=201)
-async def create_priority_config(payload: TicketPriorityConfigCreate, db: Session = Depends(get_db)):
-    existing = db.query(TicketPriorityConfigRecord).filter(TicketPriorityConfigRecord.name == payload.name).first()
+async def create_priority_config(
+    payload: TicketPriorityConfigCreate,
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(require_authenticated_role("admin", "supervisor")),
+):
+    existing = db.query(TicketPriorityConfigRecord).filter(
+        TicketPriorityConfigRecord.name_key == payload.name.lower()
+    ).first()
     if existing:
         raise HTTPException(status_code=409, detail="Priority already exists")
-    rec = TicketPriorityConfigRecord(**payload.model_dump())
+    rec = TicketPriorityConfigRecord(
+        **payload.model_dump(),
+        name_key=payload.name.lower(),
+    )
     db.add(rec)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Priority already exists")
     db.refresh(rec)
     return rec
 
 
 @app.delete("/config/priorities/{priority_id}")
-async def delete_priority_config(priority_id: int, db: Session = Depends(get_db)):
+async def delete_priority_config(
+    priority_id: int,
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(require_authenticated_role("admin", "supervisor")),
+):
     rec = db.query(TicketPriorityConfigRecord).filter(TicketPriorityConfigRecord.id == priority_id).first()
     if not rec:
         raise HTTPException(status_code=404, detail="Priority not found")
@@ -5195,12 +6257,20 @@ async def delete_priority_config(priority_id: int, db: Session = Depends(get_db)
 # ── Notification config ────────────────────────────────────────
 
 @app.get("/config/notifications", response_model=List[NotificationConfig])
-async def list_notification_config(db: Session = Depends(get_db)):
+async def list_notification_config(
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(require_authenticated_role("admin", "supervisor")),
+):
     return db.query(NotificationConfigRecord).all()
 
 
 @app.patch("/config/notifications/{event}", response_model=NotificationConfig)
-async def update_notification_config(event: str, payload: NotificationConfigUpdate, db: Session = Depends(get_db)):
+async def update_notification_config(
+    event: str,
+    payload: NotificationConfigUpdate,
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(require_authenticated_role("admin", "supervisor")),
+):
     rec = db.query(NotificationConfigRecord).filter(NotificationConfigRecord.event == event).first()
     if not rec:
         raise HTTPException(status_code=404, detail="Notification event not found")
@@ -5250,7 +6320,9 @@ def _report_filters(
     ),
 ) -> ReportFilters:
     """Normalize the shared report selection, bounded to 30 days by default."""
-    now = datetime.utcnow().replace(microsecond=0)
+    # Keep full precision so records created earlier in the current second are
+    # not excluded by a default end boundary rounded down to :00 microseconds.
+    now = datetime.utcnow()
 
     def utc_naive(value: Optional[datetime]) -> Optional[datetime]:
         if value is None:
@@ -5305,6 +6377,14 @@ def _report_sla_deadline_column():
     )
 
 
+def _report_resolution_hours_expression(db: Session):
+    created_at = _report_created_at_column()
+    resolved_at = _report_resolved_at_column()
+    if db.get_bind().dialect.name == "sqlite":
+        return (func.julianday(resolved_at) - func.julianday(created_at)) * 24.0
+    return extract("epoch", resolved_at - created_at) / 3600.0
+
+
 def _sla_breached_condition(now: datetime, db: Session):
     deadline = _report_sla_deadline_column()
     resolved_at = _report_resolved_at_column()
@@ -5355,10 +6435,11 @@ def _report_ticket_query(db: Session, filters: ReportFilters, user: UserRecord):
             func.lower(TicketRecord.ticket_type) == filters.ticket_type.lower()
         )
     terminal = _terminal_status_names(db)
+    normalized_status = portable_ascii_lower_expression(TicketRecord.status)
     if filters.resolution_state == "resolved":
-        query = query.filter(func.lower(TicketRecord.status).in_(terminal))
+        query = query.filter(normalized_status.in_(terminal))
     elif filters.resolution_state == "open":
-        query = query.filter(func.lower(TicketRecord.status).notin_(terminal))
+        query = query.filter(normalized_status.notin_(terminal))
     if filters.sla_state:
         eligible = sla_eligible_filter(terminal)
         deadline = _report_sla_deadline_column()
@@ -5614,29 +6695,32 @@ async def reports_summary(
     now = datetime.utcnow()
     terminal = _terminal_status_names(db)
     query = _report_ticket_query(db, filters, user)
-    total = query.count()
-    open_t = query.filter(func.lower(TicketRecord.status).notin_(terminal)).count()
-    resolved = query.filter(func.lower(TicketRecord.status).in_(terminal)).count()
-    breached = query.filter(
-        _sla_breached_condition(now, db),
-    ).count()
+    normalized_status = portable_ascii_lower_expression(TicketRecord.status)
+    total, open_t, resolved, breached, escalated = query.with_entities(
+        func.count(TicketRecord.id),
+        func.sum(case((normalized_status.notin_(terminal), 1), else_=0)),
+        func.sum(case((normalized_status.in_(terminal), 1), else_=0)),
+        func.sum(case((_sla_breached_condition(now, db), 1), else_=0)),
+        func.sum(case((normalized_status == "escalated", 1), else_=0)),
+    ).one()
+    total = int(total or 0)
+    open_t = int(open_t or 0)
+    resolved = int(resolved or 0)
+    breached = int(breached or 0)
+    escalated = int(escalated or 0)
 
-    resolved_tickets = query.with_entities(
-        _report_created_at_column().label("report_created_at"),
-        _report_resolved_at_column().label("report_resolved_at"),
-    ).filter(_report_resolved_at_column().isnot(None)).all()
-    durations = [
-        (row.report_resolved_at - row.report_created_at).total_seconds()
-        for row in resolved_tickets
-        if row.report_created_at and row.report_resolved_at
-    ]
-    avg_hours = round(sum(durations) / len(durations) / 3600, 1) if durations else 0.0
+    created_at = _report_created_at_column()
+    resolved_at = _report_resolved_at_column()
+    avg_duration = query.with_entities(
+        func.avg(_report_resolution_hours_expression(db))
+    ).filter(
+        created_at.isnot(None),
+        resolved_at.isnot(None),
+        resolved_at >= created_at,
+    ).scalar()
+    avg_hours = round(float(avg_duration), 1) if avg_duration is not None else 0.0
 
-    escalation_rate = round(
-        query.filter(func.lower(TicketRecord.status) == "escalated").count()
-        / total * 100,
-        1,
-    ) if total else 0.0
+    escalation_rate = round(escalated / total * 100, 1) if total else 0.0
     filtered_ticket_ids = query.with_entities(TicketRecord.id).subquery()
     avg_rating = db.query(func.avg(SurveyResponseRecord.rating)).join(
         SurveyRecord,
@@ -5644,6 +6728,8 @@ async def reports_summary(
     ).join(
         filtered_ticket_ids,
         filtered_ticket_ids.c.id == SurveyRecord.ticket_id,
+    ).filter(
+        SurveyRecord.delivery_status == "accepted",
     ).scalar()
     csat = round(float(avg_rating) / 5 * 100, 1) if avg_rating else 0.0
 
@@ -5721,23 +6807,26 @@ async def reports_sla_compliance(
     query = _report_ticket_query(db, filters, user).filter(
         sla_eligible_filter(_terminal_status_names(db))
     )
-    priorities = [
-        row.priority
-        for row in query.with_entities(TicketRecord.priority)
-        .filter(TicketRecord.priority.isnot(None))
-        .distinct()
-        .order_by(TicketRecord.priority)
-        .all()
-    ]
+    rows = query.with_entities(
+        TicketRecord.priority,
+        func.count(TicketRecord.id).label("total"),
+        func.sum(case(
+            (_sla_breached_condition(now, db), 1),
+            else_=0,
+        )).label("breached"),
+    ).filter(
+        TicketRecord.priority.isnot(None)
+    ).group_by(
+        TicketRecord.priority
+    ).order_by(
+        TicketRecord.priority
+    ).all()
     result = {}
-    for priority_name in priorities:
-        total = query.filter(TicketRecord.priority == priority_name).count()
-        breached = query.filter(
-            TicketRecord.priority == priority_name,
-            _sla_breached_condition(now, db),
-        ).count()
+    for row in rows:
+        total = int(row.total or 0)
+        breached = int(row.breached or 0)
         compliance = round(((total - breached) / total * 100), 1) if total else 100.0
-        result[priority_name] = {
+        result[row.priority] = {
             "total": total,
             "breached": breached,
             "compliance": compliance,
@@ -5758,28 +6847,32 @@ async def reports_resolution_time(
         TicketRecord.category.isnot(None),
     )
     total_matching = query.count()
-    rows = query.with_entities(
+    created_at = _report_created_at_column()
+    resolved_at = _report_resolved_at_column()
+    valid_query = query.filter(
+        created_at.isnot(None),
+        resolved_at >= created_at,
+    )
+    analyzed_tickets = valid_query.count()
+    total_categories = int(valid_query.with_entities(
+        func.count(func.distinct(TicketRecord.category))
+    ).scalar() or 0)
+    average_hours = func.avg(_report_resolution_hours_expression(db))
+    rows = valid_query.with_entities(
         TicketRecord.category,
-        _report_created_at_column().label("report_created_at"),
-        _report_resolved_at_column().label("report_resolved_at"),
-    ).all()
-    by_category = {}
-    for row in rows:
-        if not row.report_created_at or not row.report_resolved_at:
-            continue
-        hours = (
-            row.report_resolved_at - row.report_created_at
-        ).total_seconds() / 3600
-        by_category.setdefault(row.category, []).append(hours)
+        average_hours.label("avg_hours"),
+    ).group_by(
+        TicketRecord.category
+    ).order_by(
+        average_hours.desc(),
+        TicketRecord.category,
+    ).limit(_REPORT_SERIES_GROUP_LIMIT).all()
     return {
-        "categories": list(by_category.keys()),
-        "avg_hours": [
-            round(sum(values) / len(values), 1)
-            for values in by_category.values()
-        ],
+        "categories": [row.category for row in rows],
+        "avg_hours": [round(float(row.avg_hours), 1) for row in rows],
         "total_matching_tickets": total_matching,
-        "analyzed_tickets": len(rows),
-        "truncated": False,
+        "analyzed_tickets": analyzed_tickets,
+        "truncated": total_categories > len(rows),
     }
 
 
@@ -5927,13 +7020,27 @@ async def get_user(
 
 @app.get("/leaderboard", response_model=List[UserSummary])
 async def get_leaderboard(db: Session = Depends(get_db)):
-    users = db.query(UserRecord).order_by(desc(UserRecord.impact_points)).all()
+    resolved_counts = db.query(
+        TicketRecord.resolved_by.label("user_id"),
+        func.count(TicketRecord.id).label("tickets_resolved"),
+    ).filter(
+        TicketRecord.resolved_by.isnot(None),
+        TicketRecord.points_awarded > 0,
+    ).group_by(TicketRecord.resolved_by).subquery()
+    rows = db.query(
+        UserRecord,
+        func.coalesce(resolved_counts.c.tickets_resolved, 0),
+    ).outerjoin(
+        resolved_counts,
+        resolved_counts.c.user_id == UserRecord.id,
+    ).filter(
+        UserRecord.is_active.is_(True),
+    ).order_by(
+        desc(UserRecord.impact_points),
+        UserRecord.id,
+    ).limit(500).all()
     result = []
-    for i, u in enumerate(users):
-        resolved_count = db.query(TicketRecord).filter(
-            TicketRecord.resolved_by == u.id,
-            TicketRecord.points_awarded > 0,
-        ).count()
+    for i, (u, resolved_count) in enumerate(rows):
         result.append(UserSummary(
             id=u.id,
             name=u.name,
@@ -5942,14 +7049,23 @@ async def get_leaderboard(db: Session = Depends(get_db)):
             impact_points=u.impact_points,
             tier=u.tier,
             momentum=u.momentum,
-            tickets_resolved=resolved_count,
+            tickets_resolved=int(resolved_count or 0),
             rank=i + 1,
         ))
     return result
 
 
 @app.get("/recognitions/{user_id}", response_model=List[Recognition])
-async def get_user_recognitions(user_id: str, db: Session = Depends(get_db)):
+async def get_user_recognitions(
+    user_id: str,
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(get_current_user),
+):
+    if (user.role or "").lower() not in {"admin", "supervisor"} and user_id != user.id:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    target = db.query(UserRecord.id).filter(UserRecord.id == user_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
     recs = db.query(RecognitionRecord).filter(
         RecognitionRecord.user_id == user_id
     ).order_by(desc(RecognitionRecord.unlocked_at)).all()
@@ -6639,20 +7755,51 @@ async def list_external_users(
 
 @app.get("/admin/agents", deprecated=True)
 async def list_external_agents(
+    limit: int = Query(100, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=1_000_000),
     db: Session = Depends(get_db),
     _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
-    records = db.query(ExternalUserRecord).filter(
+    page = db.query(ExternalUserRecord).filter(
         ExternalUserRecord.user_type == "agent",
         ExternalUserRecord.active.is_(True),
-    ).order_by(ExternalUserRecord.name).all()
-    return {"agents": [_external_user_payload(record) for record in records]}
+    ).order_by(
+        ExternalUserRecord.name,
+        ExternalUserRecord.id,
+    ).offset(offset).limit(limit + 1).all()
+    return {
+        "agents": [_external_user_payload(record) for record in page[:limit]],
+        "limit": limit,
+        "offset": offset,
+        "has_more": len(page) > limit,
+    }
 
 
 # ── SendGrid email ─────────────────────────────────────────────
 
-def _email_directory(db: Session, audience: str) -> list[EmailRecipient]:
+def _email_directory(
+    db: Session,
+    audience: str,
+    *,
+    search: str,
+    limit: int,
+) -> tuple[list[EmailRecipient], bool]:
+    """Return a bounded, source-separated recipient sample.
+
+    Local and provider directories are each capped before materialization.
+    Search is applied in SQL. The caller receives an explicit truncation bit
+    because computing an exact cross-source, normalized-email cardinality
+    would require scanning the entire provider directory on every keystroke.
+    """
     by_email: dict[str, EmailRecipient] = {}
+    sample_limit = limit + 1
+    escaped_search = (
+        search.strip()
+        .replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
+    pattern = f"%{escaped_search}%" if escaped_search else None
 
     def add_recipient(recipient: EmailRecipient) -> None:
         try:
@@ -6662,12 +7809,27 @@ def _email_directory(db: Session, audience: str) -> list[EmailRecipient]:
         recipient.email = normalized
         by_email.setdefault(normalized, recipient)
 
+    local_users: list[UserRecord] = []
+    local_truncated = False
     if audience == "agents":
-        local_users = db.query(UserRecord).filter(
+        local_query = db.query(UserRecord).filter(
             UserRecord.is_active.is_(True),
             UserRecord.role.in_(("admin", "supervisor", "agent")),
             UserRecord.email.isnot(None),
-        ).order_by(UserRecord.name, UserRecord.id).all()
+        )
+        if pattern:
+            local_query = local_query.filter(or_(
+                UserRecord.name.ilike(pattern, escape="\\"),
+                UserRecord.email.ilike(pattern, escape="\\"),
+                UserRecord.title.ilike(pattern, escape="\\"),
+                UserRecord.role.ilike(pattern, escape="\\"),
+            ))
+        local_page = local_query.order_by(
+            portable_ascii_lower_expression(UserRecord.name),
+            UserRecord.id,
+        ).limit(sample_limit).all()
+        local_truncated = len(local_page) > limit
+        local_users = local_page[:sample_limit]
         for record in local_users:
             add_recipient(EmailRecipient(
                 id=f"local:{record.id}",
@@ -6679,11 +7841,25 @@ def _email_directory(db: Session, audience: str) -> list[EmailRecipient]:
             ))
 
     external_type = "agent" if audience == "agents" else "requester"
-    external_users = db.query(ExternalUserRecord).filter(
+    external_query = db.query(ExternalUserRecord).filter(
         ExternalUserRecord.active.is_(True),
         ExternalUserRecord.user_type == external_type,
         ExternalUserRecord.email.isnot(None),
-    ).order_by(ExternalUserRecord.name, ExternalUserRecord.id).all()
+        func.length(func.trim(ExternalUserRecord.email)).between(3, 320),
+        ExternalUserRecord.email.contains("@"),
+    )
+    if pattern:
+        external_query = external_query.filter(or_(
+            ExternalUserRecord.name.ilike(pattern, escape="\\"),
+            ExternalUserRecord.email.ilike(pattern, escape="\\"),
+            ExternalUserRecord.title.ilike(pattern, escape="\\"),
+        ))
+    external_page = external_query.order_by(
+        portable_ascii_lower_expression(ExternalUserRecord.name),
+        ExternalUserRecord.id,
+    ).limit(sample_limit).all()
+    external_truncated = len(external_page) > limit
+    external_users = external_page[:sample_limit]
     for record in external_users:
         add_recipient(EmailRecipient(
             id=f"external:{record.id}",
@@ -6693,10 +7869,16 @@ def _email_directory(db: Session, audience: str) -> list[EmailRecipient]:
             source=record.provider,
             title=record.title,
         ))
-    return sorted(
+    recipients = sorted(
         by_email.values(),
         key=lambda recipient: (recipient.name.casefold(), recipient.email),
     )
+    truncated = (
+        local_truncated
+        or external_truncated
+        or len(recipients) > limit
+    )
+    return recipients[:limit], truncated
 
 
 def _resolve_email_recipients(
@@ -6780,22 +7962,19 @@ async def list_email_recipients(
     _user: UserRecord = Depends(get_email_user),
 ):
     response.headers["Cache-Control"] = "no-store"
-    recipients = _email_directory(db, audience)
-    term = search.strip().casefold()
-    if term:
-        recipients = [
-            recipient
-            for recipient in recipients
-            if term in recipient.name.casefold()
-            or term in recipient.email.casefold()
-            or term in (recipient.title or "").casefold()
-        ]
-    total = len(recipients)
+    recipients, truncated = _email_directory(
+        db,
+        audience,
+        search=search,
+        limit=limit,
+    )
     return {
         "audience": audience,
-        "recipients": recipients[:limit],
-        "total": total,
-        "truncated": total > limit,
+        "recipients": recipients,
+        # This is the number shown, not an expensive exact directory count.
+        # `truncated` explicitly communicates that additional matches exist.
+        "total": len(recipients),
+        "truncated": truncated,
     }
 
 
@@ -7181,7 +8360,7 @@ def _ai_task_lifecycle(
     terminal_statuses: Optional[set[str]] = None,
 ) -> str:
     status = (ticket.ai_status or "").strip().lower().replace("-", "_")
-    ticket_status = (ticket.status or "").strip().lower()
+    ticket_status = portable_ascii_lower(ticket.status)
     if (
         terminal_statuses
         and ticket_status in terminal_statuses
@@ -8122,15 +9301,12 @@ def _unassigned_ticket_filter():
     )
 
 
-def _active_ticket_status_filter():
-    return or_(
-        TicketRecord.status.is_(None),
-        func.lower(TicketRecord.status).notin_(["closed", "resolved", "cancelled"]),
-    )
+def _active_ticket_status_filter(db: Session):
+    return active_ticket_filter(db)
 
 
 def _open_ticket_query(db: Session, since: Optional[datetime] = None):
-    query = db.query(TicketRecord).filter(_active_ticket_status_filter())
+    query = db.query(TicketRecord).filter(_active_ticket_status_filter(db))
     if since is not None:
         query = query.filter(_ticket_activity_expression() >= since)
     return query
@@ -8138,19 +9314,19 @@ def _open_ticket_query(db: Session, since: Optional[datetime] = None):
 
 def _intelligence_candidate_order():
     return (
-        case(
-            {"P1": 1, "Urgent": 1, "P2": 2, "High": 2, "P3": 3, "Medium": 3},
-            value=TicketRecord.priority,
-            else_=4,
-        ).asc(),
+        _priority_weight_expression().asc(),
         _ticket_activity_expression().desc().nullslast(),
         TicketRecord.id.asc(),
     )
 
 
-def _serialize_attention_ticket(ticket: TicketRecord, now: datetime) -> Dict[str, Any]:
-    sla = intel.sla_status(ticket, now)
-    risk = intel.escalation_risk(ticket, now)
+def _serialize_attention_ticket(
+    ticket: TicketRecord,
+    now: datetime,
+    terminal_statuses: set[str],
+) -> Dict[str, Any]:
+    sla = intel.sla_status(ticket, now, terminal_statuses)
+    risk = intel.escalation_risk(ticket, now, terminal_statuses)
     priority = (ticket.priority or "").strip() or "Unspecified"
     reasons: List[str] = []
     if sla["status"] == "breached":
@@ -8179,8 +9355,12 @@ def _serialize_attention_ticket(ticket: TicketRecord, now: datetime) -> Dict[str
         "assignee_id": ticket.assignee_id,
         "is_unassigned": _ticket_is_unassigned(ticket),
         "escalation_risk": risk,
-        "priority_score": intel.prioritize_score(ticket, now),
-        "age_hours": round(intel._age_hours(ticket, now), 2),
+        "priority_score": intel.prioritize_score(
+            ticket, now, terminal_statuses
+        ),
+        "age_hours": round(
+            intel._age_hours(ticket, now, terminal_statuses), 2
+        ),
         "dormant_hours": round(dormant_hours, 2),
         "last_activity_at": activity_at.isoformat() if activity_at else None,
         "sla": sla,
@@ -8202,6 +9382,7 @@ async def intel_overview(
     """Decision-first operations cockpit with legacy backlog isolation."""
     _reserve_analytics_request(db, _user.id)
     now = datetime.utcnow()
+    terminal_statuses = _terminal_status_names(db)
     cutoff = _intelligence_cutoff(now, window_days)
     all_open_query = _open_ticket_query(db)
     active_query = _open_ticket_query(db, cutoff)
@@ -8243,7 +9424,10 @@ async def intel_overview(
         *_intelligence_candidate_order()
     ).limit(_INTELLIGENCE_ROW_LIMIT).all()
 
-    attention = [_serialize_attention_ticket(ticket, now) for ticket in candidates]
+    attention = [
+        _serialize_attention_ticket(ticket, now, terminal_statuses)
+        for ticket in candidates
+    ]
     attention.sort(key=lambda item: (
         item["sla"]["status"] == "breached",
         item["priority"].lower() in {"p1", "urgent"},
@@ -8349,6 +9533,7 @@ def intel_service_quality(
     """Alert-only routing, support-level, friction, and clarity signals."""
     _reserve_analytics_request(db, _user.id)
     now = datetime.utcnow()
+    terminal_statuses = _terminal_status_names(db)
     cutoff = _intelligence_cutoff(now, window_days)
     query = _open_ticket_query(db, cutoff).filter(
         TicketRecord.portal_access_token_hash.is_(None)
@@ -8357,9 +9542,21 @@ def intel_service_quality(
     tickets = query.order_by(*_intelligence_candidate_order()).limit(
         _INTELLIGENCE_ROW_LIMIT
     ).all()
-    profiles = intel.build_group_profiles(db, since=now - timedelta(days=365))
-    conversations = intel.public_conversations_for_tickets(
-        db, [ticket.id for ticket in tickets]
+    profile_group_keys = {
+        (ticket.binding_id or "legacy", ticket.external_group_id)
+        for ticket in tickets
+        if ticket.external_group_id
+    }
+    profiles, group_profiles_truncated = intel.build_group_profiles(
+        db,
+        since=now - timedelta(days=365),
+        group_keys=profile_group_keys,
+    )
+    conversations, truncated_transcript_ticket_ids = (
+        intel.bounded_public_conversations_for_tickets(
+            db,
+            [ticket.id for ticket in tickets],
+        )
     )
 
     routing_alerts = []
@@ -8388,7 +9585,15 @@ def intel_service_quality(
         level_assessments.append(assessment)
 
         thread = conversations.get(ticket.id, [])
-        friction = intel.customer_friction_signal(ticket, thread, now=now)
+        friction = intel.customer_friction_signal(
+            ticket,
+            thread,
+            now=now,
+            terminal_statuses=terminal_statuses,
+            conversation_truncated=(
+                ticket.id in truncated_transcript_ticket_ids
+            ),
+        )
         if friction["flagged"]:
             friction_alerts.append(friction)
         clarification = intel.clarification_assessment(ticket, thread)
@@ -8419,6 +9624,12 @@ def intel_service_quality(
             "analyzed_tickets": len(tickets),
             "truncated": total > len(tickets),
             "group_profile_period_days": 365,
+            "group_profile_group_limit": intel.GROUP_PROFILE_GROUP_LIMIT,
+            "group_profile_aggregate_limit": intel.GROUP_PROFILE_AGGREGATE_LIMIT,
+            "group_profiles_truncated": group_profiles_truncated,
+            "transcript_limit_per_ticket": intel.PUBLIC_CONVERSATION_SAMPLE_LIMIT,
+            "transcript_truncated": bool(truncated_transcript_ticket_ids),
+            "transcript_truncated_tickets": len(truncated_transcript_ticket_ids),
         },
         "summary": {
             "routing_mismatches": len(routing_alerts),
@@ -8448,6 +9659,7 @@ def intel_sla_monitoring(
     """First-response and resolution SLA dashboard, reactive and proactive."""
     _reserve_analytics_request(db, _user.id)
     now = datetime.utcnow()
+    terminal_statuses = _terminal_status_names(db)
     cutoff = _intelligence_cutoff(now, window_days)
     query = db.query(TicketRecord).filter(
         _ticket_activity_expression() >= cutoff,
@@ -8457,15 +9669,31 @@ def intel_sla_monitoring(
     tickets = query.order_by(
         _ticket_activity_expression().desc(), TicketRecord.id.asc()
     ).limit(_INTELLIGENCE_SLA_ROW_LIMIT).all()
-    conversations = intel.public_conversations_for_tickets(
+    conversation_facts = intel.public_conversation_sla_facts(
         db, [ticket.id for ticket in tickets]
     )
     rows = []
     for ticket in tickets:
+        responded_at, has_public_conversation = conversation_facts.get(
+            ticket.id, (None, False)
+        )
         rows.append(intel.first_response_sla_status(
-            ticket, conversations.get(ticket.id, []), now=now
+            ticket,
+            [],
+            now=now,
+            terminal_statuses=terminal_statuses,
+            responded_at=responded_at,
+            conversation_coverage=bool(
+                has_public_conversation
+                or ticket.external_conversations_synced_at
+                or not ticket.external_source
+            ),
         ))
-        rows.append(intel.resolution_sla_monitor_status(ticket, now=now))
+        rows.append(intel.resolution_sla_monitor_status(
+            ticket,
+            now=now,
+            terminal_statuses=terminal_statuses,
+        ))
 
     measured = [row for row in rows if row["status"] != "unmeasured"]
     reactive = [row for row in measured if row["status"] == "breached"]
@@ -8572,6 +9800,7 @@ async def intel_prioritize(
     """Prioritization Agent: open backlog ranked by composite urgency/impact/risk."""
     _reserve_analytics_request(db, _user.id)
     now = datetime.utcnow()
+    terminal_statuses = _terminal_status_names(db)
     open_query = _open_ticket_query(db, _intelligence_cutoff(now, window_days))
     total_open = open_query.count()
     open_tickets = open_query.order_by(
@@ -8587,8 +9816,10 @@ async def intel_prioritize(
             "category": t.category,
             "complexity": t.complexity,
             "escalation_risk": t.escalation_risk or 0,
-            "age_hours": round(intel._age_hours(t, now), 2),
-            "score": intel.prioritize_score(t, now),
+            "age_hours": round(
+                intel._age_hours(t, now, terminal_statuses), 2
+            ),
+            "score": intel.prioritize_score(t, now, terminal_statuses),
         })
     ranked.sort(key=lambda r: r["score"], reverse=True)
     return {
@@ -8610,14 +9841,18 @@ async def intel_sla(
     """SLA Agent: SLA clock state for every open ticket."""
     _reserve_analytics_request(db, _user.id)
     now = datetime.utcnow()
+    terminal_statuses = _terminal_status_names(db)
     open_query = _open_ticket_query(
         db, _intelligence_cutoff(now, window_days)
-    ).filter(sla_eligible_filter(_terminal_status_names(db)))
+    ).filter(sla_eligible_filter(terminal_statuses))
     total_open = open_query.count()
     candidates = open_query.order_by(
         *_intelligence_candidate_order()
     ).limit(_INTELLIGENCE_ROW_LIMIT).all()
-    rows = [intel.sla_status(ticket, now) for ticket in candidates]
+    rows = [
+        intel.sla_status(ticket, now, terminal_statuses)
+        for ticket in candidates
+    ]
     rows.sort(key=lambda r: r["remaining_hours"])
     return {
         "generated_at": now.isoformat(),
@@ -8704,7 +9939,7 @@ async def agent_workload(
             TicketRecord.external_assignee_id.isnot(None),
             TicketRecord.external_assignee_id != "",
             _ticket_activity_expression() >= cutoff,
-            _active_ticket_status_filter(),
+            _active_ticket_status_filter(db),
         ).group_by(
             TicketRecord.binding_id,
             TicketRecord.external_assignee_id,
@@ -8820,7 +10055,7 @@ async def agent_workload(
         ).filter(
             TicketRecord.assignee_id.in_(user_ids),
             _ticket_activity_expression() >= cutoff,
-            _active_ticket_status_filter(),
+            _active_ticket_status_filter(db),
         ).group_by(TicketRecord.assignee_id).all()) if user_ids else {}
         p1_counts = dict(db.query(
             TicketRecord.assignee_id,
@@ -8828,7 +10063,7 @@ async def agent_workload(
         ).filter(
             TicketRecord.assignee_id.in_(user_ids),
             _ticket_activity_expression() >= cutoff,
-            _active_ticket_status_filter(),
+            _active_ticket_status_filter(db),
             func.lower(func.coalesce(TicketRecord.priority, "")).in_(["p1", "urgent"]),
         ).group_by(TicketRecord.assignee_id).all()) if user_ids else {}
         resolved_counts = dict(db.query(
@@ -8940,7 +10175,10 @@ async def intel_route(
         raise HTTPException(status_code=404, detail="Ticket not found")
     _authorize_ticket_analysis(_user, ticket, db)
     _reserve_analytics_request(db, _user.id)
-    return intel.recommend_assignee(db, ticket)
+    ticket, _user = _lock_authorized_ticket_analysis(db, ticket_id, _user)
+    recommendation = intel.recommend_assignee(db, ticket)
+    db.commit()
+    return recommendation
 
 
 @app.post("/tickets/{ticket_id}/summary")
@@ -8956,8 +10194,13 @@ async def ticket_summary(
         raise HTTPException(status_code=404, detail="Ticket not found")
     _authorize_ticket_analysis(_user, ticket, db)
     _reserve_ai_request(db, _user.id, "summary")
+    ticket, _user = _lock_authorized_ticket_analysis(db, ticket_id, _user)
     result = await _run_ticket_analysis(
-        ticket, db, force=force, artifacts={"summary"}
+        ticket,
+        db,
+        force=force,
+        artifacts={"summary"},
+        analysis_actor_id=_user.id,
     )
     return {"ticket_id": ticket.id, "summary": result["summary"]}
 
@@ -8977,8 +10220,13 @@ async def ticket_resolve(
         raise HTTPException(status_code=404, detail="Ticket not found")
     _authorize_ticket_analysis(_user, ticket, db)
     _reserve_ai_request(db, _user.id, "resolution")
+    ticket, _user = _lock_authorized_ticket_analysis(db, ticket_id, _user)
     result = await _run_ticket_analysis(
-        ticket, db, force=force, artifacts={"resolution"}
+        ticket,
+        db,
+        force=force,
+        artifacts={"resolution"},
+        analysis_actor_id=_user.id,
     )
     recommended = result.get("recommended_solution")
     if not recommended or not recommended.get("plan"):
@@ -9143,28 +10391,56 @@ async def _check_resolution_and_award(ticket: TicketRecord, db: Optional[Session
     """Check if a ticket transitioned to Closed and award points to the assignee."""
     owns_db = db is None
     db = db or SessionLocal()
-    ticket = db.query(TicketRecord).filter(
-        TicketRecord.id == ticket.id
-    ).populate_existing().with_for_update().first()
-    if not ticket:
-        if owns_db:
-            db.close()
-        return
-    if ticket.external_status and ticket.external_status.lower() not in ("closed", "resolved"):
-        if owns_db:
-            db.close()
-        return
-    if ticket.points_awarded_sent:
-        if owns_db:
-            db.close()
-        return
+    ticket_id = ticket.id
     try:
-        # Only an explicitly assigned Tickety account can receive local points.
-        # Provider identities are deliberately not mapped into this user domain.
-        if not ticket.assignee_id:
+        # Read the candidate without a lock, then acquire User -> Ticket. If an
+        # assignment writer won in between, release and retry against the new
+        # owner rather than introducing Ticket -> User lock inversion.
+        locked_user: Optional[UserRecord] = None
+        locked_ticket: Optional[TicketRecord] = None
+        for _attempt in range(5):
+            candidate = db.query(TicketRecord.assignee_id).filter(
+                TicketRecord.id == ticket_id
+            ).scalar()
+            if not candidate:
+                db.rollback()
+                return
+            try:
+                locked_user = _lock_user_record(db, candidate)
+                locked_ticket = _lock_ticket_record(db, ticket_id)
+            except HTTPException as exc:
+                db.rollback()
+                if exc.status_code == 404:
+                    locked_user = None
+                    locked_ticket = None
+                    continue
+                raise
+            if locked_ticket.assignee_id == locked_user.id:
+                break
+            db.rollback()
+            locked_user = None
+            locked_ticket = None
+        if locked_user is None or locked_ticket is None:
             return
-        user = db.query(UserRecord).filter(UserRecord.id == ticket.assignee_id).first()
-        if not user:
+
+        user = locked_user
+        ticket = locked_ticket
+        terminal_names = _terminal_status_names(db)
+        if ticket.external_status:
+            is_terminal = portable_ascii_lower(ticket.external_status) in terminal_names
+        else:
+            is_terminal = (
+                _is_terminal_status(db, ticket.status)
+                or _is_terminal_status(db, ticket.workflow_status)
+            )
+        if not is_terminal or ticket.points_awarded_sent:
+            db.rollback()
+            return
+        if (
+            not user.is_active
+            or (user.role or "").lower() not in _OPERATIONAL_USER_ROLES
+        ):
+            db.rollback()
             return
 
         # Calculate points
@@ -9231,6 +10507,7 @@ async def _check_resolution_and_award(ticket: TicketRecord, db: Optional[Session
     except Exception as e:
         print(f"[award] error kind={type(e).__name__}")
         db.rollback()
+        raise
     finally:
         if owns_db:
             db.close()
@@ -9266,12 +10543,35 @@ def _check_recognitions(db: Session, user: UserRecord, ticket: TicketRecord) -> 
 
     for key, passes in checks.items():
         if passes and key not in existing_keys:
-            db.add(RecognitionRecord(
+            values = dict(
                 user_id=user.id,
                 recognition_key=key,
                 ticket_id=ticket.id,
-            ))
-            unlocked.append(key)
+            )
+            dialect = db.get_bind().dialect.name
+            if dialect == "postgresql":
+                from sqlalchemy.dialects.postgresql import insert
+            elif dialect == "sqlite":
+                from sqlalchemy.dialects.sqlite import insert
+            else:
+                if not db.query(RecognitionRecord.id).filter(
+                    RecognitionRecord.user_id == user.id,
+                    RecognitionRecord.recognition_key == key,
+                ).first():
+                    db.add(RecognitionRecord(**values))
+                    unlocked.append(key)
+                continue
+            inserted = db.execute(
+                insert(RecognitionRecord)
+                .values(**values)
+                .on_conflict_do_nothing(
+                    index_elements=["user_id", "recognition_key"],
+                )
+                .returning(RecognitionRecord.recognition_key)
+            ).scalar_one_or_none()
+            if inserted:
+                existing_keys.add(inserted)
+                unlocked.append(inserted)
 
     return unlocked
 
@@ -9293,31 +10593,83 @@ def _check_reliability_streak(db: Session, user: UserRecord) -> bool:
 
 # ── Projects ──────────────────────────────────────────────────
 
+def _lock_active_user_reference(
+    db: Session,
+    user_id: Optional[str],
+    *,
+    label: str,
+) -> None:
+    if not user_id:
+        return
+    if "\x00" in user_id:
+        raise HTTPException(status_code=422, detail=f"{label} must not contain NUL")
+    try:
+        user = _lock_user_record(db, user_id)
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+        raise HTTPException(status_code=404, detail=f"{label} not found") from exc
+    if not user.is_active:
+        raise HTTPException(status_code=409, detail=f"{label} must be active")
+    if (user.role or "").lower() not in _OPERATIONAL_USER_ROLES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{label} must have a supported operational role",
+        )
+
 @app.get("/projects", response_model=List[Project])
-async def list_projects(db: Session = Depends(get_db)):
-    projects = db.query(ProjectRecord).order_by(ProjectRecord.name).all()
-    for p in projects:
-        if p.lead_id:
-            u = db.query(UserRecord).filter(UserRecord.id == p.lead_id).first()
-            p.__dict__["lead_name"] = u.name if u else None
+async def list_projects(
+    response: Response,
+    limit: int = Query(default=100, ge=1, le=200),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(require_role("admin", "supervisor", "agent")),
+):
+    page = db.query(ProjectRecord).order_by(
+        ProjectRecord.name,
+        ProjectRecord.id,
+    ).offset(offset).limit(limit + 1).all()
+    has_more = len(page) > limit
+    projects = page[:limit]
+
+    lead_ids = {project.lead_id for project in projects if project.lead_id}
+    lead_names = dict(
+        db.query(UserRecord.id, UserRecord.name).filter(
+            UserRecord.id.in_(lead_ids)
+        ).all()
+    ) if lead_ids else {}
+    for project in projects:
+        project.__dict__["lead_name"] = lead_names.get(project.lead_id)
+
+    response.headers["X-Page-Limit"] = str(limit)
+    response.headers["X-Page-Offset"] = str(offset)
+    response.headers["X-Has-More"] = str(has_more).lower()
     return projects
 
 
 @app.post("/projects", response_model=Project, status_code=201)
 async def create_project(payload: ProjectCreate, db: Session = Depends(get_db)):
     import uuid as _uuid
+    _lock_active_user_reference(db, payload.lead_id, label="Project lead")
     existing = db.query(ProjectRecord).filter(ProjectRecord.key == payload.key.upper()).first()
     if existing:
         raise HTTPException(status_code=409, detail="Project key already exists")
     project = ProjectRecord(
-        id=f"proj-{_uuid.uuid4().hex[:8]}",
+        id=f"proj-{_uuid.uuid4().hex}",
         name=payload.name,
         key=payload.key.upper(),
         description=payload.description,
         lead_id=payload.lead_id,
     )
     db.add(project)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Project key or lead changed while saving",
+        ) from exc
     db.refresh(project)
     return project
 
@@ -9327,11 +10679,21 @@ async def update_project(project_id: str, payload: ProjectUpdate, db: Session = 
     project = db.query(ProjectRecord).filter(ProjectRecord.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    for field in ["name", "description", "lead_id", "status"]:
-        val = getattr(payload, field, None)
-        if val is not None:
-            setattr(project, field, val)
-    db.commit()
+    if "lead_id" in payload.model_fields_set:
+        _lock_active_user_reference(db, payload.lead_id, label="Project lead")
+    for field in payload.model_fields_set:
+        value = getattr(payload, field)
+        if field == "description" and value is None:
+            value = ""
+        setattr(project, field, value)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Project references changed while saving",
+        ) from exc
     db.refresh(project)
     return project
 
@@ -9348,36 +10710,162 @@ async def delete_project(project_id: str, db: Session = Depends(get_db)):
 
 # ── Service Catalog ────────────────────────────────────────────
 
+_SERVICE_CATEGORY_OPTION_LIMIT = 100
+_SERVICE_CATEGORY_HEADER_BUDGET = 6_000
+
+
+def _literal_list_search_pattern(value: Optional[str]) -> Optional[str]:
+    """Return a bounded literal ILIKE pattern for list endpoints."""
+    normalized = (value or "").strip()
+    if not normalized:
+        return None
+    if "\x00" in normalized:
+        raise HTTPException(status_code=422, detail="Search must not contain NUL")
+    escaped = (
+        normalized
+        .replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
+    return f"%{escaped}%"
+
+
+def _service_category_options(
+    db: Session,
+) -> tuple[list[str], bool]:
+    """Return header-safe active category options with explicit truncation."""
+    rows = db.query(ServiceItemRecord.category).filter(
+        ServiceItemRecord.is_active.is_(True),
+        ServiceItemRecord.category.isnot(None),
+        func.trim(ServiceItemRecord.category) != "",
+    ).distinct().order_by(
+        ServiceItemRecord.category.asc(),
+    ).limit(
+        _SERVICE_CATEGORY_OPTION_LIMIT + 1
+    ).all()
+    truncated = len(rows) > _SERVICE_CATEGORY_OPTION_LIMIT
+    options: list[str] = []
+    for (category,) in rows[:_SERVICE_CATEGORY_OPTION_LIMIT]:
+        value = str(category)
+        if "\x00" in value:
+            truncated = True
+            continue
+        encoded = json.dumps(
+            [*options, value],
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+        if len(encoded.encode("ascii")) > _SERVICE_CATEGORY_HEADER_BUDGET:
+            truncated = True
+            break
+        options.append(value)
+    return options, truncated
+
+
 @app.get("/services", response_model=List[ServiceItem])
 async def list_services(
+    response: Response,
     db: Session = Depends(get_db),
-    category: Optional[str] = None,
+    category: Optional[str] = Query(
+        default=None,
+        max_length=255,
+        pattern=r"^[^\x00]*$",
+    ),
+    search: Optional[str] = Query(
+        default=None,
+        max_length=200,
+        pattern=r"^[^\x00]*$",
+    ),
+    is_active: Optional[bool] = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
+    _user: UserRecord = Depends(require_role("admin", "supervisor", "agent")),
 ):
     q = db.query(ServiceItemRecord)
-    if category:
+    if category not in (None, ""):
         q = q.filter(ServiceItemRecord.category == category)
-    return q.order_by(ServiceItemRecord.category, ServiceItemRecord.name).all()
+    if is_active is not None:
+        q = q.filter(ServiceItemRecord.is_active.is_(is_active))
+    search_pattern = _literal_list_search_pattern(search)
+    if search_pattern:
+        q = q.filter(or_(
+            ServiceItemRecord.id.ilike(search_pattern, escape="\\"),
+            ServiceItemRecord.name.ilike(search_pattern, escape="\\"),
+            ServiceItemRecord.description.ilike(search_pattern, escape="\\"),
+            ServiceItemRecord.category.ilike(search_pattern, escape="\\"),
+            ServiceItemRecord.pricing.ilike(search_pattern, escape="\\"),
+        ))
+
+    page = q.order_by(
+        func.coalesce(ServiceItemRecord.category, "").asc(),
+        ServiceItemRecord.name.asc(),
+        ServiceItemRecord.id.asc(),
+    ).offset(offset).limit(limit + 1).all()
+    has_more = len(page) > limit
+    services = page[:limit]
+
+    active_category = case((and_(
+        ServiceItemRecord.is_active.is_(True),
+        ServiceItemRecord.category.isnot(None),
+        func.trim(ServiceItemRecord.category) != "",
+    ), ServiceItemRecord.category), else_=None)
+    total, active, category_count = db.query(
+        func.count(ServiceItemRecord.id),
+        func.sum(case((ServiceItemRecord.is_active.is_(True), 1), else_=0)),
+        func.count(func.distinct(active_category)),
+    ).one()
+    category_options, category_options_truncated = _service_category_options(db)
+
+    response.headers["X-Page-Limit"] = str(limit)
+    response.headers["X-Page-Offset"] = str(offset)
+    response.headers["X-Has-More"] = str(has_more).lower()
+    response.headers["X-Service-Total"] = str(int(total or 0))
+    response.headers["X-Service-Active"] = str(int(active or 0))
+    response.headers["X-Service-Category-Count"] = str(int(category_count or 0))
+    response.headers["X-Service-Category-Options"] = json.dumps(
+        category_options,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    response.headers["X-Service-Category-Options-Truncated"] = str(
+        category_options_truncated
+    ).lower()
+    return services
 
 
 @app.post("/services", response_model=ServiceItem, status_code=201)
 async def create_service(payload: ServiceItemCreate, db: Session = Depends(get_db)):
     import uuid as _uuid
-    item = ServiceItemRecord(id=f"svc-{_uuid.uuid4().hex[:8]}", **payload.model_dump())
+    item = ServiceItemRecord(id=f"svc-{_uuid.uuid4().hex}", **payload.model_dump())
     db.add(item)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Service item identity changed while saving",
+        ) from exc
     db.refresh(item)
     return item
 
 
 @app.patch("/services/{service_id}", response_model=ServiceItem)
-async def update_service(service_id: str, payload: ServiceItemCreate, db: Session = Depends(get_db)):
+async def update_service(
+    service_id: str,
+    payload: ServiceItemUpdate,
+    db: Session = Depends(get_db),
+):
     item = db.query(ServiceItemRecord).filter(ServiceItemRecord.id == service_id).first()
     if not item:
         raise HTTPException(status_code=404, detail="Service item not found")
-    for field in ["name", "description", "category", "pricing", "sla_hours", "approval_required"]:
-        val = getattr(payload, field, None)
-        if val is not None:
-            setattr(item, field, val)
+    if "name" in payload.model_fields_set and payload.name is None:
+        raise HTTPException(status_code=422, detail="Service name cannot be null")
+    for field in payload.model_fields_set:
+        value = getattr(payload, field)
+        if field == "description" and value is None:
+            value = ""
+        setattr(item, field, value)
     db.commit()
     db.refresh(item)
     return item
@@ -9394,8 +10882,59 @@ async def delete_service(service_id: str, db: Session = Depends(get_db)):
 
 
 @app.get("/service-requests", response_model=List[ServiceRequest])
-async def list_service_requests(db: Session = Depends(get_db)):
-    reqs = db.query(ServiceRequestRecord).order_by(desc(ServiceRequestRecord.created_at)).all()
+async def list_service_requests(
+    response: Response,
+    db: Session = Depends(get_db),
+    search: Optional[str] = Query(
+        default=None,
+        max_length=200,
+        pattern=r"^[^\x00]*$",
+    ),
+    service_item_id: Optional[str] = Query(
+        default=None,
+        max_length=255,
+        pattern=r"^[^\x00]*$",
+    ),
+    approval_status: Optional[str] = Query(
+        default=None,
+        max_length=32,
+        pattern=r"^(not_required|pending|approved|rejected)?$",
+    ),
+    fulfillment_status: Optional[str] = Query(
+        default=None,
+        max_length=32,
+        pattern=r"^(pending|fulfilled|cancelled)?$",
+    ),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
+    _user: UserRecord = Depends(require_role("admin", "supervisor", "agent")),
+):
+    q = db.query(ServiceRequestRecord)
+    if service_item_id not in (None, ""):
+        q = q.filter(ServiceRequestRecord.service_item_id == service_item_id)
+    if approval_status:
+        q = q.filter(ServiceRequestRecord.approval_status == approval_status)
+    if fulfillment_status:
+        q = q.filter(ServiceRequestRecord.fulfillment_status == fulfillment_status)
+    search_pattern = _literal_list_search_pattern(search)
+    if search_pattern:
+        q = q.outerjoin(
+            ServiceItemRecord,
+            ServiceItemRecord.id == ServiceRequestRecord.service_item_id,
+        ).filter(or_(
+            ServiceRequestRecord.id.ilike(search_pattern, escape="\\"),
+            ServiceRequestRecord.ticket_id.ilike(search_pattern, escape="\\"),
+            ServiceRequestRecord.justification.ilike(search_pattern, escape="\\"),
+            ServiceRequestRecord.delivery_notes.ilike(search_pattern, escape="\\"),
+            ServiceItemRecord.name.ilike(search_pattern, escape="\\"),
+        ))
+
+    page = q.order_by(
+        ServiceRequestRecord.created_at.desc().nullslast(),
+        ServiceRequestRecord.id.asc(),
+    ).offset(offset).limit(limit + 1).all()
+    has_more = len(page) > limit
+    reqs = page[:limit]
     service_ids = {request.service_item_id for request in reqs if request.service_item_id}
     service_names = {
         service.id: service.name
@@ -9403,29 +10942,114 @@ async def list_service_requests(db: Session = Depends(get_db)):
     } if service_ids else {}
     for request in reqs:
         request.__dict__["service_name"] = service_names.get(request.service_item_id)
+
+    normalized_fulfillment = func.lower(func.trim(func.coalesce(
+        ServiceRequestRecord.fulfillment_status, ""
+    )))
+    normalized_approval = func.lower(func.trim(func.coalesce(
+        ServiceRequestRecord.approval_status, ""
+    )))
+    total, open_count, pending, pending_approval, awaiting_fulfillment = db.query(
+        func.count(ServiceRequestRecord.id),
+        func.sum(case((
+            normalized_fulfillment.notin_(("fulfilled", "cancelled")), 1
+        ), else_=0)),
+        func.sum(case((normalized_fulfillment == "pending", 1), else_=0)),
+        func.sum(case((normalized_approval == "pending", 1), else_=0)),
+        func.sum(case((and_(
+            normalized_fulfillment == "pending",
+            normalized_approval.in_(("approved", "not_required")),
+        ), 1), else_=0)),
+    ).one()
+
+    response.headers["X-Page-Limit"] = str(limit)
+    response.headers["X-Page-Offset"] = str(offset)
+    response.headers["X-Has-More"] = str(has_more).lower()
+    response.headers["X-Service-Request-Total"] = str(int(total or 0))
+    response.headers["X-Service-Request-Open"] = str(int(open_count or 0))
+    response.headers["X-Service-Request-Pending"] = str(int(pending or 0))
+    response.headers["X-Service-Request-Pending-Approval"] = str(
+        int(pending_approval or 0)
+    )
+    response.headers["X-Service-Request-Awaiting-Fulfillment"] = str(
+        int(awaiting_fulfillment or 0)
+    )
     return reqs
 
 
 @app.post("/service-requests", response_model=ServiceRequest, status_code=201)
 async def create_service_request(payload: ServiceRequestCreate, db: Session = Depends(get_db)):
+    _require_demo_ticketing()
     import uuid as _uuid
-    ticket = db.query(TicketRecord).filter(TicketRecord.id == payload.ticket_id).first()
+
+    # A request does not exist yet, so creation cannot begin with the
+    # ServiceRequest -> Ticket lock order used by decisions.  Locking the
+    # ticket first serializes all competing creates for that ticket; the
+    # existing-request read happens only after the waiting transaction has
+    # refreshed the ticket row.
+    matched_ticket = db.query(TicketRecord).filter(
+        TicketRecord.id == payload.ticket_id
+    ).update(
+        {TicketRecord.updated_at: TicketRecord.updated_at},
+        synchronize_session=False,
+    )
+    if matched_ticket != 1:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    ticket = db.query(TicketRecord).filter(
+        TicketRecord.id == payload.ticket_id
+    ).populate_existing().first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    service = db.query(ServiceItemRecord).filter(
-        ServiceItemRecord.id == payload.service_item_id,
-        ServiceItemRecord.is_active.is_(True),
+    if (
+        _is_terminal_status(db, ticket.status)
+        or _is_terminal_status(db, ticket.workflow_status)
+        or _ticket_has_resolution_history(ticket)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Resolved tickets cannot be converted to service requests",
+        )
+    if db.query(ProblemTicketLinkRecord.id).filter(
+        ProblemTicketLinkRecord.ticket_id == ticket.id
+    ).first():
+        raise HTTPException(
+            status_code=409,
+            detail="Problem-linked incidents cannot become service requests",
+        )
+
+    existing = db.query(ServiceRequestRecord.id).filter(
+        ServiceRequestRecord.ticket_id == payload.ticket_id
     ).first()
-    if not service:
-        raise HTTPException(status_code=404, detail="Service item not found")
-    existing = db.query(ServiceRequestRecord).filter(ServiceRequestRecord.ticket_id == payload.ticket_id).first()
     if existing:
         raise HTTPException(status_code=409, detail="Ticket already has a service request")
+
+    # The conditional no-op UPDATE both locks the catalog row until commit and
+    # re-evaluates ``is_active`` after a concurrent deactivation commits.
+    matched_service = db.query(ServiceItemRecord).filter(
+        ServiceItemRecord.id == payload.service_item_id,
+        ServiceItemRecord.is_active.is_(True),
+    ).update(
+        {
+            ServiceItemRecord.is_active: ServiceItemRecord.is_active,
+            ServiceItemRecord.updated_at: ServiceItemRecord.updated_at,
+        },
+        synchronize_session=False,
+    )
+    if matched_service != 1:
+        raise HTTPException(status_code=404, detail="Service item not found")
+    service = db.query(ServiceItemRecord).filter(
+        ServiceItemRecord.id == payload.service_item_id
+    ).populate_existing().first()
+    if not service or not service.is_active:
+        raise HTTPException(status_code=404, detail="Service item not found")
+
+    requested_at = datetime.utcnow()
     approval_status = "pending" if service.approval_required else "not_required"
     sr = ServiceRequestRecord(
-        id=f"sr-{_uuid.uuid4().hex[:8]}",
+        id=f"sr-{_uuid.uuid4().hex}",
         approval_status=approval_status,
         fulfillment_status="pending",
+        created_at=requested_at,
         **payload.model_dump(),
     )
     ticket.ticket_type = "request"
@@ -9433,13 +11057,94 @@ async def create_service_request(payload: ServiceRequestCreate, db: Session = De
     ticket.workflow_status = "Pending Approval" if service.approval_required else "Pending Fulfillment"
     ticket.status = ticket.workflow_status
     if service.sla_hours:
-        started_at = ticket.created_at or datetime.utcnow()
-        ticket.resolution_due_at = started_at + timedelta(hours=service.sla_hours)
+        ticket.resolution_due_at = requested_at + timedelta(hours=service.sla_hours)
         ticket.due_by = ticket.resolution_due_at
     db.add(sr)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Ticket already has a service request or references changed while saving",
+        ) from exc
     db.refresh(sr)
     return sr
+
+
+def _lock_service_request(
+    db: Session,
+    request_id: str,
+) -> ServiceRequestRecord:
+    """Serialize a request write before its linked ticket is touched.
+
+    A no-op UPDATE obtains a PostgreSQL row lock and SQLite's database write
+    lock. Re-reading with ``populate_existing`` prevents a waiting transaction
+    from deciding against stale identity-map state after the winner commits.
+    """
+    matched = db.query(ServiceRequestRecord).filter(
+        ServiceRequestRecord.id == request_id
+    ).update(
+        {ServiceRequestRecord.quantity: ServiceRequestRecord.quantity},
+        synchronize_session=False,
+    )
+    if matched != 1:
+        raise HTTPException(status_code=404, detail="Service request not found")
+    request_record = db.query(ServiceRequestRecord).filter(
+        ServiceRequestRecord.id == request_id
+    ).populate_existing().first()
+    if not request_record:
+        raise HTTPException(status_code=404, detail="Service request not found")
+    return request_record
+
+
+def _lock_service_request_ticket(
+    db: Session,
+    ticket_id: str,
+) -> TicketRecord:
+    """Lock the linked ticket after its service request, preserving lock order."""
+    matched = db.query(TicketRecord).filter(
+        TicketRecord.id == ticket_id
+    ).update(
+        {TicketRecord.updated_at: TicketRecord.updated_at},
+        synchronize_session=False,
+    )
+    if matched != 1:
+        raise HTTPException(
+            status_code=409,
+            detail="Service request is missing its linked ticket",
+        )
+    ticket = db.query(TicketRecord).filter(
+        TicketRecord.id == ticket_id
+    ).populate_existing().first()
+    if not ticket:
+        raise HTTPException(
+            status_code=409,
+            detail="Service request is missing its linked ticket",
+        )
+    return ticket
+
+
+def _lock_service_request_actor(
+    db: Session,
+    actor_id: str,
+) -> UserRecord:
+    """Keep the decision actor valid for the whole request transaction.
+
+    User -> ServiceRequest -> Ticket matches account purge/deactivation order
+    and prevents an approval audit field from referencing a concurrently
+    removed or demoted account.
+    """
+    actor = _lock_user_record(db, actor_id)
+    if (
+        not actor.is_active
+        or (actor.role or "").lower() not in {"admin", "supervisor"}
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Service request decision actor is no longer authorized",
+        )
+    return actor
 
 
 @app.patch("/service-requests/{request_id}/approval", response_model=ServiceRequest)
@@ -9449,14 +11154,28 @@ async def decide_service_request_approval(
     db: Session = Depends(get_db),
     user: UserRecord = Depends(require_role("admin", "supervisor")),
 ):
-    sr = db.query(ServiceRequestRecord).filter(ServiceRequestRecord.id == request_id).first()
-    if not sr:
-        raise HTTPException(status_code=404, detail="Service request not found")
-    ticket = db.query(TicketRecord).filter(TicketRecord.id == sr.ticket_id).first()
+    _require_demo_ticketing()
+    user = _lock_service_request_actor(db, user.id)
+    sr = _lock_service_request(db, request_id)
+    ticket = _lock_service_request_ticket(db, sr.ticket_id)
+    if (
+        _ticket_has_resolution_history(ticket)
+        or _is_terminal_status(db, ticket.status)
+        or _is_terminal_status(db, ticket.workflow_status)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Linked ticket lifecycle is already terminal",
+        )
     if sr.approval_status == "not_required":
         raise HTTPException(status_code=400, detail="Approval is not required for this request")
-    if sr.approval_status in {"approved", "rejected"}:
+    if sr.approval_status != "pending":
         raise HTTPException(status_code=409, detail="Service request approval already decided")
+    if sr.fulfillment_status != "pending":
+        raise HTTPException(
+            status_code=409,
+            detail="Service request fulfillment already decided",
+        )
     sr.approval_status = payload.decision
     sr.approved_by = user.id
     sr.approved_at = datetime.utcnow()
@@ -9464,15 +11183,23 @@ async def decide_service_request_approval(
         sr.delivery_notes = payload.comment
     if payload.decision == "approved":
         sr.fulfillment_status = "pending"
-        if ticket:
-            ticket.workflow_status = "Pending Fulfillment"
-            ticket.status = ticket.workflow_status
+        ticket.workflow_status = "Pending Fulfillment"
+        ticket.status = ticket.workflow_status
+        ticket.resolved_at = None
     else:
         sr.fulfillment_status = "cancelled"
-        if ticket:
-            ticket.workflow_status = "Request Rejected"
-            ticket.status = ticket.workflow_status
-    db.commit()
+        ticket.workflow_status = "Request Rejected"
+        ticket.status = "Cancelled"
+        ticket.resolved_at = None
+        mark_terminal_ai_not_applicable(ticket)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Service request references changed while saving",
+        ) from exc
     db.refresh(sr)
     return sr
 
@@ -9484,54 +11211,168 @@ async def update_service_request_fulfillment(
     db: Session = Depends(get_db),
     user: UserRecord = Depends(require_role("admin", "supervisor")),
 ):
-    sr = db.query(ServiceRequestRecord).filter(ServiceRequestRecord.id == request_id).first()
-    if not sr:
-        raise HTTPException(status_code=404, detail="Service request not found")
+    _require_demo_ticketing()
+    user = _lock_service_request_actor(db, user.id)
+    sr = _lock_service_request(db, request_id)
+    ticket = _lock_service_request_ticket(db, sr.ticket_id)
+    if (
+        _ticket_has_resolution_history(ticket)
+        or _is_terminal_status(db, ticket.status)
+        or _is_terminal_status(db, ticket.workflow_status)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Linked ticket lifecycle is already terminal",
+        )
+    if sr.fulfillment_status != "pending":
+        raise HTTPException(
+            status_code=409,
+            detail="Service request fulfillment already decided",
+        )
     if sr.approval_status == "pending":
         raise HTTPException(status_code=400, detail="Service request must be approved before fulfillment")
     if sr.approval_status == "rejected":
         raise HTTPException(status_code=400, detail="Rejected service requests cannot be fulfilled")
-    ticket = db.query(TicketRecord).filter(TicketRecord.id == sr.ticket_id).first()
+    if sr.approval_status not in {"approved", "not_required"}:
+        raise HTTPException(
+            status_code=409,
+            detail="Service request approval state is invalid",
+        )
     sr.fulfillment_status = payload.status
     sr.delivery_notes = payload.delivery_notes or sr.delivery_notes
     if payload.status == "fulfilled":
         sr.fulfilled_by = user.id
         sr.fulfilled_at = datetime.utcnow()
-        if ticket:
-            ticket.workflow_status = "Resolved"
-            ticket.status = "Resolved"
-            ticket.resolved_at = ticket.resolved_at or datetime.utcnow()
+        ticket.workflow_status = "Resolved"
+        ticket.status = "Resolved"
+        ticket.resolved_at = ticket.resolved_at or datetime.utcnow()
+        mark_terminal_ai_not_applicable(ticket)
     else:
-        if ticket:
-            ticket.workflow_status = "Request Cancelled"
-            ticket.status = ticket.workflow_status
-    db.commit()
+        ticket.workflow_status = "Request Cancelled"
+        ticket.status = "Cancelled"
+        ticket.resolved_at = None
+        mark_terminal_ai_not_applicable(ticket)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Service request references changed while saving",
+        ) from exc
     db.refresh(sr)
     return sr
 
 
 # ── Problem Management ─────────────────────────────────────────
 
+_PROBLEM_INVESTIGATING_STATUSES = ("Under Investigation", "Investigating")
+
+
+def _lock_problem(db: Session, problem_id: str) -> ProblemRecord:
+    matched = db.query(ProblemRecord).filter(
+        ProblemRecord.id == problem_id
+    ).update(
+        {ProblemRecord.updated_at: ProblemRecord.updated_at},
+        synchronize_session=False,
+    )
+    if matched != 1:
+        raise HTTPException(status_code=404, detail="Problem not found")
+    problem = db.query(ProblemRecord).filter(
+        ProblemRecord.id == problem_id
+    ).populate_existing().first()
+    if not problem:
+        raise HTTPException(status_code=404, detail="Problem not found")
+    return problem
+
 @app.get("/problems", response_model=List[Problem])
 async def list_problems(
+    response: Response,
     db: Session = Depends(get_db),
-    status: Optional[str] = None,
+    _user: UserRecord = Depends(require_role("admin", "supervisor", "agent")),
+    status: Optional[str] = Query(default=None, max_length=32, pattern=r"^[^\x00]*$"),
+    search: Optional[str] = Query(default=None, max_length=200, pattern=r"^[^\x00]*$"),
+    limit: int = Query(default=25, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
 ):
-    q = db.query(ProblemRecord)
+    assigned_user = aliased(UserRecord)
+    q = db.query(ProblemRecord).outerjoin(
+        assigned_user,
+        assigned_user.id == ProblemRecord.assigned_to,
+    )
     if status:
-        q = q.filter(ProblemRecord.status == status)
-    problems = q.order_by(desc(ProblemRecord.created_at)).all()
-    for p in problems:
-        if p.assigned_to:
-            u = db.query(UserRecord).filter(UserRecord.id == p.assigned_to).first()
-            p.__dict__["assigned_name"] = u.name if u else None
-        count = db.query(ProblemTicketLinkRecord).filter(ProblemTicketLinkRecord.problem_id == p.id).count()
-        p.__dict__["linked_tickets_count"] = count
+        if status == "Under Investigation":
+            q = q.filter(ProblemRecord.status.in_(_PROBLEM_INVESTIGATING_STATUSES))
+        else:
+            q = q.filter(ProblemRecord.status == status)
+    normalized_search = (search or "").strip()
+    if normalized_search:
+        escaped_search = (
+            normalized_search
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        pattern = f"%{escaped_search}%"
+        q = q.filter(or_(
+            ProblemRecord.id.ilike(pattern, escape="\\"),
+            ProblemRecord.title.ilike(pattern, escape="\\"),
+            ProblemRecord.description.ilike(pattern, escape="\\"),
+            ProblemRecord.category.ilike(pattern, escape="\\"),
+            assigned_user.name.ilike(pattern, escape="\\"),
+        ))
+
+    page = q.order_by(
+        desc(ProblemRecord.created_at),
+        ProblemRecord.id,
+    ).offset(offset).limit(limit + 1).all()
+    has_more = len(page) > limit
+    problems = page[:limit]
+    problem_ids = [problem.id for problem in problems]
+    owner_ids = {problem.assigned_to for problem in problems if problem.assigned_to}
+    owner_names = dict(
+        db.query(UserRecord.id, UserRecord.name).filter(
+            UserRecord.id.in_(owner_ids)
+        ).all()
+    ) if owner_ids else {}
+    linked_counts = dict(
+        db.query(
+            ProblemTicketLinkRecord.problem_id,
+            func.count(ProblemTicketLinkRecord.id),
+        ).filter(
+            ProblemTicketLinkRecord.problem_id.in_(problem_ids)
+        ).group_by(
+            ProblemTicketLinkRecord.problem_id
+        ).all()
+    ) if problem_ids else {}
+    for problem in problems:
+        problem.__dict__["assigned_name"] = owner_names.get(problem.assigned_to)
+        problem.__dict__["linked_tickets_count"] = int(linked_counts.get(problem.id, 0))
+
+    total, investigating, known_errors = db.query(
+        func.count(ProblemRecord.id),
+        func.sum(case((
+            ProblemRecord.status.in_(_PROBLEM_INVESTIGATING_STATUSES), 1
+        ), else_=0)),
+        func.sum(case((ProblemRecord.status == "Known Error", 1), else_=0)),
+    ).one()
+    linked_total = int(db.query(func.count(ProblemTicketLinkRecord.id)).scalar() or 0)
+    response.headers["X-Page-Limit"] = str(limit)
+    response.headers["X-Page-Offset"] = str(offset)
+    response.headers["X-Has-More"] = str(has_more).lower()
+    response.headers["X-Problem-Total"] = str(int(total or 0))
+    response.headers["X-Problem-Investigating"] = str(int(investigating or 0))
+    response.headers["X-Problem-Known-Errors"] = str(int(known_errors or 0))
+    response.headers["X-Problem-Linked-Tickets"] = str(linked_total)
     return problems
 
 
 @app.get("/problems/{problem_id}", response_model=Problem)
-async def get_problem(problem_id: str, db: Session = Depends(get_db)):
+async def get_problem(
+    problem_id: str,
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(require_role("admin", "supervisor", "agent")),
+):
     problem = db.query(ProblemRecord).filter(ProblemRecord.id == problem_id).first()
     if not problem:
         raise HTTPException(status_code=404, detail="Problem not found")
@@ -9546,40 +11387,56 @@ async def get_problem(problem_id: str, db: Session = Depends(get_db)):
 @app.post("/problems", response_model=Problem, status_code=201)
 async def create_problem(payload: ProblemCreate, db: Session = Depends(get_db)):
     import uuid as _uuid
-    problem = ProblemRecord(id=f"prob-{_uuid.uuid4().hex[:8]}", **payload.model_dump())
+    _lock_active_user_reference(db, payload.assigned_to, label="Problem assignee")
+    problem = ProblemRecord(id=f"prob-{_uuid.uuid4().hex}", **payload.model_dump())
     db.add(problem)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Problem references changed while saving",
+        ) from exc
     db.refresh(problem)
     return problem
 
 
 @app.patch("/problems/{problem_id}", response_model=Problem)
 async def update_problem(problem_id: str, payload: ProblemUpdate, db: Session = Depends(get_db)):
-    problem = db.query(ProblemRecord).filter(ProblemRecord.id == problem_id).first()
-    if not problem:
-        raise HTTPException(status_code=404, detail="Problem not found")
-    for field in ["title", "description", "status", "priority", "category", "assigned_to",
-                   "root_cause", "workaround", "resolution", "impact_scope"]:
-        val = getattr(payload, field, None)
-        if val is not None:
-            setattr(problem, field, val)
-    if payload.status and payload.status in ("Resolved", "Closed"):
+    if "assigned_to" in payload.model_fields_set:
+        _lock_active_user_reference(db, payload.assigned_to, label="Problem assignee")
+    problem = _lock_problem(db, problem_id)
+    for field in payload.model_fields_set:
+        value = getattr(payload, field)
+        if field == "description" and value is None:
+            value = ""
+        setattr(problem, field, value)
+    if problem.status in ("Resolved", "Closed"):
         if not problem.root_cause:
             raise HTTPException(status_code=400, detail="Root cause is required before closing a problem")
         if not (problem.resolution or problem.workaround):
             raise HTTPException(status_code=400, detail="Resolution or workaround is required before closing a problem")
-    if payload.status and payload.status in ("Resolved", "Closed") and not problem.closed_at:
-        problem.closed_at = datetime.utcnow()
-    db.commit()
+    if "status" in payload.model_fields_set:
+        if problem.status in ("Resolved", "Closed"):
+            problem.closed_at = problem.closed_at or datetime.utcnow()
+        else:
+            problem.closed_at = None
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Problem references changed while saving",
+        ) from exc
     db.refresh(problem)
     return problem
 
 
 @app.delete("/problems/{problem_id}")
 async def delete_problem(problem_id: str, db: Session = Depends(get_db)):
-    problem = db.query(ProblemRecord).filter(ProblemRecord.id == problem_id).first()
-    if not problem:
-        raise HTTPException(status_code=404, detail="Problem not found")
+    problem = _lock_problem(db, problem_id)
     db.query(ProblemTicketLinkRecord).filter(ProblemTicketLinkRecord.problem_id == problem_id).delete()
     db.delete(problem)
     db.commit()
@@ -9588,24 +11445,40 @@ async def delete_problem(problem_id: str, db: Session = Depends(get_db)):
 
 @app.post("/problems/{problem_id}/link/{ticket_id}", status_code=201)
 async def link_ticket_to_problem(problem_id: str, ticket_id: str, db: Session = Depends(get_db)):
-    problem = db.query(ProblemRecord).filter(ProblemRecord.id == problem_id).first()
-    if not problem:
-        raise HTTPException(status_code=404, detail="Problem not found")
-    ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
-    if not ticket:
-        raise HTTPException(status_code=404, detail="Ticket not found")
+    _lock_problem(db, problem_id)
+    ticket = _lock_ticket_record(db, ticket_id)
+    if portable_ascii_lower(ticket.ticket_type) != "incident":
+        raise HTTPException(
+            status_code=409,
+            detail="Only incident tickets can be linked as problem evidence",
+        )
     existing = db.query(ProblemTicketLinkRecord).filter(
         ProblemTicketLinkRecord.problem_id == problem_id, ProblemTicketLinkRecord.ticket_id == ticket_id
     ).first()
     if existing:
         return {"status": "exists"}
     db.add(ProblemTicketLinkRecord(problem_id=problem_id, ticket_id=ticket_id))
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raced = db.query(ProblemTicketLinkRecord.id).filter(
+            ProblemTicketLinkRecord.problem_id == problem_id,
+            ProblemTicketLinkRecord.ticket_id == ticket_id,
+        ).first()
+        if raced:
+            return {"status": "exists"}
+        raise HTTPException(
+            status_code=409,
+            detail="Problem or ticket changed while linking",
+        ) from exc
     return {"status": "linked"}
 
 
 @app.delete("/problems/{problem_id}/link/{ticket_id}")
 async def unlink_ticket_from_problem(problem_id: str, ticket_id: str, db: Session = Depends(get_db)):
+    _lock_problem(db, problem_id)
+    _lock_ticket_record(db, ticket_id)
     db.query(ProblemTicketLinkRecord).filter(
         ProblemTicketLinkRecord.problem_id == problem_id, ProblemTicketLinkRecord.ticket_id == ticket_id
     ).delete()
@@ -9617,21 +11490,54 @@ async def unlink_ticket_from_problem(problem_id: str, ticket_id: str, db: Sessio
 async def get_problem_tickets(
     problem_id: str,
     request: Request,
+    response: Response,
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
     db: Session = Depends(get_db),
     user: UserRecord = Depends(get_current_user),
 ):
     allowed_assignee_id = _ticket_scope_assignee_id(user)
-    links = db.query(ProblemTicketLinkRecord).filter(ProblemTicketLinkRecord.problem_id == problem_id).all()
-    ticket_ids = [l.ticket_id for l in links]
-    if not ticket_ids:
-        return []
-    query = db.query(TicketRecord).filter(TicketRecord.id.in_(ticket_ids))
+    if not db.query(ProblemRecord.id).filter(ProblemRecord.id == problem_id).first():
+        raise HTTPException(status_code=404, detail="Problem not found")
+    query = db.query(TicketRecord).join(
+        ProblemTicketLinkRecord,
+        ProblemTicketLinkRecord.ticket_id == TicketRecord.id,
+    ).filter(ProblemTicketLinkRecord.problem_id == problem_id)
     if allowed_assignee_id is not None:
         query = query.filter(or_(
             TicketRecord.assignee_id.is_(None),
             TicketRecord.assignee_id == allowed_assignee_id,
         ))
-    return [_ticket_for_request(request, ticket) for ticket in query.all()]
+    page = query.order_by(
+        TicketRecord.created_at.desc(),
+        TicketRecord.id.asc(),
+    ).offset(offset).limit(limit + 1).all()
+    has_more = len(page) > limit
+    response.headers["X-Page-Limit"] = str(limit)
+    response.headers["X-Page-Offset"] = str(offset)
+    response.headers["X-Has-More"] = str(has_more).lower()
+    tickets = page[:limit]
+    direct: set[tuple[str, str, str]] = set()
+    groups: dict[tuple[str, str, str], ExternalGroupRecord] = {}
+    if (user.role or "").lower() == "agent":
+        direct, groups = _agent_assignment_context(
+            db,
+            user,
+            [ticket.id for ticket in tickets],
+        )
+    return [
+        _ticket_for_request(
+            request,
+            ticket,
+            redact_ai=(
+                (user.role or "").lower() == "agent"
+                and _agent_ticket_scope_from_context(
+                    user, ticket, direct, groups
+                )[0] is None
+            ),
+        )
+        for ticket in tickets
+    ]
 
 
 # ── Change Management ──────────────────────────────────────────
@@ -9641,14 +11547,52 @@ _CHANGE_STATUSES = {
     "Completed", "Rejected", "Cancelled",
 }
 _CHANGE_APPROVAL_REQUIRED_STATUSES = {"Approved", "In Progress", "Completed"}
+_CHANGE_APPROVAL_OPEN_STATUSES = {"Draft", "Submitted", "CAB Review"}
+_CHANGE_TERMINAL_STATUSES = {"Completed", "Rejected", "Cancelled"}
+_CHANGE_TRANSITIONS = {
+    "Draft": {"Submitted", "Cancelled"},
+    "Submitted": {"CAB Review", "Cancelled"},
+    "CAB Review": {"Approved", "Cancelled"},
+    "Approved": {"In Progress", "Cancelled"},
+    "In Progress": {"Completed", "Cancelled"},
+    "Completed": set(),
+    "Rejected": set(),
+    "Cancelled": set(),
+}
+
+
+def _lock_change(db: Session, change_id: str) -> ChangeRecord:
+    """Serialize every write to one change before touching its approvals.
+
+    PostgreSQL row locks and SQLite's write lock both apply to an UPDATE, while
+    SQLite ignores SELECT FOR UPDATE. Assigning the timestamp to itself keeps
+    the audit value stable and gives both supported databases the same lock
+    order: change first, then approvals.
+    """
+    matched = db.query(ChangeRecord).filter(ChangeRecord.id == change_id).update(
+        {ChangeRecord.updated_at: ChangeRecord.updated_at},
+        synchronize_session=False,
+    )
+    if matched != 1:
+        raise HTTPException(status_code=404, detail="Change not found")
+    change = db.query(ChangeRecord).filter(
+        ChangeRecord.id == change_id
+    ).populate_existing().first()
+    if not change:
+        raise HTTPException(status_code=404, detail="Change not found")
+    return change
 
 
 def _change_approval_summary(db: Session, change_id: str) -> tuple[int, int, int]:
-    approvals = db.query(ChangeApprovalRecord).filter(ChangeApprovalRecord.change_id == change_id).all()
-    approved = sum(1 for a in approvals if a.decision == "approved")
-    rejected = sum(1 for a in approvals if a.decision == "rejected")
-    pending = sum(1 for a in approvals if not a.decision or a.decision == "pending")
-    return approved, rejected, pending
+    approved, rejected, pending = db.query(
+        func.sum(case((ChangeApprovalRecord.decision == "approved", 1), else_=0)),
+        func.sum(case((ChangeApprovalRecord.decision == "rejected", 1), else_=0)),
+        func.sum(case((or_(
+            ChangeApprovalRecord.decision.is_(None),
+            ChangeApprovalRecord.decision == "pending",
+        ), 1), else_=0)),
+    ).filter(ChangeApprovalRecord.change_id == change_id).one()
+    return int(approved or 0), int(rejected or 0), int(pending or 0)
 
 
 def _validate_change_window(start: Optional[datetime], end: Optional[datetime]):
@@ -9665,9 +11609,9 @@ def _ensure_change_ready_for_execution(change: ChangeRecord):
     if not change.scheduled_start or not change.scheduled_end:
         raise HTTPException(status_code=400, detail="Scheduled start and end are required")
     _validate_change_window(change.scheduled_start, change.scheduled_end)
-    if not change.rollback_plan:
+    if not (change.rollback_plan or "").strip():
         raise HTTPException(status_code=400, detail="Rollback plan is required")
-    if not change.test_plan:
+    if not (change.test_plan or "").strip():
         raise HTTPException(status_code=400, detail="Test plan is required")
 
 
@@ -9675,31 +11619,117 @@ def _ensure_change_transition_allowed(db: Session, change: ChangeRecord, target_
     if not target_status or target_status == change.status:
         return
     _validate_change_status(target_status)
-    approved, rejected, _pending = _change_approval_summary(db, change.id)
+    if change.status in _CHANGE_TERMINAL_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail="Terminal changes cannot be reopened through the generic editor",
+        )
+    approved, rejected, pending = _change_approval_summary(db, change.id)
     if rejected and target_status in _CHANGE_APPROVAL_REQUIRED_STATUSES:
         raise HTTPException(status_code=400, detail="Rejected changes cannot move forward")
     if target_status in _CHANGE_APPROVAL_REQUIRED_STATUSES and approved == 0:
         raise HTTPException(status_code=400, detail="At least one CAB approval is required")
+    if target_status in _CHANGE_APPROVAL_REQUIRED_STATUSES and pending:
+        raise HTTPException(status_code=400, detail="All CAB approvals must be decided")
     if target_status in _CHANGE_APPROVAL_REQUIRED_STATUSES:
         _ensure_change_ready_for_execution(change)
+    if target_status not in _CHANGE_TRANSITIONS.get(change.status, set()):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Change cannot transition from {change.status} to {target_status}",
+        )
+
+
+def _lock_change_user_references(
+    db: Session,
+    *,
+    requester_id: Optional[str] = None,
+    assigned_to: Optional[str] = None,
+) -> None:
+    """Lock and validate user references before persisting a change record."""
+    requested_ids = {
+        user_id
+        for user_id in (requester_id, assigned_to)
+        if user_id
+    }
+    locked_users: dict[str, UserRecord] = {}
+    for user_id in sorted(requested_ids):
+        try:
+            locked_users[user_id] = _lock_user_record(db, user_id)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+            label = "Assigned user" if user_id == assigned_to else "Requesting user"
+            raise HTTPException(status_code=404, detail=f"{label} not found") from exc
+
+    if requester_id and not locked_users[requester_id].is_active:
+        raise HTTPException(status_code=409, detail="Requesting user is no longer active")
+    if assigned_to and not locked_users[assigned_to].is_active:
+        raise HTTPException(status_code=409, detail="Assigned user must be active")
 
 
 @app.get("/changes", response_model=List[ChangeRecordOut])
 async def list_changes(
+    response: Response,
     db: Session = Depends(get_db),
-    status: Optional[str] = None,
+    status: Optional[str] = Query(default=None, max_length=32, pattern=r"^[^\x00]*$"),
+    search: Optional[str] = Query(default=None, max_length=200, pattern=r"^[^\x00]*$"),
+    limit: int = Query(default=25, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
 ):
-    q = db.query(ChangeRecord)
+    assigned_user = aliased(UserRecord)
+    q = db.query(ChangeRecord).outerjoin(
+        assigned_user,
+        assigned_user.id == ChangeRecord.assigned_to,
+    )
     if status:
         q = q.filter(ChangeRecord.status == status)
-    changes = q.order_by(desc(ChangeRecord.created_at)).all()
-    for c in changes:
-        if c.requested_by:
-            u = db.query(UserRecord).filter(UserRecord.id == c.requested_by).first()
-            c.__dict__["requested_name"] = u.name if u else None
-        if c.assigned_to:
-            u = db.query(UserRecord).filter(UserRecord.id == c.assigned_to).first()
-            c.__dict__["assigned_name"] = u.name if u else None
+    normalized_search = (search or "").strip()
+    if normalized_search:
+        pattern = f"%{normalized_search}%"
+        q = q.filter(or_(
+            ChangeRecord.id.ilike(pattern),
+            ChangeRecord.title.ilike(pattern),
+            ChangeRecord.description.ilike(pattern),
+            ChangeRecord.change_type.ilike(pattern),
+            assigned_user.name.ilike(pattern),
+        ))
+    page = q.order_by(
+        desc(ChangeRecord.created_at),
+        ChangeRecord.id,
+    ).offset(offset).limit(limit + 1).all()
+    has_more = len(page) > limit
+    changes = page[:limit]
+
+    user_ids = {
+        user_id
+        for change in changes
+        for user_id in (change.requested_by, change.assigned_to)
+        if user_id
+    }
+    user_names = dict(
+        db.query(UserRecord.id, UserRecord.name).filter(
+            UserRecord.id.in_(user_ids)
+        ).all()
+    ) if user_ids else {}
+    for change in changes:
+        change.__dict__["requested_name"] = user_names.get(change.requested_by)
+        change.__dict__["assigned_name"] = user_names.get(change.assigned_to)
+
+    awaiting_review, in_progress, high_risk = db.query(
+        func.sum(case((ChangeRecord.status.in_({"Submitted", "CAB Review"}), 1), else_=0)),
+        func.sum(case((ChangeRecord.status == "In Progress", 1), else_=0)),
+        func.sum(case((and_(
+            ChangeRecord.risk_level == "High",
+            ChangeRecord.status.notin_({"Completed", "Cancelled"}),
+        ), 1), else_=0)),
+    ).one()
+    response.headers["X-Page-Limit"] = str(limit)
+    response.headers["X-Page-Offset"] = str(offset)
+    response.headers["X-Has-More"] = str(has_more).lower()
+    response.headers["X-Change-Awaiting-Review"] = str(int(awaiting_review or 0))
+    response.headers["X-Change-In-Progress"] = str(int(in_progress or 0))
+    response.headers["X-Change-High-Risk"] = str(int(high_risk or 0))
     return changes
 
 
@@ -9728,13 +11758,25 @@ async def create_change(
     _validate_change_window(payload.scheduled_start, payload.scheduled_end)
     if payload.status in _CHANGE_APPROVAL_REQUIRED_STATUSES:
         raise HTTPException(status_code=400, detail="CAB approval is required before this status")
+    _lock_change_user_references(
+        db,
+        requester_id=user.id,
+        assigned_to=payload.assigned_to,
+    )
     change = ChangeRecord(
-        id=f"chg-{_uuid.uuid4().hex[:8]}",
+        id=f"chg-{_uuid.uuid4().hex}",
         requested_by=user.id,
         **payload.model_dump(),
     )
     db.add(change)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Change references changed while saving",
+        ) from exc
     db.refresh(change)
     return change
 
@@ -9746,22 +11788,46 @@ async def update_change(
     db: Session = Depends(get_db),
     _user: UserRecord = Depends(require_role("admin", "supervisor")),
 ):
-    change = db.query(ChangeRecord).filter(ChangeRecord.id == change_id).first()
-    if not change:
-        raise HTTPException(status_code=404, detail="Change not found")
+    change = _lock_change(db, change_id)
+    if change.status != "Completed" and change.completed_at is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Change completion metadata is inconsistent; repair it before editing",
+        )
+    if change.status in _CHANGE_TERMINAL_STATUSES and (
+        payload.model_fields_set - {"status"}
+        or (payload.status is not None and payload.status != change.status)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Terminal changes are immutable; use a dedicated audited workflow",
+        )
     for field in ["title", "description", "status", "change_type", "priority", "risk_level",
                    "impact", "rollback_plan", "test_plan", "scheduled_start", "scheduled_end",
-                   "assigned_to"]:
-        val = getattr(payload, field, None)
-        if val is not None and field != "status":
-            setattr(change, field, val)
+                   ]:
+        if field not in payload.model_fields_set or field == "status":
+            continue
+        value = getattr(payload, field)
+        if field == "description" and value is None:
+            value = ""
+        setattr(change, field, value)
+    if "assigned_to" in payload.model_fields_set:
+        _lock_change_user_references(db, assigned_to=payload.assigned_to)
+        change.assigned_to = payload.assigned_to
     _validate_change_window(change.scheduled_start, change.scheduled_end)
     _ensure_change_transition_allowed(db, change, payload.status)
     if payload.status is not None:
         change.status = payload.status
     if payload.status and payload.status == "Completed" and not change.completed_at:
         change.completed_at = datetime.utcnow()
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Change references changed while saving",
+        ) from exc
     db.refresh(change)
     return change
 
@@ -9772,21 +11838,65 @@ async def delete_change(
     db: Session = Depends(get_db),
     _user: UserRecord = Depends(require_role("admin", "supervisor")),
 ):
-    change = db.query(ChangeRecord).filter(ChangeRecord.id == change_id).first()
-    if not change:
-        raise HTTPException(status_code=404, detail="Change not found")
-    db.query(ChangeApprovalRecord).filter(ChangeApprovalRecord.change_id == change_id).delete()
+    change = _lock_change(db, change_id)
+    if change.status != "Draft":
+        raise HTTPException(
+            status_code=409,
+            detail="Only untouched draft changes can be deleted",
+        )
+    if db.query(ChangeApprovalRecord.id).filter(
+        ChangeApprovalRecord.change_id == change_id
+    ).first() or db.query(ChangeTicketLinkRecord.id).filter(
+        ChangeTicketLinkRecord.change_id == change_id
+    ).first():
+        raise HTTPException(
+            status_code=409,
+            detail="Changes with approval or ticket history cannot be deleted",
+        )
     db.delete(change)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Change history was added while deletion was in progress",
+        ) from exc
     return {"status": "deleted"}
 
 
 @app.get("/changes/{change_id}/approvals", response_model=List[ChangeApprovalOut])
-async def get_change_approvals(change_id: str, db: Session = Depends(get_db)):
-    approvals = db.query(ChangeApprovalRecord).filter(ChangeApprovalRecord.change_id == change_id).all()
-    for a in approvals:
-        u = db.query(UserRecord).filter(UserRecord.id == a.approver_id).first()
-        a.__dict__["approver_name"] = u.name if u else None
+async def get_change_approvals(
+    change_id: str,
+    response: Response,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
+    db: Session = Depends(get_db),
+):
+    if not db.query(ChangeRecord.id).filter(ChangeRecord.id == change_id).first():
+        raise HTTPException(status_code=404, detail="Change not found")
+    page = db.query(ChangeApprovalRecord).filter(
+        ChangeApprovalRecord.change_id == change_id,
+    ).order_by(
+        ChangeApprovalRecord.id,
+    ).offset(offset).limit(limit + 1).all()
+    has_more = len(page) > limit
+    approvals = page[:limit]
+
+    approver_ids = {
+        approval.approver_id for approval in approvals if approval.approver_id
+    }
+    approver_names = dict(
+        db.query(UserRecord.id, UserRecord.name).filter(
+            UserRecord.id.in_(approver_ids),
+        ).all()
+    ) if approver_ids else {}
+    for approval in approvals:
+        approval.__dict__["approver_name"] = approver_names.get(approval.approver_id)
+
+    response.headers["X-Page-Limit"] = str(limit)
+    response.headers["X-Page-Offset"] = str(offset)
+    response.headers["X-Has-More"] = str(has_more).lower()
     return approvals
 
 
@@ -9797,12 +11907,13 @@ async def add_change_approval(
     db: Session = Depends(get_db),
     _user: UserRecord = Depends(require_role("admin", "supervisor")),
 ):
-    change = db.query(ChangeRecord).filter(ChangeRecord.id == change_id).first()
-    if not change:
-        raise HTTPException(status_code=404, detail="Change not found")
-    approver = db.query(UserRecord).filter(UserRecord.id == payload.approver_id, UserRecord.is_active.is_(True)).first()
-    if not approver:
-        raise HTTPException(status_code=404, detail="Approver not found")
+    change = _lock_change(db, change_id)
+    if change.status not in _CHANGE_APPROVAL_OPEN_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail="Approvals can only be added before change execution",
+        )
+    _lock_active_user_reference(db, payload.approver_id, label="Approver")
     if change.requested_by and change.requested_by == payload.approver_id:
         raise HTTPException(status_code=400, detail="Requester cannot approve their own change")
     existing = db.query(ChangeApprovalRecord).filter(
@@ -9812,7 +11923,17 @@ async def add_change_approval(
         return existing
     approval = ChangeApprovalRecord(change_id=change_id, approver_id=payload.approver_id)
     db.add(approval)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raced = db.query(ChangeApprovalRecord).filter(
+            ChangeApprovalRecord.change_id == change_id,
+            ChangeApprovalRecord.approver_id == payload.approver_id,
+        ).first()
+        if raced:
+            return raced
+        raise HTTPException(status_code=409, detail="Approval could not be added")
     db.refresh(approval)
     return approval
 
@@ -9822,38 +11943,63 @@ async def decide_approval(
     change_id: str,
     approver_id: str,
     payload: Optional[ChangeApprovalDecision] = None,
-    decision: Optional[str] = None,
-    comment: Optional[str] = None,
+    decision: Optional[str] = Query(default=None, max_length=16),
+    comment: Optional[str] = Query(
+        default=None,
+        max_length=5_000,
+        pattern=r"^[^\x00]*$",
+    ),
     db: Session = Depends(get_db),
-    user: UserRecord = Depends(get_current_user),
+    user: UserRecord = Depends(get_authenticated_user),
 ):
-    change = db.query(ChangeRecord).filter(ChangeRecord.id == change_id).first()
-    if not change:
-        raise HTTPException(status_code=404, detail="Change not found")
-    approval = None
-    if approver_id.isdigit():
+    change = _lock_change(db, change_id)
+    _lock_active_user_reference(db, user.id, label="Decision actor")
+    if change.status not in _CHANGE_APPROVAL_OPEN_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail="This change is no longer open for approval decisions",
+        )
+    approval = db.query(ChangeApprovalRecord).filter(
+        ChangeApprovalRecord.change_id == change_id,
+        ChangeApprovalRecord.approver_id == approver_id,
+    ).first()
+    if not approval and approver_id.isdigit():
         approval = db.query(ChangeApprovalRecord).filter(
             ChangeApprovalRecord.change_id == change_id,
             ChangeApprovalRecord.id == int(approver_id),
         ).first()
     if not approval:
-        approval = db.query(ChangeApprovalRecord).filter(
-            ChangeApprovalRecord.change_id == change_id, ChangeApprovalRecord.approver_id == approver_id
-        ).first()
-    if not approval:
         raise HTTPException(status_code=404, detail="Approval not found")
     if user.role != "admin" and approval.approver_id != user.id:
         raise HTTPException(status_code=403, detail="Only the assigned approver or an admin can decide")
-    if change.requested_by == user.id and approval.approver_id == user.id:
+    if change.requested_by == user.id:
         raise HTTPException(status_code=400, detail="Requester cannot approve their own change")
+    if approval.decision in {"approved", "rejected"} or approval.decided_at is not None:
+        raise HTTPException(status_code=409, detail="Approval already decided")
     selected_decision = payload.decision if payload else decision
-    selected_comment = payload.comment if payload else (comment or "")
+    selected_comment = payload.comment if payload else (comment or "").strip()
     if selected_decision not in {"approved", "rejected"}:
         raise HTTPException(status_code=400, detail="Decision must be approved or rejected")
-    approval.decision = selected_decision
-    approval.comment = selected_comment
-    approval.decided_at = datetime.utcnow()
-    db.flush()
+    decided_at = datetime.utcnow()
+    updated = db.query(ChangeApprovalRecord).filter(
+        ChangeApprovalRecord.id == approval.id,
+        or_(
+            ChangeApprovalRecord.decision.is_(None),
+            ChangeApprovalRecord.decision == "pending",
+        ),
+        ChangeApprovalRecord.decided_at.is_(None),
+    ).update(
+        {
+            ChangeApprovalRecord.decision: selected_decision,
+            ChangeApprovalRecord.comment: selected_comment,
+            ChangeApprovalRecord.decided_at: decided_at,
+        },
+        synchronize_session=False,
+    )
+    if updated != 1:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Approval already decided")
+    db.expire(approval)
     approved, rejected, pending = _change_approval_summary(db, change_id)
     if rejected:
         change.status = "Rejected"
@@ -9871,28 +12017,79 @@ async def decide_approval(
 
 @app.get("/assets", response_model=List[Asset])
 async def list_assets(
+    response: Response,
+    asset_type: Optional[str] = Query(
+        default=None,
+        max_length=100,
+        pattern=r"^[^\x00]*$",
+    ),
+    status: Optional[str] = Query(
+        default=None,
+        max_length=100,
+        pattern=r"^[^\x00]*$",
+    ),
+    search: Optional[str] = Query(
+        default=None,
+        max_length=200,
+        pattern=r"^[^\x00]*$",
+    ),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
     db: Session = Depends(get_db),
-    asset_type: Optional[str] = None,
-    status: Optional[str] = None,
-    search: Optional[str] = None,
+    _user: UserRecord = Depends(require_role("admin", "supervisor", "agent")),
 ):
     q = db.query(AssetRecord)
-    if asset_type:
-        q = q.filter(AssetRecord.asset_type == asset_type)
-    if status:
-        q = q.filter(AssetRecord.status == status)
-    if search:
-        q = q.filter(AssetRecord.name.ilike(f"%{search}%"))
-    assets = q.order_by(AssetRecord.asset_type, AssetRecord.name).all()
-    for a in assets:
-        if a.owner_id:
-            u = db.query(UserRecord).filter(UserRecord.id == a.owner_id).first()
-            a.__dict__["owner_name"] = u.name if u else None
+    normalized_type = (asset_type or "").strip()
+    normalized_status = (status or "").strip()
+    if normalized_type:
+        q = q.filter(AssetRecord.asset_type == normalized_type)
+    if normalized_status:
+        q = q.filter(AssetRecord.status == normalized_status)
+    normalized_search = (search or "").strip()
+    if normalized_search:
+        escaped_search = (
+            normalized_search
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        pattern = f"%{escaped_search}%"
+        q = q.filter(or_(
+            AssetRecord.name.ilike(pattern, escape="\\"),
+            AssetRecord.asset_tag.ilike(pattern, escape="\\"),
+            AssetRecord.vendor.ilike(pattern, escape="\\"),
+            AssetRecord.model.ilike(pattern, escape="\\"),
+            AssetRecord.location.ilike(pattern, escape="\\"),
+        ))
+
+    page = q.order_by(
+        AssetRecord.asset_type,
+        AssetRecord.name,
+        AssetRecord.id,
+    ).offset(offset).limit(limit + 1).all()
+    has_more = len(page) > limit
+    assets = page[:limit]
+
+    owner_ids = {asset.owner_id for asset in assets if asset.owner_id}
+    owner_names = dict(
+        db.query(UserRecord.id, UserRecord.name).filter(
+            UserRecord.id.in_(owner_ids)
+        ).all()
+    ) if owner_ids else {}
+    for asset in assets:
+        asset.__dict__["owner_name"] = owner_names.get(asset.owner_id)
+
+    response.headers["X-Page-Limit"] = str(limit)
+    response.headers["X-Page-Offset"] = str(offset)
+    response.headers["X-Has-More"] = str(has_more).lower()
     return assets
 
 
 @app.get("/assets/stats")
-async def asset_stats(db: Session = Depends(get_db)):
+async def asset_stats(
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(require_role("admin", "supervisor", "agent")),
+):
     total = db.query(AssetRecord).count()
     by_type = {}
     for row in db.query(AssetRecord.asset_type, func.count()).group_by(AssetRecord.asset_type).all():
@@ -9901,7 +12098,11 @@ async def asset_stats(db: Session = Depends(get_db)):
 
 
 @app.get("/assets/{asset_id}", response_model=Asset)
-async def get_asset(asset_id: str, db: Session = Depends(get_db)):
+async def get_asset(
+    asset_id: str,
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(require_role("admin", "supervisor", "agent")),
+):
     asset = db.query(AssetRecord).filter(AssetRecord.id == asset_id).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
@@ -9911,12 +12112,53 @@ async def get_asset(asset_id: str, db: Session = Depends(get_db)):
     return asset
 
 
+def _validate_asset_date_range(
+    purchase_date: Optional[datetime],
+    warranty_expiry: Optional[datetime],
+) -> None:
+    if (
+        purchase_date is not None
+        and warranty_expiry is not None
+        and warranty_expiry < purchase_date
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Warranty expiry cannot precede purchase date",
+        )
+
+
+def _lock_asset_record(db: Session, asset_id: str) -> AssetRecord:
+    matched = db.query(AssetRecord).filter(
+        AssetRecord.id == asset_id
+    ).update(
+        {AssetRecord.updated_at: AssetRecord.updated_at},
+        synchronize_session=False,
+    )
+    if matched != 1:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    asset = db.query(AssetRecord).filter(
+        AssetRecord.id == asset_id
+    ).populate_existing().first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    return asset
+
+
 @app.post("/assets", response_model=Asset, status_code=201)
 async def create_asset(payload: AssetCreate, db: Session = Depends(get_db)):
     import uuid as _uuid
-    asset = AssetRecord(id=f"ast-{_uuid.uuid4().hex[:8]}", **payload.model_dump())
+    _validate_asset_date_range(payload.purchase_date, payload.warranty_expiry)
+    _lock_active_user_reference(db, payload.owner_id, label="Asset owner")
+    asset = AssetRecord(id=f"ast-{_uuid.uuid4().hex}", **payload.model_dump())
     db.add(asset)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Asset tag already exists or its owner changed while saving",
+        ) from exc
     db.refresh(asset)
     return asset
 
@@ -9926,12 +12168,30 @@ async def update_asset(asset_id: str, payload: AssetUpdate, db: Session = Depend
     asset = db.query(AssetRecord).filter(AssetRecord.id == asset_id).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
-    for field in ["name", "asset_type", "asset_tag", "status", "owner_id", "location",
-                   "vendor", "model", "purchase_date", "warranty_expiry", "cost", "notes"]:
-        val = getattr(payload, field, None)
-        if val is not None:
-            setattr(asset, field, val)
-    db.commit()
+    if "owner_id" in payload.model_fields_set:
+        _lock_active_user_reference(db, payload.owner_id, label="Asset owner")
+    asset = _lock_asset_record(db, asset_id)
+    purchase_date = (
+        payload.purchase_date
+        if "purchase_date" in payload.model_fields_set
+        else asset.purchase_date
+    )
+    warranty_expiry = (
+        payload.warranty_expiry
+        if "warranty_expiry" in payload.model_fields_set
+        else asset.warranty_expiry
+    )
+    _validate_asset_date_range(purchase_date, warranty_expiry)
+    for field in payload.model_fields_set:
+        setattr(asset, field, getattr(payload, field))
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Asset tag already exists or its owner changed while saving",
+        ) from exc
     db.refresh(asset)
     return asset
 
@@ -9941,68 +12201,434 @@ async def delete_asset(asset_id: str, db: Session = Depends(get_db)):
     asset = db.query(AssetRecord).filter(AssetRecord.id == asset_id).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
-    db.delete(asset)
+    # CMDB history is referenced by ticket.asset_id without a database-level
+    # foreign key. Retire records instead of creating dangling identifiers and
+    # erasing the configuration history behind existing tickets.
+    asset.status = "Retired"
     db.commit()
-    return {"status": "deleted"}
+    return {"status": "retired"}
 
 
 # ── Surveys / CSAT ─────────────────────────────────────────────
 
 @app.get("/surveys/templates", response_model=List[SurveyTemplate])
-async def list_survey_templates(db: Session = Depends(get_db)):
-    return db.query(SurveyTemplateRecord).order_by(SurveyTemplateRecord.name).all()
+async def list_survey_templates(
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(require_authenticated_role("admin", "supervisor")),
+):
+    return db.query(SurveyTemplateRecord).order_by(
+        SurveyTemplateRecord.name,
+        SurveyTemplateRecord.id,
+    ).limit(500).all()
 
 
 @app.get("/surveys", response_model=List[SurveyOut])
-async def list_surveys(db: Session = Depends(get_db)):
-    surveys = db.query(SurveyRecord).order_by(desc(SurveyRecord.created_at)).all()
-    for s in surveys:
-        ticket = db.query(TicketRecord).filter(TicketRecord.id == s.ticket_id).first()
-        s.__dict__["ticket_subject"] = ticket.subject if ticket else None
+async def list_surveys(
+    response: Response,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(require_authenticated_role("admin", "supervisor")),
+):
+    rows = db.query(SurveyRecord, TicketRecord.subject).outerjoin(
+        TicketRecord,
+        TicketRecord.id == SurveyRecord.ticket_id,
+    ).order_by(
+        desc(SurveyRecord.created_at),
+        SurveyRecord.id,
+    ).offset(offset).limit(limit + 1).all()
+    has_more = len(rows) > limit
+    surveys = []
+    for survey, ticket_subject in rows[:limit]:
+        survey.__dict__["ticket_subject"] = ticket_subject
+        surveys.append(survey)
+    response.headers["X-Page-Limit"] = str(limit)
+    response.headers["X-Page-Offset"] = str(offset)
+    response.headers["X-Has-More"] = str(has_more).lower()
     return surveys
 
 
-@app.post("/surveys/send", response_model=SurveyOut, status_code=201)
-async def send_survey(payload: SurveySend, db: Session = Depends(get_db)):
+@app.get("/surveys/eligible-tickets", response_model=List[Ticket])
+async def list_survey_eligible_tickets(
+    request: Request,
+    response: Response,
+    search: Optional[str] = Query(
+        default=None,
+        max_length=200,
+        pattern=r"^[^\x00]*$",
+    ),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(
+        require_authenticated_role("admin", "supervisor")
+    ),
+):
+    """Return every terminal ticket through a searchable, bounded page.
+
+    Survey selection must not infer eligibility from a recent general-ticket
+    page: a valid older resolution could otherwise become impossible to find.
+    """
+    query = db.query(TicketRecord).filter(terminal_ticket_filter(db))
+    normalized_search = (search or "").strip()
+    if normalized_search:
+        escaped = (
+            normalized_search.replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        pattern = f"%{escaped}%"
+        query = query.filter(or_(
+            TicketRecord.id.ilike(pattern, escape="\\"),
+            TicketRecord.external_id.ilike(pattern, escape="\\"),
+            TicketRecord.subject.ilike(pattern, escape="\\"),
+            TicketRecord.external_requester_name.ilike(pattern, escape="\\"),
+            TicketRecord.external_requester_email.ilike(pattern, escape="\\"),
+            TicketRecord.reporter.ilike(pattern, escape="\\"),
+        ))
+    rows = query.order_by(
+        func.coalesce(
+            TicketRecord.external_updated_at,
+            TicketRecord.updated_at,
+            TicketRecord.created_at,
+        ).desc(),
+        TicketRecord.id,
+    ).offset(offset).limit(limit + 1).all()
+    has_more = len(rows) > limit
+    response.headers["X-Page-Limit"] = str(limit)
+    response.headers["X-Page-Offset"] = str(offset)
+    response.headers["X-Has-More"] = str(has_more).lower()
+    return [_ticket_for_request(request, ticket) for ticket in rows[:limit]]
+
+
+@app.post("/surveys/send", response_model=SurveyOut, status_code=202)
+async def send_survey(
+    payload: SurveySend,
+    request: Request,
+    user: UserRecord = Depends(require_authenticated_role("admin", "supervisor")),
+    db: Session = Depends(get_db),
+):
+    if not sendgrid_status()["configured"]:
+        raise HTTPException(status_code=503, detail="SendGrid is not configured")
+
+    template = db.query(SurveyTemplateRecord).filter(
+        SurveyTemplateRecord.id == payload.template_id,
+        SurveyTemplateRecord.is_active.is_(True),
+    ).first()
+    if not template:
+        raise HTTPException(status_code=422, detail="An active survey template is required")
+    question = (template.question or "").strip()
+    if not question or len(question) > 5_000 or "\x00" in question:
+        raise HTTPException(status_code=422, detail="Survey template question is invalid")
+
     ticket = db.query(TicketRecord).filter(TicketRecord.id == payload.ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    import uuid as _uuid
+    if not _is_terminal_status(db, ticket.status):
+        raise HTTPException(
+            status_code=409,
+            detail="Surveys can only be sent for resolved or closed tickets",
+        )
+
+    raw_recipient_email = ticket.external_requester_email or ticket.reporter
+    try:
+        recipient_email = normalize_email_address(raw_recipient_email or "")
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail="Ticket requester does not have a deliverable email address",
+        ) from None
+    try:
+        recipient_name = normalize_sender_name(
+            ticket.external_requester_name or "Requester"
+        ) or "Requester"
+    except ValueError:
+        recipient_name = "Requester"
+
+    attempted_at = datetime.utcnow()
+    delivery_key = _survey_delivery_key(
+        payload.ticket_id,
+        payload.template_id,
+        recipient_email,
+    )
+    # An expired capability no longer blocks a deliberate new delivery. The
+    # unique key remains database-enforced across concurrent requests.
+    db.query(SurveyRecord).filter(
+        SurveyRecord.active_delivery_key == delivery_key,
+        SurveyRecord.response_expires_at <= attempted_at,
+    ).update(
+        {SurveyRecord.active_delivery_key: None},
+        synchronize_session=False,
+    )
+    db.commit()
+    active_delivery = db.query(SurveyRecord.id).filter(
+        SurveyRecord.active_delivery_key == delivery_key,
+    ).first()
+    if active_delivery:
+        raise HTTPException(
+            status_code=409,
+            detail="An active survey delivery already exists for this ticket and template",
+        )
+
+    response_token = secrets.token_urlsafe(SURVEY_RESPONSE_TOKEN_BYTES)
+    response_url = _survey_response_url(request, response_token)
+    expires_at = attempted_at + _survey_response_ttl()
+    _reserve_email_request(db, user.id, 1)
+
     survey = SurveyRecord(
-        id=f"srv-{_uuid.uuid4().hex[:8]}",
+        id=f"srv-{secrets.token_hex(16)}",
         ticket_id=payload.ticket_id,
         template_id=payload.template_id,
-        sent_at=datetime.utcnow(),
+        response_token_hash=_survey_token_digest(response_token),
+        active_delivery_key=delivery_key,
+        response_expires_at=expires_at,
+        question_snapshot=question,
+        recipient_email=recipient_email,
+        recipient_name=recipient_name,
+        delivery_status="pending",
+        delivery_attempted_at=attempted_at,
+        sent_by=user.id,
+        created_at=attempted_at,
     )
     db.add(survey)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        if db.query(SurveyRecord.id).filter(
+            SurveyRecord.active_delivery_key == delivery_key,
+        ).first():
+            raise HTTPException(
+                status_code=409,
+                detail="An active survey delivery already exists for this ticket and template",
+            ) from None
+        raise HTTPException(
+            status_code=503,
+            detail="Survey delivery could not be initialized",
+        ) from None
+
+    delivery_body = (
+        f"Hello {recipient_name},\n\n"
+        f"{question}\n\n"
+        f"Share your feedback: {response_url}\n\n"
+        f"This one-time link expires on {expires_at.strftime('%Y-%m-%d')} UTC."
+    )
+    try:
+        message_id = await send_sendgrid_email(
+            [EmailAddress(email=recipient_email, name=recipient_name)],
+            subject="How was your Tickety support experience?",
+            body=delivery_body,
+        )
+    except EmailConfigurationError:
+        survey.delivery_status = "failed"
+        survey.active_delivery_key = None
+        survey.delivery_error = "configuration_error"
+        db.commit()
+        raise HTTPException(status_code=503, detail="SendGrid is not configured") from None
+    except EmailDeliveryError as exc:
+        # A provider HTTP rejection is definitive and safe to retry. A network
+        # failure is ambiguous: the provider may have accepted the request
+        # before the connection failed, so keep the capability usable and
+        # block automatic duplicate delivery until it is reconciled.
+        survey.delivery_status = (
+            "failed" if exc.provider_status is not None else "uncertain"
+        )
+        if exc.provider_status is not None:
+            survey.active_delivery_key = None
+        survey.delivery_error = (
+            f"provider_{exc.provider_status}"
+            if exc.provider_status is not None
+            else "delivery_outcome_unknown"
+        )
+        db.commit()
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Email provider did not accept the survey message"
+                if exc.provider_status is not None
+                else "Survey delivery outcome is unknown; do not resend automatically"
+            ),
+        ) from None
+
+    survey.delivery_status = "accepted"
+    survey.delivery_message_id = message_id[:255] if message_id else None
+    survey.sent_at = datetime.utcnow()
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        # The already-committed pending row keeps the emailed capability valid
+        # if persistence fails after SendGrid returns 202. The active-delivery
+        # guard prevents a blind retry from sending a duplicate message.
+        db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail="Provider accepted delivery; status reconciliation is pending",
+        ) from None
     db.refresh(survey)
+    survey.__dict__["ticket_subject"] = ticket.subject
     return survey
 
 
-@app.post("/surveys/{survey_id}/respond", status_code=201)
-async def respond_survey(survey_id: str, payload: SurveyResponseCreate, db: Session = Depends(get_db)):
-    _reserve_survey_response_request(db, survey_id)
-    survey = db.query(SurveyRecord).filter(SurveyRecord.id == survey_id).first()
+@app.post("/portal/survey/lookup", response_model=SurveyPortalQuestion)
+async def lookup_public_survey(
+    payload: SurveyPortalLookupRequest,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    response.headers["Cache-Control"] = "no-store"
+    _require_public_survey_origin(request)
+    _reserve_survey_public_request(db, "lookup")
+    survey = _survey_for_token(db, payload.token)
+    if not survey or not survey.question_snapshot:
+        raise HTTPException(
+            status_code=404,
+            detail="Survey link is invalid or expired",
+            headers={"Cache-Control": "no-store"},
+        )
+    _reserve_survey_public_request(db, "lookup", token=payload.token)
+    if survey.responded_at is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Survey has already been submitted",
+            headers={"Cache-Control": "no-store"},
+        )
+    return {
+        "question": survey.question_snapshot,
+        "expires_at": survey.response_expires_at,
+    }
+
+
+@app.post(
+    "/portal/survey/respond",
+    response_model=SurveyPortalSubmitted,
+    status_code=201,
+)
+async def respond_public_survey(
+    payload: SurveyPortalResponseRequest,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    response.headers["Cache-Control"] = "no-store"
+    _require_public_survey_origin(request)
+    _reserve_survey_public_request(db, "respond")
+    survey = _survey_for_token(db, payload.token)
     if not survey:
-        raise HTTPException(status_code=404, detail="Survey not found")
-    if survey.responded_at:
-        raise HTTPException(status_code=409, detail="Survey already responded")
-    response = SurveyResponseRecord(
-        survey_id=survey_id, rating=payload.rating, comment=payload.comment
+        raise HTTPException(
+            status_code=404,
+            detail="Survey link is invalid or expired",
+            headers={"Cache-Control": "no-store"},
+        )
+    _reserve_survey_public_request(db, "respond", token=payload.token)
+    if survey.responded_at is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Survey has already been submitted",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    submitted_at = datetime.utcnow()
+    digest = _survey_token_digest(payload.token)
+    updated = db.query(SurveyRecord).filter(
+        SurveyRecord.id == survey.id,
+        SurveyRecord.response_token_hash == digest,
+        SurveyRecord.delivery_status.in_(("pending", "uncertain", "accepted")),
+        SurveyRecord.delivery_attempted_at.isnot(None),
+        or_(
+            SurveyRecord.delivery_status != "accepted",
+            SurveyRecord.sent_at.isnot(None),
+        ),
+        SurveyRecord.response_expires_at > submitted_at,
+        SurveyRecord.responded_at.is_(None),
+    ).update(
+        {
+            SurveyRecord.responded_at: submitted_at,
+            # A valid one-time response is stronger delivery evidence than a
+            # missing provider acknowledgement. Promote crash-window pending
+            # or network-uncertain deliveries so CSAT is not silently omitted.
+            SurveyRecord.delivery_status: "accepted",
+            SurveyRecord.sent_at: func.coalesce(
+                SurveyRecord.sent_at,
+                SurveyRecord.delivery_attempted_at,
+                submitted_at,
+            ),
+            SurveyRecord.delivery_error: None,
+        },
+        synchronize_session=False,
     )
-    survey.responded_at = datetime.utcnow()
-    db.add(response)
-    db.commit()
-    return {"status": "submitted", "rating": payload.rating}
+    if updated != 1:
+        db.rollback()
+        current = db.query(SurveyRecord).filter(
+            SurveyRecord.id == survey.id,
+            SurveyRecord.response_token_hash == digest,
+        ).first()
+        if current is None or current.responded_at is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Survey link is invalid or expired",
+                headers={"Cache-Control": "no-store"},
+            )
+        raise HTTPException(
+            status_code=409,
+            detail="Survey has already been submitted",
+            headers={"Cache-Control": "no-store"},
+        )
+    db.add(SurveyResponseRecord(
+        survey_id=survey.id,
+        rating=payload.rating,
+        comment=payload.comment or None,
+        submitted_at=submitted_at,
+    ))
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Survey has already been submitted",
+            headers={"Cache-Control": "no-store"},
+        ) from None
+    return {"status": "submitted"}
+
+
+@app.post("/surveys/{survey_id}/respond", status_code=410)
+async def respond_survey_legacy_route(
+    survey_id: str,
+    _payload: SurveyResponseCreate,
+    _user: UserRecord = Depends(
+        require_authenticated_role("admin", "supervisor")
+    ),
+):
+    # Never accept a guessable database ID as a public response capability.
+    raise HTTPException(
+        status_code=410,
+        detail="Legacy survey response route is disabled",
+    )
 
 
 @app.get("/surveys/stats")
-async def survey_stats(db: Session = Depends(get_db)):
-    total = db.query(SurveyRecord).count()
-    responded = db.query(SurveyRecord).filter(SurveyRecord.responded_at.isnot(None)).count()
-    responses = db.query(SurveyResponseRecord.rating, func.count()).group_by(SurveyResponseRecord.rating).all()
-    avg_rating = db.query(func.avg(SurveyResponseRecord.rating)).scalar() or 0
+async def survey_stats(
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(require_authenticated_role("admin", "supervisor")),
+):
+    accepted_filter = SurveyRecord.delivery_status == "accepted"
+    total = db.query(SurveyRecord).filter(accepted_filter).count()
+    responded = db.query(SurveyRecord).filter(
+        accepted_filter,
+        SurveyRecord.responded_at.isnot(None),
+    ).count()
+    accepted_responses = db.query(SurveyResponseRecord).join(
+        SurveyRecord,
+        SurveyRecord.id == SurveyResponseRecord.survey_id,
+    ).filter(accepted_filter)
+    responses = accepted_responses.with_entities(
+        SurveyResponseRecord.rating,
+        func.count(),
+    ).group_by(SurveyResponseRecord.rating).all()
+    avg_rating = accepted_responses.with_entities(
+        func.avg(SurveyResponseRecord.rating)
+    ).scalar() or 0
     return {
         "total_sent": total, "responded": responded, "response_rate": round(responded / total * 100, 1) if total else 0,
         "avg_rating": round(avg_rating, 1),
@@ -10012,21 +12638,104 @@ async def survey_stats(db: Session = Depends(get_db)):
 
 # ── Time Tracking ──────────────────────────────────────────────
 
+def _time_entry_scope_filters(
+    db: Session,
+    user: UserRecord,
+    *,
+    user_id: Optional[str] = None,
+    team_id: Optional[str] = None,
+) -> list[Any]:
+    """Return fail-closed worklog predicates for the caller's reporting scope.
+
+    Agents may only read their own entries, including through a ticket-specific
+    URL. Supervisors and admins retain the existing all-users default and may
+    explicitly narrow a report to one user or one provider team.
+    """
+    role = (user.role or "").lower()
+    if role == "agent":
+        if user_id is not None or team_id is not None:
+            raise HTTPException(
+                status_code=403,
+                detail="Only admins and supervisors can select another time reporting scope",
+            )
+        return [TimeEntryRecord.user_id == user.id]
+    if role not in {"admin", "supervisor"}:
+        raise HTTPException(status_code=403, detail="Insufficient time entry permissions")
+
+    filters: list[Any] = []
+    if user_id is not None:
+        target_user = db.query(UserRecord.id).filter(UserRecord.id == user_id).first()
+        if not target_user:
+            raise HTTPException(status_code=404, detail="User not found")
+        filters.append(TimeEntryRecord.user_id == user_id)
+    if team_id is not None:
+        group = db.query(ExternalGroupRecord).filter(ExternalGroupRecord.id == team_id).first()
+        if not group:
+            raise HTTPException(status_code=404, detail="Team not found")
+        team_ticket_ids = db.query(TicketRecord.id).filter(
+            TicketRecord.binding_id == group.binding_id,
+            func.lower(TicketRecord.external_source) == group.provider.lower(),
+            TicketRecord.external_group_id == group.external_id,
+        )
+        filters.append(TimeEntryRecord.ticket_id.in_(team_ticket_ids))
+    return filters
+
+
+def _normalize_optional_query_id(
+    value: Optional[str],
+    *,
+    label: str,
+) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        raise HTTPException(status_code=422, detail=f"{label} must not be blank")
+    return normalized
+
+
+def _enrich_time_entries(db: Session, entries: list[TimeEntryRecord]) -> None:
+    user_ids = {entry.user_id for entry in entries if entry.user_id}
+    user_names = dict(
+        db.query(UserRecord.id, UserRecord.name)
+        .filter(UserRecord.id.in_(user_ids))
+        .all()
+    ) if user_ids else {}
+    for entry in entries:
+        entry.__dict__["user_name"] = user_names.get(entry.user_id)
+
+
 @app.get("/time-entries", response_model=List[TimeEntry])
 async def list_time_entries(
+    response: Response,
     db: Session = Depends(get_db),
-    ticket_id: Optional[str] = None,
-    user_id: Optional[str] = None,
+    ticket_id: Optional[str] = Query(default=None, min_length=1, max_length=255, pattern=r"^[^\x00]*$"),
+    user_id: Optional[str] = Query(default=None, min_length=1, max_length=255, pattern=r"^[^\x00]*$"),
+    team_id: Optional[str] = Query(default=None, min_length=1, max_length=36, pattern=r"^[^\x00]*$"),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
+    user: UserRecord = Depends(get_current_user),
 ):
-    q = db.query(TimeEntryRecord)
+    ticket_id = _normalize_optional_query_id(ticket_id, label="Ticket ID")
+    user_id = _normalize_optional_query_id(user_id, label="User ID")
+    team_id = _normalize_optional_query_id(team_id, label="Team ID")
+    q = db.query(TimeEntryRecord).filter(
+        *_time_entry_scope_filters(db, user, user_id=user_id, team_id=team_id)
+    )
     if ticket_id:
         q = q.filter(TimeEntryRecord.ticket_id == ticket_id)
-    if user_id:
-        q = q.filter(TimeEntryRecord.user_id == user_id)
-    entries = q.order_by(desc(TimeEntryRecord.entry_date)).limit(200).all()
-    for e in entries:
-        u = db.query(UserRecord).filter(UserRecord.id == e.user_id).first()
-        e.__dict__["user_name"] = u.name if u else None
+    page = (
+        q.order_by(desc(TimeEntryRecord.entry_date), desc(TimeEntryRecord.id))
+        .offset(offset)
+        .limit(limit + 1)
+        .all()
+    )
+    has_more = len(page) > limit
+    entries = page[:limit]
+    response.headers["X-Page-Limit"] = str(limit)
+    response.headers["X-Page-Offset"] = str(offset)
+    response.headers["X-Has-More"] = str(has_more).lower()
+    _enrich_time_entries(db, entries)
     return entries
 
 
@@ -10036,9 +12745,11 @@ async def create_time_entry(
     db: Session = Depends(get_db),
     user: UserRecord = Depends(get_current_user),
 ):
-    ticket = db.query(TicketRecord).filter(TicketRecord.id == payload.ticket_id).first()
-    if not ticket:
-        raise HTTPException(status_code=404, detail="Ticket not found")
+    # Time entries are retained evidence. Serialize with reassignment and
+    # refresh before authorizing so an agent cannot write against a ticket
+    # that moved queues while this request was waiting.
+    ticket = _lock_ticket_record(db, payload.ticket_id)
+    _authorize_ticket_mutation(user, ticket, db=db)
     entry = TimeEntryRecord(
         ticket_id=payload.ticket_id,
         user_id=user.id,
@@ -10052,13 +12763,34 @@ async def create_time_entry(
 
 
 @app.get("/time-entries/ticket/{ticket_id}", response_model=List[TimeEntry])
-async def ticket_time_entries(ticket_id: str, db: Session = Depends(get_db)):
-    entries = db.query(TimeEntryRecord).filter(TimeEntryRecord.ticket_id == ticket_id).order_by(
-        desc(TimeEntryRecord.entry_date)
-    ).all()
-    for e in entries:
-        u = db.query(UserRecord).filter(UserRecord.id == e.user_id).first()
-        e.__dict__["user_name"] = u.name if u else None
+async def ticket_time_entries(
+    response: Response,
+    ticket_id: str = Path(..., min_length=1, max_length=255, pattern=r"^[^\x00]*$"),
+    db: Session = Depends(get_db),
+    user_id: Optional[str] = Query(default=None, min_length=1, max_length=255, pattern=r"^[^\x00]*$"),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
+    user: UserRecord = Depends(get_current_user),
+):
+    ticket_id = _normalize_optional_query_id(ticket_id, label="Ticket ID") or ""
+    user_id = _normalize_optional_query_id(user_id, label="User ID")
+    page = (
+        db.query(TimeEntryRecord)
+        .filter(
+            TimeEntryRecord.ticket_id == ticket_id,
+            *_time_entry_scope_filters(db, user, user_id=user_id),
+        )
+        .order_by(desc(TimeEntryRecord.entry_date), desc(TimeEntryRecord.id))
+        .offset(offset)
+        .limit(limit + 1)
+        .all()
+    )
+    has_more = len(page) > limit
+    entries = page[:limit]
+    response.headers["X-Page-Limit"] = str(limit)
+    response.headers["X-Page-Offset"] = str(offset)
+    response.headers["X-Has-More"] = str(has_more).lower()
+    _enrich_time_entries(db, entries)
     return entries
 
 
@@ -10089,19 +12821,47 @@ def _utc_bounds_for_local_day(
 
 @app.get("/time-entries/summary")
 async def time_summary(
-    time_zone: str = Query("UTC", min_length=1, max_length=64),
+    time_zone: str = Query("UTC", min_length=1, max_length=64, pattern=r"^[^\x00]*$"),
+    ticket_id: Optional[str] = Query(default=None, min_length=1, max_length=255, pattern=r"^[^\x00]*$"),
+    user_id: Optional[str] = Query(default=None, min_length=1, max_length=255, pattern=r"^[^\x00]*$"),
+    team_id: Optional[str] = Query(default=None, min_length=1, max_length=36, pattern=r"^[^\x00]*$"),
     db: Session = Depends(get_db),
+    user: UserRecord = Depends(get_current_user),
 ):
+    time_zone = time_zone.strip()
+    if not time_zone:
+        raise HTTPException(status_code=422, detail="Time zone must not be blank")
+    ticket_id = _normalize_optional_query_id(ticket_id, label="Ticket ID")
+    user_id = _normalize_optional_query_id(user_id, label="User ID")
+    team_id = _normalize_optional_query_id(team_id, label="Team ID")
     try:
         today_start, tomorrow_start = _utc_bounds_for_local_day(time_zone)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="Unknown time zone") from exc
-    total_minutes = db.query(func.sum(TimeEntryRecord.minutes)).scalar() or 0
+    scope_filters = _time_entry_scope_filters(
+        db, user, user_id=user_id, team_id=team_id
+    )
+    if ticket_id:
+        scope_filters.append(TimeEntryRecord.ticket_id == ticket_id)
+    total_minutes = db.query(func.sum(TimeEntryRecord.minutes)).filter(
+        *scope_filters
+    ).scalar() or 0
+    ticket_count = db.query(
+        func.count(func.distinct(TimeEntryRecord.ticket_id))
+    ).filter(*scope_filters).scalar() or 0
     today_minutes = db.query(func.sum(TimeEntryRecord.minutes)).filter(
+        *scope_filters,
         TimeEntryRecord.entry_date >= today_start,
         TimeEntryRecord.entry_date < tomorrow_start,
     ).scalar() or 0
-    return {"total_hours": round(total_minutes / 60, 1), "today_hours": round(today_minutes / 60, 1)}
+    total_hours = round(total_minutes / 60, 1)
+    return {
+        "total_hours": total_hours,
+        "today_hours": round(today_minutes / 60, 1),
+        "ticket_count": ticket_count,
+        "average_hours_per_ticket": round(total_minutes / 60 / ticket_count, 1)
+        if ticket_count else 0,
+    }
 
 
 # ── Self-Service Portal ────────────────────────────────────────
@@ -10265,7 +13025,13 @@ async def ws_ticket_stream(ws: WebSocket, ticket_id: str):
                     break
             await ws.send_json(progress_payload())
 
-        result = await _run_ticket_analysis(ticket, db, progress=report_progress)
+        ticket, ws_user = _lock_authorized_ticket_analysis(db, ticket_id, ws_user)
+        result = await _run_ticket_analysis(
+            ticket,
+            db,
+            progress=report_progress,
+            analysis_actor_id=ws_user.id,
+        )
 
         await ws.send_json({"type": "complete", "result": result})
         await ws.close()

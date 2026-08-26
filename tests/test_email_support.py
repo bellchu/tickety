@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -267,6 +267,66 @@ class EmailRouteTests(unittest.TestCase):
             "/email/recipients?audience=users&search=provider-agent"
         )
         self.assertEqual(hidden.json()["recipients"], [])
+
+    def test_recipient_directory_search_is_sql_bounded_before_materialization(self):
+        with self.session_factory() as db:
+            db.add_all([
+                ExternalUserRecord(
+                    id=f"bulk-requester-{index:04d}",
+                    binding_id="binding",
+                    provider="freshservice",
+                    external_id=f"bulk-{index:04d}",
+                    user_type="requester",
+                    name=f"Directory User {index:04d}",
+                    email=f"directory-{index:04d}@example.com",
+                    active=True,
+                    title="General",
+                )
+                for index in range(350)
+            ])
+            db.add(ExternalUserRecord(
+                id="late-search-match",
+                binding_id="binding",
+                provider="freshservice",
+                external_id="late-search-match",
+                user_type="requester",
+                name="Zed Search Match",
+                email="zed-search@example.com",
+                active=True,
+                title="Needle Specialist",
+            ))
+            db.commit()
+
+        directory_selects = []
+
+        def capture(_connection, _cursor, statement, parameters, _context, _executemany):
+            normalized = " ".join(statement.lower().split())
+            if normalized.startswith("select") and " from external_users" in normalized:
+                directory_selects.append((normalized, parameters))
+
+        event.listen(self.engine, "before_cursor_execute", capture)
+        try:
+            first = self.client.get(
+                "/email/recipients?audience=users&limit=1"
+            )
+            searched = self.client.get(
+                "/email/recipients?audience=users&limit=1&search=needle"
+            )
+        finally:
+            event.remove(self.engine, "before_cursor_execute", capture)
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(len(first.json()["recipients"]), 1)
+        self.assertEqual(first.json()["total"], 1)
+        self.assertTrue(first.json()["truncated"])
+        self.assertEqual(searched.status_code, 200, searched.text)
+        self.assertEqual(
+            searched.json()["recipients"][0]["id"],
+            "external:late-search-match",
+        )
+        self.assertEqual(len(directory_selects), 2)
+        self.assertTrue(all(" limit " in statement for statement, _ in directory_selects))
+        self.assertIn("lower(external_users.title) like lower", directory_selects[1][0])
 
     def test_send_resolves_directory_ids_and_adds_sender_identity(self):
         with patch.object(

@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
+import { dmMono, dmSans } from "./fonts";
 import { Providers } from "./providers";
 import { AppShell } from "@/components/layout/AppShell";
 import { AppErrorBoundary } from "@/components/layout/AppErrorBoundary";
@@ -66,7 +67,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className="nexora-ui">
+      <body className={`nexora-ui ${dmSans.variable} ${dmMono.variable}`}>
         <AppErrorBoundary>
           <Providers>
             <AppShell>{children}</AppShell>

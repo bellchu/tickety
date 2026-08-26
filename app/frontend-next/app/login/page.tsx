@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { ArrowRight, Check, LockKeyhole, ShieldCheck } from "lucide-react";
 import { TicketyLogo } from "@/components/layout/TicketyLogo";
 import { Alert, Button } from "@/components/ui";
-import { api, queryClient } from "@/lib/api";
+import { api, APIError, queryClient } from "@/lib/api";
 import { hasActiveSession, safeNextPath, ssoErrorMessage, ssoLoginUrl } from "@/lib/sso-login";
 
 const workspaceBenefits = [
@@ -78,8 +78,14 @@ export default function LoginPage() {
       queryClient.clear();
       router.push(nextPath);
       router.refresh();
-    } catch {
-      setError("We couldn’t sign you in with those details. Check your email and password, then try again.");
+    } catch (cause) {
+      setError(
+        cause instanceof APIError && cause.status === 401
+          ? "We couldn’t sign you in with those details. Check your email and password, then try again."
+          : cause instanceof APIError && cause.status === 429
+            ? "Too many sign-in attempts were made. Wait a moment before trying again."
+            : "The sign-in service is temporarily unavailable. Check your connection and try again."
+      );
     } finally {
       setLoading(false);
     }
@@ -107,9 +113,9 @@ export default function LoginPage() {
               <span className="nexora-spectrum h-1.5 w-1.5 rounded-full" aria-hidden="true" />
               OPERATIONS, IN FOCUS
             </div>
-            <h1 className="max-w-lg text-4xl font-semibold leading-[1.08] tracking-[-0.035em] xl:text-5xl">
+            <h2 className="max-w-lg text-4xl font-semibold leading-[1.08] tracking-[-0.035em] xl:text-5xl">
               Move support work forward with confidence.
-            </h1>
+            </h2>
             <p className="mt-6 max-w-lg text-base leading-7 text-[#C9CDD3]">
               Tickety gives service teams a calm, shared view of the work that needs attention now—and the context to act on it.
             </p>
@@ -140,7 +146,7 @@ export default function LoginPage() {
 
             <div className="mb-8">
               <p className="mb-3 text-xs font-semibold uppercase tracking-[0.14em] text-semantic-primary">Secure workspace</p>
-              <h2 className="text-3xl font-semibold tracking-[-0.03em] text-ink-700 sm:text-4xl">Welcome back</h2>
+              <h1 className="text-3xl font-semibold tracking-[-0.03em] text-ink-700 sm:text-4xl">Welcome back</h1>
               <p className="mt-3 text-sm leading-6 text-ink-500">Sign in to continue to your service operations workspace.</p>
             </div>
 

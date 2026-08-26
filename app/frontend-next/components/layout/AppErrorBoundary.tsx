@@ -17,9 +17,13 @@ export class AppErrorBoundary extends Component<Props, State> {
     return { hasError: true };
   }
 
-  componentDidCatch(_error: Error, _info: ErrorInfo) {
+  componentDidCatch(error: Error, info: ErrorInfo) {
     // One malformed message must never unmount the whole app; the boundary
     // below lets the user recover instead of staring at a blank page.
+    console.error("Unexpected application render error", {
+      name: error.name,
+      componentStack: info.componentStack,
+    });
   }
 
   render() {

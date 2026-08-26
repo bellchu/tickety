@@ -14,7 +14,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from starlette.websockets import WebSocketDisconnect
@@ -33,6 +33,7 @@ from app.backend.database import (
     ProblemTicketLinkRecord,
     SessionRecord,
     SurveyRecord,
+    SurveyResponseRecord,
     TicketCommentRecord,
     TicketRecord,
     TicketLinkRecord,
@@ -604,7 +605,12 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
                     id="own-ticket", subject="Assigned case", assignee_id="prod-agent"
                 ),
                 TicketRecord(
-                    id="unassigned-ticket", subject="Unassigned case", assignee_id=None
+                    id="unassigned-ticket",
+                    subject="Unassigned case",
+                    assignee_id=None,
+                    ai_reasoning="unassigned private analysis",
+                    suggested_response="unassigned private draft",
+                    summary="unassigned private summary",
                 ),
                 KbArticleRecord(
                     id="published-kb",
@@ -741,32 +747,31 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
             user = db.get(UserRecord, "legacy-password-user")
             self.assertTrue(user.password_hash.startswith(f"{main.PASSWORD_HASH_SCHEME}$"))
 
-    def test_survey_limit_persists_for_rejected_responses_without_raw_id_keys(self):
+    def test_legacy_survey_id_response_route_is_fail_closed(self):
         survey_id = "survey-id-not-for-rate-limit-storage"
         with self.session_factory() as db:
             db.add(SurveyRecord(id=survey_id, ticket_id="own-ticket"))
             db.commit()
         self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
 
-        statuses = []
-        for _ in range(6):
-            response = self.client.post(
-                f"/surveys/{survey_id}/respond",
-                headers={"Origin": "https://tickety.example"},
-                json={"rating": 5, "comment": "Thanks"},
-            )
-            statuses.append(response.status_code)
+        response = self.client.post(
+            f"/surveys/{survey_id}/respond",
+            headers={"Origin": "https://tickety.example"},
+            json={"rating": 5, "comment": "Thanks"},
+        )
 
-        self.assertEqual(statuses, [201, 409, 409, 409, 409, 429])
+        self.assertEqual(response.status_code, 410)
         with self.session_factory() as db:
-            actor_ids = {
-                row.actor_id for row in db.query(AIRequestBucketRecord).filter(
-                    AIRequestBucketRecord.window_kind == "survey_response_minute"
-                ).all()
-            }
-        self.assertNotIn(f"survey:{survey_id}", actor_ids)
-        self.assertEqual(len(actor_ids), 1)
-        self.assertTrue(next(iter(actor_ids)).startswith("survey:"))
+            self.assertEqual(
+                db.query(SurveyResponseRecord).filter_by(survey_id=survey_id).count(),
+                0,
+            )
+            self.assertEqual(
+                db.query(AIRequestBucketRecord).filter(
+                    AIRequestBucketRecord.window_kind.like("survey_response%")
+                ).count(),
+                0,
+            )
 
     def test_agent_cannot_trigger_ai_for_another_agents_ticket(self):
         self.client.cookies.set(main.SESSION_COOKIE, "prod-agent-session")
@@ -787,6 +792,196 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
                     )
                     self.assertEqual(response.status_code, 403)
         reserve.assert_not_called()
+
+    def test_ticket_ai_routes_reauthorize_after_quota_commit_reassignment(self):
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-agent-session")
+
+        def move_ticket_after_quota(db, _actor_id, _task):
+            # Match the real reservation boundary: its durable counters commit
+            # before another writer wins the assignment race.
+            db.commit()
+            db.query(TicketRecord).filter(
+                TicketRecord.id == "own-ticket"
+            ).update(
+                {TicketRecord.assignee_id: "other-agent"},
+                synchronize_session=False,
+            )
+            db.commit()
+
+        requests = (
+            ("POST", "/tickets/own-ticket/triage"),
+            ("POST", "/tickets/own-ticket/analysis"),
+            ("POST", "/tickets/own-ticket/summary"),
+            ("POST", "/intelligence/resolve/own-ticket"),
+            ("GET", "/tickets/own-ticket/related"),
+        )
+        for method, path in requests:
+            with self.subTest(path=path):
+                with self.session_factory() as db:
+                    ticket = db.get(TicketRecord, "own-ticket")
+                    ticket.assignee_id = "prod-agent"
+                    db.commit()
+                analysis = AsyncMock(return_value={})
+                retrieval = AsyncMock(return_value={"results": []})
+                with (
+                    patch.object(
+                        main,
+                        "_reserve_ai_request",
+                        side_effect=move_ticket_after_quota,
+                    ),
+                    patch.object(main, "_run_ticket_analysis", new=analysis),
+                    patch.object(
+                        ticket_vectors,
+                        "retrieve_ticket_context",
+                        new=retrieval,
+                    ),
+                ):
+                    response = self.client.request(
+                        method,
+                        path,
+                        headers={"Origin": "https://tickety.example"},
+                    )
+                self.assertEqual(response.status_code, 403, response.text)
+                analysis.assert_not_awaited()
+                retrieval.assert_not_awaited()
+
+    def test_ticket_route_reauthorizes_after_analytics_quota_reassignment(self):
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-agent-session")
+
+        def move_ticket_after_quota(db, _actor_id):
+            db.commit()
+            db.query(TicketRecord).filter(
+                TicketRecord.id == "own-ticket"
+            ).update(
+                {TicketRecord.assignee_id: "other-agent"},
+                synchronize_session=False,
+            )
+            db.commit()
+
+        recommend = MagicMock(return_value={})
+        with (
+            patch.object(
+                main,
+                "_reserve_analytics_request",
+                side_effect=move_ticket_after_quota,
+            ),
+            patch.object(main.intel, "recommend_assignee", new=recommend),
+        ):
+            response = self.client.get("/intelligence/route/own-ticket")
+
+        self.assertEqual(response.status_code, 403, response.text)
+        recommend.assert_not_called()
+
+    def test_ticket_ai_claim_refreshes_actor_after_quota_commit(self):
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-agent-session")
+
+        for actor_change in (
+            {"is_active": False},
+            {"role": "auditor"},
+        ):
+            with self.subTest(actor_change=actor_change):
+                with self.session_factory() as db:
+                    actor = db.get(UserRecord, "prod-agent")
+                    actor.is_active = True
+                    actor.role = "agent"
+                    db.get(TicketRecord, "own-ticket").assignee_id = "prod-agent"
+                    db.commit()
+
+                def change_actor_after_quota(db, _actor_id, _task):
+                    db.commit()
+                    db.query(UserRecord).filter(
+                        UserRecord.id == "prod-agent"
+                    ).update(actor_change, synchronize_session=False)
+                    db.commit()
+
+                analysis = AsyncMock(return_value={})
+                with (
+                    patch.object(
+                        main,
+                        "_reserve_ai_request",
+                        side_effect=change_actor_after_quota,
+                    ),
+                    patch.object(main, "_run_ticket_analysis", new=analysis),
+                ):
+                    response = self.client.post(
+                        "/tickets/own-ticket/triage",
+                        headers={"Origin": "https://tickety.example"},
+                    )
+
+                self.assertEqual(response.status_code, 403, response.text)
+                analysis.assert_not_awaited()
+
+    def test_midflight_reassignment_loses_ai_claim_before_persist_or_return(self):
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-agent-session")
+
+        async def reassign_during_provider(_payload, **_kwargs):
+            with self.session_factory() as db:
+                db.query(TicketRecord).filter(
+                    TicketRecord.id == "own-ticket"
+                ).update(
+                    {TicketRecord.assignee_id: "other-agent"},
+                    synchronize_session=False,
+                )
+                db.commit()
+            return {
+                "sentiment": "Neutral",
+                "category": "Other",
+                "priority": "P3",
+                "mood": "neutral",
+                "complexity": 1,
+                "action": "respond",
+                "recommended_team": main.intel.UNROUTED_REVIEW_TEAM,
+                "reasoning": "Must not be persisted after reassignment",
+                "suggested_response": None,
+            }
+
+        with (
+            patch.object(main, "_reserve_ai_request"),
+            patch.object(
+                main.engine,
+                "process_ticket",
+                new=AsyncMock(side_effect=reassign_during_provider),
+            ),
+        ):
+            response = self.client.post(
+                "/tickets/own-ticket/triage",
+                headers={"Origin": "https://tickety.example"},
+            )
+
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json(), {"detail": "analysis_access_changed"})
+        with self.session_factory() as db:
+            ticket = db.get(TicketRecord, "own-ticket")
+            self.assertEqual(ticket.assignee_id, "other-agent")
+            self.assertIsNone(ticket.ai_reasoning)
+            self.assertIsNone(ticket.ai_claim_id)
+            self.assertIsNone(ticket.ai_status)
+
+    def test_related_ticket_retrieval_reauthorizes_before_return(self):
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-agent-session")
+
+        async def reassign_during_retrieval(*_args, **_kwargs):
+            with self.session_factory() as db:
+                db.query(TicketRecord).filter(
+                    TicketRecord.id == "own-ticket"
+                ).update(
+                    {TicketRecord.assignee_id: "other-agent"},
+                    synchronize_session=False,
+                )
+                db.commit()
+            return {"results": []}
+
+        with (
+            patch.object(main, "_reserve_ai_request"),
+            patch.object(
+                ticket_vectors,
+                "retrieve_ticket_context",
+                new=AsyncMock(side_effect=reassign_during_retrieval),
+            ),
+        ):
+            response = self.client.get("/tickets/own-ticket/related")
+
+        self.assertEqual(response.status_code, 403, response.text)
 
     def test_agent_cannot_access_admin_rag_or_metrics_routes(self):
         self.client.cookies.set(main.SESSION_COOKIE, "prod-agent-session")
@@ -867,17 +1062,37 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
             {ticket["id"] for ticket in problem_tickets.json()},
             {"own-ticket", "unassigned-ticket"},
         )
+        unassigned_problem_ticket = next(
+            ticket for ticket in problem_tickets.json()
+            if ticket["id"] == "unassigned-ticket"
+        )
+        self.assertIsNone(unassigned_problem_ticket["ai_reasoning"])
+        self.assertIsNone(unassigned_problem_ticket["suggested_response"])
+        self.assertIsNone(unassigned_problem_ticket["summary"])
 
     def test_unknown_active_role_cannot_read_ticket_or_rag_collections(self):
         self.client.cookies.set(main.SESSION_COOKIE, "legacy-role-session")
         with patch.object(main, "_reserve_ai_request") as reserve:
-            listing = self.client.get("/tickets")
-            problem = self.client.get("/problems/problem-scope/tickets")
-            search = self.client.get("/ticket-intelligence/search?q=private")
+            responses = [
+                self.client.get(path)
+                for path in (
+                    "/tickets",
+                    "/problems/problem-scope/tickets",
+                    "/ticket-intelligence/search?q=private",
+                    "/categories",
+                    "/leaderboard",
+                    "/projects",
+                    "/services",
+                    "/service-requests",
+                    "/problems",
+                    "/changes",
+                    "/changes/problem-scope/approvals",
+                    "/assets",
+                    "/assets/stats",
+                )
+            ]
 
-        self.assertEqual(listing.status_code, 403)
-        self.assertEqual(problem.status_code, 403)
-        self.assertEqual(search.status_code, 403)
+        self.assertTrue(all(response.status_code == 403 for response in responses))
         reserve.assert_not_called()
 
     def test_agent_ticket_knowledge_is_scoped_and_drafts_are_hidden(self):
@@ -986,6 +1201,43 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.json()), 1)
         self.assertEqual(response.headers["x-has-more"], "true")
+
+    def test_kb_privileged_status_filters_and_all_view_are_server_scoped(self):
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-agent-session")
+        forbidden = self.client.get("/kb?status=all")
+        self.assertEqual(forbidden.status_code, 403)
+
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
+        all_articles = self.client.get("/kb?status=all")
+        drafts = self.client.get("/kb?status=draft")
+
+        self.assertEqual(all_articles.status_code, 200)
+        self.assertEqual(
+            {article["id"] for article in all_articles.json()},
+            {"published-kb", "draft-kb"},
+        )
+        self.assertEqual(
+            [article["id"] for article in drafts.json()],
+            ["draft-kb"],
+        )
+
+    def test_kb_search_matches_content_without_wildcard_expansion(self):
+        with self.session_factory() as db:
+            article = db.get(KbArticleRecord, "published-kb")
+            article.content = "Reset the satellite uplink with the verified runbook."
+            db.commit()
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-agent-session")
+
+        content_match = self.client.get("/kb?search=satellite%20uplink")
+        wildcard_literal = self.client.get("/kb?search=%25")
+
+        self.assertEqual(content_match.status_code, 200)
+        self.assertEqual(
+            [article["id"] for article in content_match.json()],
+            ["published-kb"],
+        )
+        self.assertEqual(wildcard_literal.status_code, 200)
+        self.assertEqual(wildcard_literal.json(), [])
 
     def test_kb_feedback_requires_a_strict_boolean(self):
         self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
@@ -1239,6 +1491,147 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
         with self.session_factory() as db:
             ticket = db.get(TicketRecord, "misrouted-frustrated-vague")
             self.assertEqual(ticket.external_group_id, "application-group")
+
+    def test_service_quality_bounds_each_public_transcript_and_signals_truncation(self):
+        now = datetime.utcnow()
+        conversation_count = main.intel.PUBLIC_CONVERSATION_SAMPLE_LIMIT + 5
+        with self.session_factory() as db:
+            db.add(TicketRecord(
+                id="bounded-quality-ticket",
+                subject="Repeated requester follow-up",
+                description="The service is still not working and this is frustrating.",
+                status="Open",
+                priority="P2",
+                binding_id="quality-binding",
+                external_source="freshservice",
+                external_created_at=now - timedelta(days=2),
+                external_updated_at=now - timedelta(minutes=1),
+                external_conversations_synced_at=now,
+            ))
+            db.add_all([
+                ExternalConversationRecord(
+                    id=f"bounded-quality-{index:03d}",
+                    binding_id="quality-binding",
+                    provider="freshservice",
+                    ticket_id="bounded-quality-ticket",
+                    provider_ticket_id="bounded-quality-ticket",
+                    external_id=f"bounded-quality-{index:03d}",
+                    body=("message body " + ("x" * 10_000)),
+                    body_hash=f"{index:064x}",
+                    is_private=False,
+                    incoming=index % 2 == 0,
+                    provider_created_at=now - timedelta(minutes=conversation_count - index),
+                    revision_hash=f"{index + 1:064x}",
+                )
+                for index in range(conversation_count)
+            ])
+            db.commit()
+
+        selects = []
+
+        def capture(_connection, _cursor, statement, _parameters, _context, _many):
+            normalized = " ".join(statement.lower().split())
+            if normalized.startswith("select") and " from external_conversations" in normalized:
+                selects.append(normalized)
+
+        event.listen(self.engine, "before_cursor_execute", capture)
+        try:
+            self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
+            with patch.object(main, "_reserve_analytics_request"):
+                response = self.client.get("/intelligence/service-quality?window_days=30")
+        finally:
+            event.remove(self.engine, "before_cursor_execute", capture)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertTrue(payload["scope"]["transcript_truncated"])
+        self.assertEqual(
+            payload["scope"]["transcript_limit_per_ticket"],
+            main.intel.PUBLIC_CONVERSATION_SAMPLE_LIMIT,
+        )
+        self.assertEqual(payload["scope"]["transcript_truncated_tickets"], 1)
+        friction = next(
+            item for item in payload["friction_alerts"]
+            if item["ticket_id"] == "bounded-quality-ticket"
+        )
+        self.assertEqual(
+            friction["public_message_count"],
+            main.intel.PUBLIC_CONVERSATION_SAMPLE_LIMIT,
+        )
+        self.assertTrue(friction["public_message_count_truncated"])
+        ranked = [statement for statement in selects if "row_number() over" in statement]
+        self.assertEqual(len(ranked), 1, selects)
+        self.assertIn("substr(", ranked[0])
+        self.assertNotIn("body_html", ranked[0])
+
+    def test_sla_monitoring_aggregates_first_response_without_loading_bodies(self):
+        now = datetime.utcnow()
+        with self.session_factory() as db:
+            started_at = now - timedelta(hours=5)
+            db.add(TicketRecord(
+                id="aggregate-sla-ticket",
+                subject="Aggregate first response",
+                status="Open",
+                priority="P1",
+                binding_id="quality-binding",
+                external_source="freshservice",
+                external_created_at=started_at,
+                external_updated_at=now - timedelta(minutes=1),
+                external_fr_due_by=started_at + timedelta(hours=1),
+                external_due_by=now + timedelta(hours=2),
+                external_conversations_synced_at=now,
+            ))
+            db.add_all([
+                ExternalConversationRecord(
+                    id=f"aggregate-sla-{index:03d}",
+                    binding_id="quality-binding",
+                    provider="freshservice",
+                    ticket_id="aggregate-sla-ticket",
+                    provider_ticket_id="aggregate-sla-ticket",
+                    external_id=f"aggregate-sla-{index:03d}",
+                    body="x" * 10_000,
+                    body_hash=f"{index + 100:064x}",
+                    is_private=False,
+                    incoming=False,
+                    provider_created_at=(
+                        started_at - timedelta(minutes=1)
+                        if index == 0
+                        else started_at + timedelta(hours=2, minutes=index)
+                    ),
+                    revision_hash=f"{index + 200:064x}",
+                )
+                for index in range(30)
+            ])
+            db.commit()
+
+        selects = []
+
+        def capture(_connection, _cursor, statement, _parameters, _context, _many):
+            normalized = " ".join(statement.lower().split())
+            if normalized.startswith("select") and " from external_conversations" in normalized:
+                selects.append(normalized)
+
+        event.listen(self.engine, "before_cursor_execute", capture)
+        try:
+            self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
+            with patch.object(main, "_reserve_analytics_request"):
+                response = self.client.get("/intelligence/sla-monitoring?window_days=30")
+        finally:
+            event.remove(self.engine, "before_cursor_execute", capture)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        first_response = next(
+            item for item in response.json()["reactive"]
+            if item["ticket_id"] == "aggregate-sla-ticket"
+            and item["metric"] == "first_response"
+        )
+        self.assertEqual(
+            datetime.fromisoformat(first_response["completed_at"]),
+            started_at + timedelta(hours=2, minutes=1),
+        )
+        self.assertEqual(len(selects), 1, selects)
+        self.assertIn("min(case", selects[0])
+        self.assertNotIn("external_conversations.body", selects[0])
 
     def test_sla_monitoring_separates_reactive_and_proactive_clocks(self):
         now = datetime.utcnow()
@@ -2268,16 +2661,45 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
         recipient.send_json.assert_not_awaited()
         other.send_json.assert_not_awaited()
 
-    def test_resolution_award_locks_and_refreshes_before_reading_ticket_state(self):
+    def test_resolution_award_uses_user_then_ticket_lock_order(self):
         db = MagicMock()
-        filtered = db.query.return_value.filter.return_value
-        filtered.first.return_value = None
-        filtered.populate_existing.return_value.with_for_update.return_value.first.return_value = None
+        db.query.return_value.filter.return_value.scalar.return_value = "agent"
+        user = UserRecord(
+            id="agent",
+            name="Agent",
+            role="agent",
+            is_active=True,
+        )
+        locked_ticket = TicketRecord(
+            id="ticket-1",
+            subject="Still open",
+            assignee_id="agent",
+            status="Open",
+            workflow_status="Open",
+        )
+        lock_order = []
 
-        asyncio.run(main._check_resolution_and_award(TicketRecord(id="ticket-1"), db=db))
+        with (
+            patch.object(
+                main,
+                "_lock_user_record",
+                side_effect=lambda _db, _id: lock_order.append("user") or user,
+            ),
+            patch.object(
+                main,
+                "_lock_ticket_record",
+                side_effect=lambda _db, _id: lock_order.append("ticket") or locked_ticket,
+            ),
+            patch.object(main, "_terminal_status_names", return_value={"closed", "resolved"}),
+            patch.object(main, "_is_terminal_status", return_value=False),
+        ):
+            asyncio.run(main._check_resolution_and_award(
+                TicketRecord(id="ticket-1"),
+                db=db,
+            ))
 
-        filtered.populate_existing.assert_called_once_with()
-        filtered.populate_existing.return_value.with_for_update.assert_called_once_with()
+        self.assertEqual(lock_order, ["user", "ticket"])
+        db.rollback.assert_called_once_with()
 
     def test_ticket_websocket_progress_includes_bounded_pipeline_timeout(self):
         self.client.cookies.set(main.SESSION_COOKIE, "prod-agent-session")
@@ -2548,7 +2970,7 @@ class LLMInterfaceContractTests(unittest.TestCase):
             '{"api_key":"json-secret-value"}\n'
             "client_secret = assignment-secret-value\n"
             "aws_access_key_id=AKIA1234567890ABCDEF\n"
-            "github_token=ghp_1234567890abcdefghij\n"
+            "github_token=ghp_1234567890abcdefghij\n"  # gitleaks:allow -- synthetic redaction fixture
             "address=2001:4860:4860::8888"
         )
 

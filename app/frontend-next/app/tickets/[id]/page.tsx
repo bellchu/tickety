@@ -1,9 +1,9 @@
 "use client";
 
-import { useState, useEffect, type ReactNode } from "react";
+import { useState, useEffect, useMemo, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
-import { canAccessProtectedIntelligence } from "@/lib/auth";
+import { canAccessProtectedIntelligence, canCreateTickets } from "@/lib/auth";
 import type { ResolutionPlan, Ticket, TicketAnalysisResult, TicketAuditEntry, TicketComment, UserOut } from "@/lib/types";
 import { useParams } from "next/navigation";
 import { AIThinkingStream } from "@/components/ticket/AIThinkingStream";
@@ -24,6 +24,11 @@ import { PageFrame } from "@/components/layout/PageLayout";
 import { analysisLifecycleLabel, relatedStrength, routingLabel, sourceKindLabel, ticketSignalRatings } from "@/lib/ticket-intelligence";
 import { persistedAnalysisErrorDetails } from "@/lib/analysis-errors";
 import { toLocalDateTimeInput } from "@/lib/date-time";
+import {
+  preserveTicketConfigValue,
+  ticketPriorityOptions,
+  ticketStatusOptions,
+} from "@/lib/ticket-config-options";
 import {
   formatOperationalTimestamp,
   requesterEmail,
@@ -135,10 +140,53 @@ export default function TicketDetailPage() {
           <FreshserviceSourcePanel ticket={ticket} />
         </>
       ) : (
-        <AgentActionPanel ticket={ticket} />
+        <InternalTicketPanel ticket={ticket} />
       )}
 
     </PageFrame>
+  );
+}
+
+function InternalTicketPanel({ ticket }: { ticket: Ticket }) {
+  const authQuery = useQuery({ queryKey: ["auth-me"], queryFn: api.getAuthMe, retry: false });
+  const canEditInternalTicket = !authQuery.isError && canCreateTickets(authQuery.data);
+
+  return canEditInternalTicket ? (
+    <AgentActionPanel ticket={ticket} />
+  ) : (
+    <InternalTicketReadOnlyPanel ticket={ticket} accessPending={authQuery.isLoading} />
+  );
+}
+
+function InternalTicketReadOnlyPanel({ ticket, accessPending }: { ticket: Ticket; accessPending: boolean }) {
+  return (
+    <section className="space-y-5 rounded-2xl border border-linen-400 bg-linen-50 p-5 shadow-sm sm:p-6" aria-labelledby="internal-ticket-read-only-title">
+      <div>
+        <p className="text-xs font-semibold uppercase tracking-[0.12em] text-semantic-primary">Workflow</p>
+        <h2 id="internal-ticket-read-only-title" className="mt-1 text-lg font-semibold text-ink-700">Internal ticket · Read only</h2>
+        <p className="mt-1 text-xs leading-5 text-ink-500">
+          {accessPending
+            ? "Edit access is being checked. Ticket details remain available while you wait."
+            : "Editing and comments are available only to an authenticated administrator in the demo environment."}
+        </p>
+      </div>
+
+      <div className="rounded-xl border border-linen-300 bg-linen-100 p-4">
+        <h3 className="text-sm font-semibold text-ink-700">Description</h3>
+        <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-ink-600 [overflow-wrap:anywhere]">
+          {ticket.description || "No description was provided."}
+        </p>
+      </div>
+
+      <div className="grid gap-4 rounded-xl border border-linen-300 bg-white p-4 sm:grid-cols-2 lg:grid-cols-3">
+        <InfoItem icon={<Flag className="h-3.5 w-3.5" />} label="Status">{ticket.status || "—"}</InfoItem>
+        <InfoItem icon={<Gauge className="h-3.5 w-3.5" />} label="Priority">{ticket.priority || "—"}</InfoItem>
+        <InfoItem icon={<User className="h-3.5 w-3.5" />} label="Assignee">{ticket.assignee_name || "Unassigned"}</InfoItem>
+        <InfoItem icon={<CalendarDays className="h-3.5 w-3.5" />} label="Due">{formatOperationalTimestamp(ticket.due_by || ticket.resolution_due_at)}</InfoItem>
+        <InfoItem icon={<Tag className="h-3.5 w-3.5" />} label="Tags">{ticket.tags || "—"}</InfoItem>
+        <InfoItem icon={<Mail className="h-3.5 w-3.5" />} label="Reporter">{ticket.reporter || "—"}</InfoItem>
+      </div>
+    </section>
   );
 }
 
@@ -205,6 +253,8 @@ function AgentActionPanel({ ticket }: { ticket: Ticket }) {
   const meQuery = useQuery({ queryKey: ["auth-me"], queryFn: api.getAuthMe, retry: false });
   const canManageAssignment = canAccessProtectedIntelligence(meQuery.data);
   const usersQuery = useQuery<UserOut[]>({ queryKey: ["users"], queryFn: api.getUsers, enabled: canManageAssignment, retry: false });
+  const statusConfigQuery = useQuery({ queryKey: ["status-config"], queryFn: api.getStatusConfig, retry: false });
+  const priorityConfigQuery = useQuery({ queryKey: ["priority-config"], queryFn: api.getPriorityConfig, retry: false });
   const commentsQuery = useQuery<TicketComment[]>({
     queryKey: ["ticket-comments", ticket.id],
     queryFn: () => api.getComments(ticket.id),
@@ -216,6 +266,22 @@ function AgentActionPanel({ ticket }: { ticket: Ticket }) {
   const users = usersQuery.data;
   const comments = commentsQuery.data;
   const audit = auditQuery.data;
+  const configuredStatusOptions = useMemo(
+    () => ticketStatusOptions(statusConfigQuery.isError ? undefined : statusConfigQuery.data),
+    [statusConfigQuery.data, statusConfigQuery.isError],
+  );
+  const configuredPriorityOptions = useMemo(
+    () => ticketPriorityOptions(priorityConfigQuery.isError ? undefined : priorityConfigQuery.data),
+    [priorityConfigQuery.data, priorityConfigQuery.isError],
+  );
+  const statusOptions = useMemo(
+    () => preserveTicketConfigValue(configuredStatusOptions, status),
+    [configuredStatusOptions, status],
+  );
+  const priorityOptions = useMemo(
+    () => preserveTicketConfigValue(configuredPriorityOptions, priority),
+    [configuredPriorityOptions, priority],
+  );
 
   const saveMut = useMutation({
     mutationFn: () => api.updateTicket(ticket.id, {
@@ -286,7 +352,11 @@ function AgentActionPanel({ ticket }: { ticket: Ticket }) {
               <Button className="mt-3" size="sm" variant="secondary" onClick={() => setComment(ticket.suggested_response || "")}>Use in composer</Button>
             </details>
           )}
+          <label htmlFor="ticket-comment-composer" className="block text-xs font-medium text-ink-500">
+            {isPrivate ? "Private note" : "Public reply"}
+          </label>
           <textarea
+            id="ticket-comment-composer"
             value={comment}
             onChange={(e) => setComment(e.target.value)}
             className="input-base min-h-[88px] text-sm"
@@ -351,17 +421,22 @@ function AgentActionPanel({ ticket }: { ticket: Ticket }) {
             <h3 className="text-sm font-semibold text-ink-700">Properties</h3>
             <p className="mt-1 text-xs text-ink-500">Status, ownership, timing, and classification.</p>
           </div>
+          {(statusConfigQuery.isError || priorityConfigQuery.isError) && (
+            <p role="status" className="mb-4 rounded-lg border border-linen-400 bg-white px-3 py-2 text-xs leading-5 text-ink-500">
+              Custom status or priority choices are temporarily unavailable. Default choices remain available, and the workbench can still be used.
+            </p>
+          )}
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-1">
             <label className="space-y-1">
               <span className="text-xs font-medium text-ink-500">Status</span>
               <select value={status} onChange={(e) => setStatus(e.target.value)} className="input-base text-xs">
-                {["New", "Open", "Awaiting Review", "Pending", "Escalated", "Resolved", "Closed"].map((s) => <option key={s} value={s}>{s}</option>)}
+                {statusOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
               </select>
             </label>
             <label className="space-y-1">
               <span className="text-xs font-medium text-ink-500">Priority</span>
               <select value={priority} onChange={(e) => setPriority(e.target.value)} className="input-base text-xs">
-                {["P1", "P2", "P3", "P4"].map((p) => <option key={p} value={p}>{p}</option>)}
+                {priorityOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
               </select>
             </label>
             <label className="space-y-1">

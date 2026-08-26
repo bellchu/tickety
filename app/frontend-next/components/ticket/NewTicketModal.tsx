@@ -1,18 +1,17 @@
 "use client";
 
-import { useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import type { TicketCreateInput } from "@/lib/types";
 import { Plus } from "lucide-react";
 import { Alert, Button, Dialog } from "@/components/ui";
-
-const PRIORITIES = [
-  { value: "P3", label: "P3 — Low" },
-  { value: "P2", label: "P2 — Medium" },
-  { value: "P1", label: "P1 — High" },
-];
+import {
+  defaultTicketPriority,
+  preserveTicketConfigValue,
+  ticketCreationPriorityOptions,
+} from "@/lib/ticket-config-options";
 
 interface Props {
   open: boolean;
@@ -22,13 +21,52 @@ interface Props {
 export function NewTicketModal({ open, onClose }: Props) {
   const router = useRouter();
   const queryClient = useQueryClient();
-  const [form, setForm] = useState<TicketCreateInput>({
+  const priorityConfigQuery = useQuery({
+    queryKey: ["priority-config"],
+    queryFn: api.getPriorityConfig,
+    enabled: open,
+    retry: false,
+  });
+  const configuredPriorities = useMemo(
+    () => ticketCreationPriorityOptions(priorityConfigQuery.isError ? undefined : priorityConfigQuery.data),
+    [priorityConfigQuery.data, priorityConfigQuery.isError],
+  );
+  const defaultPriority = defaultTicketPriority(configuredPriorities);
+  const [form, setForm] = useState<TicketCreateInput>(() => ({
     subject: "",
     description: "",
     reporter: "",
-    priority: "P3",
-  });
+    priority: defaultPriority,
+  }));
   const [error, setError] = useState<string | null>(null);
+  const priorityWasChanged = useRef(false);
+  const wasOpen = useRef(false);
+  const priorityOptions = useMemo(
+    () => preserveTicketConfigValue(configuredPriorities, form.priority),
+    [configuredPriorities, form.priority],
+  );
+
+  const reset = () => {
+    priorityWasChanged.current = false;
+    setForm({ subject: "", description: "", reporter: "", priority: defaultPriority });
+    setError(null);
+  };
+
+  useEffect(() => {
+    const opening = open && !wasOpen.current;
+    const closing = !open && wasOpen.current;
+
+    if (opening || closing) {
+      priorityWasChanged.current = false;
+      setForm({ subject: "", description: "", reporter: "", priority: defaultPriority });
+      setError(null);
+    } else if (open && !priorityWasChanged.current) {
+      setForm((current) => current.priority === defaultPriority
+        ? current
+        : { ...current, priority: defaultPriority });
+    }
+    wasOpen.current = open;
+  }, [defaultPriority, open]);
 
   const mutation = useMutation({
     mutationFn: () => api.createTicket(form),
@@ -40,11 +78,6 @@ export function NewTicketModal({ open, onClose }: Props) {
     },
     onError: (e) => setError(e instanceof Error ? e.message : String(e)),
   });
-
-  const reset = () => {
-    setForm({ subject: "", description: "", reporter: "", priority: "P3" });
-    setError(null);
-  };
 
   const close = () => {
     if (mutation.isPending) return;
@@ -109,12 +142,13 @@ export function NewTicketModal({ open, onClose }: Props) {
               </span>
               <select
                 value={form.priority}
-                onChange={(e) =>
+                onChange={(e) => {
+                  priorityWasChanged.current = true;
                   setForm((f) => ({ ...f, priority: e.target.value }))
-                }
+                }}
                 className="input-base w-full"
               >
-                {PRIORITIES.map((p) => (
+                {priorityOptions.map((p) => (
                   <option key={p.value} value={p.value}>
                     {p.label}
                   </option>
@@ -122,6 +156,11 @@ export function NewTicketModal({ open, onClose }: Props) {
               </select>
             </label>
           </div>
+          {priorityConfigQuery.isError && (
+            <p role="status" className="text-xs text-ink-500">
+              Custom priority choices are temporarily unavailable. Default choices remain available.
+            </p>
+          )}
           {error && (
             <Alert variant="danger" title="Ticket could not be created">{error}</Alert>
           )}

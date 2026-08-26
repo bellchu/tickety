@@ -24,6 +24,7 @@ const {
   canAccessAdministration,
   canCreateTickets,
   canAccessProtectedIntelligence,
+  canManageOperationalRecords,
   canUseAdministrativeFeatures,
   hasDemoAdministratorSession,
   hasProtectedProductionSession,
@@ -101,7 +102,7 @@ test("protected production sessions require a real active production session", (
   assert.equal(hasProtectedProductionSession(context({ role: "agent" })), true);
 });
 
-test("protected intelligence allows production admins and supervisors plus demo admins", () => {
+test("protected intelligence and operational writes allow production admins and supervisors plus demo admins", () => {
   const denied = [
     undefined,
     null,
@@ -116,11 +117,15 @@ test("protected intelligence allows production admins and supervisors plus demo 
 
   for (const candidate of denied) {
     assert.equal(canAccessProtectedIntelligence(candidate), false);
+    assert.equal(canManageOperationalRecords(candidate), false);
   }
   assert.equal(canAccessProtectedIntelligence(context({ role: "admin" })), true);
   assert.equal(canAccessProtectedIntelligence(context({ role: "supervisor" })), true);
   assert.equal(canAccessProtectedIntelligence(context({ role: "SUPERVISOR" })), true);
   assert.equal(canAccessProtectedIntelligence(context({ app_mode: "demo" })), true);
+  assert.equal(canManageOperationalRecords(context({ role: "admin" })), true);
+  assert.equal(canManageOperationalRecords(context({ role: "supervisor" })), true);
+  assert.equal(canManageOperationalRecords(context({ app_mode: "demo" })), true);
 });
 
 test("ticket creation is limited to demo admins", () => {

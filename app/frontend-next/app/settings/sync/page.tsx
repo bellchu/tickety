@@ -84,7 +84,9 @@ export default function TicketSyncStatusPage() {
     },
   });
 
-  const authError = isAuthError(authQuery.error) || isAuthError(statusQuery.error);
+  const authError = isAuthError(authQuery.error)
+    || isAuthError(statusQuery.error)
+    || isAuthError(triggerMutation.error);
   useEffect(() => {
     if (authError) router.replace("/login?next=/settings/status/sync");
   }, [authError, router]);
@@ -93,6 +95,19 @@ export default function TicketSyncStatusPage() {
     return <SyncStatusSkeleton />;
   }
   if (authError) return null;
+  if (authQuery.isError || !authQuery.data) {
+    return (
+      <PageFrame>
+        <ErrorState
+          title="Sync access could not be checked"
+          description="Your session could not be verified, so no provider status or controls were requested."
+          actionLabel="Retry access check"
+          onRetry={() => void authQuery.refetch()}
+          retrying={authQuery.isFetching}
+        />
+      </PageFrame>
+    );
+  }
   if (!canAccess) {
     return (
       <PageFrame>
@@ -103,7 +118,7 @@ export default function TicketSyncStatusPage() {
       </PageFrame>
     );
   }
-  if (statusQuery.error || !statusQuery.data) {
+  if (!statusQuery.data) {
     return (
       <PageFrame>
         <ErrorState
@@ -120,6 +135,10 @@ export default function TicketSyncStatusPage() {
   const remainingPercent = status.rate_limit_total && status.rate_limit_remaining != null
     ? Math.max(0, Math.min(100, (status.rate_limit_remaining / status.rate_limit_total) * 100))
     : null;
+  const syncBusy = status.last_status === "running" || status.last_status === "queued";
+  const checkedAt = statusQuery.dataUpdatedAt
+    ? formatTimeAgo(new Date(statusQuery.dataUpdatedAt).toISOString())
+    : "recently";
 
   return (
     <PageFrame className="max-w-6xl space-y-8">
@@ -127,12 +146,12 @@ export default function TicketSyncStatusPage() {
         eyebrow="Settings · Ticketing"
         icon={<Activity className="h-5 w-5" />}
         title="Freshservice sync status"
-        description="Automatic sync is restricted to tickets updated in the last 30 days. Older tickets enter a separate queue only after an administrator requests a range."
-        meta={`Provider: ${status.provider} · checked ${formatTimeAgo(new Date().toISOString())}`}
+        description={`Automatic sync is restricted to tickets updated in the last ${status.automatic_fetch_days} days. Older tickets enter a separate queue only after an administrator requests a range.`}
+        meta={`Provider: ${status.provider} · checked ${checkedAt}`}
         actions={(
-          <div className="flex gap-2">
-            <Link href="/settings/status" className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-linen-500 bg-linen-50 px-4 text-sm font-semibold text-ink-700 shadow-sm hover:bg-linen-200">
-              <ArrowLeft className="h-4 w-4" /> Status
+          <>
+            <Link href="/settings/status" className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-linen-500 bg-linen-50 px-4 text-sm font-semibold text-ink-700 shadow-sm hover:bg-linen-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2">
+              <ArrowLeft className="h-4 w-4" aria-hidden="true" /> Status
             </Link>
             <Button
               variant="secondary"
@@ -152,15 +171,26 @@ export default function TicketSyncStatusPage() {
             </Button>
             <Button
               onClick={() => triggerMutation.mutate()}
+              disabled={syncBusy}
               pending={triggerMutation.isPending}
               pendingLabel="Starting…"
               leadingIcon={<Activity className="h-4 w-4" />}
             >
-              Run bounded sync
+              {syncBusy ? "Sync in progress" : "Run bounded sync"}
             </Button>
-          </div>
+          </>
         )}
       />
+
+      {statusQuery.error && (
+        <Alert
+          variant="warning"
+          title="The latest sync status refresh failed"
+          action={<Button size="sm" variant="secondary" onClick={() => void statusQuery.refetch()} pending={statusQuery.isFetching} pendingLabel="Retrying…">Retry</Button>}
+        >
+          The last verified provider snapshot remains visible. No synchronization was started by the failed refresh.
+        </Alert>
+      )}
 
       {status.last_status === "throttled" && (
         <Alert variant="warning" title="Freshservice requested a pause">
@@ -190,10 +220,15 @@ export default function TicketSyncStatusPage() {
           {triggerMutation.error instanceof Error ? triggerMutation.error.message : "Unknown request error"}
         </Alert>
       )}
+      {triggerMutation.isSuccess && (
+        <Alert variant="success" title="Sync request accepted" action={<Button size="sm" variant="ghost" onClick={() => triggerMutation.reset()}>Dismiss</Button>}>
+          The bounded worker run was requested. Live status will update as the queue starts.
+        </Alert>
+      )}
 
       <SummaryStrip label="Ticket synchronization overview">
         <Metric label="Local tickets" value={status.local_ticket_count.toLocaleString()} detail={`${status.total_synced.toLocaleString()} source changes applied`} icon={<Database className="h-4 w-4" />} />
-        <Metric label="Current lane" value={statusLabel(status.last_status)} detail={status.recent_completed_at ? `Completed ${formatTimeAgo(status.recent_completed_at)}` : `Page ${status.recent_page}`} icon={<Clock3 className="h-4 w-4" />} />
+        <Metric label="Current lane" value={statusLabel(status.last_status)} detail={status.recent_cycle_started_at ? `Page ${status.recent_page} · started ${formatTimeAgo(status.recent_cycle_started_at)}` : status.recent_completed_at ? `Completed ${formatTimeAgo(status.recent_completed_at)}` : `Page ${status.recent_page}`} icon={<Clock3 className="h-4 w-4" />} />
         <Metric label="Old-ticket request" value={!status.history_requested_at ? "Not requested" : status.history_complete ? "Complete" : `${status.history_processed.toLocaleString()} scanned`} detail={!status.history_requested_at ? "Administrator action required" : status.history_complete ? "Requested range checkpointed" : `Next page ${status.history_page}`} icon={<History className="h-4 w-4" />} />
         <Metric label="API budget" value={status.rate_limit_remaining == null ? "Awaiting headers" : `${status.rate_limit_remaining.toLocaleString()} left`} detail={status.rate_limit_total ? `${Math.round(remainingPercent ?? 0)}% of ${status.rate_limit_total.toLocaleString()} available` : "Reported by Freshservice"} icon={<Gauge className="h-4 w-4" />} />
       </SummaryStrip>

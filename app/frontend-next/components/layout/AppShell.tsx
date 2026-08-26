@@ -35,8 +35,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const [navigationOpen, setNavigationOpen] = useState(false);
-  const [authState, setAuthState] = useState<"checking" | "authenticated">("checking");
+  const [authState, setAuthState] = useState<"checking" | "authenticated" | "error">("checking");
   const [authContext, setAuthContext] = useState<AuthContext | null>(null);
+  const [authAttempt, setAuthAttempt] = useState(0);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const currentNavigationItem = getCurrentNavigationItem(pathname);
 
@@ -79,14 +80,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           router.replace(`/login?next=${encodeURIComponent(destination)}`);
           return;
         }
-        // Let page-level queries render the appropriate connection error for
-        // non-authentication failures instead of misclassifying them as logout.
-        setAuthState("authenticated");
+        setAuthState("error");
       });
     return () => {
       cancelled = true;
     };
-  }, [pathname, router]);
+  }, [authAttempt, pathname, router]);
 
   useEffect(() => {
     if (!navigationOpen) return;
@@ -142,8 +141,29 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     );
   }
 
+  if (authState === "error") {
+    return (
+      <main className="nexora-ambient grid min-h-screen place-items-center p-6">
+        <div role="alert" className="w-full max-w-md rounded-2xl border border-linen-400 bg-white p-7 text-center shadow-[var(--shadow-raised)]">
+          <TicketyLogo size="lg" />
+          <h1 className="mt-5 text-lg font-semibold text-ink-700">Workspace connection unavailable</h1>
+          <p className="mt-2 text-sm leading-6 text-ink-500">
+            Tickety could not verify this session, so protected workspace data remains hidden. Check your connection and retry.
+          </p>
+          <button
+            type="button"
+            onClick={() => setAuthAttempt((attempt) => attempt + 1)}
+            className="relative mt-5 inline-flex min-h-10 items-center justify-center rounded-md border border-transparent bg-ink-700 px-4 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-ink-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2"
+          >
+            Retry session check
+          </button>
+        </div>
+      </main>
+    );
+  }
+
   return (
-    <AppExperience>
+    <AppExperience realtimeEnabled={authContext?.auth_kind === "session"}>
       <div className="nexora-ambient min-h-screen">
         <a
           href="#main-content"

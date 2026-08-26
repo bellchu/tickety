@@ -1,10 +1,11 @@
 import os
+import re
 import secrets
 from datetime import datetime
 from pathlib import Path
 from sqlalchemy import (
     create_engine, Column, String, Text, Integer, DateTime, Boolean, Float,
-    ForeignKey, UniqueConstraint, Index, CheckConstraint,
+    ForeignKey, UniqueConstraint, Index, CheckConstraint, text,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
 from dotenv import load_dotenv
@@ -19,6 +20,25 @@ DATABASE_URL = os.getenv(
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+
+def _ticket_config_name_key(context) -> str:
+    """Build the database-enforced, case-insensitive config identity."""
+    name = str(context.get_current_parameters().get("name") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 _-]*", name):
+        raise ValueError(
+            "ticket configuration names must use the portable ASCII key format"
+        )
+    return name.lower()
+
+
+def normalize_user_email(value: object) -> str | None:
+    normalized = str(value or "").strip().lower()
+    return normalized or None
+
+
+def _user_email_key(context) -> str | None:
+    return normalize_user_email(context.get_current_parameters().get("email"))
 
 
 class TicketRecord(Base):
@@ -115,6 +135,10 @@ class TicketRecord(Base):
 
     # SupportLogic-style intelligence fields
     escalation_risk = Column(Integer, default=0)
+    escalation_risk_backfilled_at = Column(
+        DateTime,
+        nullable=True,
+    )
     summary = Column(Text, nullable=True)
     recommended_solution = Column(Text, nullable=True)
 
@@ -122,6 +146,19 @@ class TicketRecord(Base):
         UniqueConstraint(
             "binding_id", "external_source", "external_id",
             name="uix_binding_external_ticket",
+        ),
+        Index(
+            "ix_tickets_escalation_risk_backfill_pending",
+            "updated_at",
+            "id",
+            postgresql_where=text(
+                "ai_reasoning IS NOT NULL AND "
+                "escalation_risk_backfilled_at IS NULL"
+            ),
+            sqlite_where=text(
+                "ai_reasoning IS NOT NULL AND "
+                "escalation_risk_backfilled_at IS NULL"
+            ),
         ),
     )
 
@@ -219,6 +256,7 @@ class UserRecord(Base):
     id = Column(String, primary_key=True)
     name = Column(String, nullable=False)
     email = Column(String, nullable=True)
+    email_key = Column(String(320), nullable=True, default=_user_email_key)
     avatar = Column(String, nullable=True)
     title = Column(String, nullable=True)
     impact_points = Column(Integer, default=0)
@@ -232,6 +270,16 @@ class UserRecord(Base):
     password_hash = Column(String, nullable=True)
     is_active = Column(Boolean, default=True)
     last_login_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("email_key", name="uix_users_email_key"),
+        CheckConstraint(
+            "(email IS NULL AND email_key IS NULL) OR "
+            "(email IS NOT NULL AND email_key IS NOT NULL AND "
+            "email = lower(trim(email)) AND email_key = email)",
+            name="ck_users_email_identity_canonical",
+        ),
+    )
 
 
 class RecognitionRecord(Base):
@@ -385,6 +433,11 @@ class UserExternalIdentityLinkRecord(Base):
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     __table_args__ = (
+        # Migration 0020 deliberately created both the constraint and the
+        # named lookup index. Keep both represented so PostgreSQL Alembic
+        # drift checks do not mistake the existing constraint for unmanaged
+        # schema while the index remains available to query plans.
+        UniqueConstraint("external_user_id"),
         UniqueConstraint(
             "user_id", "binding_id", "provider",
             name="uix_user_external_identity_binding",
@@ -943,11 +996,16 @@ class TicketStatusConfigRecord(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String, nullable=False, unique=True)
+    name_key = Column(String(100), nullable=False, default=_ticket_config_name_key)
     label = Column(String, nullable=False)
     color = Column(String, default="slate")
     is_open = Column(Boolean, default=True)  # True = counts as "open" state
     is_terminal = Column(Boolean, default=False)  # True = closed/resolved
     sort_order = Column(Integer, default=0)
+
+    __table_args__ = (
+        UniqueConstraint("name_key", name="uix_ticket_status_config_name_key"),
+    )
 
 
 class TicketPriorityConfigRecord(Base):
@@ -956,11 +1014,16 @@ class TicketPriorityConfigRecord(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String, nullable=False, unique=True)
+    name_key = Column(String(100), nullable=False, default=_ticket_config_name_key)
     label = Column(String, nullable=False)
     color = Column(String, default="slate")
     sla_hours = Column(Integer, nullable=True)  # override global SLA per priority
     weight = Column(Integer, default=10)  # sort weight (lower = higher priority)
     sort_order = Column(Integer, default=0)
+
+    __table_args__ = (
+        UniqueConstraint("name_key", name="uix_ticket_priority_config_name_key"),
+    )
 
 
 class NotificationConfigRecord(Base):
@@ -1070,7 +1133,7 @@ class ChangeRecord(Base):
     title = Column(String, nullable=False, index=True)
     description = Column(Text, default="")
     change_type = Column(String, default="Normal")  # Normal | Standard | Emergency
-    status = Column(String, default="Draft")  # Draft, Submitted, CAB Review, Approved, In Progress, Completed, Rejected
+    status = Column(String, nullable=False, default="Draft")  # Draft, Submitted, CAB Review, Approved, In Progress, Completed, Rejected, Cancelled
     priority = Column(String, default="P2")
     risk_level = Column(String, default="Medium")  # Low, Medium, High
     impact = Column(String, nullable=True)
@@ -1084,6 +1147,16 @@ class ChangeRecord(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('Draft', 'Submitted', 'CAB Review', 'Approved', "
+            "'In Progress', 'Completed', 'Rejected', 'Cancelled') AND "
+            "((status = 'Completed' AND completed_at IS NOT NULL) OR "
+            "(status <> 'Completed' AND completed_at IS NULL))",
+            name="ck_changes_status_completion",
+        ),
+    )
+
 
 class ChangeApprovalRecord(Base):
     """CAB / individual approvals for a change request."""
@@ -1091,7 +1164,10 @@ class ChangeApprovalRecord(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     change_id = Column(String, ForeignKey("changes.id"), nullable=False, index=True)
-    approver_id = Column(String, ForeignKey("users.id"), nullable=False)
+    # A decided approval is part of the change audit trail even after the
+    # approver's account is permanently purged.  Purge anonymizes that link;
+    # pending approvals are removed because nobody can act on them anymore.
+    approver_id = Column(String, ForeignKey("users.id"), nullable=True)
     decision = Column(String, nullable=True)  # approved | rejected | pending
     comment = Column(Text, nullable=True)
     decided_at = Column(DateTime, nullable=True)
@@ -1152,6 +1228,22 @@ class SurveyRecord(Base):
     id = Column(String, primary_key=True)  # uuid
     ticket_id = Column(String, ForeignKey("tickets.id"), nullable=False, index=True)
     template_id = Column(Integer, ForeignKey("survey_templates.id"), nullable=True)
+    # The response capability is returned once in the delivery URL. Only its
+    # digest is retained so a database read cannot be turned into a valid link.
+    response_token_hash = Column(String(64), nullable=True, unique=True, index=True)
+    # Non-null while a delivery is active. The unique key makes concurrent
+    # sends for the same ticket/template/recipient idempotent before the
+    # provider request is dispatched.
+    active_delivery_key = Column(String(64), nullable=True, unique=True, index=True)
+    response_expires_at = Column(DateTime, nullable=True)
+    question_snapshot = Column(Text, nullable=True)
+    recipient_email = Column(String(320), nullable=True)
+    recipient_name = Column(String(255), nullable=True)
+    delivery_status = Column(String(32), nullable=False, default="pending", index=True)
+    delivery_message_id = Column(String(255), nullable=True)
+    delivery_error = Column(String(64), nullable=True)
+    delivery_attempted_at = Column(DateTime, nullable=True)
+    sent_by = Column(String, ForeignKey("users.id"), nullable=True)
     sent_at = Column(DateTime, nullable=True)
     responded_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -1166,6 +1258,10 @@ class SurveyResponseRecord(Base):
     rating = Column(Integer, nullable=False)  # 1-5
     comment = Column(Text, nullable=True)
     submitted_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("survey_id", name="uix_survey_response_once"),
+    )
 
 
 # ── Time Tracking ──────────────────────────────────────────────
@@ -1257,10 +1353,20 @@ def _ensure_columns():
     if not insp.has_table("tickets"):
         return  # nothing to migrate yet; create_all will build the full table
 
+    # SQLite reports SQLAlchemy DateTime columns with DATETIME affinity, while
+    # PostgreSQL has no DATETIME type. Keep the demo compatibility DDL aligned
+    # with each dialect without weakening Alembic as the production authority.
+    is_sqlite = engine.dialect.name == "sqlite"
+    datetime_ddl = "DATETIME" if is_sqlite else "TIMESTAMP"
+    boolean_false_ddl = "0" if is_sqlite else "FALSE"
+
     # ── tickets table additions ──
     existing = {c["name"] for c in insp.get_columns("tickets")}
     additions = {
         "escalation_risk": "INTEGER DEFAULT 0",
+        # Match SQLAlchemy's SQLite DateTime affinity exactly so an Alembic
+        # check after this compatibility path reports no schema drift.
+        "escalation_risk_backfilled_at": datetime_ddl,
         "summary": "TEXT",
         "recommended_solution": "TEXT",
         "ai_source_hash": "VARCHAR(64)",
@@ -1275,7 +1381,7 @@ def _ensure_columns():
         "ai_started_at": "TIMESTAMP",
         "ai_generated_at": "TIMESTAMP",
         "ai_error": "VARCHAR",
-        "ai_synthetic": "BOOLEAN DEFAULT 0",
+        "ai_synthetic": f"BOOLEAN DEFAULT {boolean_false_ddl}",
         "ai_suggested_priority": "VARCHAR",
         "ai_suggested_category": "VARCHAR",
         "ai_suggested_team": "VARCHAR",
@@ -1318,11 +1424,23 @@ def _ensure_columns():
         for col, ddl in additions.items():
             if col not in existing:
                 conn.exec_driver_sql(
-                    f'ALTER TABLE tickets ADD COLUMN IF NOT EXISTS {col} {ddl}'
+                    f'ALTER TABLE tickets ADD COLUMN {col} {ddl}'
                 )
         conn.exec_driver_sql(
             "CREATE UNIQUE INDEX IF NOT EXISTS ix_tickets_portal_access_token_hash "
             "ON tickets (portal_access_token_hash)"
+        )
+        conn.exec_driver_sql(
+            "UPDATE tickets SET escalation_risk_backfilled_at = "
+            "COALESCE(ai_generated_at, updated_at, created_at, CURRENT_TIMESTAMP) "
+            "WHERE escalation_risk_backfilled_at IS NULL AND "
+            "ai_reasoning IS NOT NULL AND "
+            "escalation_risk IS NOT NULL AND escalation_risk <> 0"
+        )
+        conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_tickets_escalation_risk_backfill_pending "
+            "ON tickets (updated_at, id) WHERE ai_reasoning IS NOT NULL "
+            "AND escalation_risk_backfilled_at IS NULL"
         )
 
     if insp.has_table("sync_state"):
@@ -1365,7 +1483,7 @@ def _ensure_columns():
                 if col in sync_cols:
                     continue
                 conn.exec_driver_sql(
-                    f"ALTER TABLE sync_state ADD COLUMN IF NOT EXISTS {col} {ddl}"
+                    f"ALTER TABLE sync_state ADD COLUMN {col} {ddl}"
                 )
 
     if insp.has_table("ticket_comments"):
@@ -1380,7 +1498,7 @@ def _ensure_columns():
             for col, ddl in comment_additions.items():
                 if col not in comment_cols:
                     conn.exec_driver_sql(
-                        f'ALTER TABLE ticket_comments ADD COLUMN IF NOT EXISTS {col} {ddl}'
+                        f'ALTER TABLE ticket_comments ADD COLUMN {col} {ddl}'
                     )
             conn.exec_driver_sql(
                 "CREATE UNIQUE INDEX IF NOT EXISTS uix_ticket_external_comment "
@@ -1390,6 +1508,23 @@ def _ensure_columns():
     # ── users table additions (auth/roles) ──
     if insp.has_table("users"):
         user_cols = {c["name"] for c in insp.get_columns("users")}
+        with engine.connect() as conn:
+            user_email_updates = []
+            owner_by_email_key: dict[str, str] = {}
+            for user_id, email in conn.exec_driver_sql("SELECT id, email FROM users"):
+                email_key = normalize_user_email(email)
+                if email_key is not None:
+                    if "\x00" in email_key or len(email_key) > 320:
+                        raise RuntimeError("users contains an invalid canonical email")
+                    previous_owner = owner_by_email_key.get(email_key)
+                    if previous_owner is not None and previous_owner != user_id:
+                        raise RuntimeError("users contains duplicate canonical emails")
+                    owner_by_email_key[email_key] = user_id
+                user_email_updates.append({
+                    "user_id": user_id,
+                    "email": email_key,
+                    "email_key": email_key,
+                })
         user_additions = {
             "role": "VARCHAR DEFAULT 'agent'",
             "password_hash": "VARCHAR",
@@ -1400,8 +1535,46 @@ def _ensure_columns():
             for col, ddl in user_additions.items():
                 if col not in user_cols:
                     conn.exec_driver_sql(
-                        f'ALTER TABLE users ADD COLUMN IF NOT EXISTS {col} {ddl}'
+                        f'ALTER TABLE users ADD COLUMN {col} {ddl}'
                     )
+
+        # Existing demo databases need the same canonical identity contract as
+        # migration 0025. Alembic batch operations keep this compatible with
+        # SQLite, whose ALTER TABLE cannot add a named unique constraint.
+        inspector = _sa_inspect(engine)
+        user_cols = {c["name"] for c in inspector.get_columns("users")}
+        unique_names = {
+            constraint.get("name")
+            for constraint in inspector.get_unique_constraints("users")
+        }
+        unique_names.update({
+            index.get("name")
+            for index in inspector.get_indexes("users")
+        })
+        if (
+            "email_key" not in user_cols
+            or "uix_users_email_key" not in unique_names
+        ):
+            from alembic.migration import MigrationContext
+            from alembic.operations import Operations
+
+            with engine.begin() as conn:
+                operations = Operations(MigrationContext.configure(conn))
+                with operations.batch_alter_table("users", schema=None) as batch_op:
+                    if "email_key" not in user_cols:
+                        batch_op.add_column(Column("email_key", String(320), nullable=True))
+                    if "uix_users_email_key" not in unique_names:
+                        batch_op.create_unique_constraint(
+                            "uix_users_email_key", ["email_key"]
+                        )
+        if user_email_updates:
+            from sqlalchemy import text
+
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "UPDATE users SET email = :email, email_key = :email_key "
+                    "WHERE id = :user_id"
+                ), user_email_updates)
 
     # ── service request workflow additions ──
     if insp.has_table("service_requests"):
@@ -1419,7 +1592,7 @@ def _ensure_columns():
             for col, ddl in sr_additions.items():
                 if col not in sr_cols:
                     conn.exec_driver_sql(
-                        f'ALTER TABLE service_requests ADD COLUMN IF NOT EXISTS {col} {ddl}'
+                        f'ALTER TABLE service_requests ADD COLUMN {col} {ddl}'
                     )
 
     # ── knowledge governance additions ──
@@ -1435,27 +1608,180 @@ def _ensure_columns():
             for col, ddl in kb_additions.items():
                 if col not in kb_cols:
                     conn.exec_driver_sql(
-                        f'ALTER TABLE kb_articles ADD COLUMN IF NOT EXISTS {col} {ddl}'
+                        f'ALTER TABLE kb_articles ADD COLUMN {col} {ddl}'
                     )
+
+    # ── secure survey delivery additions ──
+    if insp.has_table("surveys"):
+        survey_cols = {c["name"] for c in insp.get_columns("surveys")}
+        survey_additions = {
+            "response_token_hash": "VARCHAR(64)",
+            "active_delivery_key": "VARCHAR(64)",
+            "response_expires_at": datetime_ddl,
+            "question_snapshot": "TEXT",
+            "recipient_email": "VARCHAR(320)",
+            "recipient_name": "VARCHAR(255)",
+            "delivery_status": "VARCHAR(32) NOT NULL DEFAULT 'legacy'",
+            "delivery_message_id": "VARCHAR(255)",
+            "delivery_error": "VARCHAR(64)",
+            "delivery_attempted_at": datetime_ddl,
+            "sent_by": "VARCHAR",
+        }
+        with engine.begin() as conn:
+            for col, ddl in survey_additions.items():
+                if col not in survey_cols:
+                    conn.exec_driver_sql(
+                        f'ALTER TABLE surveys ADD COLUMN {col} {ddl}'
+                    )
+            conn.exec_driver_sql(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_surveys_response_token_hash "
+                "ON surveys (response_token_hash)"
+            )
+            conn.exec_driver_sql(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_surveys_active_delivery_key "
+                "ON surveys (active_delivery_key)"
+            )
+            conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_surveys_delivery_status "
+                "ON surveys (delivery_status)"
+            )
+
+    if insp.has_table("survey_responses"):
+        with engine.begin() as conn:
+            conn.exec_driver_sql(
+                "DELETE FROM survey_responses WHERE id NOT IN ("
+                "SELECT first_response_id FROM ("
+                "SELECT MIN(id) AS first_response_id "
+                "FROM survey_responses GROUP BY survey_id"
+                ") AS retained_responses)"
+            )
+            conn.exec_driver_sql(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uix_survey_response_once "
+                "ON survey_responses (survey_id)"
+            )
+
+    # ── anonymized change approval history ──
+    # Existing demo databases can predate migration 0024. create_all() never
+    # relaxes a NOT NULL constraint, so use Alembic's dialect-aware batch
+    # operation here as the same safe table rebuild used by the migration.
+    if insp.has_table("change_approvals"):
+        approval_columns = {
+            column["name"]: column
+            for column in insp.get_columns("change_approvals")
+        }
+        approver_column = approval_columns.get("approver_id")
+        if approver_column and not approver_column.get("nullable", False):
+            from alembic.migration import MigrationContext
+            from alembic.operations import Operations
+
+            with engine.begin() as conn:
+                operations = Operations(MigrationContext.configure(conn))
+                with operations.batch_alter_table(
+                    "change_approvals", schema=None
+                ) as batch_op:
+                    batch_op.alter_column(
+                        "approver_id",
+                        existing_type=String(),
+                        nullable=True,
+                    )
+
+    # ── normalized ticket configuration identities ──
+    # Validate every legacy table before the first ALTER. SQLite DDL is not
+    # transactional, so discovering an invalid priority after changing the
+    # status table would otherwise leave a demo database half-upgraded.
+    config_tables = (
+        ("ticket_status_config", "uix_ticket_status_config_name_key", 100),
+        ("ticket_priority_config", "uix_ticket_priority_config_name_key", 32),
+    )
+    for table_name, _index_name, max_name_length in config_tables:
+        if not insp.has_table(table_name):
+            continue
+        with engine.connect() as conn:
+            names = [row[0] for row in conn.exec_driver_sql(
+                f"SELECT name FROM {table_name}"
+            )]
+        normalized_names = []
+        for name in names:
+            if (
+                not isinstance(name, str)
+                or name != name.strip()
+                or len(name) > max_name_length
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 _-]*", name)
+            ):
+                raise RuntimeError(
+                    f"{table_name} contains a nonportable or overlong name"
+                )
+            normalized_names.append(name.lower())
+        if len(normalized_names) != len(set(normalized_names)):
+            raise RuntimeError(
+                f"{table_name} contains case-insensitive duplicate names"
+            )
+
+    for table_name, index_name, _max_name_length in config_tables:
+        if not insp.has_table(table_name):
+            continue
+        config_cols = {c["name"] for c in insp.get_columns(table_name)}
+        with engine.begin() as conn:
+            if "name_key" not in config_cols:
+                conn.exec_driver_sql(
+                    f"ALTER TABLE {table_name} ADD COLUMN name_key VARCHAR(100)"
+                )
+            conn.exec_driver_sql(
+                f"UPDATE {table_name} SET name_key = lower(trim(name))"
+            )
+            duplicate = conn.exec_driver_sql(
+                f"SELECT name_key FROM {table_name} "
+                "GROUP BY name_key HAVING COUNT(*) > 1 LIMIT 1"
+            ).scalar_one_or_none()
+            if duplicate is not None:
+                raise RuntimeError(
+                    f"{table_name} contains case-insensitive duplicate names"
+                )
+            conn.exec_driver_sql(
+                f"CREATE UNIQUE INDEX IF NOT EXISTS {index_name} "
+                f"ON {table_name} (name_key)"
+            )
+
+
+def _database_revision_sets() -> tuple[set[str], set[str]]:
+    """Return repository and database Alembic heads for the configured engine."""
+    from alembic.config import Config
+    from alembic.runtime.migration import MigrationContext
+    from alembic.script import ScriptDirectory
+
+    config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
+    expected_heads = set(ScriptDirectory.from_config(config).get_heads())
+    with engine.connect() as connection:
+        current_heads = set(MigrationContext.configure(connection).get_current_heads())
+    return expected_heads, current_heads
 
 
 def verify_database_schema() -> None:
     """Fail closed unless the production database is at the Alembic head."""
     try:
-        from alembic.config import Config
-        from alembic.runtime.migration import MigrationContext
-        from alembic.script import ScriptDirectory
-
-        config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
-        script = ScriptDirectory.from_config(config)
-        expected_heads = set(script.get_heads())
-        with engine.connect() as connection:
-            current_heads = set(MigrationContext.configure(connection).get_current_heads())
+        expected_heads, current_heads = _database_revision_sets()
         if not expected_heads or current_heads != expected_heads:
             raise RuntimeError
     except Exception:
         raise RuntimeError(
             "Database schema is not at the required migration revision; run `alembic upgrade head`."
+        ) from None
+
+
+def _verify_demo_schema_before_bootstrap() -> None:
+    """Do not overlay current ORM metadata onto an older versioned schema."""
+    try:
+        if not _sa_inspect(engine).has_table("alembic_version"):
+            return
+        expected_heads, current_heads = _database_revision_sets()
+        if not expected_heads or current_heads != expected_heads:
+            raise RuntimeError
+    except Exception:
+        raise RuntimeError(
+            "Demo database is Alembic-managed but not at the required migration "
+            "revision; run `alembic upgrade head` before starting Tickety. If a "
+            "legacy bootstrap already modified this versioned schema, restore a "
+            "verified backup or repair it through the migration recovery process."
         ) from None
 
 
@@ -1465,6 +1791,10 @@ def init_db():
         # migration job so replicas never race schema changes.
         verify_database_schema()
         return
+    # A current ORM create_all() can pre-create relations owned by later
+    # migrations. Reject versioned, behind-head demo databases before any DDL;
+    # unversioned databases retain the established compatibility bootstrap.
+    _verify_demo_schema_before_bootstrap()
     Base.metadata.create_all(bind=engine)
     _ensure_columns()
     _ensure_ticket_search_documents()

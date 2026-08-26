@@ -16,6 +16,7 @@ from app.backend.database import (
     SurveyRecord,
     SurveyResponseRecord,
     TicketRecord,
+    TicketStatusConfigRecord,
     UserRecord,
     get_db,
 )
@@ -95,8 +96,16 @@ class ReportsApiTests(unittest.TestCase):
                 ),
             ])
             db.add_all([
-                SurveyRecord(id="recent-survey", ticket_id="recent-resolved"),
-                SurveyRecord(id="old-survey", ticket_id="old-created-recently-resolved"),
+                SurveyRecord(
+                    id="recent-survey",
+                    ticket_id="recent-resolved",
+                    delivery_status="accepted",
+                ),
+                SurveyRecord(
+                    id="old-survey",
+                    ticket_id="old-created-recently-resolved",
+                    delivery_status="accepted",
+                ),
             ])
             db.add_all([
                 SurveyResponseRecord(survey_id="recent-survey", rating=5),
@@ -214,6 +223,35 @@ class ReportsApiTests(unittest.TestCase):
         self.assertEqual(unassigned.json()["total_tickets"], 1)
         self.assertEqual(breached.json()["total_tickets"], 1)
         self.assertEqual(breached.json()["breached_sla"], 1)
+
+    def test_report_terminal_filters_use_portable_ascii_keys(self):
+        with self.session_factory() as db:
+            db.add(TicketStatusConfigRecord(
+                name="K",
+                name_key="k",
+                label="Terminal K",
+                is_open=False,
+                is_terminal=True,
+            ))
+            db.get(TicketRecord, "recent-open").status = "K"
+            db.get(TicketRecord, "other-agent").status = "K"
+            db.commit()
+
+        summary = self.client.get("/reports/summary", params=self.period())
+        resolved = self.client.get(
+            "/reports/summary",
+            params=self.period(resolution_state="resolved"),
+        )
+        open_tickets = self.client.get(
+            "/reports/summary",
+            params=self.period(resolution_state="open"),
+        )
+
+        self.assertEqual(summary.status_code, 200, summary.text)
+        self.assertEqual(summary.json()["resolved_tickets"], 2)
+        self.assertEqual(summary.json()["open_tickets"], 2)
+        self.assertEqual(resolved.json()["total_tickets"], 2)
+        self.assertEqual(open_tickets.json()["total_tickets"], 2)
 
     def test_report_options_are_derived_from_the_visible_ticket_scope(self):
         response = self.client.get("/reports/options")

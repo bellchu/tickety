@@ -13,7 +13,9 @@ from app.backend.database import (
     Base,
     ExternalUserRecord,
     TicketCommentRecord,
+    TicketPriorityConfigRecord,
     TicketRecord,
+    TicketStatusConfigRecord,
     UserRecord,
     get_db,
 )
@@ -32,6 +34,12 @@ class TicketListApiTests(unittest.TestCase):
 
         with self.session_factory() as db:
             db.add_all([
+                UserRecord(
+                    id="test-admin",
+                    name="Test Admin",
+                    role="admin",
+                    is_active=True,
+                ),
                 UserRecord(id="agent-a", name="Alice Agent"),
                 UserRecord(id="agent-b", name="Bob Agent"),
             ])
@@ -150,6 +158,61 @@ class TicketListApiTests(unittest.TestCase):
         ):
             with self.subTest(params=params):
                 self.assertEqual(self.client.get("/tickets", params=params).status_code, 422)
+
+    def test_queue_sort_and_dashboard_summary_do_not_silently_truncate(self):
+        queue = self.client.get("/tickets", params={"sort": "queue", "limit": 10})
+        summary = self.client.get("/dashboard/summary")
+
+        self.assertEqual(queue.status_code, 200)
+        self.assertEqual(
+            [ticket["id"] for ticket in queue.json()[:3]],
+            ["ticket-000", "ticket-004", "ticket-008"],
+        )
+        self.assertEqual(summary.status_code, 200)
+        self.assertEqual(summary.json(), {
+            "total_tickets": 105,
+            "active_tickets": 105,
+            "inactive_tickets": 0,
+            "p1_active": 27,
+            "escalated_active": 1,
+            "unassigned_active": 0,
+        })
+
+        with self.session_factory() as db:
+            db.get(TicketRecord, "ticket-000").status = "Closed"
+            unassigned = db.get(TicketRecord, "ticket-001")
+            unassigned.assignee_id = None
+            unassigned.external_assignee_id = None
+            db.commit()
+
+        updated = self.client.get("/dashboard/summary")
+        self.assertEqual(updated.json(), {
+            "total_tickets": 105,
+            "active_tickets": 104,
+            "inactive_tickets": 1,
+            "p1_active": 26,
+            "escalated_active": 1,
+            "unassigned_active": 1,
+        })
+
+    def test_dashboard_terminal_counts_use_portable_ascii_keys(self):
+        with self.session_factory() as db:
+            db.add(TicketStatusConfigRecord(
+                name="K",
+                name_key="k",
+                label="Terminal K",
+                is_open=False,
+                is_terminal=True,
+            ))
+            db.get(TicketRecord, "ticket-000").status = "K"
+            db.get(TicketRecord, "ticket-001").status = "K"
+            db.commit()
+
+        response = self.client.get("/dashboard/summary")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["inactive_tickets"], 1)
+        self.assertEqual(response.json()["active_tickets"], 104)
 
     def test_filters_are_combined_server_side(self):
         response = self.client.get("/tickets", params={
@@ -366,6 +429,39 @@ class TicketListApiTests(unittest.TestCase):
         ranks = {"P1": 1, "P2": 2, "P3": 3, "P4": 4}
         self.assertEqual([ranks[value] for value in priorities], sorted(ranks[value] for value in priorities))
 
+    def test_priority_sort_honors_configured_custom_weight(self):
+        with self.session_factory() as db:
+            db.add(TicketPriorityConfigRecord(
+                name="Severity Zero",
+                label="Severity zero",
+                color="red",
+                weight=2,
+                sort_order=99,
+            ))
+            db.add(TicketRecord(
+                id="ticket-custom-priority",
+                subject="Custom priority incident",
+                description="Uses an administrator-defined queue priority",
+                reporter="operator@example.com",
+                status="Open",
+                priority="severity zero",
+                category="General",
+                assignee_id="agent-a",
+                created_at=datetime(2026, 1, 2, 12, 0, 0),
+                updated_at=datetime(2026, 1, 2, 12, 0, 0),
+            ))
+            db.commit()
+
+        response = self.client.get(
+            "/tickets", params={"sort": "priority", "limit": 106}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        priorities = [ticket["priority"] for ticket in response.json()]
+        custom_index = priorities.index("severity zero")
+        self.assertTrue(all(value == "P1" for value in priorities[:custom_index]))
+        self.assertEqual(priorities[custom_index + 1], "P2")
+
     def test_ticket_enrichment_uses_only_batched_queries(self):
         select_statements = []
 
@@ -380,9 +476,10 @@ class TicketListApiTests(unittest.TestCase):
             event.remove(self.engine, "before_cursor_execute", track_selects)
 
         self.assertEqual(response.status_code, 200)
-        # Ticket page, local owners, provider profiles, public-comment times,
-        # and current triage provenance. No row causes an N+1 query.
-        self.assertEqual(len(select_statements), 5)
+        # Ticket page, dynamic terminal-status policy, local owners, provider
+        # profiles, public-comment times, and current triage provenance. No row
+        # causes an N+1 query.
+        self.assertEqual(len(select_statements), 6)
         self.assertTrue(all(ticket["assignee_name"] for ticket in response.json()))
 
 

@@ -39,7 +39,6 @@ import {
   selectDeterministicQueue,
 } from "@/lib/dashboard";
 import type { PrioritizedTicket, Ticket } from "@/lib/types";
-import { localDateKey } from "@/lib/date-time";
 import { cn, formatTimeAgo } from "@/lib/utils";
 import {
   requesterEmail,
@@ -47,7 +46,6 @@ import {
   ticketCreatedAt,
   ticketLastCommunicationAt,
 } from "@/lib/ticket-display";
-import { ticketSentimentPresentation, ticketSignalRatings } from "@/lib/ticket-intelligence";
 
 const CLOSED_STATUSES = new Set(["canceled", "cancelled", "closed", "resolved", "completed"]);
 const EMPTY_TICKETS: Ticket[] = [];
@@ -64,45 +62,6 @@ function formatDurationHours(hours: number) {
   if (hours < 1) return "<1h";
   if (hours < 24) return `${Math.round(hours)}h`;
   return `${Math.round(hours / 24)}d`;
-}
-
-function csvCell(value: unknown) {
-  let text = value == null ? "" : String(value);
-  // Prevent spreadsheet applications from evaluating exported user content.
-  if (/^[\t\r ]*[=+\-@]/.test(text)) text = `'${text}`;
-  return `"${text.replace(/"/g, '""')}"`;
-}
-
-function exportTickets(tickets: Ticket[]) {
-  const columns: Array<[string, (ticket: Ticket) => unknown]> = [
-    ["Ticket ID", (ticket) => ticket.id],
-    ["Subject", (ticket) => ticket.subject],
-    ["Status", (ticket) => ticket.status],
-    ["Reported priority", (ticket) => ticket.priority],
-    ["AI content priority", (ticket) => ticketSignalRatings(ticket)[0].visualValue],
-    ["Customer sentiment", (ticket) => ticketSentimentPresentation(ticket)?.label],
-    ["Reporter", (ticket) => ticket.reporter],
-    ["Requester name", (ticket) => requesterName(ticket)],
-    ["Requester email", (ticket) => requesterEmail(ticket)],
-    ["Requester title", (ticket) => ticket.requester_title],
-    ["Assignee", (ticket) => ticket.assignee_name || ticket.external_assignee_name],
-    ["Category", (ticket) => ticket.category],
-    ["Created", (ticket) => ticketCreatedAt(ticket)],
-    ["Last communication", (ticket) => ticketLastCommunicationAt(ticket)],
-  ];
-  const rows = [
-    columns.map(([label]) => csvCell(label)).join(","),
-    ...tickets.map((ticket) => columns.map(([, getValue]) => csvCell(getValue(ticket))).join(",")),
-  ];
-  const blob = new Blob([`\uFEFF${rows.join("\r\n")}`], { type: "text/csv;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = `tickety-operations-${localDateKey()}.csv`;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  URL.revokeObjectURL(url);
 }
 
 function ContextMetric({
@@ -173,12 +132,19 @@ function intelligenceQueueReason(item: PrioritizedTicket) {
 
 export default function DashboardPage() {
   const [newTicketOpen, setNewTicketOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState("");
+  const [exportNotice, setExportNotice] = useState("");
   const authQuery = useQuery({ queryKey: ["auth-me"], queryFn: api.getAuthMe, retry: false });
   const canUseIntelligence = canAccessProtectedIntelligence(authQuery.data);
   const canCreateTicket = canCreateTickets(authQuery.data);
   const demoWorkspace = isDemoContext(authQuery.data);
 
-  const ticketsQuery = useQuery({ queryKey: ["tickets"], queryFn: api.getTickets });
+  const ticketsQuery = useQuery({
+    queryKey: ["tickets", "dashboard-queue"],
+    queryFn: () => api.getTicketsPage({ sort: "queue", limit: 100 }),
+  });
+  const summaryQuery = useQuery({ queryKey: ["dashboard-summary"], queryFn: api.getDashboardSummary });
   const priorityQuery = useQuery({
     queryKey: ["intel-prioritize"],
     queryFn: api.getIntelPrioritize,
@@ -191,26 +157,46 @@ export default function DashboardPage() {
     retry: false,
     enabled: canUseIntelligence,
   });
-  const servicesQuery = useQuery({ queryKey: ["services"], queryFn: () => api.getServices(), retry: false });
-  const serviceRequestsQuery = useQuery({ queryKey: ["serviceRequests"], queryFn: api.getServiceRequests, retry: false });
+  const servicesQuery = useQuery({
+    queryKey: ["services", "dashboard-summary"],
+    queryFn: () => api.getServicesPage({ isActive: true, limit: 1 }),
+    retry: false,
+  });
+  const serviceRequestsQuery = useQuery({
+    queryKey: ["serviceRequests", "dashboard-summary"],
+    queryFn: () => api.getServiceRequestsPage({ limit: 1 }),
+    retry: false,
+  });
 
-  const tickets = ticketsQuery.data ?? EMPTY_TICKETS;
+  const tickets = ticketsQuery.data?.tickets ?? EMPTY_TICKETS;
   const activeTickets = useMemo(() => tickets.filter(isActiveTicket), [tickets]);
-  const ticketById = useMemo(() => new Map(tickets.map((ticket) => [ticket.id, ticket])), [tickets]);
 
   // Never surface cached protected data after the capability is lost or a refresh fails.
   const priorityData = canUseIntelligence && !priorityQuery.isError ? priorityQuery.data : undefined;
   const slaData = canUseIntelligence && !slaQuery.isError ? slaQuery.data : undefined;
+  const rankedTicketIds = (priorityData?.ranked ?? []).slice(0, 6).map((item) => item.ticket_id);
+  const rankedTicketsQuery = useQuery({
+    queryKey: ["dashboard-ranked-tickets", ...rankedTicketIds],
+    queryFn: () => Promise.all(rankedTicketIds.map((ticketId) => api.getTicket(ticketId))),
+    enabled: canUseIntelligence && rankedTicketIds.length > 0,
+    retry: false,
+  });
+  const ticketById = useMemo(
+    () => new Map(
+      [...tickets, ...(rankedTicketsQuery.data ?? [])].map((ticket) => [ticket.id, ticket])
+    ),
+    [rankedTicketsQuery.data, tickets]
+  );
   const rankedById = useMemo(
     () => new Map((priorityData?.ranked ?? []).map((item) => [item.ticket_id, item])),
     [priorityData]
   );
   const rankedQueue = useMemo(() => (
-    (priorityData?.ranked ?? [])
+    (rankedTicketsQuery.isError ? [] : (priorityData?.ranked ?? []))
       .map((item) => ticketById.get(item.ticket_id))
       .filter((ticket): ticket is Ticket => Boolean(ticket && isActiveTicket(ticket)))
       .slice(0, 6)
-  ), [priorityData, ticketById]);
+  ), [priorityData, rankedTicketsQuery.isError, ticketById]);
   const usesIntelligenceQueue = rankedQueue.length > 0;
   const queue = useMemo(() => {
     return usesIntelligenceQueue ? rankedQueue : selectDeterministicQueue(tickets, 6);
@@ -221,20 +207,21 @@ export default function DashboardPage() {
   const atRisk = slaItems.filter((item) => item.status === "at_risk").length;
   const onTrack = slaItems.filter((item) => item.status === "on_track").length;
   const slaHealth = slaItems.length ? Math.round((onTrack / slaItems.length) * 100) : null;
-  const p1Count = activeTickets.filter((ticket) => ticket.priority.trim().toUpperCase() === "P1").length;
-  const escalatedCount = activeTickets.filter((ticket) => ticket.status.trim().toLowerCase() === "escalated").length;
-  const unassignedCount = activeTickets.filter((ticket) => !ticket.assignee_id && !ticket.assignee_name && !ticket.external_assignee_name).length;
-  const inactiveCount = tickets.length - activeTickets.length;
+  const summary = summaryQuery.data;
+  const activeTicketCount = summary?.active_tickets ?? activeTickets.length;
+  const totalTicketCount = summary?.total_tickets ?? tickets.length;
+  const p1Count = summary?.p1_active ?? activeTickets.filter((ticket) => ticket.priority.trim().toUpperCase() === "P1").length;
+  const escalatedCount = summary?.escalated_active ?? activeTickets.filter((ticket) => ticket.status.trim().toLowerCase() === "escalated").length;
+  const unassignedCount = summary?.unassigned_active ?? activeTickets.filter((ticket) => !ticket.assignee_id && !ticket.assignee_name && !ticket.external_assignee_name).length;
+  const inactiveCount = summary?.inactive_tickets ?? tickets.length - activeTickets.length;
   const attentionCount = breached + atRisk;
-  const activeServices = (servicesQuery.data ?? []).filter((service) => service.is_active).length;
-  const openServiceRequests = (serviceRequestsQuery.data ?? []).filter(
-    (request) => !["fulfilled", "cancelled"].includes(request.fulfillment_status.toLowerCase())
-  ).length;
+  const activeServices = servicesQuery.data?.summary.active ?? 0;
+  const openServiceRequests = serviceRequestsQuery.data?.summary.open ?? 0;
 
   const topTicket = queue[0];
   const topRecommendation = topTicket ? rankedById.get(topTicket.id) : undefined;
   const hasIntelligenceRanking = Boolean(topRecommendation && topTicket);
-  const queueLoading = ticketsQuery.isLoading || authQuery.isLoading || (canUseIntelligence && priorityQuery.isLoading);
+  const queueLoading = ticketsQuery.isLoading || authQuery.isLoading || (canUseIntelligence && (priorityQuery.isLoading || (rankedTicketIds.length > 0 && rankedTicketsQuery.isLoading)));
 
   const pulse = breached > 0
     ? { label: "Intervention required", body: `${breached} open ${breached === 1 ? "request has" : "requests have"} breached an SLA target.`, tone: "danger" as const }
@@ -247,7 +234,9 @@ export default function DashboardPage() {
           ].filter(Boolean).join(" · "),
           tone: "warning" as const,
         }
-      : activeTickets.length === 0
+      : summaryQuery.isError && ticketsQuery.data?.hasMore
+        ? { label: "Queue available", body: "The priority queue is visible, but complete operational totals need to be refreshed.", tone: "warning" as const }
+      : activeTicketCount === 0
         ? { label: "Queue clear", body: "There are no active tickets in the current queue.", tone: "success" as const }
         : canUseIntelligence && slaQuery.isError
           ? { label: "Core queue is current", body: "Ticket data is available; SLA intelligence needs to be refreshed.", tone: "warning" as const }
@@ -258,6 +247,7 @@ export default function DashboardPage() {
               : { label: "Core queue is current", body: "No active P1 tickets are present; SLA status is not included in this view.", tone: "success" as const };
 
   const pulseLoading = ticketsQuery.isLoading
+    || summaryQuery.isLoading
     || authQuery.isLoading
     || (canUseIntelligence && slaQuery.isLoading && p1Count === 0);
 
@@ -267,11 +257,15 @@ export default function DashboardPage() {
     canUseIntelligence && slaQuery.isError ? "SLA intelligence" : null,
     servicesQuery.isError ? "service catalog" : null,
     serviceRequestsQuery.isError ? "service request status" : null,
+    summaryQuery.isError ? "complete operational totals" : null,
+    canUseIntelligence && rankedTicketsQuery.isError ? "ranked ticket details" : null,
   ].filter((item): item is string => Boolean(item));
   const retryingUnavailable = authQuery.isFetching
     || (canUseIntelligence && (priorityQuery.isFetching || slaQuery.isFetching))
     || servicesQuery.isFetching
-    || serviceRequestsQuery.isFetching;
+    || serviceRequestsQuery.isFetching
+    || summaryQuery.isFetching
+    || rankedTicketsQuery.isFetching;
 
   const retryUnavailableData = () => {
     const requests: Array<Promise<unknown>> = [];
@@ -281,7 +275,35 @@ export default function DashboardPage() {
     if (canUseIntelligence && slaQuery.isError) requests.push(slaQuery.refetch());
     if (servicesQuery.isError) requests.push(servicesQuery.refetch());
     if (serviceRequestsQuery.isError) requests.push(serviceRequestsQuery.refetch());
+    if (summaryQuery.isError) requests.push(summaryQuery.refetch());
+    if (canUseIntelligence && rankedTicketsQuery.isError) requests.push(rankedTicketsQuery.refetch());
     void Promise.all(requests);
+  };
+
+  const exportAllTickets = async () => {
+    setExporting(true);
+    setExportError("");
+    setExportNotice("");
+    try {
+      const result = await api.downloadReportCsv({
+        startAt: new Date(0).toISOString(),
+        endAt: new Date(Date.now() + 60_000).toISOString(),
+        dateField: "created",
+      });
+      const url = URL.createObjectURL(result.blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = result.filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+      setExportNotice(`Exported ${result.rowCount.toLocaleString()} permitted ticket${result.rowCount === 1 ? "" : "s"}.`);
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : "The complete ticket export could not be prepared.");
+    } finally {
+      setExporting(false);
+    }
   };
 
   if (ticketsQuery.isError) {
@@ -322,8 +344,10 @@ export default function DashboardPage() {
           <>
           <Button
             variant="secondary"
-            onClick={() => exportTickets(tickets)}
+            onClick={() => void exportAllTickets()}
             disabled={ticketsQuery.isLoading || tickets.length === 0}
+            pending={exporting}
+            pendingLabel="Preparing export…"
             leadingIcon={<Download className="h-4 w-4" />}
           >
             Export CSV
@@ -332,6 +356,9 @@ export default function DashboardPage() {
           </>
         }
       />
+
+      {exportError && <Alert variant="danger" title="Export failed">{exportError}</Alert>}
+      {exportNotice && <Alert variant="success" title="Export ready">{exportNotice}</Alert>}
 
       {(priorityData?.truncated || slaData?.truncated) && (
         <Alert role="note" variant="warning" title="Operational intelligence is sampled" className="text-xs">
@@ -372,7 +399,7 @@ export default function DashboardPage() {
             )}
           </div>
           <div className="grid min-w-0 grid-cols-3 divide-x divide-white/15 rounded-xl border border-white/10 bg-white/[0.04] px-1 py-4 sm:px-2">
-            <div className="min-w-0 px-1.5 text-center sm:px-3"><p className="font-mono text-2xl font-medium tabular-nums text-white">{ticketsQuery.isLoading ? "—" : activeTickets.length}</p><p className="mt-1 break-words text-[10px] leading-4 text-linen-400 sm:text-[11px]">Active</p></div>
+            <div className="min-w-0 px-1.5 text-center sm:px-3"><p className="font-mono text-2xl font-medium tabular-nums text-white">{ticketsQuery.isLoading || summaryQuery.isLoading ? "—" : activeTicketCount}</p><p className="mt-1 break-words text-[10px] leading-4 text-linen-400 sm:text-[11px]">Active</p></div>
             <div className="min-w-0 px-1.5 text-center sm:px-3"><p className="font-mono text-2xl font-medium tabular-nums text-white">{ticketsQuery.isLoading || (canUseIntelligence && slaQuery.isLoading) ? "—" : secondaryPulse.value}</p><p className="mt-1 break-words text-[10px] leading-4 text-linen-400 sm:text-[11px]">{secondaryPulse.label}</p></div>
             <div className="min-w-0 px-1.5 text-center sm:px-3"><p className="font-mono text-2xl font-medium tabular-nums text-white">{ticketsQuery.isLoading ? "—" : p1Count}</p><p className="mt-1 break-words text-[10px] leading-4 text-linen-400 sm:text-[11px]">P1 active</p></div>
           </div>
@@ -471,7 +498,7 @@ export default function DashboardPage() {
                     <article
                       key={ticket.id}
                       aria-describedby={index === 0 ? "priority-recommendation-summary" : undefined}
-                      className={cn("relative p-4", index === 0 && "bg-[var(--color-primary-soft)]")}
+                      className={cn("relative p-4", index === 0 && "bg-[var(--color-primary-soft)]", index >= 4 && "hidden sm:block")}
                     >
                       {index === 0 && <span aria-hidden="true" className="nexora-spectrum absolute inset-y-0 left-0 w-[3px]" />}
                       <div className="flex min-w-0 items-center gap-2">
@@ -483,9 +510,8 @@ export default function DashboardPage() {
                       <Link href={`/tickets/${ticket.id}`} className="mt-2.5 block text-ink-700 hover:text-semantic-primary hover:underline"><ListText text={ticket.subject} lines={2} className="text-sm font-semibold leading-5" /></Link>
                       <TicketSentimentSubtitle ticket={ticket} />
                       <ListText text={ranked ? intelligenceQueueReason(ranked) : deterministicQueueReason(ticket)} lines={2} className="mt-1 text-xs leading-5 text-ink-500" />
-                      <p className="mt-2 flex min-w-0 items-start gap-1.5 text-xs text-ink-500"><UserRound className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" /><ListText text={`${requesterName(ticket)}${requesterEmail(ticket) ? ` · ${requesterEmail(ticket)}` : ""}`} lines={2} /></p>
-                      <p className="mt-1 text-[11px] text-ink-400">Created {formatTimeAgo(ticketCreatedAt(ticket))} · Last contact {formatTimeAgo(ticketLastCommunicationAt(ticket))}</p>
-                      <ListText text={`Owner: ${ticket.assignee_name || ticket.external_assignee_name || "Unassigned"}`} lines={2} className="mt-1 text-[11px] text-ink-400" />
+                      <p className="mt-2 flex min-w-0 items-start gap-1.5 text-xs text-ink-500"><UserRound className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" /><ListText text={ticket.assignee_name || ticket.external_assignee_name || "Unassigned"} lines={2} /></p>
+                      <p className="mt-1 text-[11px] text-ink-400" title={ticketLastCommunicationAt(ticket) || undefined}>Updated {formatTimeAgo(ticketLastCommunicationAt(ticket))}</p>
                     </article>
                   );
                 })}
@@ -565,10 +591,10 @@ export default function DashboardPage() {
           <div className="grid divide-y divide-linen-300 sm:grid-cols-3 sm:divide-x sm:divide-y-0 xl:grid-cols-1 xl:divide-x-0 xl:divide-y">
             <ContextMetric
               label="Ticket volume"
-              value={tickets.length}
-              supporting={`${activeTickets.length} active · ${inactiveCount} inactive`}
+              value={totalTicketCount}
+              supporting={`${activeTicketCount} active · ${inactiveCount} inactive`}
               icon={<TicketIcon className="h-4 w-4" />}
-              loading={ticketsQuery.isLoading}
+              loading={ticketsQuery.isLoading || summaryQuery.isLoading}
             />
             {canUseIntelligence ? (
               <ContextMetric

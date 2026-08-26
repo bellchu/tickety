@@ -31,13 +31,17 @@ export function canAccessAdministration(context?: AuthContext | null) {
   return canUseAdministrativeFeatures(context);
 }
 
-export function canAccessProtectedIntelligence(context?: AuthContext | null) {
+export function canManageOperationalRecords(context?: AuthContext | null) {
   const role = normalizedRole(context);
   return Boolean(
     hasDemoAdministratorSession(context) ||
     (hasProtectedProductionSession(context) &&
       (role === "admin" || role === "supervisor"))
   );
+}
+
+export function canAccessProtectedIntelligence(context?: AuthContext | null) {
+  return canManageOperationalRecords(context);
 }
 
 export function canCreateTickets(context?: AuthContext | null) {

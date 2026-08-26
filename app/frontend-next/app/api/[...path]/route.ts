@@ -13,23 +13,20 @@ import {
  * Runtime API proxy.
  *
  * The browser calls same-origin `/api/...` (see lib/api.ts). This catch-all
- * route handler forwards each request to the backend at
- * `process.env.NEXT_PUBLIC_API_URL` — which is read at RUNTIME, not build time.
+ * route handler forwards each request to the backend address read at runtime.
  *
  * We intentionally do NOT rely on next.config.js `rewrites()`, because Next.js
  * evaluates `rewrites()` at `next build` and bakes the destination into the
  * routes manifest. A build-time destination breaks when the same image runs in
- * different environments (the in-cluster `backend-service` address is only
- * known at pod-startup time). A route handler reads the env on every request,
- * so the k8s pod env `NEXT_PUBLIC_API_URL=http://backend-service:8000` is
- * honoured.
+ * different environments because the private backend address is deployment
+ * configuration. A route handler reads the environment on every request.
  */
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 // Server-only env (NOT NEXT_PUBLIC_*). Next.js inlines NEXT_PUBLIC_* vars at
-// build time, which would bake in the build host and ignore the runtime pod
-// env. A plain (non-public) var is read from process.env at request time.
+// build time, which would bake in the build host and ignore runtime
+// configuration. A plain (non-public) var is read from process.env per request.
 const BACKEND =
   process.env.BACKEND_URL ||
   process.env.NEXT_PUBLIC_API_URL ||

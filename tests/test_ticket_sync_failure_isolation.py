@@ -12,6 +12,7 @@ from app.backend.database import (
     ExternalActivityRecord,
     ExternalConversationRecord,
     ExternalTicketContextRecord,
+    ProblemTicketLinkRecord,
     SyncStateRecord,
     TicketCommentRecord,
     TicketRecord,
@@ -47,6 +48,7 @@ class TicketSyncFailureIsolationTests(unittest.TestCase):
         )
         UserRecord.__table__.create(self.engine)
         TicketRecord.__table__.create(self.engine)
+        ProblemTicketLinkRecord.__table__.create(self.engine)
         TicketCommentRecord.__table__.create(self.engine)
         SyncStateRecord.__table__.create(self.engine)
         AIArtifactRecord.__table__.create(self.engine)

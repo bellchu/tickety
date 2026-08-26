@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   CheckCircle2,
@@ -33,6 +33,7 @@ export default function EmailPage() {
   const emailAccess = canUseEmail(authQuery.data);
   const [audience, setAudience] = useState<EmailAudience>("agents");
   const [search, setSearch] = useState("");
+  const [directorySearch, setDirectorySearch] = useState("");
   const [selected, setSelected] = useState<EmailRecipient[]>([]);
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
@@ -43,8 +44,8 @@ export default function EmailPage() {
     enabled: emailAccess,
   });
   const recipientsQuery = useQuery({
-    queryKey: ["email-recipients", audience, search],
-    queryFn: () => api.getEmailRecipients(audience, search),
+    queryKey: ["email-recipients", audience, directorySearch],
+    queryFn: () => api.getEmailRecipients(audience, directorySearch),
     enabled: emailAccess,
   });
   const sendMutation = useMutation({
@@ -61,10 +62,16 @@ export default function EmailPage() {
   const configured = statusQuery.data?.configured === true;
   const isAdmin = authQuery.data?.role.toLowerCase() === "admin";
 
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDirectorySearch(search.trim()), 300);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+
   const changeAudience = (nextAudience: EmailAudience) => {
     setAudience(nextAudience);
     setSelected([]);
     setSearch("");
+    setDirectorySearch("");
     sendMutation.reset();
   };
 
@@ -163,11 +170,12 @@ export default function EmailPage() {
           </div>
 
           <div className="flex items-center justify-between border-b border-linen-300 bg-linen-100 px-4 py-2.5 text-xs text-ink-500">
-            <span>{recipientsQuery.data ? `${recipientsQuery.data.total} matching · ${selected.length} selected` : "Loading directory…"}</span>
+            <span>{recipientsQuery.data ? `${recipientsQuery.data.total}${recipientsQuery.data.truncated ? "+" : ""} matching · ${selected.length} selected` : "Loading directory…"}</span>
             <button type="button" onClick={selectVisible} disabled={!recipients.length || selected.length >= MAX_RECIPIENTS} className="font-semibold text-semantic-primary hover:underline disabled:opacity-50">Select visible</button>
           </div>
 
           <div className="max-h-[30rem] overflow-y-auto">
+            {recipientsQuery.data?.truncated && <p className="border-b border-linen-300 bg-amber-50 px-4 py-2 text-xs text-amber-800">Showing the first matches. Refine your search to find someone else.</p>}
             {recipientsQuery.isLoading ? (
               <div className="space-y-2 p-4">{[1, 2, 3, 4].map((item) => <Skeleton key={item} className="h-14 w-full" />)}</div>
             ) : recipientsQuery.isError ? (
@@ -223,11 +231,21 @@ export default function EmailPage() {
               <div className="mt-2 min-h-14 rounded-lg border border-linen-400 bg-linen-100 p-2">
                 {selected.length === 0 ? <span className="px-1 text-xs text-ink-400">Choose recipients from the directory.</span> : (
                   <div className="flex flex-wrap gap-1.5">
-                    {selected.map((recipient) => (
+                    {selected.slice(0, 6).map((recipient) => (
                       <button key={recipient.id} type="button" onClick={() => toggleRecipient(recipient)} className="inline-flex max-w-full items-center gap-1 rounded-full border border-clay-400/30 bg-clay-50 px-2 py-1 text-xs font-medium text-clay-700" title={`Remove ${recipient.name}`}>
-                        <span className="min-w-0 whitespace-normal break-words [overflow-wrap:anywhere]">{recipient.name}</span><X className="h-3 w-3 shrink-0" />
+                        <span className="min-w-0 whitespace-normal break-words [overflow-wrap:anywhere]">{recipient.name}</span><X className="h-3 w-3 shrink-0" aria-hidden="true" />
                       </button>
                     ))}
+                    {selected.length > 6 && <details className="w-full rounded-lg border border-linen-300 bg-white px-2 py-1.5">
+                      <summary className="cursor-pointer text-xs font-semibold text-ink-500">{selected.length - 6} more recipient{selected.length - 6 === 1 ? "" : "s"}</summary>
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        {selected.slice(6).map((recipient) => (
+                          <button key={recipient.id} type="button" onClick={() => toggleRecipient(recipient)} className="inline-flex max-w-full items-center gap-1 rounded-full border border-clay-400/30 bg-clay-50 px-2 py-1 text-xs font-medium text-clay-700" title={`Remove ${recipient.name}`}>
+                            <span className="min-w-0 whitespace-normal break-words [overflow-wrap:anywhere]">{recipient.name}</span><X className="h-3 w-3 shrink-0" aria-hidden="true" />
+                          </button>
+                        ))}
+                      </div>
+                    </details>}
                   </div>
                 )}
               </div>

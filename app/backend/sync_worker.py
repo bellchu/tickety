@@ -13,7 +13,11 @@ from .database import (
     SyncStateRecord,
     TicketRecord,
 )
-from .ai_eligibility import active_ticket_filter, mark_terminal_ai_not_applicable
+from .ai_eligibility import (
+    active_ticket_filter,
+    mark_terminal_ai_not_applicable,
+    terminal_status_names,
+)
 from .ai_state import automatic_ai_policy_eligible_filter
 from .attachment_storage import attachment_storage_configured
 from .integrations.sync import (
@@ -42,7 +46,7 @@ _VALID_PROCESS_ROLES = {"api", "worker", "all"}
 
 
 def _refresh_admin_settings() -> None:
-    """Pick up portal-approved settings without restarting the worker pod."""
+    """Pick up portal-approved settings without restarting the worker."""
     try:
         settings_module.refresh_settings_from_db()
     except Exception as exc:
@@ -71,7 +75,7 @@ def scheduler_enabled_for_process() -> bool:
     """Whether this process may own scheduled jobs.
 
     The optional enable flag is a kill switch, not a way to turn an API role
-    into a worker. This keeps a mistaken boolean on replicated API pods from
+    into a worker. This keeps a mistaken boolean on replicated API processes from
     reintroducing duplicate schedulers.
     """
     role = process_role()
@@ -397,24 +401,44 @@ def _auto_triage_job():
             db.close()
             return
 
-        # Fix missing escalation risk (column added later, may be NULL)
-        no_risk_ids = [row.id for row in db.query(TicketRecord.id).filter(
+        # Backfill a bounded page of legacy risk values. A dedicated marker is
+        # required because zero is a valid computed score, not a missing-value
+        # sentinel. Load the rows directly and commit the page once to avoid
+        # an unbounded N+1 query/transaction sweep on upgraded databases.
+        risk_batch_size = _bounded_interval(
+            "AI_RISK_BACKFILL_PER_SWEEP", 25, 1, 100
+        )
+        no_risk = db.query(TicketRecord).filter(
             active_ticket_filter(db),
             TicketRecord.ai_reasoning.isnot(None),
-            TicketRecord.escalation_risk == 0
-        ).all()]
-        if no_risk_ids:
+            TicketRecord.escalation_risk_backfilled_at.is_(None),
+        ).order_by(
+            TicketRecord.updated_at.asc(),
+            TicketRecord.id.asc(),
+        ).limit(risk_batch_size).all()
+        if no_risk:
             from . import intelligence as intel
-            for ticket_id in no_risk_ids:
+            terminals = terminal_status_names(db)
+            completed_at = datetime.utcnow()
+            updated = 0
+            for ticket in no_risk:
                 try:
-                    t2 = db.query(TicketRecord).filter(
-                        TicketRecord.id == ticket_id
-                    ).first()
-                    if t2:
-                        t2.escalation_risk = intel.escalation_risk(t2)
-                        db.commit()
+                    ticket.escalation_risk = intel.escalation_risk(
+                        ticket,
+                        terminal_statuses=terminals,
+                    )
+                    ticket.escalation_risk_backfilled_at = completed_at
+                    updated += 1
                 except Exception as e:
                     print(f"[auto-triage] risk error kind={type(e).__name__}")
+            if updated:
+                try:
+                    db.commit()
+                except Exception as e:
+                    print(
+                        "[auto-triage] risk batch commit error "
+                        f"kind={type(e).__name__}"
+                    )
                     db.rollback()
 
         db.close()

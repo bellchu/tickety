@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlarmClock,
   Archive,
@@ -74,6 +74,8 @@ const TEAM_FOLDERS: Array<{ id: AgentWorkspaceFolder; label: string }> = [
   { id: "unassigned", label: "Unassigned" },
 ];
 
+const AGENT_TICKET_PAGE_SIZE = 25;
+
 function activeDeadline(ticket: AgentWorkspaceTicket) {
   if (ticket.needs_reply) {
     return ticket.response_due_at || ticket.external_fr_due_by || ticket.resolution_due_at || ticket.external_due_by;
@@ -99,9 +101,11 @@ export function AgentWorkspace() {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const queryClient = useQueryClient();
+  const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [copied, setCopied] = useState<"reply" | "link" | null>(null);
   const markedSeen = useRef(new Set<string>());
+  const markingSeen = useRef(new Set<string>());
 
   const scope: AgentWorkspaceScope = searchParams.get("scope") === "team" ? "team" : "mine";
   const rawFolder = searchParams.get("folder") as AgentWorkspaceFolder | null;
@@ -122,28 +126,83 @@ export function AgentWorkspace() {
     queryKey: ["agent-workspace", "bootstrap"],
     queryFn: api.getAgentWorkspaceBootstrap,
   });
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSearch(searchInput.trim()), 300);
+    return () => window.clearTimeout(timer);
+  }, [searchInput]);
+
   const ticketsKey = ["agent-workspace", "tickets", scope, teamId || "", folder, search] as const;
-  const ticketsQuery = useQuery({
+  const ticketsQuery = useInfiniteQuery({
     queryKey: ticketsKey,
-    queryFn: () => api.getAgentWorkspaceTickets({
+    queryFn: ({ pageParam }) => api.getAgentWorkspaceTickets({
       scope,
       teamId,
       folder,
       search,
-      limit: 100,
+      limit: AGENT_TICKET_PAGE_SIZE,
+      offset: pageParam,
     }),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage, _pages, lastPageParam) => (
+      lastPage.hasMore && lastPage.tickets.length > 0
+        ? lastPageParam + lastPage.tickets.length
+        : undefined
+    ),
   });
-  const tickets = useMemo(() => ticketsQuery.data?.tickets || [], [ticketsQuery.data?.tickets]);
-  const selected = tickets.find((ticket) => ticket.id === selectedId) || tickets[0];
+  const tickets = useMemo(() => {
+    const unique = new Map<string, AgentWorkspaceTicket>();
+    for (const page of ticketsQuery.data?.pages ?? []) {
+      for (const ticket of page.tickets) unique.set(ticket.id, ticket);
+    }
+    return Array.from(unique.values());
+  }, [ticketsQuery.data?.pages]);
+  const loadedSelected = tickets.find((ticket) => ticket.id === selectedId);
+  const deepLinkedTicketQuery = useQuery({
+    queryKey: [
+      "agent-workspace",
+      "selected-ticket",
+      scope,
+      teamId || "",
+      folder,
+      selectedId || "",
+    ],
+    queryFn: async () => {
+      const page = await api.getAgentWorkspaceTickets({
+        scope,
+        teamId,
+        folder,
+        ticketId: selectedId,
+        limit: 1,
+      });
+      return page.tickets.find((ticket) => ticket.id === selectedId) ?? null;
+    },
+    enabled: Boolean(
+      selectedId
+      && !loadedSelected
+      && !ticketsQuery.isLoading
+      && !ticketsQuery.isError
+    ),
+  });
+  const selected = loadedSelected
+    || deepLinkedTicketQuery.data
+    || (!selectedId ? tickets[0] : undefined);
 
   useEffect(() => {
-    if (tickets.length && (!selectedId || !tickets.some((ticket) => ticket.id === selectedId))) {
+    if (tickets.length && !selectedId) {
       replaceParams({ ticket: tickets[0].id });
     }
-    if (!tickets.length && selectedId) replaceParams({ ticket: null });
+    if (
+      selectedId
+      && !loadedSelected
+      && deepLinkedTicketQuery.isSuccess
+      && !deepLinkedTicketQuery.data
+    ) {
+      replaceParams({ ticket: tickets[0]?.id ?? null });
+    }
     // replaceParams intentionally derives the latest URL state on render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId, tickets]);
+  }, [selectedId, loadedSelected, tickets, deepLinkedTicketQuery.data, deepLinkedTicketQuery.isSuccess]);
 
   const stateMutation = useMutation({
     mutationFn: ({
@@ -159,10 +218,17 @@ export function AgentWorkspace() {
   });
 
   useEffect(() => {
-    if (!selected?.is_unread || markedSeen.current.has(selected.id)) return;
-    markedSeen.current.add(selected.id);
-    stateMutation.mutate({ ticketId: selected.id, update: { mark_seen: true } });
-    // The mutation instance is stable for the mounted workspace.
+    if (!selected?.is_unread || markedSeen.current.has(selected.id) || markingSeen.current.has(selected.id)) return;
+    const ticketId = selected.id;
+    markingSeen.current.add(ticketId);
+    void api.updateAgentTicketState(ticketId, { mark_seen: true })
+      .then(() => {
+        markedSeen.current.add(ticketId);
+        void queryClient.invalidateQueries({ queryKey: ["agent-workspace"] });
+      })
+      .catch(() => undefined)
+      .finally(() => markingSeen.current.delete(ticketId));
+    // The query client is stable for the mounted workspace.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.id, selected?.is_unread]);
 
@@ -175,10 +241,8 @@ export function AgentWorkspace() {
   const selectTeamFolder = (nextFolder: AgentWorkspaceFolder) => {
     if (teamId) replaceParams({ folder: nextFolder, ticket: null });
   };
-  const nextTicket = useMemo(() => {
-    const index = tickets.findIndex((ticket) => ticket.id === selected?.id);
-    return index >= 0 ? tickets[index + 1] : undefined;
-  }, [selected?.id, tickets]);
+  const selectedIndex = tickets.findIndex((ticket) => ticket.id === selected?.id);
+  const nextTicket = selectedIndex >= 0 ? tickets[selectedIndex + 1] : undefined;
 
   const copyText = async (value: string, kind: "reply" | "link") => {
     await navigator.clipboard.writeText(value);
@@ -212,11 +276,19 @@ export function AgentWorkspace() {
         </div>
       </header>
 
-      {!bootstrapQuery.isLoading && !bootstrapQuery.data?.identity && (
+      {bootstrapQuery.isError ? (
+        <Alert
+          variant="danger"
+          title="Agent workspace identity could not be checked"
+          action={<Button size="sm" variant="secondary" pending={bootstrapQuery.isFetching} pendingLabel="Retrying…" onClick={() => void bootstrapQuery.refetch()}>Retry</Button>}
+        >
+          Personal assignments remain available, but provider identity and team membership could not be refreshed.
+        </Alert>
+      ) : !bootstrapQuery.isLoading && bootstrapQuery.data && !bootstrapQuery.data.identity ? (
         <Alert variant="warning" title="Freshservice work identity not linked">
           Local assignments still appear in My Inbox. Ask an administrator to link your Freshservice agent identity to unlock authoritative personal and team queues.
         </Alert>
-      )}
+      ) : null}
 
       <section className="grid min-h-[680px] overflow-hidden rounded-2xl border border-linen-400 bg-linen-50 shadow-sm lg:h-[calc(100vh-9rem)] lg:grid-cols-[14rem_22rem_minmax(0,1fr)]" aria-label="Agent ticket workspace">
         <aside className="min-w-0 border-b border-linen-400 bg-linen-100 lg:overflow-y-auto lg:border-b-0 lg:border-r" aria-label="Mailbox folders">
@@ -254,7 +326,11 @@ export function AgentWorkspace() {
             </div>
             {bootstrapQuery.isLoading ? (
               <div className="space-y-2 px-2"><Skeleton className="h-9" /><Skeleton className="h-9" /></div>
-            ) : bootstrapQuery.data?.teams.length ? (
+            ) : bootstrapQuery.isError ? (
+              <p className="px-2.5 py-3 text-xs leading-5 text-semantic-danger">Team inboxes could not be loaded. Retry the identity check above.</p>
+            ) : !bootstrapQuery.data?.identity ? (
+              <p className="px-2.5 py-3 text-xs leading-5 text-ink-400">Link a Freshservice work identity to load provider team inboxes.</p>
+            ) : bootstrapQuery.data.teams.length ? (
               <div className="space-y-1">
                 {bootstrapQuery.data.teams.map((team) => {
                   const active = scope === "team" && teamId === team.id;
@@ -285,7 +361,7 @@ export function AgentWorkspace() {
                 <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-semantic-primary">{scope === "mine" ? "Personal" : bootstrapQuery.data?.teams.find((team) => team.id === teamId)?.name || "Team"}</p>
                 <h2 id="agent-ticket-list-title" className="break-words text-base font-semibold text-ink-700 [overflow-wrap:anywhere]">{folderLabel(folder, scope)}</h2>
               </div>
-              <Badge variant="neutral">{tickets.length}{ticketsQuery.data?.hasMore ? "+" : ""}</Badge>
+              <Badge variant="neutral">{tickets.length}{ticketsQuery.hasNextPage ? "+" : ""}</Badge>
             </div>
             {scope === "team" && teamId && (
               <div className="mt-3 flex gap-1 overflow-x-auto pb-1" aria-label="Team inbox filters">
@@ -296,20 +372,30 @@ export function AgentWorkspace() {
             )}
             <div className="relative mt-3">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-400" aria-hidden="true" />
-              <input value={search} onChange={(event) => setSearch(event.target.value)} type="search" className="input-base h-9 pl-9 pr-8 text-xs" placeholder="Search this inbox" aria-label="Search current inbox" />
-              {search && <button type="button" onClick={() => setSearch("")} aria-label="Clear inbox search" className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-ink-400 hover:bg-linen-200"><X className="h-3.5 w-3.5" /></button>}
+              <input value={searchInput} onChange={(event) => setSearchInput(event.target.value)} type="search" className="input-base h-9 pl-9 pr-8 text-xs" placeholder="Search this inbox" aria-label="Search current inbox" />
+              {searchInput && <button type="button" onClick={() => setSearchInput("")} aria-label="Clear inbox search" className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-ink-400 hover:bg-linen-200"><X className="h-3.5 w-3.5" /></button>}
             </div>
           </div>
-          <div className="min-h-[24rem] lg:flex-1 lg:overflow-y-auto" aria-live="polite">
+          <div className="min-h-0 lg:flex-1 lg:overflow-y-auto" aria-live="polite">
             {ticketsQuery.isLoading ? (
               <div className="space-y-3 p-3" aria-label="Loading ticket inbox">{[1, 2, 3, 4].map((item) => <Skeleton key={item} className="h-28" />)}</div>
-            ) : ticketsQuery.isError ? (
-              <div className="p-4"><ErrorState title="Inbox unavailable" description="This focused queue could not be loaded." actionLabel="Retry" onRetry={() => void ticketsQuery.refetch()} retrying={ticketsQuery.isFetching} /></div>
+            ) : ticketsQuery.isError && !ticketsQuery.data ? (
+              <div className="p-4"><ErrorState density="compact" title="Inbox unavailable" description="This focused queue could not be loaded." actionLabel="Retry" onRetry={() => void ticketsQuery.refetch()} retrying={ticketsQuery.isFetching} /></div>
             ) : tickets.length === 0 ? (
-              <EmptyState title="This folder is clear" description={search ? "No tickets match this search." : "There are no tickets requiring attention in this view."} icon={<Check className="h-5 w-5" />} />
+              <EmptyState className="min-h-0 border-0 px-4 py-6 sm:min-h-40 lg:min-h-52" title="This folder is clear" description={searchInput.trim() ? "No tickets match this search." : "There are no tickets requiring attention in this view."} icon={<Check className="h-5 w-5" />} />
             ) : (
-              <div className="divide-y divide-linen-300">
-                {tickets.map((ticket) => <TicketRow key={ticket.id} ticket={ticket} selected={ticket.id === selected?.id} onSelect={() => replaceParams({ ticket: ticket.id })} onStar={() => stateMutation.mutate({ ticketId: ticket.id, update: { starred: !ticket.is_starred } })} />)}
+              <div>
+                <div className="divide-y divide-linen-300">
+                  {tickets.map((ticket) => <TicketRow key={ticket.id} ticket={ticket} selected={ticket.id === selected?.id} onSelect={() => replaceParams({ ticket: ticket.id })} onStar={() => stateMutation.mutate({ ticketId: ticket.id, update: { starred: !ticket.is_starred } })} />)}
+                </div>
+                {ticketsQuery.isFetchNextPageError && (
+                  <div className="border-t border-linen-300 p-3"><Alert variant="danger" title="More tickets could not be loaded" action={<Button size="sm" variant="secondary" onClick={() => void ticketsQuery.fetchNextPage()}>Retry</Button>}>The tickets already shown remain available.</Alert></div>
+                )}
+                {ticketsQuery.hasNextPage && !ticketsQuery.isFetchNextPageError && (
+                  <div className="border-t border-linen-300 p-3 text-center">
+                    <Button variant="secondary" size="sm" pending={ticketsQuery.isFetchingNextPage} pendingLabel="Loading more…" onClick={() => void ticketsQuery.fetchNextPage()}>Load more tickets</Button>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -326,8 +412,12 @@ export function AgentWorkspace() {
               onClearFollowUp={() => stateMutation.mutate({ ticketId: selected.id, update: { clear_follow_up: true } })}
               pending={stateMutation.isPending}
             />
+          ) : deepLinkedTicketQuery.isLoading ? (
+            <div className="space-y-4 p-4 sm:p-6" aria-label="Loading linked ticket" aria-busy="true"><Skeleton className="h-8 w-2/3" /><Skeleton className="h-28 w-full" /><Skeleton className="h-48 w-full" /></div>
+          ) : deepLinkedTicketQuery.isError ? (
+            <div className="p-4 sm:p-6"><ErrorState title="Linked ticket unavailable" description="The selected ticket could not be restored from this inbox." actionLabel="Retry" onRetry={() => void deepLinkedTicketQuery.refetch()} retrying={deepLinkedTicketQuery.isFetching} /></div>
           ) : (
-            <div className="grid min-h-[24rem] place-items-center p-6"><EmptyState title="Select a ticket" description="Choose a ticket from the inbox to open the reading pane." icon={<ListFilter className="h-5 w-5" />} /></div>
+            <div className="grid min-h-0 place-items-center p-4 sm:min-h-48 lg:min-h-[24rem] lg:p-6"><EmptyState className="min-h-0 border-0 px-4 py-6 sm:min-h-40 lg:min-h-52" title="Select a ticket" description="Choose a ticket from the inbox to open the reading pane." icon={<ListFilter className="h-5 w-5" />} /></div>
           )}
         </section>
       </section>

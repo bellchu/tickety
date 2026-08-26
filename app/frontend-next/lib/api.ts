@@ -108,6 +108,8 @@ export const api = {
   getHealth: () => fetchAPI<{ status: string; mode: "demo" | "production" }>("/health"),
   getReadiness: () => fetchAPI<import("./types").ReadinessStatus>("/health/ready"),
   getTickets: () => fetchAPI<import("./types").Ticket[]>("/tickets"),
+  getDashboardSummary: () =>
+    fetchAPI<import("./types").DashboardSummary>("/dashboard/summary"),
   getAgentWorkspaceBootstrap: () =>
     fetchAPI<import("./types").AgentWorkspaceBootstrap>("/agent-workspace/bootstrap"),
   getAgentWorkspaceTickets: async (
@@ -116,6 +118,7 @@ export const api = {
     const params = new URLSearchParams();
     if (options.scope) params.set("scope", options.scope);
     if (options.teamId) params.set("team_id", options.teamId);
+    if (options.ticketId) params.set("ticket_id", options.ticketId);
     if (options.folder) params.set("folder", options.folder);
     if (options.search?.trim()) params.set("search", options.search.trim());
     if (options.limit != null) params.set("limit", String(options.limit));
@@ -437,18 +440,27 @@ export const api = {
   deleteUser: (id: string) => fetchAPI<{ status: string }>(`/users/${id}`, { method: "DELETE" }),
   purgeUser: (id: string) => fetchAPI<{ status: string; user_id: string; removed_owned_records: number; cleared_history_references: number }>(`/users/${id}/purge`, { method: "DELETE" }),
   // Knowledge Base
-  getKbArticles: async (search?: string, category?: string) => {
+  getKbArticles: async (options: {
+    search?: string;
+    category?: string;
+    status?: "all" | "published" | "draft" | "archived";
+    limit?: number;
+    offset?: number;
+  } = {}) => {
     const params = new URLSearchParams();
-    if (search) params.set("search", search);
-    if (category) params.set("category", category);
-    params.set("limit", "500");
-    params.set("offset", "0");
+    if (options.search) params.set("search", options.search);
+    if (options.category) params.set("category", options.category);
+    if (options.status) params.set("status", options.status);
+    params.set("limit", String(options.limit ?? 20));
+    params.set("offset", String(options.offset ?? 0));
     const { data, response } = await fetchAPIResponse<import("./types").KbArticle[]>(
       `/kb?${params.toString()}`,
     );
     return {
       articles: data,
       hasMore: response.headers.get("x-has-more") === "true",
+      limit: Number(response.headers.get("x-page-limit") ?? options.limit ?? 20),
+      offset: Number(response.headers.get("x-page-offset") ?? options.offset ?? 0),
     };
   },
   getKbArticle: (id: string) => fetchAPI<import("./types").KbArticle>(`/kb/${id}`),
@@ -457,7 +469,9 @@ export const api = {
   updateKbArticle: (id: string, payload: Partial<import("./types").KbArticleCreateInput>) =>
     fetchAPI<import("./types").KbArticle>(`/kb/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
   deleteKbArticle: (id: string) => fetchAPI<{ status: string }>(`/kb/${id}`, { method: "DELETE" }),
-  getKbCategories: () => fetchAPI<{ categories: string[] }>("/kb/categories"),
+  getKbCategories: (includeUnpublished = false) => fetchAPI<{ categories: string[] }>(
+    `/kb/categories${includeUnpublished ? "?status=all" : ""}`,
+  ),
   kbFeedback: (id: string, helpful: boolean) =>
     fetchAPI<{ status: string }>(`/kb/${id}/feedback`, { method: "POST", body: JSON.stringify({ helpful }) }),
   linkKbToTicket: (ticketId: string, articleId: string) =>
@@ -514,17 +528,106 @@ export const api = {
     fetchAPI<import("./types").Project>(`/projects/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
   deleteProject: (id: string) => fetchAPI<{ status: string }>(`/projects/${id}`, { method: "DELETE" }),
   // Service Catalog
-  getServices: (category?: string) => {
+  getServicesPage: async (options: {
+    category?: string;
+    search?: string;
+    isActive?: boolean;
+    limit?: number;
+    offset?: number;
+  } = {}) => {
+    const limit = options.limit ?? 50;
+    const offset = options.offset ?? 0;
     const params = new URLSearchParams();
-    if (category) params.set("category", category);
-    return fetchAPI<import("./types").ServiceItem[]>(`/services${params.toString() ? "?" + params.toString() : ""}`);
+    if (options.category) params.set("category", options.category);
+    if (options.search?.trim()) params.set("search", options.search.trim());
+    if (options.isActive !== undefined) params.set("is_active", String(options.isActive));
+    params.set("limit", String(limit));
+    params.set("offset", String(offset));
+    const { data, response } = await fetchAPIResponse<import("./types").ServiceItem[]>(
+      `/services?${params.toString()}`,
+    );
+    const readCount = (name: string, fallback = 0) => {
+      const raw = response.headers.get(name);
+      const value = raw === null ? Number.NaN : Number(raw);
+      return Number.isInteger(value) && value >= 0 ? value : fallback;
+    };
+    let categoryOptions: string[] = [];
+    try {
+      const decoded = JSON.parse(response.headers.get("x-service-category-options") || "[]");
+      if (Array.isArray(decoded)) {
+        categoryOptions = decoded.filter(
+          (value): value is string => typeof value === "string" && value.length <= 255 && !value.includes("\0"),
+        );
+      }
+    } catch {
+      categoryOptions = [];
+    }
+    const pageLimit = readCount("x-page-limit", limit) || limit;
+    const pageOffset = readCount("x-page-offset", offset);
+    const hasMoreHeader = response.headers.get("x-has-more");
+    return {
+      services: data,
+      limit: pageLimit,
+      offset: pageOffset,
+      hasMore: hasMoreHeader === "true"
+        || (hasMoreHeader !== "false" && data.length >= pageLimit),
+      summary: {
+        total: readCount("x-service-total"),
+        active: readCount("x-service-active"),
+        categoryCount: readCount("x-service-category-count"),
+        categoryOptions,
+        categoryOptionsTruncated: response.headers.get("x-service-category-options-truncated") === "true",
+      },
+    } satisfies import("./types").ServicePage;
   },
-  createService: (payload: { name: string; description?: string; category?: string; pricing?: string; sla_hours?: number; approval_required?: boolean }) =>
+  createService: (payload: { name: string; description?: string; category?: string | null; pricing?: string | null; sla_hours?: number | null; approval_required?: boolean }) =>
     fetchAPI<import("./types").ServiceItem>("/services", { method: "POST", body: JSON.stringify(payload) }),
   updateService: (id: string, payload: Partial<import("./types").ServiceItem>) =>
     fetchAPI<import("./types").ServiceItem>(`/services/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
   deleteService: (id: string) => fetchAPI<{ status: string }>(`/services/${id}`, { method: "DELETE" }),
-  getServiceRequests: () => fetchAPI<import("./types").ServiceRequest[]>("/service-requests"),
+  getServiceRequestsPage: async (options: {
+    search?: string;
+    serviceItemId?: string;
+    approvalStatus?: string;
+    fulfillmentStatus?: string;
+    limit?: number;
+    offset?: number;
+  } = {}) => {
+    const limit = options.limit ?? 50;
+    const offset = options.offset ?? 0;
+    const params = new URLSearchParams();
+    if (options.search?.trim()) params.set("search", options.search.trim());
+    if (options.serviceItemId) params.set("service_item_id", options.serviceItemId);
+    if (options.approvalStatus) params.set("approval_status", options.approvalStatus);
+    if (options.fulfillmentStatus) params.set("fulfillment_status", options.fulfillmentStatus);
+    params.set("limit", String(limit));
+    params.set("offset", String(offset));
+    const { data, response } = await fetchAPIResponse<import("./types").ServiceRequest[]>(
+      `/service-requests?${params.toString()}`,
+    );
+    const readCount = (name: string, fallback = 0) => {
+      const raw = response.headers.get(name);
+      const value = raw === null ? Number.NaN : Number(raw);
+      return Number.isInteger(value) && value >= 0 ? value : fallback;
+    };
+    const pageLimit = readCount("x-page-limit", limit) || limit;
+    const pageOffset = readCount("x-page-offset", offset);
+    const hasMoreHeader = response.headers.get("x-has-more");
+    return {
+      requests: data,
+      limit: pageLimit,
+      offset: pageOffset,
+      hasMore: hasMoreHeader === "true"
+        || (hasMoreHeader !== "false" && data.length >= pageLimit),
+      summary: {
+        total: readCount("x-service-request-total"),
+        open: readCount("x-service-request-open"),
+        pending: readCount("x-service-request-pending"),
+        pendingApproval: readCount("x-service-request-pending-approval"),
+        awaitingFulfillment: readCount("x-service-request-awaiting-fulfillment"),
+      },
+    } satisfies import("./types").ServiceRequestPage;
+  },
   createServiceRequest: (ticketId: string, serviceItemId: string, quantity: number, justification: string) =>
     fetchAPI<import("./types").ServiceRequest>("/service-requests", {
       method: "POST", body: JSON.stringify({ ticket_id: ticketId, service_item_id: serviceItemId, quantity, justification }),
@@ -540,13 +643,61 @@ export const api = {
       body: JSON.stringify({ status, delivery_notes: deliveryNotes }),
     }),
   // Problem Management
-  getProblems: (status?: string) => {
+  getProblemsPage: async (options: {
+    status?: string;
+    search?: string;
+    limit?: number;
+    offset?: number;
+  } = {}) => {
+    const limit = options.limit ?? 25;
+    const offset = options.offset ?? 0;
     const params = new URLSearchParams();
-    if (status) params.set("status", status);
-    return fetchAPI<import("./types").Problem[]>(`/problems${params.toString() ? "?" + params.toString() : ""}`);
+    if (options.status) params.set("status", options.status);
+    if (options.search?.trim()) params.set("search", options.search.trim());
+    params.set("limit", String(limit));
+    params.set("offset", String(offset));
+    const { data, response } = await fetchAPIResponse<import("./types").Problem[]>(
+      `/problems?${params.toString()}`,
+    );
+    const readNonNegativeHeader = (...names: string[]) => {
+      for (const name of names) {
+        const raw = response.headers.get(name);
+        if (raw === null) continue;
+        const value = Number(raw);
+        if (Number.isInteger(value) && value >= 0) return value;
+      }
+      return undefined;
+    };
+    const pageLimit = readNonNegativeHeader("x-page-limit") || limit;
+    const pageOffset = readNonNegativeHeader("x-page-offset") ?? offset;
+    const hasMoreHeader = response.headers.get("x-page-has-more")
+      ?? response.headers.get("x-has-more");
+    return {
+      problems: data,
+      limit: pageLimit,
+      offset: pageOffset,
+      total: readNonNegativeHeader("x-page-total"),
+      hasMore: hasMoreHeader === "true"
+        || (hasMoreHeader !== "false" && data.length >= pageLimit),
+      summary: {
+        total: readNonNegativeHeader("x-problems-total", "x-problem-total") ?? 0,
+        investigating: readNonNegativeHeader(
+          "x-problems-investigating",
+          "x-problem-investigating",
+        ) ?? 0,
+        knownErrors: readNonNegativeHeader(
+          "x-problems-known-errors",
+          "x-problem-known-errors",
+        ) ?? 0,
+        linkedTickets: readNonNegativeHeader(
+          "x-problems-linked-tickets",
+          "x-problem-linked-tickets",
+        ) ?? 0,
+      },
+    };
   },
   getProblem: (id: string) => fetchAPI<import("./types").Problem>(`/problems/${id}`),
-  createProblem: (payload: { title: string; description?: string; priority?: string; category?: string; assigned_to?: string; impact_scope?: string }) =>
+  createProblem: (payload: { title: string; description?: string; priority?: string; category?: string | null; assigned_to?: string | null; impact_scope?: string | null }) =>
     fetchAPI<import("./types").Problem>("/problems", { method: "POST", body: JSON.stringify(payload) }),
   updateProblem: (id: string, payload: Partial<import("./types").Problem>) =>
     fetchAPI<import("./types").Problem>(`/problems/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
@@ -555,12 +706,47 @@ export const api = {
     fetchAPI<{ status: string }>(`/problems/${problemId}/link/${ticketId}`, { method: "POST" }),
   unlinkTicketFromProblem: (problemId: string, ticketId: string) =>
     fetchAPI<{ status: string }>(`/problems/${problemId}/link/${ticketId}`, { method: "DELETE" }),
-  getProblemTickets: (problemId: string) => fetchAPI<import("./types").Ticket[]>(`/problems/${problemId}/tickets`),
+  getProblemTicketsPage: async (
+    problemId: string,
+    { limit = 50, offset = 0 }: { limit?: number; offset?: number } = {},
+  ) => {
+    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    const { data, response } = await fetchAPIResponse<import("./types").Ticket[]>(
+      `/problems/${encodeURIComponent(problemId)}/tickets?${params.toString()}`,
+    );
+    const limitHeader = response.headers.get("x-page-limit");
+    const offsetHeader = response.headers.get("x-page-offset");
+    const hasMoreHeader = response.headers.get("x-has-more")
+      ?? response.headers.get("x-page-has-more");
+    const responseLimit = limitHeader === null ? Number.NaN : Number(limitHeader);
+    const responseOffset = offsetHeader === null ? Number.NaN : Number(offsetHeader);
+    const pageLimit = Number.isInteger(responseLimit) && responseLimit > 0 ? responseLimit : limit;
+    return {
+      tickets: data,
+      limit: pageLimit,
+      offset: Number.isInteger(responseOffset) && responseOffset >= 0 ? responseOffset : offset,
+      hasMore: hasMoreHeader === "true",
+    };
+  },
   // Change Management
-  getChanges: (status?: string) => {
+  getChangesPage: async (options: { status?: string; search?: string; limit?: number; offset?: number } = {}) => {
     const params = new URLSearchParams();
-    if (status) params.set("status", status);
-    return fetchAPI<import("./types").ChangeRecord[]>(`/changes${params.toString() ? "?" + params.toString() : ""}`);
+    if (options.status) params.set("status", options.status);
+    if (options.search) params.set("search", options.search);
+    params.set("limit", String(options.limit ?? 25));
+    params.set("offset", String(options.offset ?? 0));
+    const { data, response } = await fetchAPIResponse<import("./types").ChangeRecord[]>(`/changes?${params.toString()}`);
+    return {
+      changes: data,
+      limit: Number(response.headers.get("x-page-limit")) || options.limit || 25,
+      offset: Number(response.headers.get("x-page-offset")) || options.offset || 0,
+      hasMore: response.headers.get("x-has-more") === "true",
+      summary: {
+        awaitingReview: Number(response.headers.get("x-change-awaiting-review")) || 0,
+        inProgress: Number(response.headers.get("x-change-in-progress")) || 0,
+        highRisk: Number(response.headers.get("x-change-high-risk")) || 0,
+      },
+    } satisfies import("./types").ChangePage;
   },
   getChange: (id: string) => fetchAPI<import("./types").ChangeRecord>(`/changes/${id}`),
   createChange: (payload: Partial<import("./types").ChangeRecord>) =>
@@ -568,7 +754,27 @@ export const api = {
   updateChange: (id: string, payload: Partial<import("./types").ChangeRecord>) =>
     fetchAPI<import("./types").ChangeRecord>(`/changes/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
   deleteChange: (id: string) => fetchAPI<{ status: string }>(`/changes/${id}`, { method: "DELETE" }),
-  getChangeApprovals: (changeId: string) => fetchAPI<import("./types").ChangeApproval[]>(`/changes/${changeId}/approvals`),
+  getChangeApprovals: async (
+    changeId: string,
+    { limit = 50, offset = 0 }: { limit?: number; offset?: number } = {},
+  ) => {
+    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    const { data, response } = await fetchAPIResponse<import("./types").ChangeApproval[]>(
+      `/changes/${encodeURIComponent(changeId)}/approvals?${params.toString()}`,
+    );
+    const limitHeader = response.headers.get("x-page-limit");
+    const offsetHeader = response.headers.get("x-page-offset");
+    const hasMoreHeader = response.headers.get("x-has-more");
+    const responseLimit = limitHeader === null ? Number.NaN : Number(limitHeader);
+    const responseOffset = offsetHeader === null ? Number.NaN : Number(offsetHeader);
+    const pageLimit = Number.isInteger(responseLimit) && responseLimit > 0 ? responseLimit : limit;
+    return {
+      approvals: data,
+      limit: pageLimit,
+      offset: Number.isInteger(responseOffset) && responseOffset >= 0 ? responseOffset : offset,
+      hasMore: hasMoreHeader === "true" || (hasMoreHeader !== "false" && data.length >= pageLimit),
+    } satisfies import("./types").ChangeApprovalPage;
+  },
   addChangeApproval: (changeId: string, approverId: string) =>
     fetchAPI<import("./types").ChangeApproval>(`/changes/${changeId}/approvals`, { method: "POST", body: JSON.stringify({ approver_id: approverId }) }),
   decideApproval: (changeId: string, approverId: string, decision: string, comment?: string) =>
@@ -577,12 +783,36 @@ export const api = {
       body: JSON.stringify({ decision, comment: comment || "" }),
     }),
   // Assets
-  getAssets: (assetType?: string, status?: string, search?: string) => {
+  getAssetsPage: async (options: {
+    assetType?: string;
+    status?: string;
+    search?: string;
+    limit?: number;
+    offset?: number;
+  } = {}) => {
+    const limit = options.limit ?? 50;
+    const offset = options.offset ?? 0;
     const params = new URLSearchParams();
-    if (assetType) params.set("asset_type", assetType);
-    if (status) params.set("status", status);
-    if (search) params.set("search", search);
-    return fetchAPI<import("./types").Asset[]>(`/assets${params.toString() ? "?" + params.toString() : ""}`);
+    if (options.assetType) params.set("asset_type", options.assetType);
+    if (options.status) params.set("status", options.status);
+    if (options.search?.trim()) params.set("search", options.search.trim());
+    params.set("limit", String(limit));
+    params.set("offset", String(offset));
+    const { data, response } = await fetchAPIResponse<import("./types").Asset[]>(
+      `/assets?${params.toString()}`,
+    );
+    const limitHeader = response.headers.get("x-page-limit");
+    const offsetHeader = response.headers.get("x-page-offset");
+    const hasMoreHeader = response.headers.get("x-has-more");
+    const responseLimit = limitHeader === null ? Number.NaN : Number(limitHeader);
+    const responseOffset = offsetHeader === null ? Number.NaN : Number(offsetHeader);
+    const pageLimit = Number.isInteger(responseLimit) && responseLimit > 0 ? responseLimit : limit;
+    return {
+      assets: data,
+      limit: pageLimit,
+      offset: Number.isInteger(responseOffset) && responseOffset >= 0 ? responseOffset : offset,
+      hasMore: hasMoreHeader === "true" || (hasMoreHeader !== "false" && data.length >= pageLimit),
+    } satisfies import("./types").AssetPage;
   },
   getAsset: (id: string) => fetchAPI<import("./types").Asset>(`/assets/${id}`),
   createAsset: (payload: Partial<import("./types").Asset>) =>
@@ -593,24 +823,94 @@ export const api = {
   getAssetStats: () => fetchAPI<{ total: number; by_type: Record<string, number> }>("/assets/stats"),
   // Surveys / CSAT
   getSurveyTemplates: () => fetchAPI<import("./types").SurveyTemplate[]>("/surveys/templates"),
-  getSurveys: () => fetchAPI<import("./types").SurveyOut[]>("/surveys"),
+  getSurveysPage: async ({ limit = 50, offset = 0 }: { limit?: number; offset?: number } = {}) => {
+    const { data, response } = await fetchAPIResponse<import("./types").SurveyOut[]>(
+      `/surveys?limit=${limit}&offset=${offset}`,
+    );
+    return {
+      surveys: data,
+      limit: Number(response.headers.get("x-page-limit")) || limit,
+      offset: Number(response.headers.get("x-page-offset")) || offset,
+      hasMore: response.headers.get("x-has-more") === "true",
+    };
+  },
+  getSurveyEligibleTickets: async ({ search, limit = 50, offset = 0 }: { search?: string; limit?: number; offset?: number } = {}) => {
+    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    if (search?.trim()) params.set("search", search.trim());
+    const { data, response } = await fetchAPIResponse<import("./types").Ticket[]>(
+      `/surveys/eligible-tickets?${params.toString()}`,
+    );
+    return {
+      tickets: data,
+      limit: Number(response.headers.get("x-page-limit")) || limit,
+      offset: Number(response.headers.get("x-page-offset")) || offset,
+      hasMore: response.headers.get("x-has-more") === "true",
+    } satisfies import("./types").TicketPage;
+  },
   sendSurvey: (ticketId: string, templateId: number) =>
     fetchAPI<import("./types").SurveyOut>("/surveys/send", { method: "POST", body: JSON.stringify({ ticket_id: ticketId, template_id: templateId }) }),
-  respondSurvey: (surveyId: string, rating: number, comment: string) =>
-    fetchAPI<{ status: string }>(`/surveys/${surveyId}/respond`, { method: "POST", body: JSON.stringify({ rating, comment }) }),
+  lookupPortalSurvey: (token: string) =>
+    fetchAPI<import("./types").PortalSurveyQuestion>("/portal/survey/lookup", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    }),
+  respondPortalSurvey: (token: string, rating: number, comment: string) =>
+    fetchAPI<import("./types").PortalSurveySubmitted>("/portal/survey/respond", {
+      method: "POST",
+      body: JSON.stringify({ token, rating, comment }),
+    }),
   getSurveyStats: () => fetchAPI<{ total_sent: number; responded: number; response_rate: number; avg_rating: number; distribution: Record<string, number> }>("/surveys/stats"),
   // Time Tracking
-  getTimeEntries: (ticketId?: string) => {
+  getTimeEntries: async (options: {
+    ticketId?: string;
+    userId?: string;
+    teamId?: string;
+    limit?: number;
+    offset?: number;
+  } = {}) => {
+    const limit = options.limit ?? 25;
+    const offset = options.offset ?? 0;
     const params = new URLSearchParams();
-    if (ticketId) params.set("ticket_id", ticketId);
-    return fetchAPI<import("./types").TimeEntry[]>(`/time-entries${params.toString() ? "?" + params.toString() : ""}`);
+    if (options.ticketId) params.set("ticket_id", options.ticketId);
+    if (options.userId) params.set("user_id", options.userId);
+    if (options.teamId) params.set("team_id", options.teamId);
+    params.set("limit", String(limit));
+    params.set("offset", String(offset));
+    const { data, response } = await fetchAPIResponse<import("./types").TimeEntry[]>(
+      `/time-entries?${params.toString()}`,
+    );
+    return {
+      entries: data,
+      limit: Number(response.headers.get("x-page-limit")) || limit,
+      offset: Number(response.headers.get("x-page-offset")) || offset,
+      hasMore: response.headers.get("x-has-more") === "true",
+    } satisfies import("./types").TimeEntryPage;
   },
   createTimeEntry: (ticketId: string, description: string, minutes: number) =>
     fetchAPI<import("./types").TimeEntry>("/time-entries", { method: "POST", body: JSON.stringify({ ticket_id: ticketId, description, minutes }) }),
-  getTicketTimeEntries: (ticketId: string) => fetchAPI<import("./types").TimeEntry[]>(`/time-entries/ticket/${ticketId}`),
-  getTimeSummary: (timeZone: string) => {
+  getTicketTimeEntries: async (ticketId: string, options: { userId?: string; limit?: number; offset?: number } = {}) => {
+    const limit = options.limit ?? 25;
+    const offset = options.offset ?? 0;
+    const params = new URLSearchParams();
+    if (options.userId) params.set("user_id", options.userId);
+    params.set("limit", String(limit));
+    params.set("offset", String(offset));
+    const { data, response } = await fetchAPIResponse<import("./types").TimeEntry[]>(
+      `/time-entries/ticket/${encodeURIComponent(ticketId)}?${params.toString()}`,
+    );
+    return {
+      entries: data,
+      limit: Number(response.headers.get("x-page-limit")) || limit,
+      offset: Number(response.headers.get("x-page-offset")) || offset,
+      hasMore: response.headers.get("x-has-more") === "true",
+    } satisfies import("./types").TimeEntryPage;
+  },
+  getTimeSummary: (timeZone: string, options: { ticketId?: string; userId?: string; teamId?: string } = {}) => {
     const params = new URLSearchParams({ time_zone: timeZone });
-    return fetchAPI<{ total_hours: number; today_hours: number }>(`/time-entries/summary?${params.toString()}`);
+    if (options.ticketId) params.set("ticket_id", options.ticketId);
+    if (options.userId) params.set("user_id", options.userId);
+    if (options.teamId) params.set("team_id", options.teamId);
+    return fetchAPI<{ total_hours: number; today_hours: number; ticket_count: number; average_hours_per_ticket: number }>(`/time-entries/summary?${params.toString()}`);
   },
   // Self-Service Portal
   portalCreateTicket: (subject: string, description: string, reporter: string, priority = "P3") =>

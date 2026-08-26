@@ -10,7 +10,12 @@ export const metadata: Metadata = {
 
 export default function AgentPage() {
   return (
-    <Suspense fallback={<Skeleton className="h-[70vh] min-h-[640px] w-full rounded-2xl" />}>
+    <Suspense fallback={(
+      <div aria-busy="true" aria-label="Loading agent workspace">
+        <span className="sr-only" role="status">Loading agent workspace…</span>
+        <Skeleton className="h-[70vh] min-h-[28rem] w-full rounded-2xl sm:min-h-[40rem]" />
+      </div>
+    )}>
       <AgentWorkspace />
     </Suspense>
   );

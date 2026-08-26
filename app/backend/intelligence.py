@@ -26,9 +26,9 @@ import secrets
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Collection, Dict, List, Literal, Optional
 
-from sqlalchemy import case, func, or_
+from sqlalchemy import and_, case, func, or_
 from sqlalchemy.orm import Session
 
 from .database import (
@@ -47,6 +47,12 @@ from .ai_input import (
     prompt_char_limit,
     validate_semantic_advice,
 )
+from .ai_eligibility import (
+    DEFAULT_TERMINAL_STATUSES,
+    active_ticket_filter,
+    terminal_status_names,
+)
+from .portable_keys import portable_ascii_lower, portable_ascii_lower_expression
 from .privacy import redact_text
 from .prompts import RESOLUTION_SYSTEM_PROMPT, SUMMARY_SYSTEM_PROMPT
 from .sla_policy import ticket_is_sla_exempt
@@ -136,17 +142,43 @@ def _scope_query(query, since: Optional[datetime]):
         return query
     return query.filter(_ticket_activity_expression() >= since)
 
-def _age_hours(t: TicketRecord, now: Optional[datetime] = None) -> float:
+def _normalized_terminal_statuses(
+    terminal_statuses: Optional[Collection[str]] = None,
+) -> set[str]:
+    normalized = {
+        portable_ascii_lower(value) for value in DEFAULT_TERMINAL_STATUSES
+    }
+    values = terminal_statuses or ()
+    for value in values:
+        key = portable_ascii_lower(value)
+        if key:
+            normalized.add(key)
+    return normalized
+
+
+def _age_hours(
+    t: TicketRecord,
+    now: Optional[datetime] = None,
+    terminal_statuses: Optional[Collection[str]] = None,
+) -> float:
     now = now or datetime.utcnow()
     started = t.external_created_at or t.created_at or now
-    ended = (t.external_resolved_at or t.resolved_at or now) if not _open(t) else now
+    ended = (
+        (t.external_resolved_at or t.resolved_at or now)
+        if not _open(t, terminal_statuses)
+        else now
+    )
     delta = ended - started
     return max(0.0, delta.total_seconds() / 3600.0)
 
 
-def _open(t: TicketRecord) -> bool:
-    status = (t.status or "").lower()
-    return status not in {"closed", "resolved", "cancelled"}
+def _open(
+    t: TicketRecord,
+    terminal_statuses: Optional[Collection[str]] = None,
+) -> bool:
+    return portable_ascii_lower(t.status) not in _normalized_terminal_statuses(
+        terminal_statuses
+    )
 
 
 def _clamp(v: int) -> int:
@@ -155,7 +187,11 @@ def _clamp(v: int) -> int:
 
 # ── 1. Escalation Risk Agent ─────────────────────────────────────────────
 
-def escalation_risk(t: TicketRecord, now: Optional[datetime] = None) -> int:
+def escalation_risk(
+    t: TicketRecord,
+    now: Optional[datetime] = None,
+    terminal_statuses: Optional[Collection[str]] = None,
+) -> int:
     """Predict 0-100 risk that this case will be escalated.
 
     Combines sentiment, mood, priority, complexity, age, and an already-escalated
@@ -169,23 +205,29 @@ def escalation_risk(t: TicketRecord, now: Optional[datetime] = None) -> int:
     score += (t.complexity or 1) * 4
     # Age decay: ramp risk as a case sits unresolved past half its SLA window.
     sla_h = SLA_HOURS.get(t.priority, DEFAULT_SLA_HOURS)
-    age = _age_hours(t, now)
-    if _open(t) and not ticket_is_sla_exempt(t):
+    age = _age_hours(t, now, terminal_statuses)
+    if _open(t, terminal_statuses) and not ticket_is_sla_exempt(
+        t, terminal_statuses or ()
+    ):
         if age > sla_h:
             score += 15  # past SLA
         elif age > sla_h / 2:
             score += 8
-    if (t.status or "").lower() == "escalated":
+    if portable_ascii_lower(t.status) == "escalated":
         score += 25
     return _clamp(score)
 
 
 # ── 2. SLA Agent ──────────────────────────────────────────────────────────
 
-def sla_status(t: TicketRecord, now: Optional[datetime] = None) -> Dict[str, Any]:
+def sla_status(
+    t: TicketRecord,
+    now: Optional[datetime] = None,
+    terminal_statuses: Optional[Collection[str]] = None,
+) -> Dict[str, Any]:
     """Return SLA clock state for a ticket."""
     now = now or datetime.utcnow()
-    sla_exempt = ticket_is_sla_exempt(t)
+    sla_exempt = ticket_is_sla_exempt(t, terminal_statuses or ())
     configured_sla_h = SLA_HOURS.get(t.priority, DEFAULT_SLA_HOURS)
     start = t.external_created_at or t.created_at or now
     due_at = t.resolution_due_at or t.external_due_by or t.due_by
@@ -197,14 +239,20 @@ def sla_status(t: TicketRecord, now: Optional[datetime] = None) -> Dict[str, Any
         due_at = start + timedelta(hours=sla_h)
         target_source = "priority_policy"
     end = t.external_resolved_at or t.resolved_at or (
-        now if _open(t) else (t.external_updated_at or t.updated_at or now)
+        now
+        if _open(t, terminal_statuses)
+        else (t.external_updated_at or t.updated_at or now)
     )
     elapsed = max(0.0, (end - start).total_seconds() / 3600.0)
     remaining_h = (due_at - end).total_seconds() / 3600.0
-    breached = remaining_h <= 0 and _open(t) and not sla_exempt
+    breached = (
+        remaining_h <= 0
+        and _open(t, terminal_statuses)
+        and not sla_exempt
+    )
     at_risk = (
         not breached
-        and _open(t)
+        and _open(t, terminal_statuses)
         and not sla_exempt
         and remaining_h <= sla_h * SLA_AT_RISK_THRESHOLD
         and remaining_h > 0
@@ -220,21 +268,25 @@ def sla_status(t: TicketRecord, now: Optional[datetime] = None) -> Dict[str, Any
         "due_at": due_at.isoformat(),
         "target_source": target_source,
         "status": "breached" if breached else ("at_risk" if at_risk else "on_track"),
-        "is_open": _open(t),
+        "is_open": _open(t, terminal_statuses),
     }
 
 
 # ── 3. Prioritization Agent ──────────────────────────────────────────────
 
-def prioritize_score(t: TicketRecord, now: Optional[datetime] = None) -> int:
+def prioritize_score(
+    t: TicketRecord,
+    now: Optional[datetime] = None,
+    terminal_statuses: Optional[Collection[str]] = None,
+) -> int:
     """Composite "next best ticket to work on" score (0-100)."""
     now = now or datetime.utcnow()
     score = PRIORITY_WEIGHT.get(t.priority, 25)
-    score += escalation_risk(t, now) * 0.4
+    score += escalation_risk(t, now, terminal_statuses) * 0.4
     # Age pressure: how far through its SLA window the case is.
     sla_h = SLA_HOURS.get(t.priority, DEFAULT_SLA_HOURS)
-    age = _age_hours(t, now)
-    if not ticket_is_sla_exempt(t):
+    age = _age_hours(t, now, terminal_statuses)
+    if not ticket_is_sla_exempt(t, terminal_statuses or ()):
         score += min(30, (age / max(1, sla_h)) * 30)
     score += (t.complexity or 1) * 2
     return _clamp(score)
@@ -355,6 +407,7 @@ def team_routing_decision(
     source_category: Optional[str] = None,
     ticket_status: Optional[str] = None,
     ai_evidence_current: bool = False,
+    terminal_statuses: Optional[Collection[str]] = None,
 ) -> TeamRoutingDecision:
     """Return an AI-first, fail-closed routing projection with provenance.
 
@@ -362,7 +415,9 @@ def team_routing_decision(
     but it represents the provider's current assignment and never influences
     Tickety's recommendation.
     """
-    if (ticket_status or "").strip().lower() in {"closed", "resolved", "cancelled"}:
+    if portable_ascii_lower(ticket_status) in _normalized_terminal_statuses(
+        terminal_statuses
+    ):
         return TeamRoutingDecision(
             recommended_team=NO_ACTIVE_ROUTING_TEAM,
             basis="not_applicable",
@@ -464,7 +519,7 @@ def recommend_assignee(
             "candidate_pool_truncated": False,
         }
 
-    risk = escalation_risk(ticket)
+    risk = escalation_risk(ticket, terminal_statuses=terminal_status_names(db))
     complexity = ticket.complexity or 1
     tier_needed = tier_needed_for(ticket)
 
@@ -626,14 +681,47 @@ def _dominant(counter: Counter) -> tuple[Optional[Any], int, float]:
     return value, total, round(count / max(1, total), 3)
 
 
+GROUP_PROFILE_AGGREGATE_LIMIT = 5_000
+GROUP_PROFILE_GROUP_LIMIT = 500
+
+
+def _binding_key_scope(column, binding_id: str):
+    if binding_id == "legacy":
+        return or_(column.is_(None), column == "legacy")
+    return column == binding_id
+
+
 def build_group_profiles(
-    db: Session, *, since: datetime
-) -> Dict[tuple[str, str], Dict[str, Any]]:
+    db: Session,
+    *,
+    since: datetime,
+    group_keys: Collection[tuple[str, str]],
+) -> tuple[Dict[tuple[str, str], Dict[str, Any]], bool]:
     """Learn resolver-group function and service level from completed work.
 
     Freshservice currently has no Level 0-3 group metadata. These profiles are
     therefore explicitly inferred, sample-gated, and never written back.
     """
+    normalized_keys = {
+        (binding_id or "legacy", group_id)
+        for binding_id, group_id in group_keys
+        if group_id
+    }
+    if not normalized_keys:
+        return {}, False
+    if len(normalized_keys) > GROUP_PROFILE_GROUP_LIMIT:
+        raise ValueError("too many resolver groups for bounded profile analytics")
+    groups_by_binding: Dict[str, set[str]] = {}
+    for binding_id, group_id in normalized_keys:
+        groups_by_binding.setdefault(binding_id, set()).add(group_id)
+    ticket_group_scope = or_(*(
+        and_(
+            _binding_key_scope(TicketRecord.binding_id, binding_id),
+            TicketRecord.external_group_id.in_(sorted(group_ids)),
+        )
+        for binding_id, group_ids in sorted(groups_by_binding.items())
+    ))
+
     completed_at = func.coalesce(
         TicketRecord.external_resolved_at,
         TicketRecord.resolved_at,
@@ -653,8 +741,11 @@ def build_group_profiles(
     ).filter(
         TicketRecord.external_group_id.isnot(None),
         TicketRecord.external_group_id != "",
-        func.lower(func.coalesce(TicketRecord.status, "")).in_(["closed", "resolved"]),
+        portable_ascii_lower_expression(TicketRecord.status).in_(
+            ["closed", "resolved"]
+        ),
         completed_at >= since,
+        ticket_group_scope,
     ).group_by(
         TicketRecord.binding_id,
         TicketRecord.external_group_id,
@@ -664,7 +755,18 @@ def build_group_profiles(
         TicketRecord.ai_status,
         TicketRecord.complexity,
         TicketRecord.priority,
-    ).all()
+    ).order_by(
+        TicketRecord.binding_id.asc(),
+        TicketRecord.external_group_id.asc(),
+        TicketRecord.external_category.asc().nullsfirst(),
+        TicketRecord.category.asc().nullsfirst(),
+        TicketRecord.ai_suggested_team.asc().nullsfirst(),
+        TicketRecord.ai_status.asc().nullsfirst(),
+        TicketRecord.complexity.asc().nullsfirst(),
+        TicketRecord.priority.asc().nullsfirst(),
+    ).limit(GROUP_PROFILE_AGGREGATE_LIMIT + 1).all()
+    profiles_truncated = len(rows) > GROUP_PROFILE_AGGREGATE_LIMIT
+    rows = rows[:GROUP_PROFILE_AGGREGATE_LIMIT]
 
     counters: Dict[tuple[str, str], Dict[str, Counter]] = {}
     for (
@@ -687,7 +789,20 @@ def build_group_profiles(
         )
         bucket["levels"][level] += int(count)
 
-    group_rows = db.query(ExternalGroupRecord).all()
+    directory_group_scope = or_(*(
+        and_(
+            _binding_key_scope(ExternalGroupRecord.binding_id, binding_id),
+            ExternalGroupRecord.external_id.in_(sorted(group_ids)),
+        )
+        for binding_id, group_ids in sorted(groups_by_binding.items())
+    ))
+    group_rows = db.query(ExternalGroupRecord).filter(
+        directory_group_scope,
+    ).order_by(
+        ExternalGroupRecord.binding_id.asc(),
+        ExternalGroupRecord.external_id.asc(),
+        ExternalGroupRecord.id.asc(),
+    ).limit(len(normalized_keys)).all()
     names = {
         (group.binding_id or "legacy", group.external_id): group.name
         for group in group_rows
@@ -707,7 +822,7 @@ def build_group_profiles(
             "level_samples": level_samples,
             "level_confidence": level_confidence,
         }
-    return profiles
+    return profiles, profiles_truncated
 
 
 def routing_alert(
@@ -822,28 +937,152 @@ def support_level_assessment(
     }
 
 
-def public_conversations_for_tickets(
-    db: Session, ticket_ids: List[str]
-) -> Dict[str, List[ExternalConversationRecord]]:
-    if not ticket_ids:
-        return {}
-    rows = db.query(ExternalConversationRecord).filter(
-        ExternalConversationRecord.ticket_id.in_(ticket_ids),
+PUBLIC_CONVERSATION_SAMPLE_LIMIT = 20
+PUBLIC_CONVERSATION_BODY_CHAR_LIMIT = 4_000
+PUBLIC_CONVERSATION_TICKET_LIMIT = 500
+
+
+@dataclass(frozen=True)
+class PublicConversationSample:
+    ticket_id: str
+    external_id: str
+    body: str
+    incoming: bool
+    provider_created_at: Optional[datetime]
+    provider_updated_at: Optional[datetime]
+    received_at: datetime
+
+
+def bounded_public_conversations_for_tickets(
+    db: Session,
+    ticket_ids: List[str],
+    *,
+    per_ticket_limit: int = PUBLIC_CONVERSATION_SAMPLE_LIMIT,
+) -> tuple[Dict[str, List[PublicConversationSample]], set[str]]:
+    """Load a fixed recent transcript sample for deterministic text signals.
+
+    Provider conversations are the lossless archive and individual bodies may
+    be large. Analytics therefore projects only the columns it needs, caps each
+    body, and admits at most ``limit + 1`` rows per already-bounded ticket so a
+    caller can disclose truncation without materializing the full one-to-many
+    relation.
+    """
+    bounded_ticket_ids = list(dict.fromkeys(ticket_ids))
+    if not bounded_ticket_ids:
+        return {}, set()
+    if len(bounded_ticket_ids) > PUBLIC_CONVERSATION_TICKET_LIMIT:
+        raise ValueError("too many tickets for bounded conversation analytics")
+    limit = max(1, min(int(per_ticket_limit), PUBLIC_CONVERSATION_SAMPLE_LIMIT))
+    conversation_at = func.coalesce(
+        ExternalConversationRecord.provider_created_at,
+        ExternalConversationRecord.provider_updated_at,
+        ExternalConversationRecord.received_at,
+    )
+    ranked = db.query(
+        ExternalConversationRecord.id.label("conversation_id"),
+        ExternalConversationRecord.ticket_id.label("ticket_id"),
+        func.row_number().over(
+            partition_by=ExternalConversationRecord.ticket_id,
+            order_by=(
+                conversation_at.desc(),
+                ExternalConversationRecord.external_id.desc(),
+                ExternalConversationRecord.id.desc(),
+            ),
+        ).label("conversation_rank"),
+    ).filter(
+        ExternalConversationRecord.ticket_id.in_(bounded_ticket_ids),
         ExternalConversationRecord.deleted.is_(False),
         ExternalConversationRecord.is_private.is_(False),
+        ExternalConversationRecord.public_tombstone.is_(False),
+    ).subquery()
+    sample_at = func.coalesce(
+        ExternalConversationRecord.provider_created_at,
+        ExternalConversationRecord.provider_updated_at,
+        ExternalConversationRecord.received_at,
+    )
+    rows = db.query(
+        ranked.c.ticket_id,
+        ExternalConversationRecord.external_id,
+        func.substr(
+            func.coalesce(ExternalConversationRecord.body, ""),
+            1,
+            PUBLIC_CONVERSATION_BODY_CHAR_LIMIT,
+        ).label("body"),
+        ExternalConversationRecord.incoming,
+        ExternalConversationRecord.provider_created_at,
+        ExternalConversationRecord.provider_updated_at,
+        ExternalConversationRecord.received_at,
+        ranked.c.conversation_rank,
+    ).join(
+        ExternalConversationRecord,
+        ExternalConversationRecord.id == ranked.c.conversation_id,
+    ).filter(
+        ranked.c.conversation_rank <= limit + 1,
     ).order_by(
-        ExternalConversationRecord.ticket_id.asc(),
-        func.coalesce(
-            ExternalConversationRecord.provider_created_at,
-            ExternalConversationRecord.provider_updated_at,
-            ExternalConversationRecord.received_at,
-        ).asc(),
+        ranked.c.ticket_id.asc(),
+        sample_at.asc(),
         ExternalConversationRecord.external_id.asc(),
     ).all()
-    grouped: Dict[str, List[ExternalConversationRecord]] = {}
+    grouped: Dict[str, List[PublicConversationSample]] = {}
+    truncated_ticket_ids: set[str] = set()
     for row in rows:
-        grouped.setdefault(row.ticket_id, []).append(row)
-    return grouped
+        if row.conversation_rank > limit:
+            truncated_ticket_ids.add(row.ticket_id)
+            continue
+        grouped.setdefault(row.ticket_id, []).append(PublicConversationSample(
+            ticket_id=row.ticket_id,
+            external_id=row.external_id,
+            body=row.body or "",
+            incoming=bool(row.incoming),
+            provider_created_at=row.provider_created_at,
+            provider_updated_at=row.provider_updated_at,
+            received_at=row.received_at,
+        ))
+    return grouped, truncated_ticket_ids
+
+
+def public_conversation_sla_facts(
+    db: Session,
+    ticket_ids: List[str],
+) -> Dict[str, tuple[Optional[datetime], bool]]:
+    """Aggregate first-response facts without selecting conversation bodies."""
+    bounded_ticket_ids = list(dict.fromkeys(ticket_ids))
+    if not bounded_ticket_ids:
+        return {}
+    if len(bounded_ticket_ids) > PUBLIC_CONVERSATION_TICKET_LIMIT:
+        raise ValueError("too many tickets for conversation SLA analytics")
+    conversation_at = func.coalesce(
+        ExternalConversationRecord.provider_created_at,
+        ExternalConversationRecord.provider_updated_at,
+        ExternalConversationRecord.received_at,
+    )
+    started_at = func.coalesce(
+        TicketRecord.external_created_at,
+        TicketRecord.created_at,
+    )
+    first_response = func.min(case((and_(
+        ExternalConversationRecord.incoming.is_(False),
+        conversation_at >= started_at,
+    ), conversation_at), else_=None))
+    rows = db.query(
+        ExternalConversationRecord.ticket_id,
+        first_response,
+        func.count(ExternalConversationRecord.id),
+    ).join(
+        TicketRecord,
+        TicketRecord.id == ExternalConversationRecord.ticket_id,
+    ).filter(
+        ExternalConversationRecord.ticket_id.in_(bounded_ticket_ids),
+        ExternalConversationRecord.deleted.is_(False),
+        ExternalConversationRecord.is_private.is_(False),
+        ExternalConversationRecord.public_tombstone.is_(False),
+    ).group_by(
+        ExternalConversationRecord.ticket_id,
+    ).all()
+    return {
+        ticket_id: (responded_at, bool(public_count))
+        for ticket_id, responded_at, public_count in rows
+    }
 
 
 def _conversation_at(row: ExternalConversationRecord) -> datetime:
@@ -853,7 +1092,10 @@ def _conversation_at(row: ExternalConversationRecord) -> datetime:
 def customer_friction_signal(
     ticket: TicketRecord,
     conversations: List[ExternalConversationRecord],
-    *, now: Optional[datetime] = None,
+    *,
+    now: Optional[datetime] = None,
+    terminal_statuses: Optional[Collection[str]] = None,
+    conversation_truncated: bool = False,
 ) -> Dict[str, Any]:
     now = now or datetime.utcnow()
     incoming = [row for row in conversations if row.incoming]
@@ -879,7 +1121,7 @@ def customer_friction_signal(
         or not ticket.external_source
     )
     ticket_end = (
-        now if _open(ticket)
+        now if _open(ticket, terminal_statuses)
         else ticket.external_resolved_at or ticket.resolved_at
         or ticket.external_updated_at or ticket.updated_at or now
     )
@@ -906,14 +1148,21 @@ def customer_friction_signal(
     # A completed late reply is accounted for in the reactive first-response
     # SLA view. The live friction alert remains actionable by firing only when
     # a requester turn is still waiting beyond the elapsed-time threshold.
-    long_gap = current_unanswered_gap >= gap_threshold and _open(ticket)
+    long_gap = (
+        current_unanswered_gap >= gap_threshold
+        and _open(ticket, terminal_statuses)
+    )
     frustrated = bool(frustration_evidence)
     flagged = frustrated or long_gap or excessive_back_and_forth
     evidence = list(dict.fromkeys(frustration_evidence))
     if long_gap:
         evidence.append(f"A requester turn has waited {round(current_unanswered_gap, 1)} hours for a response")
     if excessive_back_and_forth:
-        evidence.append(f"{len(conversations)} public messages across at least {round_trips} response cycles")
+        qualifier = "At least " if conversation_truncated else ""
+        evidence.append(
+            f"{qualifier}{len(conversations)} public messages across at least "
+            f"{round_trips} response cycles"
+        )
     severity_score = (2 if frustrated else 0) + (2 if long_gap else 0) + (1 if excessive_back_and_forth else 0)
     return {
         "ticket_id": ticket.id,
@@ -928,6 +1177,7 @@ def customer_friction_signal(
         "current_unanswered_gap_hours": round(current_unanswered_gap, 2),
         "gap_threshold_hours": gap_threshold,
         "public_message_count": len(conversations),
+        "public_message_count_truncated": conversation_truncated,
         "requester_message_count": len(requester_events),
         "agent_message_count": len(agent_events),
         "unanswered_requester_turns": unanswered,
@@ -990,10 +1240,14 @@ FIRST_RESPONSE_SLA_HOURS = {"P1": 1.0, "P2": 4.0, "P3": 8.0}
 def first_response_sla_status(
     ticket: TicketRecord,
     conversations: List[ExternalConversationRecord],
-    *, now: Optional[datetime] = None,
+    *,
+    now: Optional[datetime] = None,
+    terminal_statuses: Optional[Collection[str]] = None,
+    responded_at: Optional[datetime] = None,
+    conversation_coverage: Optional[bool] = None,
 ) -> Dict[str, Any]:
     now = now or datetime.utcnow()
-    sla_exempt = ticket_is_sla_exempt(ticket)
+    sla_exempt = ticket_is_sla_exempt(ticket, terminal_statuses or ())
     started_at = ticket.external_created_at or ticket.created_at or now
     due_at = ticket.external_fr_due_by or ticket.response_due_at
     if due_at and due_at > started_at:
@@ -1003,21 +1257,26 @@ def first_response_sla_status(
         target_source = "priority_policy"
         target_hours = FIRST_RESPONSE_SLA_HOURS.get(ticket.priority, 8.0)
         due_at = started_at + timedelta(hours=target_hours)
-    response_times = [
-        _conversation_at(row) for row in conversations
-        if not row.incoming and _conversation_at(row) >= started_at
-    ]
-    responded_at = min(response_times) if response_times else None
-    conversation_coverage = bool(
-        conversations
-        or ticket.external_conversations_synced_at
-        or not ticket.external_source
-    )
+    if conversation_coverage is None:
+        response_times = [
+            _conversation_at(row) for row in conversations
+            if not row.incoming and _conversation_at(row) >= started_at
+        ]
+        responded_at = min(response_times) if response_times else None
+        conversation_coverage = bool(
+            conversations
+            or ticket.external_conversations_synced_at
+            or not ticket.external_source
+        )
+    else:
+        conversation_coverage = bool(conversation_coverage or responded_at is not None)
     terminal_at = (
         ticket.external_resolved_at or ticket.resolved_at
         or ticket.external_updated_at or ticket.updated_at or now
     )
-    observed_at = responded_at or (now if _open(ticket) else terminal_at)
+    observed_at = responded_at or (
+        now if _open(ticket, terminal_statuses) else terminal_at
+    )
     delta_hours = (due_at - observed_at).total_seconds() / 3600.0
     if sla_exempt or (not conversation_coverage and responded_at is None):
         status = "unmeasured"
@@ -1026,7 +1285,9 @@ def first_response_sla_status(
     else:
         breached = delta_hours < 0
         approaching = (
-            not breached and responded_at is None and _open(ticket)
+            not breached
+            and responded_at is None
+            and _open(ticket, terminal_statuses)
             and delta_hours <= target_hours * SLA_AT_RISK_THRESHOLD
         )
         status = "breached" if breached else (
@@ -1038,7 +1299,11 @@ def first_response_sla_status(
         "priority": ticket.priority or "Unspecified",
         "metric": "first_response",
         "status": status,
-        "breach_state": "active" if breached and responded_at is None and _open(ticket) else ("historical" if breached else None),
+        "breach_state": "active" if (
+            breached
+            and responded_at is None
+            and _open(ticket, terminal_statuses)
+        ) else ("historical" if breached else None),
         "target_source": target_source,
         "target_hours": round(target_hours, 2),
         "started_at": started_at.isoformat(),
@@ -1046,16 +1311,17 @@ def first_response_sla_status(
         "completed_at": responded_at.isoformat() if responded_at else None,
         "remaining_hours": 0.0 if sla_exempt else round(max(0.0, delta_hours), 2),
         "overdue_hours": 0.0 if sla_exempt else round(max(0.0, -delta_hours), 2),
-        "is_open": _open(ticket),
+        "is_open": _open(ticket, terminal_statuses),
     }
 
 
 def resolution_sla_monitor_status(
     ticket: TicketRecord,
     *, now: Optional[datetime] = None,
+    terminal_statuses: Optional[Collection[str]] = None,
 ) -> Dict[str, Any]:
     now = now or datetime.utcnow()
-    sla_exempt = ticket_is_sla_exempt(ticket)
+    sla_exempt = ticket_is_sla_exempt(ticket, terminal_statuses or ())
     started_at = ticket.external_created_at or ticket.created_at or now
     due_at = ticket.resolution_due_at or ticket.external_due_by or ticket.due_by
     configured = float(SLA_HOURS.get(ticket.priority, DEFAULT_SLA_HOURS))
@@ -1067,16 +1333,24 @@ def resolution_sla_monitor_status(
         target_hours = configured
         due_at = started_at + timedelta(hours=target_hours)
     completed_at = ticket.external_resolved_at or ticket.resolved_at
-    observed_at = completed_at or (now if _open(ticket) else ticket.external_updated_at or ticket.updated_at or now)
+    observed_at = completed_at or (
+        now
+        if _open(ticket, terminal_statuses)
+        else ticket.external_updated_at or ticket.updated_at or now
+    )
     delta_hours = (due_at - observed_at).total_seconds() / 3600.0
-    if sla_exempt or (not _open(ticket) and completed_at is None):
+    if sla_exempt or (
+        not _open(ticket, terminal_statuses) and completed_at is None
+    ):
         status = "unmeasured"
         breached = False
         approaching = False
     else:
         breached = delta_hours < 0
         approaching = (
-            not breached and completed_at is None and _open(ticket)
+            not breached
+            and completed_at is None
+            and _open(ticket, terminal_statuses)
             and delta_hours <= target_hours * SLA_AT_RISK_THRESHOLD
         )
         status = "breached" if breached else (
@@ -1088,7 +1362,11 @@ def resolution_sla_monitor_status(
         "priority": ticket.priority or "Unspecified",
         "metric": "resolution",
         "status": status,
-        "breach_state": "active" if breached and completed_at is None and _open(ticket) else ("historical" if breached else None),
+        "breach_state": "active" if (
+            breached
+            and completed_at is None
+            and _open(ticket, terminal_statuses)
+        ) else ("historical" if breached else None),
         "target_source": target_source,
         "target_hours": round(target_hours, 2),
         "started_at": started_at.isoformat(),
@@ -1096,7 +1374,7 @@ def resolution_sla_monitor_status(
         "completed_at": completed_at.isoformat() if completed_at else None,
         "remaining_hours": 0.0 if sla_exempt else round(max(0.0, delta_hours), 2),
         "overdue_hours": 0.0 if sla_exempt else round(max(0.0, -delta_hours), 2),
-        "is_open": _open(ticket),
+        "is_open": _open(ticket, terminal_statuses),
     }
 
 
@@ -1113,7 +1391,9 @@ def run_level_zero_study(
         TicketRecord.updated_at,
     )
     base = db.query(TicketRecord).filter(
-        func.lower(func.coalesce(TicketRecord.status, "")).in_(["closed", "resolved"]),
+        portable_ascii_lower_expression(TicketRecord.status).in_(
+            ["closed", "resolved"]
+        ),
         completed_at >= range_start,
         completed_at <= now,
         TicketRecord.portal_access_token_hash.is_(None),
@@ -1131,7 +1411,9 @@ def run_level_zero_study(
         TicketRecord,
         TicketRecord.id == ExternalConversationRecord.ticket_id,
     ).filter(
-        func.lower(func.coalesce(TicketRecord.status, "")).in_(["closed", "resolved"]),
+        portable_ascii_lower_expression(TicketRecord.status).in_(
+            ["closed", "resolved"]
+        ),
         completed_at >= range_start,
         completed_at <= now,
         ExternalConversationRecord.deleted.is_(False),
@@ -1391,6 +1673,7 @@ def account_health(
     since: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     """Per-reporter health inside the selected operational activity window."""
+    terminals = terminal_status_names(db)
     query = _scope_query(
         db.query(TicketRecord).filter(TicketRecord.reporter == reporter),
         since,
@@ -1399,17 +1682,17 @@ def account_health(
     if not total:
         return {"reporter": reporter, "health_score": None, "churn_risk": "unknown",
                 "open": 0, "total": 0}
-    open_n = query.filter(or_(
-        TicketRecord.status.is_(None),
-        func.lower(TicketRecord.status).notin_(["closed", "resolved", "cancelled"]),
-    )).count()
+    open_n = query.filter(active_ticket_filter(db)).count()
     resolved_n = query.filter(TicketRecord.resolved_at.isnot(None)).count()
     tickets = query.order_by(
         TicketRecord.updated_at.desc().nullslast(), TicketRecord.id.asc()
     ).limit(_MAX_ANALYTICS_ROWS).all()
 
     analyzed = len(tickets)
-    avg_risk = sum(escalation_risk(t) for t in tickets) / analyzed
+    avg_risk = sum(
+        escalation_risk(t, terminal_statuses=terminals)
+        for t in tickets
+    ) / analyzed
 
     # Sentiment pain: count negative sentiments.
     pain = sum(
@@ -1613,10 +1896,8 @@ def proactive_alerts(
     """Unified feed of cases needing human attention right now:
     escalation-prone, SLA at-risk, and SLA-breached tickets."""
     now = now or datetime.utcnow()
-    open_query = db.query(TicketRecord).filter(or_(
-        TicketRecord.status.is_(None),
-        func.lower(TicketRecord.status).notin_(["closed", "resolved", "cancelled"]),
-    ))
+    terminals = terminal_status_names(db)
+    open_query = db.query(TicketRecord).filter(active_ticket_filter(db))
     open_query = _scope_query(open_query, since)
     total_open = open_query.count()
     open_tickets = open_query.order_by(
@@ -1633,11 +1914,11 @@ def proactive_alerts(
     sla_at_risk = []
     sla_breached = []
     for t in open_tickets:
-        risk = escalation_risk(t, now)
+        risk = escalation_risk(t, now, terminals)
         if risk >= 70:
             escalate_prone.append({"ticket_id": t.id, "subject": t.subject,
                                     "risk": risk, "priority": t.priority})
-        sla = sla_status(t, now)
+        sla = sla_status(t, now, terminals)
         if sla["status"] == "at_risk":
             sla_at_risk.append(sla)
         elif sla["status"] == "breached":

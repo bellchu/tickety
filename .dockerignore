@@ -18,6 +18,12 @@ dist
 build
 coverage
 *.tar
+backups/
+*.dump
+*.backup
+*.bak
+*.sql
+*.sql.gz
 *.db
 *.sqlite
 .DS_Store

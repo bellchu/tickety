@@ -19,7 +19,7 @@ const variantClasses: Record<ButtonVariant, string> = {
 };
 
 const sizeClasses: Record<ButtonSize, string> = {
-  sm: "min-h-8 px-3 text-xs",
+  sm: "min-h-11 px-3 text-xs sm:min-h-8",
   md: "min-h-10 px-4 text-sm",
   lg: "min-h-11 px-5 text-sm",
 };
@@ -92,7 +92,7 @@ export interface IconButtonProps
 }
 
 const iconSizeClasses = {
-  sm: "h-8 w-8",
+  sm: "h-11 w-11 sm:h-8 sm:w-8",
   md: "h-10 w-10",
   lg: "h-11 w-11",
 };

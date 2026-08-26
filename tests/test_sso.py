@@ -9,7 +9,8 @@ from unittest.mock import AsyncMock, patch
 import jwt
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -486,35 +487,17 @@ class SsoEndpointTests(unittest.TestCase):
             self.assertTrue(user.is_active)
             self.assertEqual(link.user_id, user.id)
 
-    def test_ambiguous_legacy_email_never_links_arbitrarily(self):
-        identity = sso_service.OidcIdentity(
-            issuer=str(self.metadata["issuer"]),
-            subject="ambiguous-subject",
-            email="duplicate@example.com",
-            name="Duplicate User",
-        )
+    def test_database_rejects_legacy_email_key_drift(self):
         with self.session_factory() as db:
-            db.add_all([
-                UserRecord(
-                    id="u-duplicate-1",
-                    email=identity.email,
-                    name="First",
-                    role="agent",
-                    is_active=True,
-                    password_hash="",
-                ),
-                UserRecord(
-                    id="u-duplicate-2",
-                    email=identity.email,
-                    name="Second",
-                    role="agent",
-                    is_active=True,
-                    password_hash="",
-                ),
-            ])
             db.commit()
-            with self.assertRaisesRegex(PermissionError, "identity_conflict"):
-                main._resolve_sso_user(db, identity, "entra")
+            with self.assertRaises(IntegrityError):
+                db.execute(text(
+                    "INSERT INTO users (id, name, email, role, is_active) VALUES "
+                    "('u-legacy-drift', 'Legacy Drift', 'duplicate@example.com', "
+                    "'agent', 1)"
+                ))
+                db.flush()
+            db.rollback()
 
     def test_provider_denial_consumes_transaction_without_token_exchange(self):
         _, _, state = self._begin_login("/reports")

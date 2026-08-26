@@ -166,16 +166,17 @@ class CorpusMutationControlsTests(unittest.TestCase):
             category="Network",
             priority="P2",
         )
-        main._apply_ticket_analysis(ticket, {
-            "sentiment": "Moderate",
-            "category": "Software",
-            "priority": "P3",
-            "mood": "concerned",
-            "complexity": 2,
-            "reasoning": "scope: single user",
-            "action": "route",
-            "recommended_team": "Application Support",
-        }, None)
+        with self.session_factory() as db:
+            main._apply_ticket_analysis(ticket, {
+                "sentiment": "Moderate",
+                "category": "Software",
+                "priority": "P3",
+                "mood": "concerned",
+                "complexity": 2,
+                "reasoning": "scope: single user",
+                "action": "route",
+                "recommended_team": "Application Support",
+            }, db)
         self.assertEqual(ticket.category, "Network")
         self.assertEqual(ticket.ai_suggested_category, "Software")
         self.assertEqual(ticket.ai_suggested_team, "Application Support")

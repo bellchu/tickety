@@ -8,7 +8,7 @@ import { formatTimeAgo } from "@/lib/utils";
 import { formatOperationalTimestamp, requesterEmail, requesterName, safeMailto } from "@/lib/ticket-display";
 import { Alert, Button, Skeleton } from "@/components/ui";
 
-const COMMENT_PAGE_SIZE = 500;
+const COMMENT_PAGE_SIZE = 25;
 
 type ThreadTicket = Pick<
   Ticket,

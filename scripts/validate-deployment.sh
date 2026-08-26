@@ -2,54 +2,24 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-CHART_DIR="$ROOT_DIR/deploy/helm/tickety"
 REQUIRE_DOCKER=false
-REQUIRE_HELM=false
-REQUIRE_KUBECTL=false
-REQUIRE_KUBECTL_CLUSTER=false
-REQUIRE_YAML=false
 
 usage() {
   cat <<'EOF'
-Usage: scripts/validate-deployment.sh [options]
+Usage: scripts/validate-deployment.sh [--require-docker]
 
-Validate the Docker Compose configuration, Helm chart, and Kubernetes manifests
-using every available local tool. By default, unavailable optional tools are
-reported and skipped. Require a tool explicitly for CI or a strict local check.
+Validate the only supported Tickety production release path: Docker Compose to
+https://tickety.nexora.com through the fixed local Cloudflare Tunnel mapping.
 
 Options:
-  --require-docker   Fail unless Docker Compose v2 is available.
-  --require-helm     Fail unless Helm is available.
-  --require-kubectl  Fail unless kubectl is available.
-  --require-kubectl-cluster
-                    Fail unless kubectl can reach a Kubernetes API server.
-  --require-yaml     Fail unless Python with PyYAML is available.
-  -h, --help         Show this help text.
+  --require-docker  Fail unless Docker Compose v2 is available.
+  -h, --help        Show this help text.
 EOF
-}
-
-require_or_skip() {
-  local required=$1
-  local tool=$2
-
-  if command -v "$tool" >/dev/null 2>&1; then
-    return 0
-  fi
-  if [[ $required == true ]]; then
-    echo "Required tool is unavailable: $tool" >&2
-    exit 1
-  fi
-  echo "Skipping $tool validation: tool is unavailable."
-  return 1
 }
 
 while (($#)); do
   case "$1" in
     --require-docker) REQUIRE_DOCKER=true ;;
-    --require-helm) REQUIRE_HELM=true ;;
-    --require-kubectl) REQUIRE_KUBECTL=true ;;
-    --require-kubectl-cluster) REQUIRE_KUBECTL=true; REQUIRE_KUBECTL_CLUSTER=true ;;
-    --require-yaml) REQUIRE_YAML=true ;;
     -h|--help) usage; exit 0 ;;
     *)
       echo "Unknown option: $1" >&2
@@ -60,208 +30,162 @@ while (($#)); do
   shift
 done
 
-echo "Checking deployment shell scripts..."
-shell_scripts=("$ROOT_DIR/deploy.sh")
-while IFS= read -r -d '' script; do
-  shell_scripts+=("$script")
-done < <(find "$ROOT_DIR/k8s" "$ROOT_DIR/scripts" -type f -name '*.sh' -print0 2>/dev/null)
-bash -n "${shell_scripts[@]}"
+if [[ -n ${DOCKER_HOST:-} || -n ${DOCKER_CONTEXT:-} ]]; then
+  echo "Deployment validation rejects DOCKER_HOST and DOCKER_CONTEXT overrides." >&2
+  exit 1
+fi
 
-echo "Checking production target regression guard..."
-"$ROOT_DIR/scripts/verify-production-target.sh" --self-test
+echo "Checking production shell scripts..."
+bash -n \
+  "$ROOT_DIR/deploy.sh" \
+  "$ROOT_DIR/scripts/validate-deployment.sh" \
+  "$ROOT_DIR/scripts/verify-compose-production.sh"
 
-yaml_python=""
-json_python=""
-for candidate in python3 python; do
-  if [[ -z $json_python ]] && command -v "$candidate" >/dev/null 2>&1; then
-    json_python=$candidate
-  fi
-  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import yaml' >/dev/null 2>&1; then
-    yaml_python=$candidate
-    break
+echo "Checking production target regression guards..."
+"$ROOT_DIR/scripts/verify-compose-production.sh" --self-test
+
+echo "Checking Docker production release gate wiring..."
+if [[ $(grep -Fc '"$ROOT_DIR/scripts/verify-compose-production.sh" --mapping-only' \
+  "$ROOT_DIR/deploy.sh") -lt 2 ]]; then
+  echo "Docker deployment must verify the fixed production mapping before build and rollout." >&2
+  exit 1
+fi
+if ! grep -Fq -- '--expected-full-sha "$build_full_sha"' "$ROOT_DIR/deploy.sh" || \
+  ! grep -Fq -- '--expected-short-sha "$build_sha"' "$ROOT_DIR/deploy.sh"; then
+  echo "Docker deployment must verify the expected full and short Git SHA after rollout." >&2
+  exit 1
+fi
+if grep -Eq 'deploy_(kubernetes|aks)|MODE == (kubernetes|aks)|helm upgrade|kubectl apply|az acr build' \
+  "$ROOT_DIR/deploy.sh"; then
+  echo "deploy.sh must not expose a production path outside Docker Compose." >&2
+  exit 1
+fi
+if "$ROOT_DIR/deploy.sh" kubernetes >/dev/null 2>&1; then
+  echo "deploy.sh unexpectedly accepted a Kubernetes production mode." >&2
+  exit 1
+fi
+for docker_override in DOCKER_HOST DOCKER_CONTEXT; do
+  if env "$docker_override=tcp://127.0.0.1:9" \
+    "$ROOT_DIR/scripts/verify-compose-production.sh" --mapping-only >/dev/null 2>&1; then
+    echo "Production verifier accepted forbidden $docker_override override." >&2
+    exit 1
   fi
 done
 
-validate_yaml_resources() {
-  "$yaml_python" - "$@" <<'PY'
-from pathlib import Path
-import sys
-import yaml
+echo "Checking Docker build-context exclusions..."
+for pattern in '.env' '.env.*' 'backups/' '*.dump' '*.backup' '*.bak' '*.sql' '*.sql.gz'; do
+  if ! grep -Fqx -- "$pattern" "$ROOT_DIR/.dockerignore"; then
+    echo ".dockerignore must exclude $pattern" >&2
+    exit 1
+  fi
+done
 
-count = 0
-for filename in sys.argv[1:]:
-    path = Path(filename)
-    for index, document in enumerate(yaml.safe_load_all(path.read_text()), start=1):
-        if document is None:
-            continue
-        if not isinstance(document, dict):
-            raise SystemExit(f"{path}:{index}: document must be a mapping")
-        for field in ("apiVersion", "kind", "metadata"):
-            if field not in document:
-                raise SystemExit(f"{path}:{index}: missing {field}")
-        metadata = document["metadata"]
-        if not isinstance(metadata, dict) or not metadata.get("name"):
-            raise SystemExit(f"{path}:{index}: missing metadata.name")
-        count += 1
-print(f"Validated {count} Kubernetes resources from {len(sys.argv) - 1} file(s).")
-PY
-}
-
-validate_existing_secret_rollout() {
-  "$yaml_python" - "$1" <<'PY'
-from pathlib import Path
-import sys
-import yaml
-
-expected_token = "deployment-validation"
-documents = list(yaml.safe_load_all(Path(sys.argv[1]).read_text()))
-deployments = {
-    document.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/component"):
-        document.get("spec", {}).get("template", {}).get("metadata", {})
-        .get("annotations", {}).get("tickety.io/existing-secret-rollout-token")
-    for document in documents
-    if isinstance(document, dict) and document.get("kind") == "Deployment"
-}
-expected = {"backend": expected_token, "worker": expected_token}
-actual = {component: deployments.get(component) for component in expected}
-if actual != expected:
-    raise SystemExit(f"existing Secret rollout annotations are invalid: {actual}")
-if any(isinstance(document, dict) and document.get("kind") == "Secret" for document in documents):
-    raise SystemExit("existingSecret rendering must not create a chart-managed Secret")
-print("Validated existing Secret rollout annotations.")
-PY
-}
-
-rendered_files=()
-existing_secret_render=""
-temporary_dir=""
-cleanup() {
-  [[ -z $temporary_dir ]] || rm -rf "$temporary_dir"
-}
-trap cleanup EXIT
-
-if require_or_skip "$REQUIRE_DOCKER" docker; then
-  if ! docker compose version >/dev/null 2>&1; then
+if ! command -v docker >/dev/null 2>&1; then
+  if [[ $REQUIRE_DOCKER == true ]]; then
+    echo "Required tool is unavailable: docker" >&2
+    exit 1
+  fi
+  echo "Skipping Compose validation: docker is unavailable."
+  echo "Deployment validation passed."
+  exit 0
+fi
+if ! docker compose version >/dev/null 2>&1; then
+  if [[ $REQUIRE_DOCKER == true ]]; then
     echo "Docker Compose 2.24 or later is required (run it as 'docker compose')." >&2
     exit 1
   fi
-  echo "Checking Docker Compose configuration..."
-  docker compose --project-directory "$ROOT_DIR" -f "$ROOT_DIR/docker-compose.yml" config --quiet
-  if [[ -n $json_python ]]; then
-    docker compose --project-directory "$ROOT_DIR" -f "$ROOT_DIR/docker-compose.yml" config --format json |
-      "$json_python" -c '
+  echo "Skipping Compose validation: Docker Compose v2 is unavailable."
+  echo "Deployment validation passed."
+  exit 0
+fi
+
+echo "Checking Docker Compose configuration..."
+docker compose --project-directory "$ROOT_DIR" \
+  -f "$ROOT_DIR/docker-compose.yml" config --quiet
+
+python_command=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1; then
+    python_command=$candidate
+    break
+  fi
+done
+if [[ -z $python_command ]]; then
+  echo "Python is required to validate the rendered Compose topology." >&2
+  exit 1
+fi
+
+docker compose --project-directory "$ROOT_DIR" \
+  -f "$ROOT_DIR/docker-compose.yml" config --format json |
+  "$python_command" -c '
 import json
 import sys
 
 model = json.load(sys.stdin)
+if model.get("name") != "tickety":
+    raise SystemExit("Compose production project name must be tickety")
 services = model["services"]
 expected = {"postgres", "migrate", "backend", "worker", "frontend", "tunnel-proxy"}
-if not expected.issubset(services):
-    raise SystemExit(f"missing Compose services: {sorted(expected - set(services))}")
+if set(services) != expected:
+    raise SystemExit(f"Compose services differ from the fixed topology: {sorted(services)}")
+for name in ("migrate", "backend", "worker"):
+    if services[name].get("image") != "tickety-backend:latest":
+        raise SystemExit(f"{name} must use tickety-backend:latest")
+if services["frontend"].get("image") != "tickety-frontend:latest":
+    raise SystemExit("frontend must use tickety-frontend:latest")
 for name, service in services.items():
     if name not in {"frontend", "tunnel-proxy"} and service.get("ports"):
         raise SystemExit(f"{name} must not publish host ports")
-tunnel_ports = services["tunnel-proxy"].get("ports") or []
+frontend_ports = services["frontend"].get("ports") or []
+if len(frontend_ports) != 1:
+    raise SystemExit("frontend must publish exactly one host port")
+frontend_port = frontend_ports[0]
+if (
+    frontend_port.get("mode") != "ingress"
+    or frontend_port.get("target") != 3000
+    or frontend_port.get("protocol") != "tcp"
+    or frontend_port.get("host_ip") != "127.0.0.1"
+):
+    raise SystemExit("frontend host port must bind TCP 3000 to IPv4 loopback only")
 expected_tunnel_port = {
     "mode": "ingress",
     "target": 443,
     "published": "443",
     "protocol": "tcp",
+    "host_ip": "127.0.0.1",
 }
-if tunnel_ports != [expected_tunnel_port]:
-    raise SystemExit(
-        "tunnel-proxy must publish exactly host TCP 443 to container TCP 443"
-    )
+if (services["tunnel-proxy"].get("ports") or []) != [expected_tunnel_port]:
+    raise SystemExit("tunnel-proxy must bind host TCP 443 to IPv4 loopback only")
 if services["tunnel-proxy"]["depends_on"]["frontend"]["condition"] != "service_healthy":
     raise SystemExit("tunnel-proxy must wait for the healthy frontend")
-if services["backend"]["depends_on"]["migrate"]["condition"] != "service_completed_successfully":
-    raise SystemExit("backend must wait for successful migrations")
-if services["worker"]["depends_on"]["migrate"]["condition"] != "service_completed_successfully":
-    raise SystemExit("worker must wait for successful migrations")
+for name in ("backend", "worker"):
+    if services[name]["depends_on"]["migrate"]["condition"] != "service_completed_successfully":
+        raise SystemExit(f"{name} must wait for successful migrations")
 if services["worker"]["environment"].get("TICKETY_PROCESS_ROLE") != "worker":
     raise SystemExit("worker process role is missing")
 print("Validated Docker Compose service topology.")
 '
-    if ! grep -Eq '^[[:space:]]*reverse_proxy[[:space:]]+frontend:3000[[:space:]]*$' \
-      "$ROOT_DIR/deploy/local-tunnel/Caddyfile"; then
-      echo "tunnel-proxy must forward to frontend:3000" >&2
-      exit 1
-    fi
-  fi
-fi
 
-if require_or_skip "$REQUIRE_HELM" helm; then
-  if [[ ! -f $CHART_DIR/Chart.yaml ]]; then
-    echo "Helm chart is missing: $CHART_DIR" >&2
+echo "Checking DATABASE_URL routing-override rejection..."
+test_password=local-production-gate-test-password-0000000000000000000000000000
+for unsafe_database_url in \
+  "postgresql+psycopg2://tickety:${test_password}@postgres:5432/tickety?host=outside.invalid&port=6543" \
+  "postgresql+psycopg2://tickety:${test_password}@postgres:5432/tickety#host=outside.invalid"; do
+  if POSTGRES_USER=tickety \
+    POSTGRES_PASSWORD="$test_password" \
+    POSTGRES_DB=tickety \
+    DATABASE_URL="$unsafe_database_url" \
+    "$ROOT_DIR/scripts/verify-compose-production.sh" --mapping-only >/dev/null 2>&1; then
+    echo "Production verifier accepted a DATABASE_URL routing override." >&2
     exit 1
   fi
+done
+unset test_password unsafe_database_url
 
-  echo "Linting Helm chart..."
-  helm lint --strict --kube-version 1.25.0 "$CHART_DIR"
-
-  temporary_dir=$(mktemp -d)
-  render_chart() {
-    local name=$1
-    shift
-    local output="$temporary_dir/$name.yaml"
-    helm template tickety "$CHART_DIR" --namespace tickety --kube-version 1.25.0 "$@" >"$output"
-    rendered_files+=("$output")
-  }
-
-  echo "Rendering Helm chart variants..."
-  render_chart default
-  render_chart production --values "$ROOT_DIR/deploy/examples/production-values.yaml"
-  render_chart ingress --set ingress.enabled=true --set ingress.host=tickety.example.test
-  render_chart backup --set backup.enabled=true
-  render_chart external-database \
-    --set postgresql.enabled=false \
-    --set-string postgresql.externalDatabaseUrl='postgresql+psycopg2://tickety:password@database.example.test:5432/tickety'
-  render_chart existing-secret \
-    --set existingSecret=tickety-existing-secret \
-    --set-string existingSecretRolloutToken=deployment-validation
-  existing_secret_render="$temporary_dir/existing-secret.yaml"
-fi
-
-shopt -s nullglob
-manifest_files=("$ROOT_DIR"/k8s/*.yaml)
-if ((${#manifest_files[@]} == 0)); then
-  echo "No Kubernetes manifests found in $ROOT_DIR/k8s." >&2
+if ! grep -Eq '^[[:space:]]*reverse_proxy[[:space:]]+frontend:3000[[:space:]]*$' \
+  "$ROOT_DIR/deploy/local-tunnel/Caddyfile"; then
+  echo "tunnel-proxy must forward to frontend:3000" >&2
   exit 1
-fi
-
-if [[ -n $yaml_python ]]; then
-  echo "Checking Kubernetes YAML resources..."
-  if ((${#rendered_files[@]})); then
-    validate_yaml_resources "${manifest_files[@]}" "${rendered_files[@]}"
-    validate_existing_secret_rollout "$existing_secret_render"
-  else
-    validate_yaml_resources "${manifest_files[@]}"
-  fi
-elif [[ $REQUIRE_YAML == true ]]; then
-  echo "Required YAML validator is unavailable: install PyYAML for python3 or python." >&2
-  exit 1
-else
-  echo "Skipping YAML resource validation: PyYAML is unavailable."
-fi
-
-if require_or_skip "$REQUIRE_KUBECTL" kubectl; then
-  if kubectl version --request-timeout=5s --output=json >/dev/null 2>&1; then
-    echo "Validating Kubernetes manifests with kubectl client dry-run..."
-    # Client-side schema validation downloads OpenAPI from the configured
-    # cluster. YAML/resource checks above cover offline structure; disabling
-    # this lookup keeps the dry-run focused on kubectl resource handling.
-    kubectl apply --dry-run=client --validate=false -f "$ROOT_DIR/k8s"
-    if ((${#rendered_files[@]})); then
-      for rendered_file in "${rendered_files[@]}"; do
-        kubectl apply --dry-run=client --validate=false -f "$rendered_file"
-      done
-    fi
-  elif [[ $REQUIRE_KUBECTL_CLUSTER == true ]]; then
-    echo "A reachable Kubernetes API server is required for kubectl client dry-run validation." >&2
-    exit 1
-  else
-    echo "Skipping kubectl client dry-run: no reachable Kubernetes API server."
-  fi
 fi
 
 echo "Deployment validation passed."

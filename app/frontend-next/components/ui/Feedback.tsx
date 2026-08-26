@@ -59,6 +59,7 @@ export interface ErrorStateProps extends Omit<StateProps, "action"> {
   onRetry?: () => void;
   retrying?: boolean;
   actionProps?: Omit<ButtonProps, "children" | "onClick" | "pending">;
+  density?: "comfortable" | "compact";
 }
 
 export function ErrorState({
@@ -69,20 +70,28 @@ export function ErrorState({
   onRetry,
   retrying = false,
   actionProps,
+  density = "comfortable",
   className,
   ...props
 }: ErrorStateProps) {
   return (
     <div
       role="alert"
-      className={cn("flex min-h-52 flex-col items-center justify-center rounded-2xl border border-rust-400/30 bg-[var(--color-danger-soft)] px-6 py-10 text-center", className)}
+      className={cn(
+        "flex flex-col items-center justify-center rounded-2xl border border-rust-400/30 bg-[var(--color-danger-soft)] text-center",
+        density === "compact" ? "min-h-0 px-4 py-5" : "min-h-52 px-6 py-10",
+        className
+      )}
       {...props}
     >
-      <div className="mb-4 grid h-11 w-11 place-items-center rounded-xl bg-white/70 text-semantic-danger" aria-hidden="true">{icon}</div>
+      <div className={cn(
+        "grid place-items-center rounded-xl bg-white/70 text-semantic-danger",
+        density === "compact" ? "mb-2 h-9 w-9" : "mb-4 h-11 w-11"
+      )} aria-hidden="true">{icon}</div>
       <h3 className="text-sm font-semibold text-ink-700">{title}</h3>
       {description && <div className="mt-1 max-w-md text-sm leading-5 text-ink-500">{description}</div>}
       {onRetry && (
-        <Button className="mt-5" variant="secondary" onClick={onRetry} pending={retrying} pendingLabel="Retrying…" {...actionProps}>
+        <Button className={density === "compact" ? "mt-3" : "mt-5"} variant="secondary" onClick={onRetry} pending={retrying} pendingLabel="Retrying…" {...actionProps}>
           {actionLabel}
         </Button>
       )}

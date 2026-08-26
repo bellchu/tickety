@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import Optional
 
-from sqlalchemy import func, inspect, or_
+from sqlalchemy import inspect, or_
 from sqlalchemy.orm import Session
 
 from .database import TicketRecord, TicketStatusConfigRecord
+from .portable_keys import portable_ascii_lower, portable_ascii_lower_expression
 
 
 DEFAULT_TERMINAL_STATUSES = frozenset({"closed", "resolved", "cancelled"})
@@ -30,7 +31,7 @@ def terminal_status_names(db: Session) -> set[str]:
     ).all()
     names = set(DEFAULT_TERMINAL_STATUSES)
     names.update({
-        str(row[0]).strip().lower()
+        portable_ascii_lower(row[0])
         for row in configured
         if row and str(row[0] or "").strip()
     })
@@ -43,20 +44,20 @@ def active_ticket_filter(db: Session):
     terminal = tuple(sorted(terminal_status_names(db)))
     return or_(
         TicketRecord.status.is_(None),
-        func.lower(func.trim(TicketRecord.status)).notin_(terminal),
+        portable_ascii_lower_expression(TicketRecord.status).notin_(terminal),
     )
 
 
 def terminal_ticket_filter(db: Session):
     """SQL expression selecting tickets excluded from automatic AI."""
     terminal = tuple(sorted(terminal_status_names(db)))
-    return func.lower(func.trim(func.coalesce(TicketRecord.status, ""))).in_(terminal)
+    return portable_ascii_lower_expression(TicketRecord.status).in_(terminal)
 
 
 def is_terminal_status(db: Session, status: Optional[str]) -> bool:
     return bool(
         status
-        and status.strip().lower() in terminal_status_names(db)
+        and portable_ascii_lower(status) in terminal_status_names(db)
     )
 
 

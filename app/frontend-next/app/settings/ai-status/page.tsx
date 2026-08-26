@@ -176,6 +176,15 @@ export default function AIStatusPage() {
     return () => window.clearTimeout(timer);
   }, [searchInput]);
 
+  useEffect(() => {
+    const totalTasks = statusQuery.data?.total_tasks;
+    if (totalTasks === undefined || offset === 0 || offset < totalTasks) return;
+    const lastPageOffset = totalTasks === 0
+      ? 0
+      : Math.floor((totalTasks - 1) / PAGE_SIZE) * PAGE_SIZE;
+    setOffset(lastPageOffset);
+  }, [offset, statusQuery.data?.total_tasks]);
+
   const authError = isAuthError(authQuery.error)
     || isAuthError(statusQuery.error)
     || isAuthError(bulkMutation.error)
@@ -205,7 +214,7 @@ export default function AIStatusPage() {
     setScheduleTask(task);
     const snapshotNow = parseApiDateTime(statusQuery.data?.generated_at)
       || parseApiDateTime(task.updated_at)
-      || new Date(0);
+      || new Date();
     setScheduleInput(toLocalDateTimeInput(
       task.next_attempt_at || new Date(snapshotNow.getTime() + 15 * 60_000),
     ));
@@ -228,6 +237,19 @@ export default function AIStatusPage() {
 
   if (authQuery.isLoading || (canAccess && statusQuery.isLoading)) return <AIStatusSkeleton />;
   if (authError) return null;
+  if (authQuery.isError || !authQuery.data) {
+    return (
+      <PageFrame>
+        <ErrorState
+          title="AI status access could not be checked"
+          description="Your session could not be verified, so no administrative AI data was requested."
+          actionLabel="Retry access check"
+          onRetry={() => void authQuery.refetch()}
+          retrying={authQuery.isFetching}
+        />
+      </PageFrame>
+    );
+  }
   if (!canAccess) {
     return (
       <PageFrame>
@@ -238,7 +260,7 @@ export default function AIStatusPage() {
       </PageFrame>
     );
   }
-  if (statusQuery.error || !statusQuery.data) {
+  if (!statusQuery.data) {
     return (
       <PageFrame>
         <ErrorState
@@ -257,7 +279,7 @@ export default function AIStatusPage() {
   const hasNextPage = offset + data.tasks.length < data.total_tasks;
   const firstResult = data.total_tasks ? offset + 1 : 0;
   const lastResult = offset + data.tasks.length;
-  const snapshotNow = parseApiDateTime(data.generated_at) || new Date(0);
+  const snapshotNow = parseApiDateTime(data.generated_at) || new Date();
   const snapshotNowMs = snapshotNow.getTime();
   const maximumScheduleMs = snapshotNowMs + 365 * 24 * 60 * 60_000;
   const minimumSchedule = toLocalDateTimeInput(new Date(snapshotNowMs + 60_000));
@@ -279,9 +301,9 @@ export default function AIStatusPage() {
         description="Inspect durable ticket-analysis work, retry and lease health, enabled automation, and prompt-free provider-call telemetry."
         meta={`Live refresh every 10 seconds · snapshot ${formatTimeAgo(data.generated_at)}`}
         actions={(
-          <div className="flex gap-2">
-            <Link href="/settings/status" className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-linen-500 bg-linen-50 px-4 text-sm font-semibold text-ink-700 shadow-sm hover:bg-linen-200">
-              <ArrowLeft className="h-4 w-4" /> Status
+          <div className="flex flex-wrap gap-2">
+            <Link href="/settings/status" className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-linen-500 bg-linen-50 px-4 text-sm font-semibold text-ink-700 shadow-sm hover:bg-linen-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2">
+              <ArrowLeft className="h-4 w-4" aria-hidden="true" /> Status
             </Link>
             <Button
               variant="secondary"
@@ -295,6 +317,16 @@ export default function AIStatusPage() {
           </div>
         )}
       />
+
+      {statusQuery.error && (
+        <Alert
+          variant="warning"
+          title="The latest AI status refresh failed"
+          action={<Button size="sm" variant="secondary" onClick={() => void statusQuery.refetch()} pending={statusQuery.isFetching} pendingLabel="Retrying…">Retry</Button>}
+        >
+          The last verified snapshot remains visible. No queue action was attempted by the failed refresh.
+        </Alert>
+      )}
 
       {data.provider_cooldown && (
         <Alert variant="info" title="Provider capacity pause is active">
@@ -398,7 +430,7 @@ export default function AIStatusPage() {
         <SectionHeader
           title="Automation readiness"
           description="Global feature switches and integration admission are separate safety boundaries."
-          actions={<Link href="/settings#settings-automation" className="text-xs font-semibold text-semantic-primary hover:underline">Change automation settings</Link>}
+          actions={<Link href="/settings#settings-automation" className="rounded-sm text-xs font-semibold text-semantic-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2">Change automation settings</Link>}
         />
         <div className="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(280px,0.45fr)]">
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
@@ -434,13 +466,12 @@ export default function AIStatusPage() {
         <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
           <div className="min-w-0">
             <p className="text-xs font-semibold uppercase tracking-[0.1em] text-ink-400">Task view</p>
-            <div className="mt-2 flex gap-1 overflow-x-auto pb-1" role="tablist" aria-label="AI task status views">
+            <div className="mt-2 flex gap-1 overflow-x-auto pb-1" role="group" aria-label="AI task status views">
               {views.map((item) => (
                 <button
                   key={item.value}
                   type="button"
-                  role="tab"
-                  aria-selected={view === item.value}
+                  aria-pressed={view === item.value}
                   onClick={() => selectView(item.value)}
                   className={`inline-flex min-h-9 shrink-0 items-center gap-2 rounded-lg px-3 text-xs font-semibold transition-colors ${view === item.value ? "bg-ink-700 text-white" : "bg-linen-200 text-ink-500 hover:bg-linen-300 hover:text-ink-700"}`}
                 >
@@ -453,7 +484,7 @@ export default function AIStatusPage() {
           <form onSubmit={submitSearch} className="flex w-full max-w-md gap-2" role="search">
             <label className="relative min-w-0 flex-1">
               <span className="sr-only">Search AI tasks</span>
-              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-400" />
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-400" aria-hidden="true" />
               <input
                 value={searchInput}
                 onChange={(event) => setSearchInput(event.target.value)}
@@ -499,13 +530,13 @@ export default function AIStatusPage() {
           />
         )}
         {data.total_tasks > PAGE_SIZE && (
-          <div className="flex items-center justify-between border-t border-linen-400 px-5 py-4 sm:px-6">
-            <p className="text-xs text-ink-400">Page {Math.floor(offset / PAGE_SIZE) + 1}</p>
+          <nav aria-label="AI task pages" className="flex items-center justify-between border-t border-linen-400 px-5 py-4 sm:px-6">
+            <p className="text-xs text-ink-400" aria-live="polite">Page {Math.floor(offset / PAGE_SIZE) + 1}</p>
             <div className="flex gap-2">
               <Button variant="secondary" size="sm" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))} leadingIcon={<ChevronLeft className="h-4 w-4" />}>Previous</Button>
               <Button variant="secondary" size="sm" disabled={!hasNextPage} onClick={() => setOffset(offset + PAGE_SIZE)}>Next <ChevronRight className="h-4 w-4" /></Button>
             </div>
-          </div>
+          </nav>
         )}
       </ContentSurface>
 
@@ -673,8 +704,8 @@ function TaskRow({
               </Button>
             </div>
           ) : <span />}
-          <Link href={`/tickets/${encodeURIComponent(task.ticket_id)}`} className="inline-flex min-h-9 items-center gap-2 rounded-md border border-linen-500 bg-linen-50 px-3 text-xs font-semibold text-ink-700 hover:bg-linen-200">
-            Open ticket <ExternalLink className="h-3.5 w-3.5" />
+          <Link href={`/tickets/${encodeURIComponent(task.ticket_id)}`} className="inline-flex min-h-9 items-center gap-2 rounded-md border border-linen-500 bg-linen-50 px-3 text-xs font-semibold text-ink-700 hover:bg-linen-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2">
+            Open ticket <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
           </Link>
         </div>
       </div>

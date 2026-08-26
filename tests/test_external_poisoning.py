@@ -1,10 +1,15 @@
+import asyncio
 import io
+import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 from pydantic import ValidationError
+from fastapi import HTTPException
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -12,6 +17,8 @@ from sqlalchemy.pool import StaticPool
 from app.backend import main, sync_worker, ticket_vectors
 from app.backend.database import (
     Base,
+    ProblemRecord,
+    ProblemTicketLinkRecord,
     SyncStateRecord,
     TicketRecord,
     UserRecord,
@@ -218,6 +225,224 @@ class ExternalPersistenceBoundaryTests(unittest.TestCase):
             self.assertEqual(ticket.priority, "P3")
             self.assertEqual(ticket.ticket_type, "service_request")
             refresh.assert_called_once_with(db, ticket)
+
+    def test_provider_reopen_clears_live_resolution_in_both_update_modes(self):
+        resolved_at = datetime(2026, 7, 10, 9, 0, 0)
+        for overwrite in (False, True):
+            with self.subTest(overwrite=overwrite), self.session_factory() as db:
+                provider_id = f"provider-reopen-{overwrite}"
+                ticket = TicketRecord(
+                    id=f"reopened-{overwrite}",
+                    subject="Previously resolved incident",
+                    description="Provider-owned content",
+                    reporter="requester@example.test",
+                    priority="P3",
+                    status="Closed",
+                    workflow_status="Closed",
+                    ticket_type="incident",
+                    external_source="freshservice",
+                    external_id=provider_id,
+                    external_status="Resolved",
+                    external_resolved_at=resolved_at,
+                    resolved_at=resolved_at,
+                )
+                db.add(ticket)
+                db.commit()
+
+                action, reopened = sync._upsert_ticket(
+                    db,
+                    _external_ticket(
+                        external_id=provider_id,
+                        status="Open",
+                        resolved_at=None,
+                        updated_at=resolved_at + timedelta(hours=1),
+                    ),
+                    "freshservice",
+                    overwrite=overwrite,
+                )
+
+                self.assertEqual(action, "updated")
+                self.assertEqual(reopened.status, "Open")
+                self.assertEqual(reopened.workflow_status, "Open")
+                self.assertEqual(reopened.external_status, "Open")
+                self.assertIsNone(reopened.external_resolved_at)
+                self.assertIsNone(reopened.resolved_at)
+
+    def test_authoritative_provider_update_propagates_removed_deadlines(self):
+        old_due = datetime(2026, 7, 14, 9, 0, 0)
+        old_response_due = datetime(2026, 7, 13, 9, 0, 0)
+        with self.session_factory() as db:
+            db.add(TicketRecord(
+                id="deadline-removed",
+                subject="Provider deadline changed",
+                description="Provider-owned content",
+                reporter="requester@example.test",
+                priority="P3",
+                status="Open",
+                workflow_status="Open",
+                ticket_type="incident",
+                external_source="freshservice",
+                external_id="provider-deadline",
+                external_status="Open",
+                external_due_by=old_due,
+                external_fr_due_by=old_response_due,
+                due_by=old_due,
+                resolution_due_at=old_due,
+                response_due_at=old_response_due,
+            ))
+            db.commit()
+
+            action, ticket = sync._upsert_ticket(
+                db,
+                _external_ticket(
+                    external_id="provider-deadline",
+                    due_by=None,
+                    fr_due_by=None,
+                    updated_at=old_due + timedelta(hours=1),
+                ),
+                "freshservice",
+                overwrite=True,
+            )
+
+            self.assertEqual(action, "updated")
+            for field in (
+                "external_due_by", "external_fr_due_by", "due_by",
+                "resolution_due_at", "response_due_at",
+            ):
+                self.assertIsNone(getattr(ticket, field), field)
+
+    def test_provider_cannot_reclassify_linked_incident_as_a_request(self):
+        with self.session_factory() as db:
+            ticket = TicketRecord(
+                id="linked-incident",
+                subject="Incident evidence",
+                reporter="requester@example.test",
+                priority="P3",
+                status="Open",
+                workflow_status="Open",
+                ticket_type="incident",
+                external_source="freshservice",
+                external_id="provider-1",
+                external_status="Open",
+            )
+            problem = ProblemRecord(
+                id="problem-1",
+                title="Recurring provider incident",
+                status="Under Investigation",
+            )
+            db.add_all([ticket, problem])
+            db.flush()
+            db.add(ProblemTicketLinkRecord(
+                problem_id=problem.id,
+                ticket_id=ticket.id,
+            ))
+            db.commit()
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "unlink it before synchronization",
+            ):
+                sync._upsert_ticket(
+                    db,
+                    _external_ticket(ticket_type=" SeRvIcE_ReQuEsT "),
+                    "freshservice",
+                    overwrite=True,
+                )
+
+            db.refresh(ticket)
+            self.assertEqual(ticket.ticket_type, "incident")
+
+    def test_problem_link_and_provider_type_transition_are_serialized(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = create_engine(
+                f"sqlite:///{temp_dir}/problem-type-race.db",
+                connect_args={"check_same_thread": False, "timeout": 30},
+            )
+            session_factory = sessionmaker(bind=engine)
+            Base.metadata.create_all(engine)
+            try:
+                for index in range(8):
+                    ticket_id = f"race-ticket-{index}"
+                    problem_id = f"race-problem-{index}"
+                    with session_factory() as db:
+                        db.add_all([
+                            TicketRecord(
+                                id=ticket_id,
+                                subject="Incident evidence",
+                                reporter="requester@example.test",
+                                status="Open",
+                                workflow_status="Open",
+                                ticket_type="incident",
+                                external_source="freshservice",
+                                external_id=f"provider-{index}",
+                                external_status="Open",
+                            ),
+                            ProblemRecord(
+                                id=problem_id,
+                                title="Concurrent problem evidence",
+                                status="Under Investigation",
+                            ),
+                        ])
+                        db.commit()
+
+                    barrier = threading.Barrier(2)
+
+                    def transition_type():
+                        with session_factory() as db:
+                            barrier.wait(timeout=10)
+                            try:
+                                sync._upsert_ticket(
+                                    db,
+                                    _external_ticket(
+                                        external_id=f"provider-{index}",
+                                        ticket_type="service_request",
+                                    ),
+                                    "freshservice",
+                                    overwrite=True,
+                                )
+                                return "type_changed"
+                            except RuntimeError:
+                                return "type_blocked"
+
+                    def link_problem():
+                        with session_factory() as db:
+                            barrier.wait(timeout=10)
+                            try:
+                                asyncio.run(main.link_ticket_to_problem(
+                                    problem_id,
+                                    ticket_id,
+                                    db,
+                                ))
+                                return "linked"
+                            except HTTPException as exc:
+                                return exc.status_code
+
+                    with ThreadPoolExecutor(max_workers=2) as executor:
+                        results = [
+                            future.result(timeout=30)
+                            for future in (
+                                executor.submit(transition_type),
+                                executor.submit(link_problem),
+                            )
+                        ]
+                    self.assertIn(
+                        sorted(results, key=str),
+                        [
+                            sorted(["type_changed", 409], key=str),
+                            sorted(["type_blocked", "linked"], key=str),
+                        ],
+                    )
+
+                    with session_factory() as db:
+                        ticket = db.get(TicketRecord, ticket_id)
+                        linked = db.query(ProblemTicketLinkRecord.id).filter(
+                            ProblemTicketLinkRecord.ticket_id == ticket_id
+                        ).first()
+                        self.assertFalse(
+                            ticket.ticket_type != "incident" and linked is not None
+                        )
+            finally:
+                engine.dispose()
 
 
 class ProviderParserIsolationTests(unittest.TestCase):

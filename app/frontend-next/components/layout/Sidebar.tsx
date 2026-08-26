@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
-import { canAccessAdministration, canAccessProtectedIntelligence, isDemoContext } from "@/lib/auth";
+import { canAccessAdministration, canAccessProtectedIntelligence, canManageOperationalRecords, isDemoContext } from "@/lib/auth";
 import { TicketyLogo } from "@/components/layout/TicketyLogo";
 import { LoginLink } from "@/components/layout/LoginLink";
 import { LogoutButton } from "@/components/layout/LogoutButton";
@@ -78,6 +78,7 @@ export function Sidebar({
   const { data: me } = useQuery({ queryKey: ["auth-me"], queryFn: api.getAuthMe, retry: false });
   const canAccessAdmin = canAccessAdministration(me);
   const canAccessIntelligence = canAccessProtectedIntelligence(me);
+  const canAccessOperations = canManageOperationalRecords(me);
   const isDemoWorkspace = isDemoContext(me);
   const isDemoFallback = me?.auth_kind === "demo_fallback";
   const showLogin = isDemoFallback;
@@ -85,6 +86,7 @@ export function Sidebar({
   const canSeeItem = (visibility: NavigationVisibility) => (
     visibility === "all"
     || (visibility === "admin" && canAccessAdmin)
+    || (visibility === "operations" && canAccessOperations)
     || (visibility === "intelligence" && canAccessIntelligence)
   );
 
@@ -113,7 +115,7 @@ export function Sidebar({
         </button>
       </div>
 
-      <nav aria-label="Workspace" className="relative z-10 flex-1 space-y-5 overflow-y-auto px-3 py-5">
+      <nav aria-label="Workspace" className="relative z-10 flex-1 space-y-4 overflow-y-auto px-3 py-4 [scrollbar-gutter:stable]">
         {navigationSections.map((group) => {
           const visibleItems = group.items.filter((item) => canSeeItem(item.visibility));
           if (!visibleItems.length) return null;

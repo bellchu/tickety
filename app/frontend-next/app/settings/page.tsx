@@ -7,7 +7,15 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, APIError } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { canAccessAdministration, isDemoAdministrationContext } from "@/lib/auth";
-import { Settings as SettingsType, LlmCatalog, LlmProvider, TicketCategory, BuildInfo } from "@/lib/types";
+import {
+  Settings as SettingsType,
+  LlmCatalog,
+  LlmProvider,
+  TicketCategory,
+  TicketPriorityConfig,
+  TicketStatusConfig,
+  BuildInfo,
+} from "@/lib/types";
 import { cn } from "@/lib/utils";
 import {
   Settings as SettingsIcon, Save, RefreshCw, CheckCircle2, AlertCircle,
@@ -16,7 +24,7 @@ import {
   Mail, Search, ChevronLeft, ChevronRight,
 } from "lucide-react";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
-import { Alert, Button, DataListCard, DataTable, DataTableViewport, ErrorState, ListText, Skeleton } from "@/components/ui";
+import { Alert, Button, ConfirmDialog, DataListCard, DataTable, DataTableViewport, ErrorState, IconButton, ListText, Skeleton } from "@/components/ui";
 import { PageFrame, PageHeader } from "@/components/layout/PageLayout";
 
 const PROVIDER_OPTIONS = [
@@ -106,6 +114,53 @@ const CATEGORY_COLORS = [
   { value: "cyan", label: "Cyan", className: "bg-cyan-400" },
   { value: "red", label: "Red", className: "bg-rust-400" },
 ];
+
+const CONFIG_COLORS = [
+  { value: "slate", label: "Slate", className: "bg-linen-500" },
+  { value: "blue", label: "Blue", className: "bg-blue-500" },
+  { value: "amber", label: "Amber", className: "bg-amber-500" },
+  { value: "red", label: "Red", className: "bg-rust-500" },
+  { value: "moss", label: "Moss", className: "bg-moss-500" },
+  { value: "clay", label: "Clay", className: "bg-clay-500" },
+] as const;
+
+type ConfigColor = (typeof CONFIG_COLORS)[number]["value"];
+type StatusLifecycle = "open" | "terminal";
+
+const CONFIG_NAME_MAX_LENGTH = 100;
+const PRIORITY_NAME_MAX_LENGTH = 32;
+const CONFIG_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 _-]*$/;
+const CONFIG_LABEL_MAX_LENGTH = 100;
+const CONFIG_SORT_ORDER_MAX = 10_000;
+const PRIORITY_SLA_MIN_HOURS = 1;
+const PRIORITY_SLA_MAX_HOURS = 8_760;
+const PRIORITY_WEIGHT_MIN = 1;
+const PRIORITY_WEIGHT_MAX = 1_000;
+
+const CONFIG_COLOR_CLASSES: Record<string, string> = {
+  ...Object.fromEntries(CONFIG_COLORS.map((option) => [option.value, option.className])),
+  // Preserve an intentional visual for the legacy seeded status color.
+  emerald: "bg-emerald-500",
+};
+
+function configColorClass(color: string) {
+  return CONFIG_COLOR_CLASSES[color] || CONFIG_COLOR_CLASSES.slate;
+}
+
+function configErrorMessage(error: unknown, fallback: string) {
+  return error instanceof Error && error.message.trim() ? error.message : fallback;
+}
+
+function isConfigurationAccessError(error: unknown) {
+  return isAuthError(error) || isForbiddenError(error);
+}
+
+function nextConfigSortOrder(items: Array<{ sort_order: number }> | undefined) {
+  const highest = (items || []).reduce((current, item) => (
+    Number.isFinite(item.sort_order) ? Math.max(current, item.sort_order) : current
+  ), -1);
+  return Math.max(0, highest + 1);
+}
 
 async function postMaintenanceAction(path: string) {
   const res = await fetch(path, { method: "POST", credentials: "include", cache: "no-store" });
@@ -447,7 +502,7 @@ export default function SettingsPage() {
                 onClick={() => selectSettingsTab(tab.id)}
                 onKeyDown={(event) => handleSettingsTabKeyDown(event, index)}
                 className={cn(
-                  "inline-flex min-h-10 shrink-0 items-center rounded-lg px-3 text-xs font-semibold transition-colors",
+                  "inline-flex min-h-11 shrink-0 items-center rounded-lg px-3 text-xs font-semibold transition-colors sm:min-h-10",
                   selected ? "bg-ink-700 text-white shadow-sm" : "text-ink-500 hover:bg-linen-200 hover:text-ink-700"
                 )}
               >
@@ -769,7 +824,7 @@ export default function SettingsPage() {
 
         {/* ═══ SLA Targets ═══ */}
         <SettingsSection title="SLA Targets" subtitle="Set resolution time targets per priority level. Used by SLA clocks and escalation risk scoring.">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 gap-4 xs:grid-cols-2 md:grid-cols-4">
             {[["SLA_P1_HOURS", "P1 (Critical)", "4"], ["SLA_P2_HOURS", "P2 (High)", "24"], ["SLA_P3_HOURS", "P3 (Normal)", "72"], ["SLA_P4_HOURS", "P4 (Low)", "168"]].map(([key, label, def]) => (
               <label key={key} className="block space-y-1.5">
                 <span className="text-sm font-medium text-ink-600">{label}</span>
@@ -800,7 +855,7 @@ export default function SettingsPage() {
           <Field label="Organization Name">
             <input type="text" value={form.ORG_NAME || ""} onChange={(e) => handleChange("ORG_NAME", e.target.value)} placeholder="Acme IT Support" className="input-base" />
           </Field>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <Field label="Logo URL">
               <input type="text" value={form.ORG_LOGO_URL || ""} onChange={(e) => handleChange("ORG_LOGO_URL", e.target.value)} placeholder="https://…" className="input-base" />
             </Field>
@@ -811,10 +866,10 @@ export default function SettingsPage() {
         </SettingsSection>
 
         {/* ═══ Custom Statuses ═══ */}
-        <StatusConfigSection />
+        <StatusConfigSection canManage={canAccessSettings} />
 
         {/* ═══ Custom Priorities ═══ */}
-        <PriorityConfigSection />
+        <PriorityConfigSection canManage={canAccessSettings} />
 
         {/* ═══ Notifications ═══ */}
         <NotificationSection />
@@ -890,7 +945,7 @@ export default function SettingsPage() {
               className="input-base"
             />
           </Field>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <Field label={<DeploymentManagedLabel label="CORS Allow Origins" managed={productionSecuritySettingsReadOnly} />}>
               <input
                 type="text"
@@ -1074,7 +1129,7 @@ export default function SettingsPage() {
             </span>
           )}
           {mutation.isError && (
-            <span className="flex items-center gap-1.5 text-sm text-rust-500">
+            <span role="alert" className="flex items-center gap-1.5 text-sm text-rust-500">
               <AlertCircle className="w-4 h-4" /> {mutation.error instanceof Error ? mutation.error.message : "Failed to save"}
             </span>
           )}
@@ -1753,12 +1808,14 @@ function ToggleRow({ label, desc, value, onChange, disabled = false }: { label: 
         aria-label={label}
         disabled={disabled}
         onClick={() => onChange(!value)}
-        className={cn(
-          "relative shrink-0 w-10 h-5 rounded-full transition-colors ml-3 flex items-center",
-          value ? "bg-moss-500 justify-end" : "bg-linen-400 justify-start"
-        )}
+        className="group ml-3 inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 disabled:cursor-not-allowed sm:h-8"
       >
-        <span className="w-4 h-4 rounded-full bg-white shadow-sm transition-all mx-0.5" />
+        <span className={cn(
+          "flex h-5 w-10 items-center rounded-full transition-colors",
+          value ? "justify-end bg-moss-500" : "justify-start bg-linen-400",
+        )} aria-hidden="true">
+          <span className="mx-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-all" />
+        </span>
       </button>
     </div>
   );
@@ -1766,154 +1823,626 @@ function ToggleRow({ label, desc, value, onChange, disabled = false }: { label: 
 
 // ═══ Custom Status Config Section ═════════════════════════════
 
-function StatusConfigSection() {
+function ConfigColorPicker({
+  name,
+  value,
+  onChange,
+  disabled = false,
+}: {
+  name: string;
+  value: ConfigColor;
+  onChange: (value: ConfigColor) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <fieldset disabled={disabled} className="space-y-2">
+      <legend className="text-sm font-medium text-ink-600">Color</legend>
+      <div className="grid grid-cols-2 gap-2 xs:grid-cols-3">
+        {CONFIG_COLORS.map((option) => {
+          const selected = value === option.value;
+          return (
+            <label key={option.value} className={cn("block", disabled ? "cursor-not-allowed" : "cursor-pointer")}>
+              <input
+                type="radio"
+                name={name}
+                value={option.value}
+                checked={selected}
+                onChange={() => onChange(option.value)}
+                className="peer sr-only"
+              />
+              <span className={cn(
+                "flex min-h-11 items-center gap-2 rounded-lg border px-3 text-xs font-semibold transition-colors",
+                "peer-focus-visible:outline-none peer-focus-visible:ring-2 peer-focus-visible:ring-[var(--focus-ring)] peer-focus-visible:ring-offset-2",
+                selected
+                  ? "border-clay-300 bg-[var(--color-primary-soft)] text-ink-700"
+                  : "border-linen-400 bg-linen-50 text-ink-500 hover:bg-linen-200",
+              )}>
+                <span className={cn("h-3 w-3 shrink-0 rounded-full", option.className)} aria-hidden="true" />
+                {option.label}
+              </span>
+            </label>
+          );
+        })}
+      </div>
+    </fieldset>
+  );
+}
+
+function StatusConfigSection({ canManage }: { canManage: boolean }) {
   const queryClient = useQueryClient();
-  const { data: statuses, isLoading } = useQuery({ queryKey: ["status-config"], queryFn: api.getStatusConfig });
+  const statusQuery = useQuery({
+    queryKey: ["status-config"],
+    queryFn: api.getStatusConfig,
+    enabled: canManage,
+    retry: false,
+  });
+  const statuses = statusQuery.data;
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
   const [label, setLabel] = useState("");
-  const [color, setColor] = useState("slate");
-  const [isOpen, setIsOpen] = useState(true);
-  const [isTerminal, setIsTerminal] = useState(false);
+  const [color, setColor] = useState<ConfigColor>("slate");
+  const [lifecycle, setLifecycle] = useState<StatusLifecycle>("open");
+  const [formError, setFormError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<TicketStatusConfig | null>(null);
+
+  const resetDraft = () => {
+    setName("");
+    setLabel("");
+    setColor("slate");
+    setLifecycle("open");
+    setFormError(null);
+  };
 
   const createMut = useMutation({
-    mutationFn: () => api.createStatusConfig({ name, label, color, is_open: isOpen, is_terminal: isTerminal, sort_order: (statuses?.length || 0) }),
+    mutationFn: () => api.createStatusConfig({
+      name: name.trim(),
+      label: label.trim(),
+      color,
+      is_open: lifecycle === "open",
+      is_terminal: lifecycle === "terminal",
+      sort_order: nextConfigSortOrder(statuses),
+    }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["status-config"] });
-      setName(""); setLabel(""); setColor("slate"); setIsOpen(true); setIsTerminal(false); setShowForm(false);
+      void queryClient.invalidateQueries({ queryKey: ["status-config"] });
+      resetDraft();
+      setShowForm(false);
     },
   });
   const deleteMut = useMutation({
     mutationFn: (id: number) => api.deleteStatusConfig(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["status-config"] }),
+    onSuccess: () => {
+      setDeleting(null);
+      void queryClient.invalidateQueries({ queryKey: ["status-config"] });
+    },
+    onError: () => setDeleting(null),
   });
 
+  const normalizedName = name.trim();
+  const normalizedLabel = label.trim();
+  const portableName = !normalizedName || CONFIG_NAME_PATTERN.test(normalizedName);
+  const duplicateName = Boolean(statuses?.some((status) => (
+    status.name.trim().toLowerCase() === normalizedName.toLowerCase()
+  )));
+  const nextSortOrder = nextConfigSortOrder(statuses);
+  const accessDenied = !canManage || [statusQuery.error, createMut.error, deleteMut.error].some(isConfigurationAccessError);
+  const validationMessage = formError
+    || (!portableName ? "Internal values may use letters, numbers, spaces, hyphens, and underscores." : null)
+    || (duplicateName ? "A status with this internal value already exists." : null)
+    || (nextSortOrder > CONFIG_SORT_ORDER_MAX ? "The status ordering limit has been reached." : null);
+  const canCreate = Boolean(
+    canManage
+    && !accessDenied
+    && normalizedName
+    && normalizedLabel
+    && normalizedName.length <= CONFIG_NAME_MAX_LENGTH
+    && normalizedLabel.length <= CONFIG_LABEL_MAX_LENGTH
+    && portableName
+    && !duplicateName
+    && nextSortOrder <= CONFIG_SORT_ORDER_MAX
+    && !createMut.isPending
+  );
+
+  const createStatus = () => {
+    if (!canCreate) {
+      if (!normalizedName || !normalizedLabel) setFormError("Add both an internal value and a display label.");
+      return;
+    }
+    setFormError(null);
+    createMut.reset();
+    createMut.mutate();
+  };
+
+  const retryAccess = () => {
+    createMut.reset();
+    deleteMut.reset();
+    void statusQuery.refetch();
+  };
+
   return (
-    <SettingsSection title="Ticket Statuses" subtitle="Configure the ticket lifecycle statuses available across the system">
-      {isLoading ? (
-        <div className="space-y-2">{[1, 2, 3].map((i) => <div key={i} className="skeleton h-10 w-full" />)}</div>
-      ) : (
-        <div className="space-y-2">
-          {(statuses || []).map((s) => (
-            <div key={s.id} className="flex items-center justify-between rounded border border-linen-400 px-3 py-2">
-              <div className="flex items-center gap-3">
-                <span className={cn("w-2.5 h-2.5 rounded-full", `bg-${s.color === "moss" ? "moss-500" : "linen-500"}`)} />
+    <>
+      <SettingsSection title="Ticket statuses" subtitle="Define the ordered lifecycle choices used by ticket workflows. Internal values are stored on tickets; display labels are what people see.">
+        {accessDenied ? (
+          <ErrorState
+            density="compact"
+            title="Status configuration access could not be verified"
+            description="Status values and write controls are hidden until administrator access is confirmed."
+            actionLabel="Recheck access"
+            onRetry={canManage ? retryAccess : undefined}
+            retrying={statusQuery.isFetching}
+          />
+        ) : statusQuery.isLoading ? (
+          <div className="space-y-2" aria-busy="true" aria-label="Loading ticket statuses">
+            {[1, 2, 3].map((item) => <Skeleton key={item} className="h-12 w-full" />)}
+          </div>
+        ) : statusQuery.isError ? (
+          <ErrorState
+            density="compact"
+            title="Ticket statuses could not be loaded"
+            description="No lifecycle values are being shown or changed."
+            actionLabel="Retry statuses"
+            onRetry={() => void statusQuery.refetch()}
+            retrying={statusQuery.isFetching}
+          />
+        ) : (
+          <div className="space-y-4">
+            {createMut.isError && (
+              <Alert variant="danger" title="Status could not be created">
+                {configErrorMessage(createMut.error, "The status was not saved.")}
+              </Alert>
+            )}
+            {deleteMut.isError && (
+              <Alert variant="danger" title="Status could not be removed">
+                {configErrorMessage(deleteMut.error, "The status remains available.")}
+              </Alert>
+            )}
+
+            {statuses && statuses.length > 0 ? (
+              <ol className="max-h-[30rem] space-y-2 overflow-y-auto pr-1" aria-label="Configured ticket statuses">
+                {statuses.map((status) => {
+                  const invalidLifecycle = status.is_open && status.is_terminal;
+                  const lifecycleLabel = invalidLifecycle
+                    ? "Invalid lifecycle"
+                    : status.is_terminal
+                      ? "Terminal"
+                      : status.is_open
+                        ? "Open"
+                        : "Inactive";
+                  return (
+                    <li key={status.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3 rounded-xl border border-linen-400 bg-linen-50 px-3 py-3">
+                      <div className="flex min-w-0 items-start gap-3">
+                        <span className={cn("mt-1 h-3 w-3 shrink-0 rounded-full", configColorClass(status.color))} aria-hidden="true" />
+                        <div className="min-w-0">
+                          <p className="break-words text-sm font-semibold text-ink-700 [overflow-wrap:anywhere]">{status.label}</p>
+                          <p className="mt-0.5 break-all font-mono text-[11px] text-ink-400">{status.name}</p>
+                          <span className={cn(
+                            "mt-2 inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold",
+                            invalidLifecycle
+                              ? "border-rust-400/40 bg-[var(--color-danger-soft)] text-rust-600"
+                              : status.is_open
+                                ? "border-moss-500/30 bg-[var(--color-success-soft)] text-moss-600"
+                                : "border-linen-400 bg-linen-200 text-ink-500",
+                          )}>
+                            {lifecycleLabel}
+                          </span>
+                        </div>
+                      </div>
+                      <IconButton
+                        icon={<Trash2 className="h-4 w-4" />}
+                        aria-label={`Remove status ${status.label}`}
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => { deleteMut.reset(); setDeleting(status); }}
+                      />
+                    </li>
+                  );
+                })}
+              </ol>
+            ) : (
+              <div className="rounded-xl border border-dashed border-linen-400 bg-linen-50 px-4 py-6 text-center">
+                <p className="text-sm font-semibold text-ink-700">No ticket statuses configured</p>
+                <p className="mt-1 text-xs leading-5 text-ink-500">Add the first lifecycle value before creating or updating tickets.</p>
+              </div>
+            )}
+
+            {showForm ? (
+              <div
+                className="space-y-4 rounded-xl border border-clay-300 bg-[var(--color-primary-soft)] p-4"
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && event.target instanceof HTMLInputElement && event.target.type !== "radio") {
+                    event.preventDefault();
+                    createStatus();
+                  }
+                }}
+              >
                 <div>
-                  <span className="text-sm font-medium text-ink-700">{s.label}</span>
-                  <span className="text-xs text-ink-400 ml-2">({s.name})</span>
+                  <p className="text-sm font-semibold text-ink-700">Add ticket status</p>
+                  <p className="mt-1 text-xs leading-5 text-ink-500">Choose one lifecycle behavior so a status can never be both open and terminal.</p>
                 </div>
-                <div className="flex gap-1.5">
-                  {s.is_open && <span className="rounded border border-clay-400/20 bg-clay-400/10 px-1.5 py-0.5 text-[10px] text-clay-600">open</span>}
-                  {s.is_terminal && <span className="text-[10px] px-1.5 py-0.5 rounded bg-linen-300 text-ink-500">terminal</span>}
+                <fieldset disabled={createMut.isPending} className="space-y-4">
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    <label className="block space-y-1.5" htmlFor="status-internal-value">
+                      <span className="text-sm font-medium text-ink-600">Internal value</span>
+                      <input
+                        id="status-internal-value"
+                        type="text"
+                        maxLength={CONFIG_NAME_MAX_LENGTH}
+                        pattern="[A-Za-z0-9][A-Za-z0-9 _-]*"
+                        value={name}
+                        onChange={(event) => { setName(event.target.value); setFormError(null); createMut.reset(); }}
+                        placeholder="Awaiting vendor"
+                        className="input-base"
+                        aria-describedby="status-internal-value-help"
+                      />
+                      <span id="status-internal-value-help" className="block text-xs leading-5 text-ink-500">Stable ASCII key: letters, numbers, spaces, hyphens, or underscores · up to 100 characters</span>
+                    </label>
+                    <label className="block space-y-1.5" htmlFor="status-display-label">
+                      <span className="text-sm font-medium text-ink-600">Display label</span>
+                      <input
+                        id="status-display-label"
+                        type="text"
+                        maxLength={CONFIG_LABEL_MAX_LENGTH}
+                        value={label}
+                        onChange={(event) => { setLabel(event.target.value); setFormError(null); createMut.reset(); }}
+                        placeholder="Waiting on vendor"
+                        className="input-base"
+                      />
+                    </label>
+                  </div>
+
+                  <fieldset className="space-y-2">
+                    <legend className="text-sm font-medium text-ink-600">Lifecycle behavior</legend>
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                      {([
+                        ["open", "Open", "Counts in active ticket queues"],
+                        ["terminal", "Terminal", "Closed or resolved; no longer open"],
+                      ] as const).map(([value, title, description]) => (
+                        <label key={value} className="cursor-pointer">
+                          <input
+                            type="radio"
+                            name="status-lifecycle"
+                            value={value}
+                            checked={lifecycle === value}
+                            onChange={() => setLifecycle(value)}
+                            className="peer sr-only"
+                          />
+                          <span className={cn(
+                            "block min-h-16 rounded-lg border px-3 py-2 transition-colors",
+                            "peer-focus-visible:outline-none peer-focus-visible:ring-2 peer-focus-visible:ring-[var(--focus-ring)] peer-focus-visible:ring-offset-2",
+                            lifecycle === value ? "border-clay-400 bg-white" : "border-linen-400 bg-linen-50 hover:bg-linen-200",
+                          )}>
+                            <span className="block text-sm font-semibold text-ink-700">{title}</span>
+                            <span className="mt-0.5 block text-xs leading-5 text-ink-500">{description}</span>
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                  </fieldset>
+
+                  <ConfigColorPicker name="status-color" value={color} onChange={setColor} disabled={createMut.isPending} />
+                </fieldset>
+
+                {validationMessage && <p role="alert" className="text-xs font-medium text-rust-600">{validationMessage}</p>}
+                <div className="flex flex-col-reverse gap-2 xs:flex-row xs:justify-end">
+                  <Button type="button" variant="secondary" size="sm" disabled={createMut.isPending} onClick={() => { resetDraft(); createMut.reset(); setShowForm(false); }}>Cancel</Button>
+                  <Button type="button" size="sm" onClick={createStatus} disabled={!canCreate} pending={createMut.isPending} pendingLabel="Creating…" leadingIcon={<Plus className="h-4 w-4" />}>Create status</Button>
                 </div>
               </div>
-              <button type="button" onClick={() => deleteMut.mutate(s.id)} className="p-1.5 rounded text-ink-400 hover:text-rust-500 hover:bg-rust-400/10">
-                <Trash2 className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          ))}
-          {showForm ? (
-            <div className="rounded border border-linen-400 p-4 space-y-3 bg-linen-200">
-              <div className="grid grid-cols-2 gap-3">
-                <input placeholder="Name (e.g. On Hold)" value={name} onChange={(e) => setName(e.target.value)} className="input-base" />
-                <input placeholder="Label" value={label} onChange={(e) => setLabel(e.target.value)} className="input-base" />
-              </div>
-              <div className="flex items-center gap-4">
-                <label className="flex items-center gap-2 text-xs text-ink-500">
-                  <input type="checkbox" checked={isOpen} onChange={(e) => setIsOpen(e.target.checked)} /> Counts as open
-                </label>
-                <label className="flex items-center gap-2 text-xs text-ink-500">
-                  <input type="checkbox" checked={isTerminal} onChange={(e) => setIsTerminal(e.target.checked)} /> Terminal (closed/resolved)
-                </label>
-              </div>
-              <div className="flex items-center gap-2">
-                <button type="button" onClick={() => createMut.mutate()} disabled={!name.trim() || !label.trim()} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-clay-500 text-linen-50 text-xs font-medium hover:bg-clay-600 disabled:opacity-50">
-                  <Plus className="w-3 h-3" /> Create
-                </button>
-                <button type="button" onClick={() => setShowForm(false)} className="px-3 py-1.5 rounded text-xs text-ink-500 hover:bg-linen-300">Cancel</button>
-              </div>
-            </div>
-          ) : (
-            <button type="button" onClick={() => setShowForm(true)} className="inline-flex items-center gap-1.5 text-xs font-medium text-ink-600 hover:text-ink-700">
-              <Plus className="w-3.5 h-3.5" /> Add Status
-            </button>
-          )}
-        </div>
-      )}
-    </SettingsSection>
+            ) : (
+              <Button type="button" variant="secondary" size="sm" onClick={() => { resetDraft(); createMut.reset(); setShowForm(true); }} leadingIcon={<Plus className="h-4 w-4" />}>
+                Add status
+              </Button>
+            )}
+          </div>
+        )}
+      </SettingsSection>
+
+      <ConfirmDialog
+        open={canManage && !accessDenied && Boolean(deleting)}
+        onOpenChange={(open) => { if (!open) { setDeleting(null); deleteMut.reset(); } }}
+        title="Remove ticket status?"
+        description={<>The option <strong>{deleting?.label}</strong> will be removed from future ticket choices. Tickets that already store this internal value are not rewritten.</>}
+        confirmLabel="Remove status"
+        destructive
+        pending={deleteMut.isPending}
+        onConfirm={() => { if (canManage && !accessDenied && deleting) deleteMut.mutate(deleting.id); }}
+      />
+    </>
   );
 }
 
 // ═══ Custom Priority Config Section ═══════════════════════════
 
-function PriorityConfigSection() {
+function PriorityConfigSection({ canManage }: { canManage: boolean }) {
   const queryClient = useQueryClient();
-  const { data: priorities, isLoading } = useQuery({ queryKey: ["priority-config"], queryFn: api.getPriorityConfig });
+  const priorityQuery = useQuery({
+    queryKey: ["priority-config"],
+    queryFn: api.getPriorityConfig,
+    enabled: canManage,
+    retry: false,
+  });
+  const priorities = priorityQuery.data;
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
   const [label, setLabel] = useState("");
+  const [color, setColor] = useState<ConfigColor>("slate");
   const [slaHours, setSlaHours] = useState("");
   const [weight, setWeight] = useState("10");
+  const [formError, setFormError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<TicketPriorityConfig | null>(null);
+
+  const resetDraft = () => {
+    setName("");
+    setLabel("");
+    setColor("slate");
+    setSlaHours("");
+    setWeight("10");
+    setFormError(null);
+  };
 
   const createMut = useMutation({
     mutationFn: () => api.createPriorityConfig({
-      name, label, sla_hours: slaHours ? parseInt(slaHours) : null, weight: parseInt(weight) || 10,
-      sort_order: priorities?.length || 0,
+      name: name.trim(),
+      label: label.trim(),
+      color,
+      sla_hours: slaHours.trim() ? Number(slaHours) : null,
+      weight: Number(weight),
+      sort_order: nextConfigSortOrder(priorities),
     }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["priority-config"] });
-      setName(""); setLabel(""); setSlaHours(""); setWeight("10"); setShowForm(false);
+      void queryClient.invalidateQueries({ queryKey: ["priority-config"] });
+      resetDraft();
+      setShowForm(false);
     },
   });
   const deleteMut = useMutation({
     mutationFn: (id: number) => api.deletePriorityConfig(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["priority-config"] }),
+    onSuccess: () => {
+      setDeleting(null);
+      void queryClient.invalidateQueries({ queryKey: ["priority-config"] });
+    },
+    onError: () => setDeleting(null),
   });
 
+  const normalizedName = name.trim();
+  const normalizedLabel = label.trim();
+  const portableName = !normalizedName || CONFIG_NAME_PATTERN.test(normalizedName);
+  const parsedSlaHours = slaHours.trim() ? Number(slaHours) : null;
+  const parsedWeight = Number(weight);
+  const duplicateName = Boolean(priorities?.some((priority) => (
+    priority.name.trim().toLowerCase() === normalizedName.toLowerCase()
+  )));
+  const validSla = parsedSlaHours === null || (
+    Number.isInteger(parsedSlaHours)
+    && parsedSlaHours >= PRIORITY_SLA_MIN_HOURS
+    && parsedSlaHours <= PRIORITY_SLA_MAX_HOURS
+  );
+  const validWeight = Number.isInteger(parsedWeight)
+    && parsedWeight >= PRIORITY_WEIGHT_MIN
+    && parsedWeight <= PRIORITY_WEIGHT_MAX;
+  const nextSortOrder = nextConfigSortOrder(priorities);
+  const accessDenied = !canManage || [priorityQuery.error, createMut.error, deleteMut.error].some(isConfigurationAccessError);
+  const validationMessage = formError
+    || (!portableName ? "Internal values may use letters, numbers, spaces, hyphens, and underscores." : null)
+    || (duplicateName ? "A priority with this internal value already exists." : null)
+    || (!validSla ? "SLA target must be a whole number from 1 to 8,760 hours, or left blank." : null)
+    || (!validWeight ? "Queue weight must be a whole number from 1 to 1,000." : null)
+    || (nextSortOrder > CONFIG_SORT_ORDER_MAX ? "The priority ordering limit has been reached." : null);
+  const canCreate = Boolean(
+    canManage
+    && !accessDenied
+    && normalizedName
+    && normalizedLabel
+    && normalizedName.length <= PRIORITY_NAME_MAX_LENGTH
+    && normalizedLabel.length <= CONFIG_LABEL_MAX_LENGTH
+    && portableName
+    && !duplicateName
+    && validSla
+    && validWeight
+    && nextSortOrder <= CONFIG_SORT_ORDER_MAX
+    && !createMut.isPending
+  );
+
+  const createPriority = () => {
+    if (!canCreate) {
+      if (!normalizedName || !normalizedLabel) setFormError("Add both an internal value and a display label.");
+      return;
+    }
+    setFormError(null);
+    createMut.reset();
+    createMut.mutate();
+  };
+
+  const retryAccess = () => {
+    createMut.reset();
+    deleteMut.reset();
+    void priorityQuery.refetch();
+  };
+
   return (
-    <SettingsSection title="Ticket Priorities" subtitle="Define priority levels with SLA targets and sort weights">
-      {isLoading ? (
-        <div className="space-y-2">{[1, 2, 3].map((i) => <div key={i} className="skeleton h-10 w-full" />)}</div>
-      ) : (
-        <div className="space-y-2">
-          {(priorities || []).map((p) => (
-            <div key={p.id} className="flex items-center justify-between rounded border border-linen-400 px-3 py-2">
-              <div className="flex items-center gap-3">
-                <span className="text-sm font-bold text-ink-700">{p.name}</span>
-                <span className="text-xs text-ink-500">{p.label}</span>
-                {p.sla_hours && <span className="text-xs text-ink-400">SLA: {p.sla_hours}h</span>}
-                <span className="text-xs text-ink-400">weight: {p.weight}</span>
+    <>
+      <SettingsSection title="Ticket priorities" subtitle="Define ordered urgency levels for ticket workflows. Lower queue weights are treated as more urgent; an optional SLA overrides the global target.">
+        {accessDenied ? (
+          <ErrorState
+            density="compact"
+            title="Priority configuration access could not be verified"
+            description="Priority values and write controls are hidden until administrator access is confirmed."
+            actionLabel="Recheck access"
+            onRetry={canManage ? retryAccess : undefined}
+            retrying={priorityQuery.isFetching}
+          />
+        ) : priorityQuery.isLoading ? (
+          <div className="space-y-2" aria-busy="true" aria-label="Loading ticket priorities">
+            {[1, 2, 3].map((item) => <Skeleton key={item} className="h-12 w-full" />)}
+          </div>
+        ) : priorityQuery.isError ? (
+          <ErrorState
+            density="compact"
+            title="Ticket priorities could not be loaded"
+            description="No urgency values are being shown or changed."
+            actionLabel="Retry priorities"
+            onRetry={() => void priorityQuery.refetch()}
+            retrying={priorityQuery.isFetching}
+          />
+        ) : (
+          <div className="space-y-4">
+            {createMut.isError && (
+              <Alert variant="danger" title="Priority could not be created">
+                {configErrorMessage(createMut.error, "The priority was not saved.")}
+              </Alert>
+            )}
+            {deleteMut.isError && (
+              <Alert variant="danger" title="Priority could not be removed">
+                {configErrorMessage(deleteMut.error, "The priority remains available.")}
+              </Alert>
+            )}
+
+            {priorities && priorities.length > 0 ? (
+              <ol className="max-h-[30rem] space-y-2 overflow-y-auto pr-1" aria-label="Configured ticket priorities">
+                {priorities.map((priority) => (
+                  <li key={priority.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3 rounded-xl border border-linen-400 bg-linen-50 px-3 py-3">
+                    <div className="flex min-w-0 items-start gap-3">
+                      <span className={cn("mt-1 h-3 w-3 shrink-0 rounded-full", configColorClass(priority.color))} aria-hidden="true" />
+                      <div className="min-w-0">
+                        <p className="break-words text-sm font-semibold text-ink-700 [overflow-wrap:anywhere]">{priority.label}</p>
+                        <p className="mt-0.5 break-all font-mono text-[11px] text-ink-400">{priority.name}</p>
+                        <div className="mt-2 flex flex-wrap gap-1.5 text-[11px] font-medium text-ink-500">
+                          <span className="rounded-full border border-linen-400 bg-linen-100 px-2 py-0.5">
+                            {priority.sla_hours != null ? `${priority.sla_hours}h SLA` : "Global SLA"}
+                          </span>
+                          <span className="rounded-full border border-linen-400 bg-linen-100 px-2 py-0.5">Queue weight {priority.weight}</span>
+                        </div>
+                      </div>
+                    </div>
+                    <IconButton
+                      icon={<Trash2 className="h-4 w-4" />}
+                      aria-label={`Remove priority ${priority.label}`}
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => { deleteMut.reset(); setDeleting(priority); }}
+                    />
+                  </li>
+                ))}
+              </ol>
+            ) : (
+              <div className="rounded-xl border border-dashed border-linen-400 bg-linen-50 px-4 py-6 text-center">
+                <p className="text-sm font-semibold text-ink-700">No ticket priorities configured</p>
+                <p className="mt-1 text-xs leading-5 text-ink-500">Add the first urgency value before creating or reprioritizing tickets.</p>
               </div>
-              <button type="button" onClick={() => deleteMut.mutate(p.id)} className="p-1.5 rounded text-ink-400 hover:text-rust-500 hover:bg-rust-400/10">
-                <Trash2 className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          ))}
-          {showForm ? (
-            <div className="rounded border border-linen-400 p-4 space-y-3 bg-linen-200">
-              <div className="grid grid-cols-2 gap-3">
-                <input placeholder="Name (e.g. P5)" value={name} onChange={(e) => setName(e.target.value)} className="input-base" />
-                <input placeholder="Label (e.g. Trivial)" value={label} onChange={(e) => setLabel(e.target.value)} className="input-base" />
+            )}
+
+            {showForm ? (
+              <div
+                className="space-y-4 rounded-xl border border-clay-300 bg-[var(--color-primary-soft)] p-4"
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && event.target instanceof HTMLInputElement && event.target.type !== "radio") {
+                    event.preventDefault();
+                    createPriority();
+                  }
+                }}
+              >
+                <div>
+                  <p className="text-sm font-semibold text-ink-700">Add ticket priority</p>
+                  <p className="mt-1 text-xs leading-5 text-ink-500">Use a lower queue weight for work that should rank ahead of less urgent tickets.</p>
+                </div>
+                <fieldset disabled={createMut.isPending} className="space-y-4">
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    <label className="block space-y-1.5" htmlFor="priority-internal-value">
+                      <span className="text-sm font-medium text-ink-600">Internal value</span>
+                      <input
+                        id="priority-internal-value"
+                        type="text"
+                        maxLength={PRIORITY_NAME_MAX_LENGTH}
+                        pattern="[A-Za-z0-9][A-Za-z0-9 _-]*"
+                        value={name}
+                        onChange={(event) => { setName(event.target.value); setFormError(null); createMut.reset(); }}
+                        placeholder="P5"
+                        className="input-base"
+                        aria-describedby="priority-internal-value-help"
+                      />
+                      <span id="priority-internal-value-help" className="block text-xs leading-5 text-ink-500">Stable ASCII key: letters, numbers, spaces, hyphens, or underscores · up to 32 characters</span>
+                    </label>
+                    <label className="block space-y-1.5" htmlFor="priority-display-label">
+                      <span className="text-sm font-medium text-ink-600">Display label</span>
+                      <input
+                        id="priority-display-label"
+                        type="text"
+                        maxLength={CONFIG_LABEL_MAX_LENGTH}
+                        value={label}
+                        onChange={(event) => { setLabel(event.target.value); setFormError(null); createMut.reset(); }}
+                        placeholder="Planning"
+                        className="input-base"
+                      />
+                    </label>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    <label className="block space-y-1.5" htmlFor="priority-sla-hours">
+                      <span className="text-sm font-medium text-ink-600">SLA target <span className="font-normal text-ink-400">(optional)</span></span>
+                      <div className="relative">
+                        <input
+                          id="priority-sla-hours"
+                          type="number"
+                          min={PRIORITY_SLA_MIN_HOURS}
+                          max={PRIORITY_SLA_MAX_HOURS}
+                          step={1}
+                          inputMode="numeric"
+                          value={slaHours}
+                          onChange={(event) => { setSlaHours(event.target.value); setFormError(null); createMut.reset(); }}
+                          placeholder="Uses global target"
+                          className="input-base pr-16"
+                          aria-describedby="priority-sla-hours-help"
+                        />
+                        <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-ink-400">hours</span>
+                      </div>
+                      <span id="priority-sla-hours-help" className="block text-xs leading-5 text-ink-500">1–8,760; leave blank to use the global SLA</span>
+                    </label>
+                    <label className="block space-y-1.5" htmlFor="priority-queue-weight">
+                      <span className="text-sm font-medium text-ink-600">Queue weight</span>
+                      <input
+                        id="priority-queue-weight"
+                        type="number"
+                        min={PRIORITY_WEIGHT_MIN}
+                        max={PRIORITY_WEIGHT_MAX}
+                        step={1}
+                        inputMode="numeric"
+                        value={weight}
+                        onChange={(event) => { setWeight(event.target.value); setFormError(null); createMut.reset(); }}
+                        className="input-base"
+                        aria-describedby="priority-queue-weight-help"
+                      />
+                      <span id="priority-queue-weight-help" className="block text-xs leading-5 text-ink-500">1–1,000 · lower values rank as more urgent</span>
+                    </label>
+                  </div>
+
+                  <ConfigColorPicker name="priority-color" value={color} onChange={setColor} disabled={createMut.isPending} />
+                </fieldset>
+
+                {validationMessage && <p role="alert" className="text-xs font-medium text-rust-600">{validationMessage}</p>}
+                <div className="flex flex-col-reverse gap-2 xs:flex-row xs:justify-end">
+                  <Button type="button" variant="secondary" size="sm" disabled={createMut.isPending} onClick={() => { resetDraft(); createMut.reset(); setShowForm(false); }}>Cancel</Button>
+                  <Button type="button" size="sm" onClick={createPriority} disabled={!canCreate} pending={createMut.isPending} pendingLabel="Creating…" leadingIcon={<Plus className="h-4 w-4" />}>Create priority</Button>
+                </div>
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <input type="number" placeholder="SLA hours" value={slaHours} onChange={(e) => setSlaHours(e.target.value)} className="input-base" />
-                <input type="number" placeholder="Sort weight" value={weight} onChange={(e) => setWeight(e.target.value)} className="input-base" />
-              </div>
-              <div className="flex items-center gap-2">
-                <button type="button" onClick={() => createMut.mutate()} disabled={!name.trim() || !label.trim()} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-clay-500 text-linen-50 text-xs font-medium hover:bg-clay-600 disabled:opacity-50">
-                  <Plus className="w-3 h-3" /> Create
-                </button>
-                <button type="button" onClick={() => setShowForm(false)} className="px-3 py-1.5 rounded text-xs text-ink-500 hover:bg-linen-300">Cancel</button>
-              </div>
-            </div>
-          ) : (
-            <button type="button" onClick={() => setShowForm(true)} className="inline-flex items-center gap-1.5 text-xs font-medium text-ink-600 hover:text-ink-700">
-              <Plus className="w-3.5 h-3.5" /> Add Priority
-            </button>
-          )}
-        </div>
-      )}
-    </SettingsSection>
+            ) : (
+              <Button type="button" variant="secondary" size="sm" onClick={() => { resetDraft(); createMut.reset(); setShowForm(true); }} leadingIcon={<Plus className="h-4 w-4" />}>
+                Add priority
+              </Button>
+            )}
+          </div>
+        )}
+      </SettingsSection>
+
+      <ConfirmDialog
+        open={canManage && !accessDenied && Boolean(deleting)}
+        onOpenChange={(open) => { if (!open) { setDeleting(null); deleteMut.reset(); } }}
+        title="Remove ticket priority?"
+        description={<>The option <strong>{deleting?.label}</strong> will be removed from future ticket choices. Tickets that already store this internal value are not rewritten.</>}
+        confirmLabel="Remove priority"
+        destructive
+        pending={deleteMut.isPending}
+        onConfirm={() => { if (canManage && !accessDenied && deleting) deleteMut.mutate(deleting.id); }}
+      />
+    </>
   );
 }
 
@@ -1942,13 +2471,19 @@ function NotificationSection() {
               </div>
               <button
                 type="button"
+                role="switch"
+                aria-checked={n.enabled}
+                aria-label={`${n.label} notifications`}
+                disabled={updateMut.isPending}
                 onClick={() => updateMut.mutate({ event: n.event, enabled: !n.enabled, channels: n.channels })}
-                className={cn(
-                  "relative shrink-0 w-10 h-5 rounded-full transition-colors flex items-center",
-                  n.enabled ? "bg-moss-500 justify-end" : "bg-linen-400 justify-start"
-                )}
+                className="group inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 sm:h-8"
               >
-                <span className="w-4 h-4 rounded-full bg-white shadow-sm transition-all mx-0.5" />
+                <span className={cn(
+                  "flex h-5 w-10 items-center rounded-full transition-colors",
+                  n.enabled ? "justify-end bg-moss-500" : "justify-start bg-linen-400",
+                )} aria-hidden="true">
+                  <span className="mx-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-all" />
+                </span>
               </button>
             </div>
           ))}

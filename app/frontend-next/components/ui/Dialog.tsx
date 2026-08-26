@@ -149,14 +149,15 @@ export function Dialog({
               </div>
             )}
           </div>
-          <IconButton
-            icon={<X className="h-4 w-4" />}
-            aria-label={closeLabel}
-            size="sm"
-            onClick={() => onOpenChange(false)}
-            disabled={!dismissible}
-            className="-mr-1 -mt-1"
-          />
+          {dismissible && (
+            <IconButton
+              icon={<X className="h-4 w-4" />}
+              aria-label={closeLabel}
+              size="sm"
+              onClick={() => onOpenChange(false)}
+              className="-mr-1 -mt-1"
+            />
+          )}
         </div>
         {children && <div className="min-h-0 overflow-y-auto px-5 py-5 sm:px-6">{children}</div>}
         {footer && (

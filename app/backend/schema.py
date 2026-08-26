@@ -1,6 +1,27 @@
-from pydantic import BaseModel, Field, field_validator
+import re
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing import Optional, List, Literal
-from datetime import datetime
+from datetime import datetime, timezone
+
+
+def _reject_nul(value: Optional[str]) -> Optional[str]:
+    if value is not None and "\x00" in value:
+        raise ValueError("must not contain NUL characters")
+    return value
+
+
+def _utc_naive(value: Optional[datetime]) -> Optional[datetime]:
+    """Normalize API datetimes to the database's UTC-naive convention."""
+    if value is not None and value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
+class StrictWriteModel(BaseModel):
+    """Reject misspelled or read-only fields instead of reporting false success."""
+
+    model_config = ConfigDict(extra="forbid")
 
 
 class Ticket(BaseModel):
@@ -468,6 +489,7 @@ class AgentWorkspaceIdentity(BaseModel):
 class AgentWorkspaceBootstrap(BaseModel):
     identity: Optional[AgentWorkspaceIdentity] = None
     teams: List[AgentWorkspaceTeam] = Field(default_factory=list)
+    teams_truncated: bool = False
     counts: dict[str, int] = Field(default_factory=dict)
 
 
@@ -998,6 +1020,15 @@ class LoginRequest(BaseModel):
     email: str = Field(..., min_length=1, max_length=320)
     password: str = Field(..., min_length=1, max_length=1024)
 
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        _reject_nul(value)
+        normalized = value.strip().lower()
+        if not normalized:
+            raise ValueError("must not be blank")
+        return normalized
+
 
 class UserOut(BaseModel):
     id: str
@@ -1023,19 +1054,39 @@ class AuthContext(UserOut):
 
 class UserCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=120)
-    email: str = Field(..., min_length=3)
+    email: str = Field(..., min_length=3, max_length=320)
     title: Optional[str] = None
     role: Literal["admin", "supervisor", "agent"] = "agent"
     password: Optional[str] = None  # optional, generated if omitted
 
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        _reject_nul(value)
+        normalized = value.strip().lower()
+        if len(normalized) < 3:
+            raise ValueError("must be at least 3 characters")
+        return normalized
+
 
 class UserUpdate(BaseModel):
     name: Optional[str] = None
-    email: Optional[str] = None
+    email: Optional[str] = Field(None, min_length=3, max_length=320)
     title: Optional[str] = None
     role: Optional[Literal["admin", "supervisor", "agent"]] = None
     is_active: Optional[bool] = None
     password: Optional[str] = None
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        _reject_nul(value)
+        normalized = value.strip().lower()
+        if len(normalized) < 3:
+            raise ValueError("must be at least 3 characters")
+        return normalized
 
 
 class AuthResponse(BaseModel):
@@ -1107,12 +1158,37 @@ class TicketStatusConfig(BaseModel):
 
 
 class TicketStatusConfigCreate(BaseModel):
-    name: str = Field(..., min_length=1)
-    label: str = Field(..., min_length=1)
-    color: str = "slate"
-    is_open: bool = True
-    is_terminal: bool = False
-    sort_order: int = 0
+    name: str = Field(..., min_length=1, max_length=100)
+    label: str = Field(..., min_length=1, max_length=100)
+    color: Literal["slate", "blue", "amber", "red", "emerald", "moss", "clay"] = "slate"
+    is_open: bool = Field(default=True, strict=True)
+    is_terminal: bool = Field(default=False, strict=True)
+    sort_order: int = Field(default=0, ge=0, le=10_000)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("must not be blank")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 _-]*", normalized):
+            raise ValueError("name must use letters, numbers, spaces, hyphens, or underscores")
+        return normalized
+
+    @field_validator("label")
+    @classmethod
+    def normalize_label(cls, value: str) -> str:
+        _reject_nul(value)
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("must not be blank")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_lifecycle(self):
+        if self.is_open and self.is_terminal:
+            raise ValueError("a terminal status cannot count as open")
+        return self
 
 
 class TicketPriorityConfig(BaseModel):
@@ -1129,12 +1205,31 @@ class TicketPriorityConfig(BaseModel):
 
 
 class TicketPriorityConfigCreate(BaseModel):
-    name: str = Field(..., min_length=1)
-    label: str = Field(..., min_length=1)
-    color: str = "slate"
-    sla_hours: Optional[int] = None
-    weight: int = 10
-    sort_order: int = 0
+    name: str = Field(..., min_length=1, max_length=32)
+    label: str = Field(..., min_length=1, max_length=100)
+    color: Literal["slate", "blue", "amber", "red", "emerald", "moss", "clay"] = "slate"
+    sla_hours: Optional[int] = Field(default=None, ge=1, le=8_760)
+    weight: int = Field(default=10, ge=1, le=1_000)
+    sort_order: int = Field(default=0, ge=0, le=10_000)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("must not be blank")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 _-]*", normalized):
+            raise ValueError("name must use letters, numbers, spaces, hyphens, or underscores")
+        return normalized
+
+    @field_validator("label")
+    @classmethod
+    def normalize_label(cls, value: str) -> str:
+        _reject_nul(value)
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("must not be blank")
+        return normalized
 
 
 class NotificationConfig(BaseModel):
@@ -1182,18 +1277,71 @@ class Project(BaseModel):
         from_attributes = True
 
 
-class ProjectCreate(BaseModel):
+class ProjectCreate(StrictWriteModel):
     name: str = Field(..., min_length=1, max_length=120)
     key: str = Field(..., min_length=2, max_length=20)
-    description: str = ""
-    lead_id: Optional[str] = None
+    description: str = Field("", max_length=20_000)
+    lead_id: Optional[str] = Field(None, max_length=255)
+
+    @field_validator("name", "key")
+    @classmethod
+    def normalize_required_text(cls, value: str) -> str:
+        _reject_nul(value)
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("must not be blank")
+        return normalized
+
+    @field_validator("description")
+    @classmethod
+    def normalize_description(cls, value: str) -> str:
+        _reject_nul(value)
+        return value.strip()
+
+    @field_validator("lead_id")
+    @classmethod
+    def normalize_optional_id(cls, value: Optional[str]) -> Optional[str]:
+        _reject_nul(value)
+        normalized = value.strip() if value is not None else ""
+        return normalized or None
 
 
-class ProjectUpdate(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    lead_id: Optional[str] = None
-    status: Optional[str] = None
+class ProjectUpdate(StrictWriteModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=120)
+    description: Optional[str] = Field(None, max_length=20_000)
+    lead_id: Optional[str] = Field(None, max_length=255)
+    status: Optional[Literal["active", "archived"]] = None
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        _reject_nul(value)
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("must not be blank")
+        return normalized
+
+    @field_validator("description")
+    @classmethod
+    def normalize_description(cls, value: Optional[str]) -> Optional[str]:
+        _reject_nul(value)
+        return value.strip() if value is not None else None
+
+    @field_validator("lead_id")
+    @classmethod
+    def normalize_optional_id(cls, value: Optional[str]) -> Optional[str]:
+        _reject_nul(value)
+        normalized = value.strip() if value is not None else ""
+        return normalized or None
+
+    @model_validator(mode="after")
+    def reject_null_required_fields(self):
+        for field in ("name", "status"):
+            if field in self.model_fields_set and getattr(self, field) is None:
+                raise ValueError(f"{field} must not be null")
+        return self
 
 
 # ── Service Catalog ────────────────────────────────────────────
@@ -1214,13 +1362,75 @@ class ServiceItem(BaseModel):
         from_attributes = True
 
 
-class ServiceItemCreate(BaseModel):
+class ServiceItemCreate(StrictWriteModel):
     name: str = Field(..., min_length=1, max_length=200)
-    description: str = ""
-    category: Optional[str] = None
-    pricing: Optional[str] = None
-    sla_hours: Optional[int] = None
-    approval_required: bool = False
+    description: str = Field("", max_length=20_000)
+    category: Optional[str] = Field(None, max_length=200)
+    pricing: Optional[str] = Field(None, max_length=500)
+    sla_hours: Optional[int] = Field(None, ge=1, le=8_760)
+    approval_required: bool = Field(False, strict=True)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        _reject_nul(value)
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("must not be blank")
+        return normalized
+
+    @field_validator("description")
+    @classmethod
+    def normalize_description(cls, value: str) -> str:
+        _reject_nul(value)
+        return value.strip()
+
+    @field_validator("category", "pricing")
+    @classmethod
+    def normalize_optional_text(cls, value: Optional[str]) -> Optional[str]:
+        _reject_nul(value)
+        normalized = value.strip() if value is not None else ""
+        return normalized or None
+
+
+class ServiceItemUpdate(StrictWriteModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=200)
+    description: Optional[str] = Field(None, max_length=20_000)
+    category: Optional[str] = Field(None, max_length=200)
+    pricing: Optional[str] = Field(None, max_length=500)
+    sla_hours: Optional[int] = Field(None, ge=1, le=8_760)
+    approval_required: Optional[bool] = Field(None, strict=True)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        _reject_nul(value)
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("must not be blank")
+        return normalized
+
+    @field_validator("description")
+    @classmethod
+    def normalize_description(cls, value: Optional[str]) -> Optional[str]:
+        _reject_nul(value)
+        return value.strip() if value is not None else None
+
+    @field_validator("category", "pricing")
+    @classmethod
+    def normalize_optional_text(cls, value: Optional[str]) -> Optional[str]:
+        _reject_nul(value)
+        normalized = value.strip() if value is not None else ""
+        return normalized or None
+
+    @model_validator(mode="after")
+    def reject_null_required_fields(self):
+        for field in ("name", "approval_required"):
+            if field in self.model_fields_set and getattr(self, field) is None:
+                raise ValueError(f"{field} must not be null")
+        return self
 
 
 class ServiceRequest(BaseModel):
@@ -1243,21 +1453,48 @@ class ServiceRequest(BaseModel):
         from_attributes = True
 
 
-class ServiceRequestCreate(BaseModel):
-    ticket_id: str = Field(..., min_length=1)
-    service_item_id: str = Field(..., min_length=1)
-    quantity: int = 1
-    justification: str = ""
+class ServiceRequestCreate(StrictWriteModel):
+    ticket_id: str = Field(..., min_length=1, max_length=255)
+    service_item_id: str = Field(..., min_length=1, max_length=255)
+    quantity: int = Field(1, ge=1, le=1_000)
+    justification: str = Field("", max_length=20_000)
+
+    @field_validator("ticket_id", "service_item_id")
+    @classmethod
+    def normalize_id(cls, value: str) -> str:
+        _reject_nul(value)
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("must not be blank")
+        return normalized
+
+    @field_validator("justification")
+    @classmethod
+    def normalize_justification(cls, value: str) -> str:
+        _reject_nul(value)
+        return value.strip()
 
 
-class ServiceRequestApprovalDecision(BaseModel):
+class ServiceRequestApprovalDecision(StrictWriteModel):
     decision: Literal["approved", "rejected"]
-    comment: str = ""
+    comment: str = Field("", max_length=5_000)
+
+    @field_validator("comment")
+    @classmethod
+    def normalize_comment(cls, value: str) -> str:
+        _reject_nul(value)
+        return value.strip()
 
 
-class ServiceRequestFulfillmentUpdate(BaseModel):
+class ServiceRequestFulfillmentUpdate(StrictWriteModel):
     status: Literal["fulfilled", "cancelled"]
-    delivery_notes: str = ""
+    delivery_notes: str = Field("", max_length=20_000)
+
+    @field_validator("delivery_notes")
+    @classmethod
+    def normalize_delivery_notes(cls, value: str) -> str:
+        _reject_nul(value)
+        return value.strip()
 
 
 # ── Problem Management ─────────────────────────────────────────
@@ -1284,26 +1521,84 @@ class Problem(BaseModel):
         from_attributes = True
 
 
-class ProblemCreate(BaseModel):
+class ProblemCreate(StrictWriteModel):
     title: str = Field(..., min_length=1, max_length=200)
-    description: str = ""
-    priority: str = "P2"
-    category: Optional[str] = None
-    assigned_to: Optional[str] = None
-    impact_scope: Optional[str] = None
+    description: str = Field("", max_length=20_000)
+    priority: Literal["P1", "P2", "P3", "P4"] = "P2"
+    category: Optional[str] = Field(None, max_length=200)
+    assigned_to: Optional[str] = Field(None, max_length=255)
+    impact_scope: Optional[str] = Field(None, max_length=2_000)
+
+    @field_validator("title", "priority")
+    @classmethod
+    def normalize_required_text(cls, value: str) -> str:
+        _reject_nul(value)
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("must not be blank")
+        return normalized
+
+    @field_validator("description")
+    @classmethod
+    def normalize_description(cls, value: str) -> str:
+        _reject_nul(value)
+        return value.strip()
+
+    @field_validator("category", "assigned_to", "impact_scope")
+    @classmethod
+    def normalize_optional_text(cls, value: Optional[str]) -> Optional[str]:
+        _reject_nul(value)
+        normalized = value.strip() if value is not None else ""
+        return normalized or None
 
 
-class ProblemUpdate(BaseModel):
-    title: Optional[str] = None
-    description: Optional[str] = None
-    status: Optional[str] = None
-    priority: Optional[str] = None
-    category: Optional[str] = None
-    assigned_to: Optional[str] = None
-    root_cause: Optional[str] = None
-    workaround: Optional[str] = None
-    resolution: Optional[str] = None
-    impact_scope: Optional[str] = None
+class ProblemUpdate(StrictWriteModel):
+    title: Optional[str] = Field(None, min_length=1, max_length=200)
+    description: Optional[str] = Field(None, max_length=20_000)
+    status: Optional[Literal[
+        "New", "Under Investigation", "Known Error", "Resolved", "Closed"
+    ]] = None
+    priority: Optional[Literal["P1", "P2", "P3", "P4"]] = None
+    category: Optional[str] = Field(None, max_length=200)
+    assigned_to: Optional[str] = Field(None, max_length=255)
+    root_cause: Optional[str] = Field(None, max_length=20_000)
+    workaround: Optional[str] = Field(None, max_length=20_000)
+    resolution: Optional[str] = Field(None, max_length=20_000)
+    impact_scope: Optional[str] = Field(None, max_length=2_000)
+
+    @field_validator("title", "status", "priority")
+    @classmethod
+    def normalize_required_text(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        _reject_nul(value)
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("must not be blank")
+        return normalized
+
+    @field_validator("description")
+    @classmethod
+    def normalize_description(cls, value: Optional[str]) -> Optional[str]:
+        _reject_nul(value)
+        return value.strip() if value is not None else None
+
+    @field_validator(
+        "category", "assigned_to", "root_cause", "workaround", "resolution",
+        "impact_scope",
+    )
+    @classmethod
+    def normalize_optional_text(cls, value: Optional[str]) -> Optional[str]:
+        _reject_nul(value)
+        normalized = value.strip() if value is not None else ""
+        return normalized or None
+
+    @model_validator(mode="after")
+    def reject_null_required_fields(self):
+        for field in ("title", "status", "priority"):
+            if field in self.model_fields_set and getattr(self, field) is None:
+                raise ValueError(f"{field} must not be null")
+        return self
 
 
 # ── Change Management ──────────────────────────────────────────
@@ -1333,40 +1628,126 @@ class ChangeRecordOut(BaseModel):
         from_attributes = True
 
 
-class ChangeCreate(BaseModel):
+class ChangeCreate(StrictWriteModel):
     title: str = Field(..., min_length=1, max_length=200)
-    description: str = ""
-    change_type: str = "Normal"
-    status: str = "Draft"
-    priority: str = "P2"
-    risk_level: str = "Medium"
-    impact: Optional[str] = None
-    rollback_plan: Optional[str] = None
-    test_plan: Optional[str] = None
+    description: str = Field("", max_length=20_000)
+    change_type: Literal["Normal", "Standard", "Emergency"] = "Normal"
+    status: Literal["Draft", "Submitted"] = "Draft"
+    priority: Literal["P1", "P2", "P3", "P4"] = "P2"
+    risk_level: Literal["Low", "Medium", "High"] = "Medium"
+    impact: Optional[str] = Field(None, max_length=2_000)
+    rollback_plan: Optional[str] = Field(None, max_length=20_000)
+    test_plan: Optional[str] = Field(None, max_length=20_000)
     scheduled_start: Optional[datetime] = None
     scheduled_end: Optional[datetime] = None
-    assigned_to: Optional[str] = None
+    assigned_to: Optional[str] = Field(None, max_length=255)
+
+    @field_validator("title")
+    @classmethod
+    def normalize_title(cls, value: str) -> str:
+        _reject_nul(value)
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("must not be blank")
+        return normalized
+
+    @field_validator("change_type", "status", "priority", "risk_level")
+    @classmethod
+    def normalize_choice(cls, value: str) -> str:
+        _reject_nul(value)
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("must not be blank")
+        return normalized
+
+    @field_validator("description")
+    @classmethod
+    def normalize_description(cls, value: str) -> str:
+        _reject_nul(value)
+        return value.strip()
+
+    @field_validator("impact", "rollback_plan", "test_plan", "assigned_to")
+    @classmethod
+    def normalize_optional_text(cls, value: Optional[str]) -> Optional[str]:
+        _reject_nul(value)
+        normalized = value.strip() if value is not None else ""
+        return normalized or None
+
+    @field_validator("scheduled_start", "scheduled_end")
+    @classmethod
+    def normalize_schedule(cls, value: Optional[datetime]) -> Optional[datetime]:
+        return _utc_naive(value)
 
 
-class ChangeUpdate(BaseModel):
-    title: Optional[str] = None
-    description: Optional[str] = None
-    status: Optional[str] = None
-    change_type: Optional[str] = None
-    priority: Optional[str] = None
-    risk_level: Optional[str] = None
-    impact: Optional[str] = None
-    rollback_plan: Optional[str] = None
-    test_plan: Optional[str] = None
+class ChangeUpdate(StrictWriteModel):
+    title: Optional[str] = Field(None, min_length=1, max_length=200)
+    description: Optional[str] = Field(None, max_length=20_000)
+    status: Optional[Literal[
+        "Draft", "Submitted", "CAB Review", "Approved", "In Progress",
+        "Completed", "Rejected", "Cancelled",
+    ]] = None
+    change_type: Optional[Literal["Normal", "Standard", "Emergency"]] = None
+    priority: Optional[Literal["P1", "P2", "P3", "P4"]] = None
+    risk_level: Optional[Literal["Low", "Medium", "High"]] = None
+    impact: Optional[str] = Field(None, max_length=2_000)
+    rollback_plan: Optional[str] = Field(None, max_length=20_000)
+    test_plan: Optional[str] = Field(None, max_length=20_000)
     scheduled_start: Optional[datetime] = None
     scheduled_end: Optional[datetime] = None
-    assigned_to: Optional[str] = None
+    assigned_to: Optional[str] = Field(None, max_length=255)
+
+    @field_validator("title")
+    @classmethod
+    def normalize_title(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        _reject_nul(value)
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("must not be blank")
+        return normalized
+
+    @field_validator("status", "change_type", "priority", "risk_level")
+    @classmethod
+    def normalize_choice(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        _reject_nul(value)
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("must not be blank")
+        return normalized
+
+    @field_validator("description")
+    @classmethod
+    def normalize_description(cls, value: Optional[str]) -> Optional[str]:
+        _reject_nul(value)
+        return value.strip() if value is not None else None
+
+    @field_validator("impact", "rollback_plan", "test_plan", "assigned_to")
+    @classmethod
+    def normalize_optional_text(cls, value: Optional[str]) -> Optional[str]:
+        _reject_nul(value)
+        normalized = value.strip() if value is not None else ""
+        return normalized or None
+
+    @field_validator("scheduled_start", "scheduled_end")
+    @classmethod
+    def normalize_schedule(cls, value: Optional[datetime]) -> Optional[datetime]:
+        return _utc_naive(value)
+
+    @model_validator(mode="after")
+    def reject_null_required_fields(self):
+        for field in ("title", "status", "change_type", "priority", "risk_level"):
+            if field in self.model_fields_set and getattr(self, field) is None:
+                raise ValueError(f"{field} must not be null")
+        return self
 
 
 class ChangeApprovalOut(BaseModel):
     id: int
     change_id: str
-    approver_id: str
+    approver_id: Optional[str] = None
     approver_name: Optional[str] = None
     decision: Optional[str] = None
     comment: Optional[str] = None
@@ -1377,14 +1758,28 @@ class ChangeApprovalOut(BaseModel):
         from_attributes = True
 
 
-class ChangeApprovalCreate(BaseModel):
-    change_id: Optional[str] = None
-    approver_id: str
+class ChangeApprovalCreate(StrictWriteModel):
+    approver_id: str = Field(..., min_length=1, max_length=255)
+
+    @field_validator("approver_id")
+    @classmethod
+    def normalize_approver_id(cls, value: str) -> str:
+        _reject_nul(value)
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("must not be blank")
+        return normalized
 
 
-class ChangeApprovalDecision(BaseModel):
+class ChangeApprovalDecision(StrictWriteModel):
     decision: Literal["approved", "rejected"]
-    comment: str = ""
+    comment: str = Field("", max_length=5_000)
+
+    @field_validator("comment")
+    @classmethod
+    def normalize_comment(cls, value: str) -> str:
+        _reject_nul(value)
+        return value.strip()
 
 
 # ── Asset / CMDB ───────────────────────────────────────────────
@@ -1411,34 +1806,91 @@ class Asset(BaseModel):
         from_attributes = True
 
 
-class AssetCreate(BaseModel):
+class AssetCreate(StrictWriteModel):
     name: str = Field(..., min_length=1, max_length=200)
-    asset_type: str = Field(..., min_length=1)
-    asset_tag: Optional[str] = None
-    status: str = "In Use"
-    owner_id: Optional[str] = None
-    location: Optional[str] = None
-    vendor: Optional[str] = None
-    model: Optional[str] = None
+    asset_type: Literal[
+        "Hardware", "Software", "License", "Network", "Facility"
+    ]
+    asset_tag: Optional[str] = Field(None, max_length=255)
+    status: Literal["In Use", "Available", "Retired", "Broken", "Lost"] = "In Use"
+    owner_id: Optional[str] = Field(None, max_length=255)
+    location: Optional[str] = Field(None, max_length=255)
+    vendor: Optional[str] = Field(None, max_length=255)
+    model: Optional[str] = Field(None, max_length=255)
     purchase_date: Optional[datetime] = None
     warranty_expiry: Optional[datetime] = None
-    cost: Optional[float] = None
-    notes: Optional[str] = None
+    cost: Optional[float] = Field(None, ge=0, le=1_000_000_000_000)
+    notes: Optional[str] = Field(None, max_length=20_000)
+
+    @field_validator("name", "asset_type", "status")
+    @classmethod
+    def normalize_required_text(cls, value: str) -> str:
+        _reject_nul(value)
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("must not be blank")
+        return normalized
+
+    @field_validator("asset_tag", "owner_id", "location", "vendor", "model", "notes")
+    @classmethod
+    def normalize_optional_text(cls, value: Optional[str]) -> Optional[str]:
+        _reject_nul(value)
+        normalized = value.strip() if value is not None else ""
+        return normalized or None
+
+    @field_validator("purchase_date", "warranty_expiry")
+    @classmethod
+    def normalize_datetime(cls, value: Optional[datetime]) -> Optional[datetime]:
+        return _utc_naive(value)
 
 
-class AssetUpdate(BaseModel):
-    name: Optional[str] = None
-    asset_type: Optional[str] = None
-    asset_tag: Optional[str] = None
-    status: Optional[str] = None
-    owner_id: Optional[str] = None
-    location: Optional[str] = None
-    vendor: Optional[str] = None
-    model: Optional[str] = None
+class AssetUpdate(StrictWriteModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=200)
+    asset_type: Optional[Literal[
+        "Hardware", "Software", "License", "Network", "Facility"
+    ]] = None
+    asset_tag: Optional[str] = Field(None, max_length=255)
+    status: Optional[Literal[
+        "In Use", "Available", "Retired", "Broken", "Lost"
+    ]] = None
+    owner_id: Optional[str] = Field(None, max_length=255)
+    location: Optional[str] = Field(None, max_length=255)
+    vendor: Optional[str] = Field(None, max_length=255)
+    model: Optional[str] = Field(None, max_length=255)
     purchase_date: Optional[datetime] = None
     warranty_expiry: Optional[datetime] = None
-    cost: Optional[float] = None
-    notes: Optional[str] = None
+    cost: Optional[float] = Field(None, ge=0, le=1_000_000_000_000)
+    notes: Optional[str] = Field(None, max_length=20_000)
+
+    @field_validator("name", "asset_type", "status")
+    @classmethod
+    def normalize_required_text(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        _reject_nul(value)
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("must not be blank")
+        return normalized
+
+    @field_validator("asset_tag", "owner_id", "location", "vendor", "model", "notes")
+    @classmethod
+    def normalize_optional_text(cls, value: Optional[str]) -> Optional[str]:
+        _reject_nul(value)
+        normalized = value.strip() if value is not None else ""
+        return normalized or None
+
+    @field_validator("purchase_date", "warranty_expiry")
+    @classmethod
+    def normalize_datetime(cls, value: Optional[datetime]) -> Optional[datetime]:
+        return _utc_naive(value)
+
+    @model_validator(mode="after")
+    def reject_null_required_fields(self):
+        for field in ("name", "asset_type", "status"):
+            if field in self.model_fields_set and getattr(self, field) is None:
+                raise ValueError(f"{field} must not be null")
+        return self
 
 
 # ── Surveys / CSAT ─────────────────────────────────────────────
@@ -1459,6 +1911,14 @@ class SurveyOut(BaseModel):
     ticket_id: str
     template_id: Optional[int] = None
     ticket_subject: Optional[str] = None
+    recipient_email: Optional[str] = None
+    recipient_name: Optional[str] = None
+    response_expires_at: Optional[datetime] = None
+    delivery_status: Literal["pending", "uncertain", "accepted", "failed", "legacy"] = "legacy"
+    delivery_message_id: Optional[str] = None
+    delivery_error: Optional[str] = None
+    delivery_attempted_at: Optional[datetime] = None
+    sent_by: Optional[str] = None
     sent_at: Optional[datetime] = None
     responded_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
@@ -1468,13 +1928,48 @@ class SurveyOut(BaseModel):
 
 
 class SurveySend(BaseModel):
-    ticket_id: str
-    template_id: int = 1
+    ticket_id: str = Field(..., min_length=1, max_length=255)
+    template_id: int = Field(1, ge=1)
+
+    @field_validator("ticket_id")
+    @classmethod
+    def normalize_ticket_id(cls, value: str) -> str:
+        _reject_nul(value)
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("must not be blank")
+        return normalized
 
 
 class SurveyResponseCreate(BaseModel):
     rating: int = Field(..., ge=1, le=5)
-    comment: str = ""
+    comment: str = Field("", max_length=2_000)
+
+    @field_validator("comment")
+    @classmethod
+    def validate_comment(cls, value: str) -> str:
+        if "\x00" in value:
+            raise ValueError("Survey comment is invalid")
+        return value.strip()
+
+
+class SurveyPortalLookupRequest(BaseModel):
+    # Shape validation is intentionally completed in the handler so malformed
+    # and unknown capabilities receive the same public response.
+    token: str = Field("", max_length=512)
+
+
+class SurveyPortalQuestion(BaseModel):
+    question: str
+    expires_at: datetime
+
+
+class SurveyPortalResponseRequest(SurveyResponseCreate):
+    token: str = Field("", max_length=512)
+
+
+class SurveyPortalSubmitted(BaseModel):
+    status: Literal["submitted"] = "submitted"
 
 
 # ── Time Tracking ──────────────────────────────────────────────
@@ -1494,9 +1989,18 @@ class TimeEntry(BaseModel):
 
 
 class TimeEntryCreate(BaseModel):
-    ticket_id: str = Field(..., min_length=1)
-    description: str = ""
-    minutes: int = Field(..., ge=1)
+    ticket_id: str = Field(..., min_length=1, max_length=255)
+    description: str = Field(..., min_length=1, max_length=10_000)
+    minutes: int = Field(..., ge=1, le=1_440)
+
+    @field_validator("ticket_id", "description")
+    @classmethod
+    def normalize_text(cls, value: str) -> str:
+        _reject_nul(value)
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("must not be blank")
+        return normalized
 
 
 # ── Self-Service Portal ────────────────────────────────────────

@@ -1,3 +1,5 @@
+name: tickety
+
 services:
   postgres:
     image: ${POSTGRES_IMAGE:-pgvector/pgvector:0.8.6-pg16}
@@ -18,6 +20,7 @@ services:
       start_period: 10s
 
   migrate:
+    image: tickety-backend:latest
     build:
       context: .
       target: backend
@@ -35,6 +38,7 @@ services:
     restart: "on-failure:3"
 
   backend:
+    image: tickety-backend:latest
     build:
       context: .
       target: backend
@@ -61,6 +65,7 @@ services:
       start_period: 15s
 
   worker:
+    image: tickety-backend:latest
     build:
       context: .
       target: backend
@@ -86,13 +91,14 @@ services:
       start_period: 15s
 
   frontend:
+    image: tickety-frontend:latest
     build:
       context: .
       target: frontend
     command: ["node", "server.js"]
     restart: unless-stopped
     ports:
-      - "${TICKETY_PORT:-3000}:3000"
+      - "127.0.0.1:${TICKETY_PORT:-3000}:3000"
     environment:
       # Browser traffic stays same-origin; these server-only values let the
       # Next.js HTTP and WebSocket proxies reach the private API service.
@@ -115,7 +121,7 @@ services:
     image: ${CADDY_IMAGE:-caddy:2.10-alpine}
     restart: unless-stopped
     ports:
-      - "443:443"
+      - "127.0.0.1:443:443"
     volumes:
       - ./deploy/local-tunnel/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

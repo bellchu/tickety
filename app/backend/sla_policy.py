@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import re
 from typing import Iterable
 
 from sqlalchemy import and_, func
 
 from .database import TicketRecord
+from .portable_keys import portable_ascii_lower, portable_ascii_lower_expression
 
 
 # Freshservice projects status 3 as ``Pending``; operationally that is its
@@ -26,7 +26,9 @@ DEFAULT_SLA_EXEMPT_STATUSES = frozenset({
 
 
 def normalize_sla_status(value: object) -> str:
-    return re.sub(r"[\s_-]+", " ", str(value or "").strip().lower())
+    return portable_ascii_lower(
+        str(value or "").replace("_", " ").replace("-", " ")
+    )
 
 
 def sla_exempt_status_names(additional_statuses: Iterable[str] = ()) -> set[str]:
@@ -56,9 +58,9 @@ def ticket_is_sla_exempt(
 
 
 def _normalized_status_expression(column):
-    return func.lower(func.trim(func.replace(func.replace(
+    return portable_ascii_lower_expression(func.replace(func.replace(
         func.coalesce(column, ""), "_", " "
-    ), "-", " ")))
+    ), "-", " "))
 
 
 def sla_eligible_filter(additional_statuses: Iterable[str] = ()):

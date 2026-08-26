@@ -8,7 +8,13 @@ import { useEngagementStore } from "@/lib/engagement-state";
 import { createNotificationsWS } from "@/lib/ws";
 import { isPointsNotification } from "@/lib/realtime-validation";
 
-export function AppExperience({ children }: { children: React.ReactNode }) {
+export function AppExperience({
+  children,
+  realtimeEnabled,
+}: {
+  children: React.ReactNode;
+  realtimeEnabled: boolean;
+}) {
   const setNotification = useEngagementStore((state) => state.setNotification);
   const showPointsToast = useEngagementStore((state) => state.showPointsToast);
   const showTierPromotion = useEngagementStore((state) => state.showTierPromotion);
@@ -16,6 +22,8 @@ export function AppExperience({ children }: { children: React.ReactNode }) {
   const clearTierPromotion = useEngagementStore((state) => state.clearTierPromotion);
 
   useEffect(() => {
+    if (!realtimeEnabled) return;
+
     const ws = createNotificationsWS();
     ws.connect();
     const unsubscribe = ws.onMessage((data) => {
@@ -28,7 +36,7 @@ export function AppExperience({ children }: { children: React.ReactNode }) {
       unsubscribe();
       ws.disconnect();
     };
-  }, [setNotification]);
+  }, [realtimeEnabled, setNotification]);
 
   return (
     <>

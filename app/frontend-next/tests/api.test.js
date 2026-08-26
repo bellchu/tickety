@@ -171,3 +171,213 @@ test("time summary sends the browser's IANA time zone", async () => {
     global.fetch = originalFetch;
   }
 });
+
+test("time entry list and summary share the same explicit self scope", async () => {
+  const { api } = loadApi();
+  const originalFetch = global.fetch;
+  const calls = [];
+  global.fetch = async (url) => {
+    calls.push(url);
+    return new Response(JSON.stringify(url.includes("summary")
+      ? { total_hours: 3, today_hours: 1, ticket_count: 2, average_hours_per_ticket: 1.5 }
+      : []), { status: 200 });
+  };
+
+  try {
+    await api.getTimeEntries({ ticketId: "ticket-1", userId: "user-1" });
+    await api.getTimeSummary("UTC", { ticketId: "ticket-1", userId: "user-1" });
+    assert.deepEqual(calls, [
+      "/api/time-entries?ticket_id=ticket-1&user_id=user-1&limit=25&offset=0",
+      "/api/time-entries/summary?time_zone=UTC&ticket_id=ticket-1&user_id=user-1",
+    ]);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("time entry list clients preserve bounded page metadata", async () => {
+  const { api } = loadApi();
+  const originalFetch = global.fetch;
+  const calls = [];
+  global.fetch = async (url) => {
+    calls.push(String(url));
+    return new Response(JSON.stringify([{
+      id: 7,
+      ticket_id: "ticket /1",
+      user_id: "agent-1",
+      user_name: "Agent One",
+      description: "Paged work",
+      minutes: 15,
+      entry_date: "2026-08-26T00:00:00Z",
+      created_at: "2026-08-26T00:00:00Z",
+    }]), {
+      status: 200,
+      headers: {
+        "x-page-limit": "2",
+        "x-page-offset": "4",
+        "x-has-more": "true",
+      },
+    });
+  };
+
+  try {
+    const scoped = await api.getTimeEntries({
+      ticketId: "ticket /1",
+      userId: "agent & 1",
+      teamId: "team/1",
+      limit: 2,
+      offset: 4,
+    });
+    const ticket = await api.getTicketTimeEntries("ticket /1", {
+      userId: "agent & 1",
+      limit: 2,
+      offset: 4,
+    });
+
+    assert.deepEqual(calls, [
+      "/api/time-entries?ticket_id=ticket+%2F1&user_id=agent+%26+1&team_id=team%2F1&limit=2&offset=4",
+      "/api/time-entries/ticket/ticket%20%2F1?user_id=agent+%26+1&limit=2&offset=4",
+    ]);
+    for (const page of [scoped, ticket]) {
+      assert.equal(page.entries.length, 1);
+      assert.equal(page.limit, 2);
+      assert.equal(page.offset, 4);
+      assert.equal(page.hasMore, true);
+    }
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("change approval history preserves bounded page metadata", async () => {
+  const { api } = loadApi();
+  const originalFetch = global.fetch;
+  const calls = [];
+  global.fetch = async (url) => {
+    calls.push(String(url));
+    return new Response(JSON.stringify([{
+      id: 51,
+      change_id: "change /1",
+      approver_id: null,
+      approver_name: null,
+      decision: "approved",
+      comment: "Retained after account deletion",
+      decided_at: "2026-08-26T00:00:00Z",
+      created_at: "2026-08-26T00:00:00Z",
+    }]), {
+      status: 200,
+      headers: {
+        "x-page-limit": "50",
+        "x-page-offset": "50",
+        "x-has-more": "true",
+      },
+    });
+  };
+
+  try {
+    const page = await api.getChangeApprovals("change /1", { limit: 50, offset: 50 });
+
+    assert.deepEqual(calls, [
+      "/api/changes/change%20%2F1/approvals?limit=50&offset=50",
+    ]);
+    assert.equal(page.approvals.length, 1);
+    assert.equal(page.approvals[0].approver_id, null);
+    assert.equal(page.limit, 50);
+    assert.equal(page.offset, 50);
+    assert.equal(page.hasMore, true);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("change approval history fails safe when pagination headers are unavailable", async () => {
+  const { api } = loadApi();
+  const originalFetch = global.fetch;
+  global.fetch = async () => new Response(JSON.stringify([{
+    id: 2,
+    change_id: "change-2",
+    approver_id: "reviewer-2",
+    approver_name: "Reviewer Two",
+    decision: null,
+    comment: null,
+    decided_at: null,
+    created_at: "2026-08-26T00:00:00Z",
+  }]), { status: 200 });
+
+  try {
+    const page = await api.getChangeApprovals("change-2", { limit: 1, offset: 1 });
+
+    assert.equal(page.limit, 1);
+    assert.equal(page.offset, 1);
+    assert.equal(page.hasMore, true);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("survey ticket search encodes complete server-side terminal paging", async () => {
+  const { api } = loadApi();
+  const originalFetch = global.fetch;
+  const calls = [];
+  global.fetch = async (url) => {
+    calls.push(String(url));
+    return new Response(JSON.stringify([]), {
+      status: 200,
+      headers: {
+        "x-page-limit": "50",
+        "x-page-offset": "100",
+        "x-has-more": "true",
+      },
+    });
+  };
+
+  try {
+    const page = await api.getSurveyEligibleTickets({
+      search: "VPN & archived",
+      limit: 50,
+      offset: 100,
+    });
+
+    assert.deepEqual(calls, [
+      "/api/surveys/eligible-tickets?limit=50&offset=100&search=VPN+%26+archived",
+    ]);
+    assert.equal(page.limit, 50);
+    assert.equal(page.offset, 100);
+    assert.equal(page.hasMore, true);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("public survey capabilities stay in POST bodies and never enter request URLs", async () => {
+  const { api } = loadApi();
+  const originalFetch = global.fetch;
+  const calls = [];
+  const capability = "private-survey-capability";
+  global.fetch = async (url, options) => {
+    calls.push({ url: String(url), options });
+    const responseBody = String(url).endsWith("/lookup")
+      ? { question: "How did we do?", expires_at: "2026-09-25T00:00:00Z" }
+      : { status: "submitted" };
+    return new Response(JSON.stringify(responseBody), { status: String(url).endsWith("/lookup") ? 200 : 201 });
+  };
+
+  try {
+    await api.lookupPortalSurvey(capability);
+    await api.respondPortalSurvey(capability, 5, "Excellent");
+
+    assert.deepEqual(calls.map(({ url }) => url), [
+      "/api/portal/survey/lookup",
+      "/api/portal/survey/respond",
+    ]);
+    assert.ok(calls.every(({ url, options }) => options.method === "POST" && !url.includes(capability)));
+    assert.deepEqual(JSON.parse(calls[0].options.body), { token: capability });
+    assert.deepEqual(JSON.parse(calls[1].options.body), {
+      token: capability,
+      rating: 5,
+      comment: "Excellent",
+    });
+  } finally {
+    global.fetch = originalFetch;
+  }
+});

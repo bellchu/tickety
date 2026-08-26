@@ -1,4 +1,4 @@
-export type NavigationVisibility = "all" | "admin" | "intelligence";
+export type NavigationVisibility = "all" | "admin" | "operations" | "intelligence";
 
 export type NavigationIconKey =
   | "dashboard"
@@ -58,7 +58,7 @@ export const navigationSections: readonly NavigationSection[] = [
     items: [
       { href: "/agents", label: "Agents", icon: "agents", visibility: "admin" },
       { href: "/email", label: "Email", icon: "email", visibility: "all" },
-      { href: "/surveys", label: "Surveys", icon: "surveys", visibility: "all" },
+      { href: "/surveys", label: "Surveys", icon: "surveys", visibility: "operations" },
       { href: "/leaderboard", label: "Leaderboard", icon: "leaderboard", visibility: "all" },
     ],
   },

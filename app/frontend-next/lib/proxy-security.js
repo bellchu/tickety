@@ -33,7 +33,7 @@ function jsonError(status, detail) {
 
 /**
  * Use the deployment-owned public URL for forwarding identity. TLS commonly
- * terminates before the Next.js pod, so req.nextUrl can legitimately be http
+ * terminates before the Next.js container, so req.nextUrl can legitimately be http
  * even while the browser origin is https. Falling back to the request URL
  * keeps local development usable when SITE_URL is absent or invalid.
  *

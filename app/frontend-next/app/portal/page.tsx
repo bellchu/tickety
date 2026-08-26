@@ -372,14 +372,16 @@ export default function PortalPage() {
 
       <Dialog
         open={Boolean(createdTicket)}
-        onOpenChange={(open) => { if (!open) closeCreatedTicket(); }}
+        onOpenChange={() => undefined}
         title="Your request is on its way"
         description="Save this private tracking link now. For your security, it cannot be recovered or shown again after you close this window."
-        closeLabel="Close and discard tracking link"
+        role="alertdialog"
+        dismissible={false}
+        closeOnBackdrop={false}
         className="max-w-xl"
         footer={
           <>
-            <Button variant="secondary" onClick={closeCreatedTicket}>I have saved it</Button>
+            <Button variant="secondary" onClick={closeCreatedTicket} leadingIcon={<Check className="h-4 w-4" />}>I have saved the link</Button>
             <Button onClick={() => createdTicket && window.open(createdTicket.tracking_url, "_blank", "noopener,noreferrer")} leadingIcon={<ExternalLink className="h-4 w-4" />}>
               Open request
             </Button>

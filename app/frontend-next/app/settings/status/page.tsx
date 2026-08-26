@@ -8,8 +8,6 @@ import {
   Activity,
   ArrowLeft,
   Bot,
-  CheckCircle2,
-  Clock3,
   Cloud,
   Database,
   HardDrive,
@@ -66,6 +64,7 @@ export default function AdminStatusPage() {
     queryFn: api.getVersion,
     enabled: canAccess,
     staleTime: Infinity,
+    retry: false,
   });
   const aiQuery = useQuery({
     queryKey: ["ai-task-status", "all", "", 0, 1],
@@ -96,14 +95,27 @@ export default function AdminStatusPage() {
     refetchInterval: 30_000,
   });
 
-  const operationalQueries = [readinessQuery, aiQuery, syncQuery, retrievalQuery, oauthQuery];
-  const authError = isAuthError(authQuery.error) || operationalQueries.some((query) => isAuthError(query.error));
+  const refreshableQueries = [readinessQuery, versionQuery, aiQuery, syncQuery, retrievalQuery, oauthQuery];
+  const authError = isAuthError(authQuery.error) || refreshableQueries.some((query) => isAuthError(query.error));
   useEffect(() => {
     if (authError) router.replace("/login?next=/settings/status");
   }, [authError, router]);
 
   if (authQuery.isLoading) return <StatusSkeleton />;
   if (authError) return null;
+  if (authQuery.isError || !authQuery.data) {
+    return (
+      <PageFrame>
+        <ErrorState
+          title="Status access could not be checked"
+          description="Your session could not be verified, so no administrative status data was requested."
+          actionLabel="Retry access check"
+          onRetry={() => void authQuery.refetch()}
+          retrying={authQuery.isFetching}
+        />
+      </PageFrame>
+    );
+  }
   if (!canAccess) {
     return (
       <PageFrame>
@@ -117,13 +129,21 @@ export default function AdminStatusPage() {
   const retrieval = retrievalQuery.data;
   const oauth = oauthQuery.data;
   const version = versionQuery.data;
+  const applicationUnavailable = Boolean(readinessQuery.error);
+  const buildUnavailable = Boolean(versionQuery.error);
   const syncNeedsReview = Boolean(
     sync?.last_status === "error"
     || sync?.last_status === "throttled"
     || sync?.attachment_errors
     || (!sync?.attachment_storage_configured && sync?.attachment_pending)
   );
-  const unavailableCount = operationalQueries.filter((query) => query.error).length;
+  const unavailableCount = [
+    applicationUnavailable || buildUnavailable,
+    Boolean(aiQuery.error),
+    Boolean(syncQuery.error),
+    Boolean(retrievalQuery.error),
+    Boolean(oauthQuery.error),
+  ].filter(Boolean).length;
   const warningCount = [
     Boolean(ai?.queue.attention),
     syncNeedsReview,
@@ -131,11 +151,11 @@ export default function AdminStatusPage() {
     Boolean(oauth?.configured && !oauth.connected),
     readinessQuery.data?.status === "not_ready",
   ].filter(Boolean).length;
-  const refreshing = operationalQueries.some((query) => query.isFetching);
+  const refreshing = refreshableQueries.some((query) => query.isFetching);
   const refreshAll = () => {
-    void Promise.all(operationalQueries.map((query) => query.refetch()));
+    void Promise.all(refreshableQueries.map((query) => query.refetch()));
   };
-  const lastSnapshot = ai?.generated_at || sync?.run_finished_at || version?.build_time || null;
+  const latestResponseAt = Math.max(0, ...refreshableQueries.map((query) => query.dataUpdatedAt));
 
   return (
     <PageFrame width="wide" className="space-y-8">
@@ -144,11 +164,11 @@ export default function AdminStatusPage() {
         icon={<Activity className="h-5 w-5" />}
         title="Status"
         description="A single operational view for application readiness, AI tasks, ticket synchronization, search indexing, and integration connectivity."
-        meta={`Live checks refresh independently${lastSnapshot ? ` · latest snapshot ${formatTimeAgo(lastSnapshot)}` : ""}`}
+        meta={`Live checks refresh independently${latestResponseAt ? ` · latest response ${formatTimeAgo(new Date(latestResponseAt).toISOString())}` : ""}`}
         actions={(
-          <div className="flex gap-2">
-            <Link href="/settings" className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-linen-500 bg-linen-50 px-4 text-sm font-semibold text-ink-700 shadow-sm hover:bg-linen-200">
-              <ArrowLeft className="h-4 w-4" /> Settings
+          <div className="flex flex-wrap gap-2">
+            <Link href="/settings" className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-linen-500 bg-linen-50 px-4 text-sm font-semibold text-ink-700 shadow-sm hover:bg-linen-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2">
+              <ArrowLeft className="h-4 w-4" aria-hidden="true" /> Settings
             </Link>
             <Button variant="secondary" onClick={refreshAll} pending={refreshing} pendingLabel="Refreshing…" leadingIcon={<RefreshCw className="h-4 w-4" />}>Refresh all</Button>
           </div>
@@ -170,7 +190,7 @@ export default function AdminStatusPage() {
         <SummaryMetric label="Checks" value="5" detail="Independent operational areas" icon={<Activity className="h-4 w-4" />} />
         <SummaryMetric label="Needs review" value={warningCount.toLocaleString()} detail="Degraded but still observable" icon={<TriangleAlert className="h-4 w-4" />} />
         <SummaryMetric label="Unavailable" value={unavailableCount.toLocaleString()} detail="Checks that could not respond" icon={<Cloud className="h-4 w-4" />} />
-        <SummaryMetric label="Build" value={version?.version || "Loading…"} detail={version?.build_sha ? `Commit ${version.build_sha.slice(0, 12)}` : "Deployment identity pending"} icon={<Server className="h-4 w-4" />} />
+        <SummaryMetric label="Build" value={buildUnavailable ? "Unavailable" : version?.version || "Loading…"} detail={buildUnavailable ? "Deployment identity did not respond" : version?.build_sha ? `Commit ${version.build_sha.slice(0, 12)}` : "Deployment identity pending"} icon={<Server className="h-4 w-4" />} />
       </SummaryStrip>
 
       <section aria-labelledby="operational-status-heading">
@@ -179,13 +199,13 @@ export default function AdminStatusPage() {
           <StatusCard
             icon={<Server className="h-5 w-5" />}
             title="Application readiness"
-            tone={readinessQuery.error ? "unavailable" : readinessQuery.data?.status === "ready" ? "healthy" : readinessQuery.data ? "warning" : "neutral"}
-            status={readinessQuery.error ? "Unavailable" : readinessQuery.data?.status === "ready" ? "Ready" : readinessQuery.data ? "Not ready" : "Checking…"}
+            tone={applicationUnavailable ? "unavailable" : readinessQuery.data?.status === "ready" ? "healthy" : readinessQuery.data ? "warning" : "neutral"}
+            status={applicationUnavailable ? "Unavailable" : readinessQuery.data?.status === "ready" ? "Ready" : readinessQuery.data ? "Not ready" : "Checking…"}
             description="Backend readiness and its required database dependency."
             facts={[
               { label: "Database", value: readinessQuery.data?.checks.database || "Checking…" },
-              { label: "Version", value: version?.version || "Loading…" },
-              { label: "Build time", value: formatLocalDateTime(version?.build_time, undefined, "Not recorded") },
+              { label: "Version", value: buildUnavailable ? "Unavailable" : version?.version || "Loading…" },
+              { label: "Build time", value: buildUnavailable ? "Unavailable" : formatLocalDateTime(version?.build_time, undefined, "Not recorded") },
             ]}
             diagnosticArea="application"
           />
@@ -324,7 +344,7 @@ function StatusCard({
       )}
       {href && action && (
         <div className="mt-auto pt-5 text-right">
-          <Link href={href} className="text-xs font-semibold text-semantic-primary hover:underline">{action} →</Link>
+          <Link href={href} className="rounded-sm text-xs font-semibold text-semantic-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2">{action} →</Link>
         </div>
       )}
     </ContentSurface>

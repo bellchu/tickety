@@ -19,12 +19,14 @@ from ..database import (
     ExternalGroupRecord,
     ExternalTicketContextRecord,
     ExternalUserRecord,
+    ProblemTicketLinkRecord,
     SessionLocal,
     SyncStateRecord,
     TicketCommentRecord,
     TicketRecord,
 )
 from ..schema import ExternalAttachment, ExternalConversation, ExternalTicket, WebhookEvent
+from ..portable_keys import portable_ascii_lower
 from ..attachment_storage import (
     AzureBlobAttachmentStore,
     attachment_max_bytes,
@@ -353,7 +355,7 @@ def _project_source_status(source_status: str) -> tuple[str, str, str]:
     """Project one provider status into external, workflow, and display state."""
     workflow_status = (
         "Closed"
-        if source_status.lower() in ("closed", "resolved")
+        if portable_ascii_lower(source_status) in ("closed", "resolved")
         else source_status
     )
     return source_status, workflow_status, workflow_status
@@ -653,7 +655,7 @@ def _source_context_payload(ext: ExternalTicket) -> dict[str, Any]:
         "priority_mapped": _source_value(ext.priority),
         "ticket_type_raw": _source_value(ext.ticket_type),
         "ticket_type_mapped": _source_value(
-            (ext.ticket_type or "incident").lower()
+            portable_ascii_lower(ext.ticket_type or "incident")
         ),
         "category": _source_value(ext.external_category),
         "subcategory": _source_value(ext.external_subcategory),
@@ -683,7 +685,7 @@ def _project_ticket_context(
         "priority_raw": ext.external_priority_code,
         "priority_mapped": ext.priority,
         "ticket_type_raw": ext.ticket_type,
-        "ticket_type_mapped": (ext.ticket_type or "incident").lower(),
+        "ticket_type_mapped": portable_ascii_lower(ext.ticket_type or "incident"),
         "category": ext.external_category,
         "subcategory": ext.external_subcategory,
         "item_category": ext.external_item_category,
@@ -1134,7 +1136,8 @@ def _ticket_change_artifacts(
         existing.priority != ext.priority
         or existing.external_priority_code != ext.external_priority_code
         or existing.external_ticket_type_raw != ext.ticket_type
-        or existing.ticket_type != (ext.ticket_type or existing.ticket_type or "incident").lower()
+        or portable_ascii_lower(existing.ticket_type)
+        != portable_ascii_lower(ext.ticket_type or existing.ticket_type or "incident")
         or existing.external_category != ext.external_category
         or existing.external_subcategory != ext.external_subcategory
         or existing.external_item_category != ext.external_item_category
@@ -1188,8 +1191,47 @@ def _upsert_ticket(
 
     authoritative_status = _project_source_status(ext.status)
     external_status, workflow_status, display_status = authoritative_status
+    source_is_resolved = portable_ascii_lower(ext.status) in {
+        "closed", "resolved",
+    }
 
     if existing:
+        matched = db.query(TicketRecord).filter(
+            TicketRecord.id == existing.id
+        ).update(
+            {TicketRecord.updated_at: TicketRecord.updated_at},
+            synchronize_session=False,
+        )
+        if matched != 1:
+            if commit_changes:
+                db.rollback()
+            raise RuntimeError("Provider ticket disappeared while synchronization was locking it")
+        locked_row = db.query(
+            TicketRecord,
+            ProblemTicketLinkRecord.id,
+        ).outerjoin(
+            ProblemTicketLinkRecord,
+            ProblemTicketLinkRecord.ticket_id == TicketRecord.id,
+        ).filter(
+            TicketRecord.id == existing.id
+        ).populate_existing().first()
+        if locked_row is None:
+            if commit_changes:
+                db.rollback()
+            raise RuntimeError("Provider ticket disappeared while synchronization was locking it")
+        existing, linked_problem_id = locked_row
+        projected_ticket_type = portable_ascii_lower(
+            ext.ticket_type or existing.ticket_type or "incident"
+        )
+        if (
+            projected_ticket_type != "incident"
+            and linked_problem_id is not None
+        ):
+            if commit_changes:
+                db.rollback()
+            raise RuntimeError(
+                "Provider ticket type conflicts with a linked problem; unlink it before synchronization"
+            )
         source_status_changed = (
             existing.external_status,
             existing.workflow_status,
@@ -1197,6 +1239,8 @@ def _upsert_ticket(
         ) != authoritative_status
         if not overwrite:
             if not source_status_changed:
+                if commit_changes:
+                    db.commit()
                 return "skipped", None
             existing.external_status = external_status
             existing.external_status_code = ext.external_status_code
@@ -1206,10 +1250,15 @@ def _upsert_ticket(
                 existing.external_updated_at = ext.updated_at
             existing.external_resolved_at = ext.resolved_at
             existing.updated_at = datetime.utcnow()
-            if ext.status.lower() in ("closed", "resolved"):
+            if source_is_resolved:
                 existing.resolved_at = (
                     ext.resolved_at or existing.resolved_at or datetime.utcnow()
                 )
+            else:
+                # The provider's current state is authoritative. Historical
+                # revisions remain in the external activity ledger; the live
+                # ticket must not continue to look resolved after a reopen.
+                existing.resolved_at = None
             if commit_changes:
                 db.commit()
                 db.refresh(existing)
@@ -1225,8 +1274,7 @@ def _upsert_ticket(
             existing.priority != ext.priority
             or existing.external_priority_code != ext.external_priority_code
             or existing.external_ticket_type_raw != ext.ticket_type
-            or existing.ticket_type
-            != (ext.ticket_type or existing.ticket_type or "incident").lower()
+            or portable_ascii_lower(existing.ticket_type) != projected_ticket_type
             or existing.external_category != ext.external_category
             or existing.external_subcategory != ext.external_subcategory
             or existing.external_item_category != ext.external_item_category
@@ -1256,12 +1304,14 @@ def _upsert_ticket(
             or existing.external_resolved_at != ext.resolved_at
             or existing.external_due_by != ext.due_by
             or existing.external_fr_due_by != ext.fr_due_by
-            or existing.ticket_type != (ext.ticket_type or existing.ticket_type or "incident").lower()
+            or portable_ascii_lower(existing.ticket_type) != projected_ticket_type
             or (ext.url and existing.external_url != ext.url)
         )
         if not changed:
             # Nothing to write — count as skipped so the worker doesn't
             # report spurious "updated" activity on every poll.
+            if commit_changes:
+                db.commit()
             return "skipped", existing
         existing.subject = ext.subject
         existing.description = ext.description
@@ -1296,16 +1346,20 @@ def _upsert_ticket(
         existing.external_fr_due_by = ext.fr_due_by
         existing.external_url = ext.url or existing.external_url
         existing.workflow_status = workflow_status
-        existing.ticket_type = (ext.ticket_type or existing.ticket_type or "incident").lower()
-        existing.due_by = ext.due_by or existing.due_by
-        existing.resolution_due_at = ext.due_by or existing.resolution_due_at
-        existing.response_due_at = ext.fr_due_by or existing.response_due_at
+        existing.ticket_type = projected_ticket_type
+        # These local columns are the query-optimized projection of provider
+        # deadlines. Mirror explicit NULL removals instead of retaining stale
+        # SLA targets that reports would continue to count as breaches.
+        existing.due_by = ext.due_by
+        existing.resolution_due_at = ext.due_by
+        existing.response_due_at = ext.fr_due_by
         existing.updated_at = datetime.utcnow()
-        if ext.status.lower() in ("closed", "resolved"):
+        if source_is_resolved:
             existing.status = display_status
             existing.resolved_at = ext.resolved_at or existing.resolved_at or datetime.utcnow()
         else:
             existing.status = display_status
+            existing.resolved_at = None
         if commit_changes:
             db.commit()
             db.refresh(existing)
@@ -1326,7 +1380,7 @@ def _upsert_ticket(
         status=workflow_status,
         workflow_status=workflow_status,
         priority=ext.priority,
-        ticket_type=(ext.ticket_type or "incident").lower(),
+        ticket_type=portable_ascii_lower(ext.ticket_type or "incident"),
         due_by=ext.due_by,
         response_due_at=ext.fr_due_by,
         resolution_due_at=ext.due_by,
@@ -1355,7 +1409,7 @@ def _upsert_ticket(
         external_due_by=ext.due_by,
         external_fr_due_by=ext.fr_due_by,
         created_at=ext.created_at or datetime.utcnow(),
-        resolved_at=ext.resolved_at if ext.status.lower() in ("closed", "resolved") else None,
+        resolved_at=ext.resolved_at if source_is_resolved else None,
     )
     db.add(new_ticket)
     if commit_changes:

@@ -53,3 +53,11 @@ test("overview keeps protected intelligence fail-closed before rendering it", ()
     /usesIntelligenceQueue \? rankedQueue : selectDeterministicQueue\(tickets, 6\)/,
   );
 });
+
+test("overview uses complete server totals and a server-generated export", () => {
+  assert.match(overviewSource, /api\.getDashboardSummary/);
+  assert.match(overviewSource, /api\.getTicketsPage\(\{ sort: "queue", limit: 100 \}\)/);
+  assert.match(overviewSource, /api\.downloadReportCsv/);
+  assert.doesNotMatch(overviewSource, /function exportTickets/);
+  assert.match(overviewSource, /index >= 4 && "hidden sm:block"/);
+});

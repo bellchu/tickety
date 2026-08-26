@@ -39,11 +39,14 @@ export function AIThinkingStream({ ticketId, hasExisting, recoveryState, onCompl
     }
   };
 
-  const startWatchdog = (timeoutSeconds?: unknown) => {
+  const startWatchdog = (timeoutSeconds: unknown, onTimeout: () => void) => {
     clearWatchdog();
-    watchdogRef.current = setTimeout(() => {
-      finishWithError("The analysis timed out before it completed. Please try again.");
-    }, triageWatchdogDelayMs(timeoutSeconds));
+    watchdogRef.current = setTimeout(onTimeout, triageWatchdogDelayMs(timeoutSeconds));
+  };
+
+  const startHandshakeWatchdog = (onTimeout: () => void) => {
+    clearWatchdog();
+    watchdogRef.current = setTimeout(onTimeout, 30_000);
   };
 
   useEffect(() => {
@@ -66,28 +69,35 @@ export function AIThinkingStream({ ticketId, hasExisting, recoveryState, onCompl
     setSteps([]);
     setResult(null);
     setError("");
-    startWatchdog();
     const ws = createTicketStreamWS(ticketId);
     wsRef.current = ws;
+    let settled = false;
+    const fail = (message: string) => {
+      if (settled) return;
+      settled = true;
+      finishWithError(message);
+    };
+    startHandshakeWatchdog(() => fail("The analysis stream could not start. Check your connection and try again."));
     ws.onMessage((data) => {
       if (!data || typeof data !== "object") {
-        finishWithError("The analysis stream returned an unexpected message. Please try again.");
+        fail("The analysis stream returned an unexpected message. Please try again.");
         return;
       }
       if (data.type === "progress") {
         if (!isTriageProgressMessage(data)) {
-          finishWithError("The analysis stream returned an unexpected message. Please try again.");
+          fail("The analysis stream returned an unexpected message. Please try again.");
           return;
         }
-        startWatchdog(data.timeout_seconds);
+        startWatchdog(data.timeout_seconds, () => fail("The analysis timed out before it completed. Please try again."));
         setSteps(data.steps);
       } else if (data.type === "complete") {
         const payload = data.result;
         if (!isTicketAnalysisResult(payload, ticketId)) {
-          finishWithError("The analysis returned an unexpected result. Please try again.");
+          fail("The analysis returned an unexpected result. Please try again.");
           return;
         }
         const result = payload;
+        settled = true;
         clearWatchdog();
         setResult(result);
         setSteps((prev) => prev.map((s) => (
@@ -107,8 +117,18 @@ export function AIThinkingStream({ ticketId, hasExisting, recoveryState, onCompl
         queryClient.invalidateQueries({ queryKey: ["intel-workload"] });
         queryClient.invalidateQueries({ queryKey: ["intel-route", ticketId] });
       } else if (data.type === "error") {
-        finishWithError(typeof data.message === "string" ? data.message : "The analysis stream stopped before it completed.");
+        fail(typeof data.message === "string" ? data.message : "The analysis stream stopped before it completed.");
       }
+    });
+    ws.onClose((event) => {
+      fail(
+        event.code === 1008
+          ? "Your session is not permitted to run this analysis. Refresh your access and try again."
+          : "The analysis connection closed before processing began. Please try again."
+      );
+    });
+    ws.onError(() => {
+      fail("The analysis connection could not be established. Please try again.");
     });
     ws.connect();
   };

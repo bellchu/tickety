@@ -34,7 +34,7 @@ test("proxy errors expose only the stable public code", async () => {
   assert.equal(response.headers.get("content-type"), "application/json");
 });
 
-test("deployment public URL survives TLS termination before the pod", () => {
+test("deployment public URL survives TLS termination before the container", () => {
   assert.deepEqual(
     publicForwardingIdentity(
       "http://tickety.nexora.com/api/tickets",

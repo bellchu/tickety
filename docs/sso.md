@@ -27,7 +27,7 @@ callback path remain deployment-owned security boundaries.
 
 When switching from Entra to Okta (or changing the client ID), re-enter the new
 provider's client secret in the same save. Tickety deliberately refuses to reuse
-the previous provider's secret. Environment and Helm examples below remain
+the previous provider's secret. The ignored Compose `.env` values below remain
 available for initial bootstrap and break-glass recovery.
 
 ## Microsoft Entra ID
@@ -72,30 +72,6 @@ SSO_ALLOWED_GROUP_IDS=<it-agents-group-object-id-guid>
 SSO_AUTO_PROVISION=false
 ```
 
-Helm configuration:
-
-```yaml
-config:
-  sso:
-    enabled: true
-    provider: entra
-    clientId: <application-client-id>
-    entraTenantId: <directory-tenant-id-guid>
-    oktaDomain: ""
-    oktaAuthServerId: org
-    discoveryUrl: ""
-    allowedDomains: example.com
-    allowedGroupIds: <it-agents-group-object-id-guid>
-    autoProvision: false
-
-secrets:
-  SSO_CLIENT_SECRET: <client-secret-value>
-```
-
-When managing SSO through deployment configuration and `existingSecret` is used,
-put `SSO_CLIENT_SECRET` in that Secret and update
-`existingSecretRolloutToken` whenever the secret is rotated.
-
 ## Okta
 
 Create an Okta app integration using **OIDC - OpenID Connect** and **Web
@@ -130,26 +106,6 @@ SSO_CLIENT_SECRET=<okta-client-secret>
 SSO_ALLOWED_DOMAINS=example.com
 SSO_ALLOWED_GROUP_IDS=<okta-group-id-if-required>
 SSO_AUTO_PROVISION=false
-```
-
-The equivalent Helm block is:
-
-```yaml
-config:
-  sso:
-    enabled: true
-    provider: okta
-    clientId: <okta-client-id>
-    entraTenantId: ""
-    oktaDomain: company.okta.com
-    oktaAuthServerId: org
-    discoveryUrl: ""
-    allowedDomains: example.com
-    allowedGroupIds: <okta-group-id-if-required>
-    autoProvision: false
-
-secrets:
-  SSO_CLIENT_SECRET: <okta-client-secret>
 ```
 
 ## Account access and user experience

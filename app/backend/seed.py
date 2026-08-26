@@ -609,7 +609,7 @@ def run_seed():
             prob = ProblemRecord(
                 id="prob-vpn", title="Intermittent VPN disconnections affecting multiple users",
                 description="Multiple reports of VPN dropping every 10-30 minutes across different departments.",
-                status="Investigating", priority="P1", category="Network",
+                status="Under Investigation", priority="P1", category="Network",
                 assigned_to="u-alice", impact_scope="All remote workers on CorpVPN",
                 workaround="Switch to backup VPN (BackupCorpVPN) while investigating.",
             )
