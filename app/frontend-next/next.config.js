@@ -11,10 +11,51 @@ function productionBuildId() {
   return normalized || "local";
 }
 
+function browserSecurityHeaders() {
+  const scriptSources = ["'self'", "'unsafe-inline'"];
+  if (process.env.NODE_ENV !== "production") scriptSources.push("'unsafe-eval'");
+  const contentSecurityPolicy = [
+    "default-src 'self'",
+    "base-uri 'self'",
+    `script-src ${scriptSources.join(" ")}`,
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob: https:",
+    "font-src 'self' data:",
+    "connect-src 'self' wss:",
+    "worker-src 'self' blob:",
+    "object-src 'none'",
+    "frame-src 'none'",
+    "frame-ancestors 'none'",
+    "form-action 'self'",
+    "manifest-src 'self'",
+  ].join("; ");
+
+  return [
+    { key: "Content-Security-Policy", value: contentSecurityPolicy },
+    {
+      key: "Strict-Transport-Security",
+      value: "max-age=31536000; includeSubDomains",
+    },
+    { key: "X-Content-Type-Options", value: "nosniff" },
+    { key: "X-Frame-Options", value: "DENY" },
+    { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+    {
+      key: "Permissions-Policy",
+      value:
+        "accelerometer=(), autoplay=(), camera=(), geolocation=(), " +
+        "gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()",
+    },
+  ];
+}
+
 const nextConfig = {
+  poweredByHeader: false,
   // Keep the public asset path stable through proxies that normalize URL
   // casing, while retaining the immutable source/worktree build stamp.
   generateBuildId: productionBuildId,
+  async headers() {
+    return [{ source: "/(.*)", headers: browserSecurityHeaders() }];
+  },
   // Inject build-identifiable version info into the client bundle so the
   // footer can show which image is running. `NEXT_PUBLIC_BUILD_SHA` /
   // `NEXT_PUBLIC_BUILD_TIME` are supplied at image build time (Dockerfile).

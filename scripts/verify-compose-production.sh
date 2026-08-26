@@ -767,6 +767,126 @@ public_fetch() {
     --connect-timeout 5 --max-time 20 "$PRODUCTION_URL$path"
 }
 
+local_response_headers() {
+  local path=$1
+  curl --insecure --fail --silent --show-error --globoff \
+    --connect-timeout 5 --max-time 20 \
+    --noproxy "$PRODUCTION_HOST" \
+    --resolve "$PRODUCTION_HOST:443:127.0.0.1" \
+    --dump-header - --output /dev/null \
+    "$PRODUCTION_URL$path"
+}
+
+public_response_headers() {
+  local path=$1
+  curl --fail --silent --show-error --globoff \
+    --connect-timeout 5 --max-time 20 \
+    --dump-header - --output /dev/null \
+    "$PRODUCTION_URL$path"
+}
+
+validate_frontend_security_headers_text() {
+  local raw_headers=$1
+  local source=$2
+
+  "$PYTHON" - "$raw_headers" "$source" <<'PY'
+import json
+import sys
+
+raw, source = sys.argv[1:]
+normalized = raw.replace("\r\n", "\n").replace("\r", "\n")
+blocks = [
+    block
+    for block in normalized.split("\n\n")
+    if block.startswith("HTTP/")
+]
+if not blocks:
+    raise SystemExit(f"{source} returned no HTTP response headers")
+lines = blocks[-1].splitlines()
+status = lines[0].split()
+if len(status) < 2 or status[1] != "200":
+    raise SystemExit(f"{source} frontend security probe was not HTTP 200")
+
+headers: dict[str, list[str]] = {}
+for line in lines[1:]:
+    if not line or ":" not in line:
+        raise SystemExit(f"{source} returned a malformed response header")
+    name, value = line.split(":", 1)
+    headers.setdefault(name.strip().lower(), []).append(value.strip())
+
+expected = {
+    "strict-transport-security": "max-age=31536000; includeSubDomains",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
+    "referrer-policy": "strict-origin-when-cross-origin",
+    "permissions-policy": (
+        "accelerometer=(), autoplay=(), camera=(), geolocation=(), "
+        "gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
+    ),
+}
+verified = {}
+for name, expected_value in expected.items():
+    values = headers.get(name)
+    if values != [expected_value]:
+        raise SystemExit(f"{source} {name} is missing, duplicated, or unexpected")
+    verified[name] = values[0]
+if "x-powered-by" in headers:
+    raise SystemExit(f"{source} exposes the application framework header")
+
+csp_values = headers.get("content-security-policy")
+if not csp_values or len(csp_values) != 1:
+    raise SystemExit(f"{source} Content-Security-Policy is missing or duplicated")
+directives = {}
+for raw_directive in csp_values[0].split(";"):
+    tokens = raw_directive.strip().split()
+    if not tokens:
+        continue
+    name, values = tokens[0], tokens[1:]
+    if name in directives:
+        raise SystemExit(f"{source} Content-Security-Policy repeats a directive")
+    directives[name] = values
+expected_directives = {
+    "default-src": ["'self'"],
+    "base-uri": ["'self'"],
+    "script-src": ["'self'", "'unsafe-inline'"],
+    "style-src": ["'self'", "'unsafe-inline'"],
+    "img-src": ["'self'", "data:", "blob:", "https:"],
+    "font-src": ["'self'", "data:"],
+    "connect-src": ["'self'", "wss:"],
+    "worker-src": ["'self'", "blob:"],
+    "object-src": ["'none'"],
+    "frame-src": ["'none'"],
+    "frame-ancestors": ["'none'"],
+    "form-action": ["'self'"],
+    "manifest-src": ["'self'"],
+}
+if directives != expected_directives:
+    raise SystemExit(f"{source} Content-Security-Policy differs from the audited policy")
+verified["content-security-policy"] = csp_values[0]
+print(json.dumps(verified, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+validate_frontend_security_headers() {
+  local local_headers
+  local public_headers
+  local local_evidence
+  local public_evidence
+  local evidence_sha
+
+  local_headers=$(local_response_headers /)
+  public_headers=$(public_response_headers /)
+  local_evidence=$(validate_frontend_security_headers_text \
+    "$local_headers" "local tunnel origin")
+  public_evidence=$(validate_frontend_security_headers_text \
+    "$public_headers" "public production")
+  if [[ $local_evidence != "$public_evidence" ]]; then
+    die "local and public frontend security header evidence differ"
+  fi
+  evidence_sha=$(printf '%s' "$local_evidence" | hash_stream)
+  echo "Frontend security headers verified: local_public_sha256=$evidence_sha."
+}
+
 validate_source_state() {
   local current_full_sha
   local current_short_sha
@@ -913,6 +1033,13 @@ self_test() {
 {"dry-run":true,"id":"Container tickety-frontend-1","status":"Healthy"}
 {"dry-run":true,"id":"Container tickety-tunnel-proxy-1","status":"Running"}
 {"dry-run":true,"id":"Container tickety-tunnel-proxy-1","status":"Healthy"}'
+  local good_security_headers='HTTP/2 200
+content-security-policy: default-src '\''self'\''; base-uri '\''self'\''; script-src '\''self'\'' '\''unsafe-inline'\''; style-src '\''self'\'' '\''unsafe-inline'\''; img-src '\''self'\'' data: blob: https:; font-src '\''self'\'' data:; connect-src '\''self'\'' wss:; worker-src '\''self'\'' blob:; object-src '\''none'\''; frame-src '\''none'\''; frame-ancestors '\''none'\''; form-action '\''self'\''; manifest-src '\''self'\''
+strict-transport-security: max-age=31536000; includeSubDomains
+x-content-type-options: nosniff
+x-frame-options: DENY
+referrer-policy: strict-origin-when-cross-origin
+permissions-policy: accelerometer=(), autoplay=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()'
 
   validate_sha_pair "$full_sha" "$short_sha" >/dev/null
   expect_failure validate_sha_pair "$full_sha" deadbeefdead
@@ -946,6 +1073,18 @@ self_test() {
     '{"dry-run":true,"id":"Container tickety-postgres-1","status":"Running"}'
   expect_failure validate_compose_convergence_output \
     "$good_convergence"$'\n''{"dry-run":true,"id":"Container tickety-backend-1","status":"Waiting"}'
+  validate_frontend_security_headers_text \
+    "$good_security_headers" self-test >/dev/null
+  validate_frontend_security_headers_text \
+    "$good_security_headers"$'\r' self-test >/dev/null
+  expect_failure validate_frontend_security_headers_text '' self-test
+  expect_failure validate_frontend_security_headers_text \
+    "${good_security_headers/strict-transport-security:/missing-hsts:}" self-test
+  expect_failure validate_frontend_security_headers_text \
+    "${good_security_headers/script-src \'self\' \'unsafe-inline\'/script-src \'self\' \'unsafe-inline\' \'unsafe-eval\'}" \
+    self-test
+  expect_failure validate_frontend_security_headers_text \
+    "$good_security_headers"$'\n''x-powered-by: Next.js' self-test
 
   echo "Compose production verifier self-test passed."
 }
@@ -1017,6 +1156,7 @@ validate_compose_convergence
 validate_runtime_health
 validate_backend_image_metadata
 validate_runtime_endpoints
+validate_frontend_security_headers
 validate_frontend_document
 validate_frontend_assets
 
