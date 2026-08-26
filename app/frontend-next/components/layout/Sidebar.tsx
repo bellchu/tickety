@@ -103,7 +103,7 @@ export function Sidebar({
     >
       <div className="relative z-10 flex h-20 items-center justify-between border-b border-white/10 px-4">
         <Link href="/" className="-ml-0.5 rounded-md focus:outline-none focus:ring-2 focus:ring-clay-300" onClick={onClose}>
-          <TicketyLogo inverse size="md" />
+          <TicketyLogo inverse layout="stacked" size="md" />
         </Link>
         <button
           type="button"

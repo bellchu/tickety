@@ -4,6 +4,7 @@ import { PRODUCT_LOCKUP_NAME, PRODUCT_NAME } from "@/lib/brand";
 
 type MarkTone = "gradient" | "solid" | "dark" | "reversed";
 type LogoSize = "sm" | "md" | "lg" | "xl";
+type LogoLayout = "inline" | "stacked";
 
 /** Compact product mark used where the full Nexora wordmark cannot fit. */
 export function TicketyMark({
@@ -45,22 +46,25 @@ const logoSizes: Record<
 export function TicketyLogo({
   className,
   inverse = false,
+  layout = "inline",
   showDescriptor = false,
   size = "lg",
 }: {
   className?: string;
   inverse?: boolean;
+  layout?: LogoLayout;
   showDescriptor?: boolean;
   size?: LogoSize;
 }) {
   const sizing = logoSizes[size];
+  const stacked = layout === "stacked";
 
   return (
     <span
       aria-label={PRODUCT_LOCKUP_NAME}
       className={cn(
-        "inline-flex items-center",
-        sizing.gap,
+        "inline-flex",
+        stacked ? "flex-col items-start gap-1.5" : cn("items-center", sizing.gap),
         inverse && "rounded-md bg-white px-2.5 py-2 shadow-sm",
         className
       )}
@@ -73,7 +77,13 @@ export function TicketyLogo({
         height={sizing.height}
         className="h-auto shrink-0"
       />
-      <span aria-hidden="true" className="h-6 w-px shrink-0 bg-ink-700/20" />
+      <span
+        aria-hidden="true"
+        className={cn(
+          "shrink-0 bg-ink-700/20",
+          stacked ? "h-px w-full" : "h-6 w-px"
+        )}
+      />
       <span aria-hidden="true" className="flex min-w-0 flex-col justify-center leading-none">
         <span className={cn("whitespace-nowrap font-mono font-medium uppercase tracking-[0.18em] text-ink-700", sizing.product)}>
           {PRODUCT_NAME}
