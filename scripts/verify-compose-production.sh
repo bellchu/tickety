@@ -415,17 +415,281 @@ compose_container_id() {
 validate_applied_compose_config() {
   local service=$1
   local container_id=$2
-  local expected_config_hash
   local actual_config_hash
+  local compose_labels
 
-  expected_config_hash=$("${COMPOSE[@]}" config --hash "$service" | \
-    awk -v expected="$service" '$1 == expected {print $2}')
   actual_config_hash=$("${DOCKER[@]}" inspect --format \
     '{{index .Config.Labels "com.docker.compose.config-hash"}}' "$container_id")
-  if [[ -z $expected_config_hash || $actual_config_hash != "$expected_config_hash" ]]; then
-    die "$service container does not use the current audited Compose configuration"
+  if [[ ! $actual_config_hash =~ ^[0-9a-f]{64}$ ]]; then
+    die "$service container has no valid Compose configuration identity"
   fi
-  echo "Compose config evidence: service=$service config_hash=$actual_config_hash."
+  compose_labels=$("${DOCKER[@]}" inspect --format \
+    '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{index .Config.Labels "com.docker.compose.project.config_files"}}|{{index .Config.Labels "com.docker.compose.project.working_dir"}}' \
+    "$container_id")
+  if [[ $compose_labels != "tickety|$service|$COMPOSE_FILE|$ROOT_DIR" ]]; then
+    die "$service container does not belong to the audited Compose project and file"
+  fi
+  echo "Compose config identity: service=$service config_hash=$actual_config_hash."
+}
+
+validate_runtime_container_contract() {
+  local service=$1
+  local container_id=$2
+  local image_id
+
+  image_id=$("${DOCKER[@]}" inspect --format '{{.Image}}' "$container_id")
+  "$PYTHON" - "$service" \
+    3< <("${DOCKER[@]}" inspect "$container_id") \
+    4< <("${DOCKER[@]}" image inspect "$image_id") \
+    5< <("${COMPOSE[@]}" config --format json) <<'PY'
+import json
+import os
+import re
+import sys
+
+service = sys.argv[1]
+with os.fdopen(3) as stream:
+    container = json.load(stream)[0]
+with os.fdopen(4) as stream:
+    image = json.load(stream)[0]
+with os.fdopen(5) as stream:
+    model = json.load(stream)
+
+configured = model["services"][service]
+config = container["Config"]
+host = container["HostConfig"]
+
+if config.get("Image") != configured.get("image"):
+    raise SystemExit(f"{service} runtime image reference differs from Compose")
+
+expected_command = configured.get("command")
+if expected_command is None:
+    expected_command = image.get("Config", {}).get("Cmd")
+if config.get("Cmd") != expected_command:
+    raise SystemExit(f"{service} runtime command differs from Compose")
+
+expected_entrypoint = configured.get("entrypoint")
+if expected_entrypoint is None:
+    expected_entrypoint = image.get("Config", {}).get("Entrypoint")
+if config.get("Entrypoint") != expected_entrypoint:
+    raise SystemExit(f"{service} runtime entrypoint differs from Compose")
+for field in ("User", "WorkingDir"):
+    if (config.get(field) or "") != (image.get("Config", {}).get(field) or ""):
+        raise SystemExit(f"{service} runtime {field} overrides the audited image")
+
+def parse_environment(entries, source):
+    parsed = {}
+    for entry in entries or []:
+        if not isinstance(entry, str) or "=" not in entry:
+            raise SystemExit(f"{service} {source} environment is malformed")
+        key, value = entry.split("=", 1)
+        if not key or key in parsed:
+            raise SystemExit(f"{service} {source} environment contains an invalid key")
+        parsed[key] = value
+    return parsed
+
+expected_environment = parse_environment(
+    image.get("Config", {}).get("Env"), "image"
+)
+for key, value in (configured.get("environment") or {}).items():
+    expected_environment[str(key)] = "" if value is None else str(value)
+actual_environment = parse_environment(config.get("Env"), "runtime")
+if actual_environment != expected_environment:
+    changed_keys = sorted(
+        key
+        for key in set(actual_environment) | set(expected_environment)
+        if actual_environment.get(key) != expected_environment.get(key)
+    )
+    raise SystemExit(
+        f"{service} runtime environment differs from Compose for keys: "
+        + ", ".join(changed_keys)
+    )
+
+restart = str(configured.get("restart") or "no")
+if restart.startswith("on-failure:"):
+    restart_name = "on-failure"
+    retry_count = int(restart.split(":", 1)[1])
+else:
+    restart_name = restart
+    retry_count = 0
+if host.get("RestartPolicy") != {
+    "Name": restart_name,
+    "MaximumRetryCount": retry_count,
+}:
+    raise SystemExit(f"{service} runtime restart policy differs from Compose")
+
+expected_ports = {}
+for port in configured.get("ports") or []:
+    key = f'{port["target"]}/{port["protocol"]}'
+    expected_ports.setdefault(key, []).append(
+        {
+            "HostIp": port.get("host_ip", ""),
+            "HostPort": str(port["published"]),
+        }
+    )
+if (host.get("PortBindings") or {}) != expected_ports:
+    raise SystemExit(f"{service} runtime host ports differ from Compose")
+
+if set((container.get("NetworkSettings", {}).get("Networks") or {})) != {
+    "tickety_default"
+}:
+    raise SystemExit(f"{service} runtime network differs from Compose")
+if host.get("NetworkMode") != "tickety_default":
+    raise SystemExit(f"{service} runtime network mode differs from Compose")
+if (
+    host.get("Privileged") is not False
+    or host.get("PidMode") not in (None, "")
+    or host.get("IpcMode") != "private"
+    or host.get("CapAdd")
+    or host.get("Devices")
+    or host.get("AutoRemove") is not False
+):
+    raise SystemExit(f"{service} runtime has an unexpected privilege or lifecycle override")
+
+expected_mounts = []
+for mount in configured.get("volumes") or []:
+    mount_type = mount.get("type")
+    source = mount.get("source")
+    if mount_type == "volume":
+        source = f"tickety_{source}"
+    elif mount_type != "bind":
+        raise SystemExit(f"{service} Compose mount type is unsupported by the verifier")
+    expected_mounts.append(
+        {
+            "type": mount_type,
+            "source": source,
+            "destination": mount.get("target"),
+            "rw": not bool(mount.get("read_only")),
+        }
+    )
+actual_mounts = []
+for mount in container.get("Mounts") or []:
+    mount_type = mount.get("Type")
+    source = mount.get("Name") if mount_type == "volume" else mount.get("Source")
+    actual_mounts.append(
+        {
+            "type": mount_type,
+            "source": source,
+            "destination": mount.get("Destination"),
+            "rw": mount.get("RW"),
+        }
+    )
+sort_key = lambda mount: (str(mount["destination"]), str(mount["source"]))
+if sorted(actual_mounts, key=sort_key) != sorted(expected_mounts, key=sort_key):
+    raise SystemExit(f"{service} runtime mounts differ from Compose")
+
+def duration_ns(value):
+    match = re.fullmatch(r"([0-9]+)(ns|us|ms|s|m|h)", value)
+    if not match:
+        raise SystemExit(f"{service} Compose health duration is unsupported")
+    amount, unit = match.groups()
+    multiplier = {
+        "ns": 1,
+        "us": 1_000,
+        "ms": 1_000_000,
+        "s": 1_000_000_000,
+        "m": 60_000_000_000,
+        "h": 3_600_000_000_000,
+    }[unit]
+    return int(amount) * multiplier
+
+compose_health = configured.get("healthcheck")
+if compose_health is None:
+    expected_health = image.get("Config", {}).get("Healthcheck")
+else:
+    expected_health = {
+        "Test": [part.replace("$$", "$") for part in compose_health["test"]],
+        "Interval": duration_ns(compose_health["interval"]),
+        "Timeout": duration_ns(compose_health["timeout"]),
+        "StartPeriod": duration_ns(compose_health["start_period"]),
+        "Retries": int(compose_health["retries"]),
+    }
+if config.get("Healthcheck") != expected_health:
+    raise SystemExit(f"{service} runtime healthcheck differs from Compose")
+PY
+  echo "Runtime contract verified: service=$service image=$image_id."
+}
+
+validate_compose_convergence_output() {
+  local dry_run_output=$1
+
+  "$PYTHON" - "$dry_run_output" <<'PY'
+import json
+import sys
+
+raw = sys.argv[1]
+if not raw:
+    raise SystemExit("Compose dry-run returned no structured convergence evidence")
+
+long_running = {
+    "Container tickety-postgres-1",
+    "Container tickety-backend-1",
+    "Container tickety-worker-1",
+    "Container tickety-frontend-1",
+    "Container tickety-tunnel-proxy-1",
+}
+migrate = "Container tickety-migrate-1"
+expected_ids = long_running | {migrate}
+allowed = {
+    container_id: {"Running", "Waiting", "Healthy"}
+    for container_id in long_running
+}
+allowed[migrate] = {"Starting", "Started", "Waiting", "Exited"}
+required = {
+    container_id: {"Running", "Healthy"}
+    for container_id in long_running
+}
+required[migrate] = {"Starting", "Started", "Exited"}
+seen = {container_id: set() for container_id in expected_ids}
+final_status = {}
+
+for line_number, line in enumerate(raw.splitlines(), 1):
+    if not line:
+        raise SystemExit(f"Compose dry-run line {line_number} is empty")
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        raise SystemExit(f"Compose dry-run line {line_number} is not valid JSON")
+    if not isinstance(event, dict) or set(event) != {"dry-run", "id", "status"}:
+        raise SystemExit(f"Compose dry-run line {line_number} has an unexpected schema")
+    if event["dry-run"] is not True:
+        raise SystemExit(f"Compose event {line_number} is not dry-run evidence")
+    container_id = event["id"]
+    status = event["status"]
+    if not isinstance(container_id, str) or container_id not in expected_ids:
+        raise SystemExit(f"Compose dry-run line {line_number} identifies an unexpected resource")
+    if not isinstance(status, str) or status not in allowed[container_id]:
+        raise SystemExit(f"Compose dry-run line {line_number} requires an unexpected action")
+    seen[container_id].add(status)
+    final_status[container_id] = status
+
+for container_id in sorted(expected_ids):
+    missing = required[container_id] - seen[container_id]
+    if missing:
+        raise SystemExit(f"Compose convergence evidence is incomplete for {container_id}")
+    expected_final = "Exited" if container_id == migrate else "Healthy"
+    if final_status.get(container_id) != expected_final:
+        raise SystemExit(f"Compose convergence did not finish correctly for {container_id}")
+PY
+}
+
+validate_compose_convergence() {
+  local dry_run_output
+
+  # Compose 2.40 can resolve env_file paths differently for `config --hash`
+  # than it does while creating a container (docker/compose#14001). Ask the
+  # same convergence engine used by `compose up` for strict JSON evidence,
+  # then separately verify each container's runtime contract and immutable
+  # Compose identity below.
+  if ! dry_run_output=$(LC_ALL=C "${COMPOSE[@]}" --progress json --dry-run \
+    up --detach --no-build --wait 2>&1); then
+    echo "$dry_run_output" >&2
+    die "Compose could not prove production convergence"
+  fi
+  if ! validate_compose_convergence_output "$dry_run_output"; then
+    die "one or more production services do not use the current audited Compose configuration"
+  fi
+  echo "Compose convergence evidence: all six services reached their expected dry-run terminal state without a mutation action."
 }
 
 validate_running_service() {
@@ -441,6 +705,7 @@ validate_running_service() {
     die "$service is not running and healthy: $evidence"
   fi
   validate_applied_compose_config "$service" "$container_id"
+  validate_runtime_container_contract "$service" "$container_id"
   echo "Compose service healthy: $service container=$container_id."
 }
 
@@ -459,6 +724,7 @@ validate_runtime_health() {
     die "migrate did not complete successfully: $migrate_evidence"
   fi
   validate_applied_compose_config migrate "$migrate_container"
+  validate_runtime_container_contract migrate "$migrate_container"
   echo "Compose migration completed: container=$migrate_container exit=0."
 }
 
@@ -634,6 +900,19 @@ self_test() {
   local ready='{"status":"ready","checks":{"database":"ok"}}'
   local version='{"component":"backend","version":"1.0.0","build_sha":"0123456789ab","build_time":"2026-08-26T00:00:00Z"}'
   local good_mapping='config={"ingress":[{"hostname":"tickety.nexora.com","originRequest":{"noTLSVerify":true},"service":"https://localhost:443"},{"service":"http_status:404"}]} version=1'
+  local good_convergence='{"dry-run":true,"id":"Container tickety-postgres-1","status":"Running"}
+{"dry-run":true,"id":"Container tickety-postgres-1","status":"Healthy"}
+{"dry-run":true,"id":"Container tickety-migrate-1","status":"Starting"}
+{"dry-run":true,"id":"Container tickety-migrate-1","status":"Started"}
+{"dry-run":true,"id":"Container tickety-migrate-1","status":"Exited"}
+{"dry-run":true,"id":"Container tickety-backend-1","status":"Running"}
+{"dry-run":true,"id":"Container tickety-backend-1","status":"Healthy"}
+{"dry-run":true,"id":"Container tickety-worker-1","status":"Running"}
+{"dry-run":true,"id":"Container tickety-worker-1","status":"Healthy"}
+{"dry-run":true,"id":"Container tickety-frontend-1","status":"Running"}
+{"dry-run":true,"id":"Container tickety-frontend-1","status":"Healthy"}
+{"dry-run":true,"id":"Container tickety-tunnel-proxy-1","status":"Running"}
+{"dry-run":true,"id":"Container tickety-tunnel-proxy-1","status":"Healthy"}'
 
   validate_sha_pair "$full_sha" "$short_sha" >/dev/null
   expect_failure validate_sha_pair "$full_sha" deadbeefdead
@@ -648,6 +927,25 @@ self_test() {
     "${good_mapping/https:\/\/localhost:443/http:\/\/localhost:3000}"
   expect_failure validate_tunnel_config_line \
     "${good_mapping/\"noTLSVerify\":true/\"noTLSVerify\":false}"
+  validate_compose_convergence_output "$good_convergence" >/dev/null
+  expect_failure validate_compose_convergence_output ''
+  expect_failure validate_compose_convergence_output 'not-json'
+  expect_failure validate_compose_convergence_output \
+    "${good_convergence/\"status\":\"Running\"/\"status\":\"Update\"}"
+  expect_failure validate_compose_convergence_output \
+    "${good_convergence/\"status\":\"Running\"/\"status\":\"Replace\"}"
+  expect_failure validate_compose_convergence_output \
+    "${good_convergence/Container tickety-backend-1/Container tickety-orphan-1}"
+  expect_failure validate_compose_convergence_output \
+    "${good_convergence/\"id\":\"Container tickety-backend-1\",\"status\":\"Running\"/\"id\":\"Container tickety-backend-1\",\"status\":\"Starting\"}"
+  expect_failure validate_compose_convergence_output \
+    "${good_convergence/\"dry-run\":true/\"dry-run\":false}"
+  expect_failure validate_compose_convergence_output \
+    "${good_convergence/\"dry-run\":true/\"dry-run\":true,\"detail\":\"unexpected\"}"
+  expect_failure validate_compose_convergence_output \
+    '{"dry-run":true,"id":"Container tickety-postgres-1","status":"Running"}'
+  expect_failure validate_compose_convergence_output \
+    "$good_convergence"$'\n''{"dry-run":true,"id":"Container tickety-backend-1","status":"Waiting"}'
 
   echo "Compose production verifier self-test passed."
 }
@@ -715,6 +1013,7 @@ fi
 validate_source_state
 validate_compose_mapping
 validate_cloudflare_mapping
+validate_compose_convergence
 validate_runtime_health
 validate_backend_image_metadata
 validate_runtime_endpoints
