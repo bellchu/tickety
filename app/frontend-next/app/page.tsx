@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { NewTicketModal } from "@/components/ticket/NewTicketModal";
 import { TicketPriorityIndicator } from "@/components/ticket/TicketPriorityIndicator";
+import { TicketSentimentSubtitle } from "@/components/ticket/TicketSentimentSubtitle";
 import { Alert, Badge, Button, EmptyState, ErrorState, ListText, Skeleton } from "@/components/ui";
 import { PageFrame, PageHeader } from "@/components/layout/PageLayout";
 import { api } from "@/lib/api";
@@ -46,7 +47,7 @@ import {
   ticketCreatedAt,
   ticketLastCommunicationAt,
 } from "@/lib/ticket-display";
-import { ticketSignalRatings } from "@/lib/ticket-intelligence";
+import { ticketSentimentPresentation, ticketSignalRatings } from "@/lib/ticket-intelligence";
 
 const CLOSED_STATUSES = new Set(["canceled", "cancelled", "closed", "resolved", "completed"]);
 const EMPTY_TICKETS: Ticket[] = [];
@@ -79,7 +80,7 @@ function exportTickets(tickets: Ticket[]) {
     ["Status", (ticket) => ticket.status],
     ["Reported priority", (ticket) => ticket.priority],
     ["AI content priority", (ticket) => ticketSignalRatings(ticket)[0].visualValue],
-    ["Customer sentiment", (ticket) => ticketSignalRatings(ticket)[2].score === null ? null : ticket.mood],
+    ["Customer sentiment", (ticket) => ticketSentimentPresentation(ticket)?.label],
     ["Reporter", (ticket) => ticket.reporter],
     ["Requester name", (ticket) => requesterName(ticket)],
     ["Requester email", (ticket) => requesterEmail(ticket)],
@@ -480,6 +481,7 @@ export default function DashboardPage() {
                         <TicketStatusBadge status={ticket.status} className="ml-auto max-w-[8rem]" />
                       </div>
                       <Link href={`/tickets/${ticket.id}`} className="mt-2.5 block text-ink-700 hover:text-semantic-primary hover:underline"><ListText text={ticket.subject} lines={2} className="text-sm font-semibold leading-5" /></Link>
+                      <TicketSentimentSubtitle ticket={ticket} />
                       <ListText text={ranked ? intelligenceQueueReason(ranked) : deterministicQueueReason(ticket)} lines={2} className="mt-1 text-xs leading-5 text-ink-500" />
                       <p className="mt-2 flex min-w-0 items-start gap-1.5 text-xs text-ink-500"><UserRound className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" /><ListText text={`${requesterName(ticket)}${requesterEmail(ticket) ? ` · ${requesterEmail(ticket)}` : ""}`} lines={2} /></p>
                       <p className="mt-1 text-[11px] text-ink-400">Created {formatTimeAgo(ticketCreatedAt(ticket))} · Last contact {formatTimeAgo(ticketLastCommunicationAt(ticket))}</p>
@@ -523,7 +525,10 @@ export default function DashboardPage() {
                           <td className="min-w-0 px-3 py-4">
                             <div className="flex min-w-0 items-center gap-2">
                               <TicketPriorityIndicator ticket={ticket} compact className="max-w-28" />
-                              <Link href={`/tickets/${ticket.id}`} className="min-w-0 flex-1 text-ink-700 hover:text-semantic-primary hover:underline"><ListText text={ticket.subject} lines={2} className="text-sm font-semibold leading-5" /></Link>
+                              <div className="min-w-0 flex-1">
+                                <Link href={`/tickets/${ticket.id}`} className="block text-ink-700 hover:text-semantic-primary hover:underline"><ListText text={ticket.subject} lines={2} className="text-sm font-semibold leading-5" /></Link>
+                                <TicketSentimentSubtitle ticket={ticket} />
+                              </div>
                             </div>
                             <p className="mt-1 flex min-w-0 items-center gap-2 text-xs text-ink-500">
                               {index === 0 && <span className="shrink-0 font-mono text-[9px] font-medium uppercase tracking-[0.09em] text-semantic-primary">Recommended</span>}

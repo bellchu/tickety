@@ -6,30 +6,49 @@ const test = require("node:test");
 const root = path.join(__dirname, "..");
 const read = (...parts) => fs.readFileSync(path.join(root, ...parts), "utf8");
 
-test("ticket detail highlights content priority with stars and renders sentiment as emoji", () => {
+test("content intelligence uses one star language and excludes sentiment cards", () => {
   const strip = read("components", "ticket", "TicketSignalStrip.tsx");
   const intelligence = read("lib", "ticket-intelligence.ts");
 
   assert.match(strip, /Content intelligence/);
-  assert.match(strip, /rating\.visual === "emoji"/);
-  assert.match(strip, /rating\.visual === "meter"/);
-  assert.match(strip, /rating\.visual === "risk"/);
+  assert.match(strip, /data-signal-visual="stars"/);
   assert.match(strip, /<Star/);
   assert.match(strip, /rating\.highlighted/);
+  assert.doesNotMatch(strip, /emoji|meter|risk.*width|transition-\[width\]/);
   assert.match(intelligence, /label: "Content priority"/);
-  assert.match(intelligence, /label: "Sentiment sensor"/);
+  assert.doesNotMatch(intelligence, /key: "customer-sentiment"|label: "Sentiment sensor"/);
+});
+
+test("sentiment is a plain emoji subtitle immediately after ticket subjects", () => {
+  const subtitle = read("components", "ticket", "TicketSentimentSubtitle.tsx");
+  const detail = read("app", "tickets", "[id]", "page.tsx");
+  const ticketList = read("components", "ticket", "TicketList.tsx");
+  const dashboard = read("app", "page.tsx");
+  const workspace = read("components", "agent", "AgentWorkspace.tsx");
+  const priorityCard = read("components", "engagement", "PriorityCard.tsx");
+  const intelligence = read("lib", "ticket-intelligence.ts");
+
+  assert.match(subtitle, /ticketSentimentPresentation/);
+  assert.match(subtitle, /Sentiment ·/);
+  assert.doesNotMatch(subtitle, /rounded|border|bg-/);
+  assert.match(detail, /<\/h1>\s*<TicketSentimentSubtitle ticket=\{ticket\} latestAnalysis=\{latestAnalysis\}/);
+  assert.match(ticketList, /ticket\.subject[\s\S]{0,240}<TicketSentimentSubtitle ticket=\{ticket\}/);
+  assert.match(dashboard, /ticket\.subject[\s\S]{0,240}<TicketSentimentSubtitle ticket=\{ticket\}/);
+  assert.match(workspace, />\{ticket\.subject\}<\/h3>\s*<TicketSentimentSubtitle ticket=\{ticket\}/);
+  assert.match(priorityCard, /ticket\.subject[\s\S]{0,120}<TicketSentimentSubtitle ticket=\{ticket\}/);
+  assert.doesNotMatch(priorityCard, /Impact · \{ticket\.sentiment\}/);
   assert.match(intelligence, /😡/u);
   assert.match(intelligence, /😊/u);
 });
 
-test("primary agent ticket views use the shared priority and sentiment indicator", () => {
+test("primary ticket views keep sentiment out of the priority indicator", () => {
   const indicator = read("components", "ticket", "TicketPriorityIndicator.tsx");
   const ticketList = read("components", "ticket", "TicketList.tsx");
   const dashboard = read("app", "page.tsx");
   const workspace = read("components", "agent", "AgentWorkspace.tsx");
 
   assert.match(indicator, /AI-assessed|prioritySignal/);
-  assert.match(indicator, /Customer sentiment:/);
+  assert.doesNotMatch(indicator, /sentiment|moodEmoji|moodLabel|moodUrgencyColor/i);
   assert.match(indicator, /Reported \$\{reportedPriority\}/);
   assert.match(ticketList, /TicketPriorityIndicator/);
   assert.match(dashboard, /TicketPriorityIndicator/);

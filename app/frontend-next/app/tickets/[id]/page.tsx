@@ -8,6 +8,7 @@ import type { ResolutionPlan, Ticket, TicketAnalysisResult, TicketAuditEntry, Ti
 import { useParams } from "next/navigation";
 import { AIThinkingStream } from "@/components/ticket/AIThinkingStream";
 import { FreshserviceConversationThread } from "@/components/ticket/FreshserviceConversationThread";
+import { TicketSentimentSubtitle } from "@/components/ticket/TicketSentimentSubtitle";
 import { TicketSignalStrip } from "@/components/ticket/TicketSignalStrip";
 import {
   ArrowLeft, ArrowUpRight, BriefcaseBusiness, CalendarDays, Clock3, User, Tag, Flag, Mail, MessageSquare,
@@ -106,6 +107,7 @@ export default function TicketDetailPage() {
           <h1 id="ticket-title" title={ticket.subject} className="mt-3 max-w-5xl break-words text-2xl font-semibold tracking-[-0.025em] text-ink-700 [overflow-wrap:anywhere] sm:text-3xl">
             {ticket.subject}
           </h1>
+          <TicketSentimentSubtitle ticket={ticket} latestAnalysis={latestAnalysis} />
           <TicketSignalStrip
             ratings={ticketSignalRatings(ticket, latestAnalysis)}
             reasoning={latestAnalysis?.ticket_id === ticket.id ? latestAnalysis.triage.reasoning : ticket.ai_reasoning}

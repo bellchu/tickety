@@ -19,7 +19,7 @@ export function TicketSignalStrip({ ratings, reasoning }: { ratings: TicketSigna
         </p>
       </div>
 
-      <div className="mt-4 grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-12">
+      <div className="mt-4 grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {ratings.map((rating) => (
           <div
             key={rating.key}
@@ -28,8 +28,8 @@ export function TicketSignalStrip({ ratings, reasoning }: { ratings: TicketSigna
             className={cn(
               "relative min-w-0 overflow-hidden rounded-xl border p-3.5",
               rating.highlighted
-                ? "border-clay-300 bg-gradient-to-br from-[var(--color-primary-soft)] via-white to-white shadow-[0_8px_24px_rgba(87,34,159,0.08)] sm:col-span-2 xl:col-span-4"
-                : "border-linen-300 bg-white xl:col-span-2",
+                ? "border-clay-300 bg-[var(--color-primary-soft)]/55 shadow-[0_8px_24px_rgba(87,34,159,0.08)]"
+                : "border-linen-300 bg-white",
             )}
           >
             {rating.highlighted && <span className="nexora-spectrum absolute inset-y-0 left-0 w-[3px]" aria-hidden="true" />}
@@ -42,7 +42,7 @@ export function TicketSignalStrip({ ratings, reasoning }: { ratings: TicketSigna
               </span>
             </div>
 
-            <SignalVisual rating={rating} />
+            <SignalStars rating={rating} />
 
             <p className={cn("mt-2 break-words font-semibold leading-5 text-ink-700 [overflow-wrap:anywhere]", rating.highlighted ? "text-sm" : "text-xs")}>
               {rating.displayValue}
@@ -63,47 +63,9 @@ export function TicketSignalStrip({ ratings, reasoning }: { ratings: TicketSigna
   );
 }
 
-function SignalVisual({ rating }: { rating: TicketSignalRating }) {
-  if (rating.visual === "emoji") {
-    return (
-      <div className="mt-2 flex h-8 items-center" aria-hidden="true">
-        <span className={cn("text-[1.65rem] leading-none drop-shadow-sm", rating.score === null && "grayscale opacity-35")}>
-          {rating.visualValue || "🙂"}
-        </span>
-      </div>
-    );
-  }
-
-  if (rating.visual === "risk") {
-    const percentage = rating.score === null ? 0 : Number(rating.visualValue || 0);
-    return (
-      <div className="mt-3" aria-hidden="true">
-        <div className="h-2 overflow-hidden rounded-full bg-linen-300">
-          <div className="h-full rounded-full bg-[var(--brand-pink)] transition-[width]" style={{ width: `${Math.max(0, Math.min(100, percentage))}%` }} />
-        </div>
-      </div>
-    );
-  }
-
-  if (rating.visual === "meter") {
-    const meterColor = rating.key === "business-impact" ? "bg-amber-500" : "bg-semantic-info";
-    return (
-      <div className="mt-3 grid grid-cols-5 gap-1" aria-hidden="true">
-        {[1, 2, 3, 4, 5].map((position) => (
-          <span
-            key={position}
-            className={cn(
-              "h-1.5 rounded-full",
-              rating.score !== null && position <= rating.score ? meterColor : "bg-linen-300",
-            )}
-          />
-        ))}
-      </div>
-    );
-  }
-
+function SignalStars({ rating }: { rating: TicketSignalRating }) {
   return (
-    <div className="mt-2 flex items-center gap-0.5" aria-hidden="true">
+    <div className="mt-2 flex items-center gap-0.5" aria-hidden="true" data-signal-visual="stars">
       {[1, 2, 3, 4, 5].map((position) => {
         const filled = rating.score !== null && position <= rating.score;
         return (
@@ -112,7 +74,7 @@ function SignalVisual({ rating }: { rating: TicketSignalRating }) {
             className={cn(
               rating.highlighted ? "h-[18px] w-[18px]" : "h-4 w-4",
               "shrink-0",
-              filled ? cn("fill-current", rating.colorClass) : "text-ink-400/45",
+              filled ? "fill-current text-amber-500" : "text-ink-400/35",
             )}
             aria-hidden="true"
             focusable="false"

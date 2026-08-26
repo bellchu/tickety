@@ -44,6 +44,7 @@ import {
 } from "@/lib/ticket-display";
 import { FreshserviceConversationThread } from "@/components/ticket/FreshserviceConversationThread";
 import { TicketPriorityIndicator } from "@/components/ticket/TicketPriorityIndicator";
+import { TicketSentimentSubtitle } from "@/components/ticket/TicketSentimentSubtitle";
 import { Alert, Badge, Button, EmptyState, ErrorState, IconButton, Skeleton } from "@/components/ui";
 import { PageFrame } from "@/components/layout/PageLayout";
 
@@ -345,6 +346,7 @@ function TicketRow({ ticket, selected, onSelect, onStar }: { ticket: AgentWorksp
           <time dateTime={ticketLastCommunicationAt(ticket) || undefined}>{formatTimeAgo(ticketLastCommunicationAt(ticket))}</time>
         </div>
         <h3 className={cn("mt-1.5 break-words text-sm leading-5 text-ink-700 [overflow-wrap:anywhere]", ticket.is_unread ? "font-semibold" : "font-medium")}>{ticket.subject}</h3>
+        <TicketSentimentSubtitle ticket={ticket} />
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
           <TicketPriorityIndicator ticket={ticket} compact />
           {ticket.needs_reply && <span className="badge border-clay-200 bg-[var(--color-info-soft)] text-clay-700">Needs reply</span>}
@@ -382,6 +384,7 @@ function TicketReadingPane({ ticket, copied, onCopy, onStar, onFollowUp, onClear
             <span>{ticket.assignment_scope === "mine" ? "My Inbox" : ticket.team_name || "Team Inbox"}</span>
           </div>
           <h2 className="mt-2 break-words text-xl font-semibold leading-7 tracking-[-0.02em] text-ink-700">{ticket.subject}</h2>
+          <TicketSentimentSubtitle ticket={ticket} />
           <p className="mt-1 text-xs text-ink-400">{requesterName(ticket)} · updated {formatTimeAgo(ticketLastCommunicationAt(ticket))}</p>
         </div>
         <IconButton size="sm" variant="secondary" onClick={onStar} aria-label={ticket.is_starred ? "Remove star" : "Star ticket"} icon={<Star className={cn("h-4 w-4", ticket.is_starred && "fill-current text-amber-500")} />} />

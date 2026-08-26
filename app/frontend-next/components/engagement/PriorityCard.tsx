@@ -4,6 +4,7 @@ import Link from "next/link";
 import { motion } from "framer-motion";
 import { Clock } from "lucide-react";
 import { TicketPriorityIndicator } from "@/components/ticket/TicketPriorityIndicator";
+import { TicketSentimentSubtitle } from "@/components/ticket/TicketSentimentSubtitle";
 import type { Ticket } from "@/lib/types";
 import {
   statusColor,
@@ -53,6 +54,7 @@ export function PriorityCard({ ticket, index = 0 }: Props) {
           <h3 className="break-words text-sm font-semibold text-ink-700 [overflow-wrap:anywhere]" title={ticket.subject}>
             {ticket.subject}
           </h3>
+          <TicketSentimentSubtitle ticket={ticket} />
           <p className="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-ink-500 [overflow-wrap:anywhere]" title={ticket.description || "(no description)"}>
             {ticket.description || "(no description)"}
           </p>
@@ -62,20 +64,6 @@ export function PriorityCard({ ticket, index = 0 }: Props) {
               <Clock className="w-3 h-3" />
               {formatTimeAgo(ticket.created_at)}
             </span>
-            {ticket.sentiment && (
-              <span
-                className={cn(
-                  "break-words text-right text-[10px] font-semibold [overflow-wrap:anywhere]",
-                  ticket.sentiment === "Negative"
-                    ? "text-rust-500"
-                    : ticket.sentiment === "Positive"
-                    ? "text-ink-600"
-                    : "text-ink-500"
-                )}
-              >
-                Impact · {ticket.sentiment}
-              </span>
-            )}
           </div>
         </div>
       </Link>
