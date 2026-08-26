@@ -655,7 +655,7 @@ export default function SettingsPage() {
             {[
               { key: "AUTO_TRIAGE_ENABLED", label: "Auto-Triage", desc: "Sentiment, category, priority, mood, complexity analysis on every new ticket" },
               { key: "AUTO_SUMMARIZE_ENABLED", label: "Auto-Summarization", desc: "Generate 2-3 sentence case summaries for support managers" },
-              { key: "AUTO_ROUTE_ENABLED", label: "Auto-Routing", desc: "Recommend the best engineer based on skills, tier, and workload" },
+              { key: "AUTO_ROUTE_ENABLED", label: "Auto-Routing", desc: "Provide advisory resolver-group routing for incoming tickets" },
               { key: "AUTO_RESOLVE_ENABLED", label: "Auto-Resolution", desc: "Generate step-by-step resolution plans with root-cause hypothesis" },
               { key: "AUTO_SYSTEMIC_ENABLED", label: "Systemic Issue Detection", desc: "Cluster similar tickets to surface broad business-impact patterns" },
             ].map((t) => (

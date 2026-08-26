@@ -31,6 +31,13 @@ export interface Ticket {
   ai_suggested_priority: string | null;
   ai_suggested_category: string | null;
   ai_suggested_team: string | null;
+  ai_secondary_team: ResolverGroup | null;
+  ai_routing_confidence: number | null;
+  ai_business_context: "ALMO" | "JAM" | "UNKNOWN" | null;
+  ai_routing_scope: "single_user" | "multiple_users" | "service_wide" | "unknown" | null;
+  ai_affected_service: string | null;
+  ai_failure_domain: string | null;
+  ai_routing_reason: string | null;
   recommended_team: string;
   recommended_team_basis: "source_group" | "ai_team" | "ai_category" | "source_category" | "not_applicable" | "unrouted_review";
   routing_status: "source_group_assignment" | "ai_team_recommendation" | "legacy_ai_category" | "source_category_suggestion" | "not_applicable" | "unrouted_review";
@@ -687,25 +694,32 @@ export interface AccountHealth {
   truncated: boolean;
 }
 
-export interface RouteCandidate {
-  user_id: string;
-  name: string;
-  tier: number;
-  impact_points: number;
-  momentum: number;
-  score: number;
-  tier_ok: boolean;
-}
+export type ResolverGroup =
+  | "INFRA_HELPDESK"
+  | "INFRA_NETWORK"
+  | "INFRA_SYSTEMS"
+  | "INFRA_ARCH"
+  | "APP_CRM_ALMO"
+  | "APP_CRM_JAM"
+  | "APP_RPA"
+  | "APP_SQL"
+  | "APP_JDE"
+  | "APP_JDE_BA"
+  | "APP_KORBER"
+  | "APP_AS400"
+  | "APP_WEB"
+  | "APP_EDI_API"
+  | "APP_PM";
 
 export interface RouteRecommendation {
-  recommended_user_id: string | null;
-  recommended_name?: string | null;
-  reasoning?: string;
-  tier_needed?: number;
-  candidates: RouteCandidate[];
-  total_users: number;
-  analyzed_users: number;
-  candidate_pool_truncated: boolean;
+  primary_group: ResolverGroup;
+  secondary_group: ResolverGroup | null;
+  confidence: number;
+  business_context: "ALMO" | "JAM" | "UNKNOWN";
+  scope: "single_user" | "multiple_users" | "service_wide" | "unknown";
+  affected_service: string;
+  failure_domain: string;
+  reason: string;
 }
 
 export interface WorkloadAgent {

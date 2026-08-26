@@ -159,7 +159,7 @@ class CorpusMutationControlsTests(unittest.TestCase):
             self.assertEqual(raised.exception.status_code, 409)
             self.assertEqual(raised.exception.detail, "duplicate_comment")
 
-    def test_ai_category_is_advisory_and_invalidates_without_touching_canonical(self):
+    def test_triage_cannot_route_and_dedicated_route_is_advisory(self):
         ticket = TicketRecord(
             id="ticket-category",
             subject="Network outage",
@@ -175,11 +175,22 @@ class CorpusMutationControlsTests(unittest.TestCase):
                 "complexity": 2,
                 "reasoning": "scope: single user",
                 "action": "route",
-                "recommended_team": "Application Support",
             }, db)
         self.assertEqual(ticket.category, "Network")
         self.assertEqual(ticket.ai_suggested_category, "Software")
-        self.assertEqual(ticket.ai_suggested_team, "Application Support")
+        self.assertIsNone(ticket.ai_suggested_team)
+
+        main._apply_ticket_routing(ticket, {
+            "primary_group": "INFRA_HELPDESK",
+            "secondary_group": None,
+            "confidence": 0.58,
+            "business_context": "UNKNOWN",
+            "scope": "single_user",
+            "affected_service": "unknown",
+            "failure_domain": "basic access triage",
+            "reason": "Only one user is affected and the failing component is unclear.",
+        })
+        self.assertEqual(ticket.ai_suggested_team, "INFRA_HELPDESK")
 
         invalidate_ticket_ai(ticket)
         self.assertEqual(ticket.category, "Network")
@@ -226,6 +237,26 @@ class CorpusMutationControlsTests(unittest.TestCase):
         self.assertRegex(current, r"^2026-07-13\.[0-9a-f]{12}$")
         with patch.object(main, "RAG_SYSTEM_PROMPT", main.RAG_SYSTEM_PROMPT + "\nchanged"):
             self.assertNotEqual(main._ai_pipeline_contract_version(), current)
+
+    def test_routing_contract_version_is_independent_and_policy_bound(self):
+        general = main._ai_pipeline_contract_version()
+        routing = main._ai_routing_contract_version()
+        self.assertEqual(routing, main.AI_ROUTING_PIPELINE_VERSION)
+        self.assertRegex(routing, r"^2026-08-26\.route\.[0-9a-f]{12}$")
+        with patch.object(
+            main,
+            "ROUTING_SYSTEM_PROMPT",
+            main.ROUTING_SYSTEM_PROMPT + "\nchanged",
+        ):
+            self.assertNotEqual(main._ai_routing_contract_version(), routing)
+            self.assertEqual(main._ai_pipeline_contract_version(), general)
+        with patch.dict(
+            os.environ,
+            {"AI_ROUTING_ALMO_EMAIL_DOMAINS": "route-version-test.invalid"},
+            clear=False,
+        ):
+            self.assertNotEqual(main._ai_routing_contract_version(), routing)
+            self.assertEqual(main._ai_pipeline_contract_version(), general)
 
 
 class RagOutputAuthorityTests(unittest.IsolatedAsyncioTestCase):

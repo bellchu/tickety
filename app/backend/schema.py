@@ -110,6 +110,13 @@ class Ticket(BaseModel):
     ai_suggested_priority: Optional[str] = None
     ai_suggested_category: Optional[str] = None
     ai_suggested_team: Optional[str] = None
+    ai_secondary_team: Optional[str] = None
+    ai_routing_confidence: Optional[float] = None
+    ai_business_context: Optional[str] = None
+    ai_routing_scope: Optional[str] = None
+    ai_affected_service: Optional[str] = None
+    ai_failure_domain: Optional[str] = None
+    ai_routing_reason: Optional[str] = None
     recommended_team: str = "Unrouted / Review"
     recommended_team_basis: Literal[
         "source_group",
@@ -135,6 +142,20 @@ class Ticket(BaseModel):
         ]
     ] = "untrusted_ai_status"
     routing_catalog_validated: bool = False
+
+    @model_validator(mode="after")
+    def hide_untrusted_route_bundle(self):
+        """Never serialize raw routing columns without exact route provenance."""
+        if self.recommended_team_basis != "ai_team":
+            self.ai_suggested_team = None
+            self.ai_secondary_team = None
+            self.ai_routing_confidence = None
+            self.ai_business_context = None
+            self.ai_routing_scope = None
+            self.ai_affected_service = None
+            self.ai_failure_domain = None
+            self.ai_routing_reason = None
+        return self
 
 
 class AIAnalysis(BaseModel):

@@ -32,14 +32,14 @@ function analysis(overrides = {}) {
     ticket_id: "ticket-1",
     triage: {
       ticket_id: "ticket-1", sentiment: "Neutral", category: "Other", priority: "P3",
-      mood: "neutral", complexity: 1, action: "respond", recommended_team: "Application Support", reasoning: "Review logs",
+      mood: "neutral", complexity: 1, action: "respond", recommended_team: "APP_EDI_API", reasoning: "Review logs",
       suggested_response: null, escalation_risk: 10,
     },
     summary: null,
     route: {
-      recommended_user_id: "user-1", recommended_name: "User", reasoning: "Best match", tier_needed: 1,
-      candidates: [{ user_id: "user-1", name: "User", tier: 1, impact_points: 4, momentum: 2, score: 18, tier_ok: true }],
-      total_users: 1, analyzed_users: 1, candidate_pool_truncated: false,
+      primary_group: "APP_EDI_API", secondary_group: null, confidence: 0.91,
+      business_context: "JAM", scope: "service_wide", affected_service: "Order interface",
+      failure_domain: "interface delivery failure", reason: "The interface fails while delivering orders",
     },
     recommended_solution: {
       ticket_id: "ticket-1",
@@ -87,9 +87,63 @@ test("triage messages require valid progress and complete result structures", ()
   assert.equal(isTriageProgressMessage(null), false);
   assert.equal(isTriageProgressMessage({ type: "progress", timeout_seconds: 900, steps: null }), false);
   assert.equal(isTicketAnalysisResult(analysis(), "ticket-1"), true);
+  assert.equal(isTicketAnalysisResult(analysis({
+    route: { ...analysis().route, secondary_group: "APP_JDE" },
+  }), "ticket-1"), true);
   assert.equal(isTicketAnalysisResult(analysis({ ticket_id: "ticket-2" }), "ticket-1"), false);
   assert.equal(isTicketAnalysisResult(analysis({ triage: { ...analysis().triage, ticket_id: "ticket-2" } }), "ticket-1"), false);
   assert.equal(isTicketAnalysisResult(analysis({ route: {} }), "ticket-1"), false);
+  assert.equal(isTicketAnalysisResult(analysis({
+    route: { ...analysis().route, primary_group: "APP_UNKNOWN" },
+  }), "ticket-1"), false);
+  assert.equal(isTicketAnalysisResult(analysis({
+    route: { ...analysis().route, secondary_group: "INFRA_HELPDESK" },
+  }), "ticket-1"), false);
+  assert.equal(isTicketAnalysisResult(analysis({
+    route: { ...analysis().route, secondary_group: "APP_EDI_API" },
+  }), "ticket-1"), false);
+  assert.equal(isTicketAnalysisResult(analysis({
+    route: { ...analysis().route, secondary_group: undefined },
+  }), "ticket-1"), false);
+  assert.equal(isTicketAnalysisResult(analysis({
+    route: { ...analysis().route, confidence: 1.01 },
+  }), "ticket-1"), false);
+  assert.equal(isTicketAnalysisResult(analysis({
+    route: { ...analysis().route, confidence: Number.NaN },
+  }), "ticket-1"), false);
+  assert.equal(isTicketAnalysisResult(analysis({
+    route: { ...analysis().route, affected_service: "" },
+  }), "ticket-1"), false);
+  assert.equal(isTicketAnalysisResult(analysis({
+    route: { ...analysis().route, reason: "first\u2028second" },
+  }), "ticket-1"), false);
+  assert.equal(isTicketAnalysisResult(analysis({
+    route: { ...analysis().route, affected_service: "unknown", confidence: 0.60 },
+  }), "ticket-1"), false);
+  assert.equal(isTicketAnalysisResult(analysis({
+    route: { ...analysis().route, affected_service: "UNKNOWN", confidence: 0.60 },
+  }), "ticket-1"), false);
+  assert.equal(isTicketAnalysisResult(analysis({
+    route: { ...analysis().route, reason: "x".repeat(1_001) },
+  }), "ticket-1"), false);
+  assert.equal(isTicketAnalysisResult(analysis({
+    route: { ...analysis().route, reason: " padded evidence " },
+  }), "ticket-1"), false);
+  assert.equal(isTicketAnalysisResult(analysis({
+    route: { ...analysis().route, unexpected: true },
+  }), "ticket-1"), false);
+  assert.equal(isTicketAnalysisResult(analysis({
+    route: { ...analysis().route, business_context: "OTHER" },
+  }), "ticket-1"), false);
+  assert.equal(isTicketAnalysisResult(analysis({
+    route: { ...analysis().route, primary_group: "APP_CRM_ALMO", business_context: "JAM" },
+  }), "ticket-1"), false);
+  assert.equal(isTicketAnalysisResult(analysis({
+    route: { ...analysis().route, primary_group: "APP_CRM_ALMO", business_context: "ALMO" },
+  }), "ticket-1"), true);
+  assert.equal(isTicketAnalysisResult(analysis({
+    route: { ...analysis().route, scope: "organization_wide" },
+  }), "ticket-1"), false);
   assert.equal(isTicketAnalysisResult(analysis({ recommended_solution: { ticket_id: "ticket-1", plan: {}, cached: false } }), "ticket-1"), false);
 });
 

@@ -7,7 +7,7 @@ SupportLogic's ambient AI workforce, scoped to what Tickety OPS Tower already st
   - Escalation Risk Agent   predict escalation risk per ticket
   - SLA Agent               watch SLA clocks, flag pre-breach + breaches
   - Prioritization Agent    rank the open backlog by urgency/impact/risk
-  - Routing Agent           recommend the best engineer for a ticket
+  - Resolver Routing Agent  projects a separately validated resolver group
   - Summarization Agent     LLM-generated case summary
   - Account Health Agent    per-reporter health score (churn risk proxy)
   - Text Analytics Agent    trends, category & sentiment distribution, top terms
@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from typing import Any, Collection, Dict, List, Literal, Optional
 
 from sqlalchemy import and_, case, func, or_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from .database import (
     ExternalConversationRecord,
@@ -310,51 +310,6 @@ CATEGORY_DIFFICULTY = {
 # Priority adds urgency that raises the required skill band.
 _PRIORITY_TIER_BUMP = {"P1": 1, "P2": 0, "P3": 0}
 
-# Team routing prefers a trusted AI issue type. Freshservice's authoritative,
-# closed-set category can provide a deterministic fallback when an AI result is
-# not ready yet. The fallback is deliberately exact-match only: unknown values
-# and the AI ``Other`` bucket still fail closed for human review.
-AI_CATEGORY_TEAMS = {
-    "Network": "Network Operations",
-    "Access Request": "Identity and Access",
-    "Hardware": "Workplace Technology",
-    "Software": "Application Support",
-}
-SOURCE_CATEGORY_TEAMS = {
-    "User Management": "Identity and Access",
-    "Password Reset": "Identity and Access",
-    "Termination/Resignation": "Identity and Access",
-    "Hardware - Accessories": "Workplace Technology",
-    "Hardware - Computers": "Workplace Technology",
-    "Hardware - Printers": "Workplace Technology",
-    "Mobile Phones": "Workplace Technology",
-    "Software": "Application Support",
-    "E1 App": "Application Support",
-    "E1 CNC": "Application Support",
-    "E1 Credit Card Processing": "Application Support",
-    "Almo - ERP/WMS Team": "Application Support",
-    "B2B Web": "Application Support",
-    "WMS": "Application Support",
-}
-_QUALITY_SOURCE_CATEGORY_TEAMS = {
-    **SOURCE_CATEGORY_TEAMS,
-    # Broader historical classifications are useful for confidence-gated
-    # group profiling, but intentionally do not alter the existing fail-closed
-    # live routing contract above.
-    "Infrastructure": "Network Operations",
-    "Power BI - Dashboards": "Application Support",
-    "BI": "Application Support",
-    "CRM": "Application Support",
-    "Web": "Application Support",
-    "SQL Admin": "Application Support",
-    "E1 Development": "Application Support",
-    "E1 Forms": "Application Support",
-    "E1 Bulk Update": "Application Support",
-    "E1 Avatax": "Application Support",
-    "EDI / Integrations": "Application Support",
-    "EDI / Integrations - POs": "Application Support",
-    "Almo - WebDev Team": "Application Support",
-}
 UNROUTED_REVIEW_TEAM = "Unrouted / Review"
 NO_ACTIVE_ROUTING_TEAM = "No active routing"
 _TRUSTED_AI_ROUTING_STATUSES = {"completed", "partial", "triage_completed"}
@@ -362,13 +317,11 @@ _TRUSTED_AI_ROUTING_STATUSES = {"completed", "partial", "triage_completed"}
 
 @dataclass(frozen=True)
 class TeamRoutingDecision:
-    """AI resolver-team projection until catalog-bound group routing is enabled.
+    """Advisory resolver-group projection until catalog mapping is enabled.
 
-    ``ai_team`` is selected from Tickety OPS Tower's closed set of resolver teams, while
-    ``ai_category`` remains a compatibility fallback for older artifacts.
-    Neither is represented as a validated Freshservice resolver-group route.
-    Every untrusted or unmapped outcome fails closed to an explicit review
-    state.
+    The static resolver code is not represented as a validated Freshservice
+    group assignment. Every stale, incomplete, or unmapped outcome fails
+    closed to an explicit review state.
     """
 
     recommended_team: str
@@ -424,11 +377,9 @@ def team_routing_decision(
             status="not_applicable",
             abstention_reason=None,
         )
-    normalized_status = (ai_status or "").strip().lower().replace("-", "_")
-    ai_routing_trusted = (
-        normalized_status in _TRUSTED_AI_ROUTING_STATUSES
-        or ai_evidence_current
-    )
+    # Aggregate lifecycle status can stay completed while one artifact becomes
+    # stale. Only the caller's exact route-artifact provenance check is trusted.
+    ai_routing_trusted = ai_evidence_current
     normalized_ai_team = (ai_suggested_team or "").strip()
     if ai_routing_trusted and normalized_ai_team in AI_RESOLVER_TEAMS:
         return TeamRoutingDecision(
@@ -438,30 +389,9 @@ def team_routing_decision(
             abstention_reason=None,
         )
 
-    # Preserve recommendations generated before the explicit AI team contract
-    # while those tickets are refreshed through the bounded worker queues.
-    if ai_routing_trusted and ai_suggested_category:
-        team = AI_CATEGORY_TEAMS.get(ai_suggested_category)
-        if team:
-            return TeamRoutingDecision(
-                recommended_team=team,
-                basis="ai_category",
-                status="legacy_ai_category",
-                abstention_reason=None,
-            )
-
-    source_team = SOURCE_CATEGORY_TEAMS.get((source_category or "").strip())
-    if source_team:
-        return TeamRoutingDecision(
-            recommended_team=source_team,
-            basis="source_category",
-            status="source_category_suggestion",
-            abstention_reason=None,
-        )
-
     if not ai_routing_trusted:
         reason = "untrusted_ai_status"
-    elif not ai_suggested_category:
+    elif not normalized_ai_team:
         reason = "missing_ai_category"
     else:
         reason = "unsupported_ai_category"
@@ -477,12 +407,15 @@ def recommended_team(
     ai_suggested_category: Optional[str],
     ai_status: Optional[str],
     ai_suggested_team: Optional[str] = None,
+    *,
+    ai_evidence_current: bool = False,
 ) -> tuple[str, str]:
     """Return the legacy tuple shape without restoring an implicit fallback."""
     decision = team_routing_decision(
         ai_suggested_category,
         ai_status,
         ai_suggested_team=ai_suggested_team,
+        ai_evidence_current=ai_evidence_current,
     )
     return decision.recommended_team, decision.basis
 
@@ -635,16 +568,14 @@ def _source_category(ticket: TicketRecord) -> str:
     return (ticket.external_category or ticket.category or "").strip()
 
 
-def _recommended_team_for_signal(ticket: TicketRecord) -> tuple[Optional[str], str]:
+def _recommended_team_for_signal(
+    ticket: TicketRecord,
+    *,
+    ai_evidence_current: bool = False,
+) -> tuple[Optional[str], str]:
     team = (ticket.ai_suggested_team or "").strip()
-    if _trusted_signal(ticket) and team in AI_RESOLVER_TEAMS:
+    if ai_evidence_current and team in AI_RESOLVER_TEAMS:
         return team, "trusted_ai_recommendation"
-    source_team = _QUALITY_SOURCE_CATEGORY_TEAMS.get(_source_category(ticket))
-    if source_team:
-        return source_team, "provider_category_policy"
-    ai_category_team = AI_CATEGORY_TEAMS.get(ticket.ai_suggested_category or "")
-    if _trusted_signal(ticket) and ai_category_team:
-        return ai_category_team, "trusted_ai_category"
     return None, "insufficient_evidence"
 
 
@@ -691,11 +622,81 @@ def _binding_key_scope(column, binding_id: str):
     return column == binding_id
 
 
+def group_profile_ticket_candidates(
+    db: Session,
+    *,
+    since: datetime,
+    group_keys: Collection[tuple[str, str]],
+) -> tuple[list[TicketRecord], bool]:
+    """Load the bounded closed-ticket evidence used by group profiles."""
+    normalized_keys = {
+        (binding_id or "legacy", group_id)
+        for binding_id, group_id in group_keys
+        if group_id
+    }
+    if not normalized_keys:
+        return [], False
+    if len(normalized_keys) > GROUP_PROFILE_GROUP_LIMIT:
+        raise ValueError("too many resolver groups for bounded profile analytics")
+    groups_by_binding: Dict[str, set[str]] = {}
+    for binding_id, group_id in normalized_keys:
+        groups_by_binding.setdefault(binding_id, set()).add(group_id)
+    ticket_group_scope = or_(*(
+        and_(
+            _binding_key_scope(TicketRecord.binding_id, binding_id),
+            TicketRecord.external_group_id.in_(sorted(group_ids)),
+        )
+        for binding_id, group_ids in sorted(groups_by_binding.items())
+    ))
+    completed_at = func.coalesce(
+        TicketRecord.external_resolved_at,
+        TicketRecord.resolved_at,
+        TicketRecord.external_updated_at,
+        TicketRecord.updated_at,
+    )
+    tickets = db.query(TicketRecord).options(load_only(
+        TicketRecord.id,
+        TicketRecord.binding_id,
+        TicketRecord.external_group_id,
+        TicketRecord.priority,
+        TicketRecord.category,
+        TicketRecord.external_category,
+        TicketRecord.complexity,
+        TicketRecord.ai_suggested_team,
+        TicketRecord.ai_secondary_team,
+        TicketRecord.ai_routing_confidence,
+        TicketRecord.ai_business_context,
+        TicketRecord.ai_routing_scope,
+        TicketRecord.ai_affected_service,
+        TicketRecord.ai_failure_domain,
+        TicketRecord.ai_routing_reason,
+        TicketRecord.ai_routing_input_hash,
+    )).filter(
+        TicketRecord.external_group_id.isnot(None),
+        TicketRecord.external_group_id != "",
+        portable_ascii_lower_expression(TicketRecord.status).in_(
+            ["closed", "resolved"]
+        ),
+        completed_at >= since,
+        ticket_group_scope,
+    ).order_by(
+        TicketRecord.binding_id.asc(),
+        TicketRecord.external_group_id.asc(),
+        TicketRecord.id.asc(),
+    ).limit(GROUP_PROFILE_AGGREGATE_LIMIT + 1).all()
+    return tickets[:GROUP_PROFILE_AGGREGATE_LIMIT], (
+        len(tickets) > GROUP_PROFILE_AGGREGATE_LIMIT
+    )
+
+
 def build_group_profiles(
     db: Session,
     *,
     since: datetime,
     group_keys: Collection[tuple[str, str]],
+    candidate_tickets: Optional[Collection[TicketRecord]] = None,
+    candidates_truncated: bool = False,
+    trusted_route_ticket_ids: Optional[Collection[str]] = None,
 ) -> tuple[Dict[tuple[str, str], Dict[str, Any]], bool]:
     """Learn resolver-group function and service level from completed work.
 
@@ -711,83 +712,41 @@ def build_group_profiles(
         return {}, False
     if len(normalized_keys) > GROUP_PROFILE_GROUP_LIMIT:
         raise ValueError("too many resolver groups for bounded profile analytics")
+    if candidate_tickets is None:
+        tickets, profiles_truncated = group_profile_ticket_candidates(
+            db,
+            since=since,
+            group_keys=normalized_keys,
+        )
+    else:
+        tickets = list(candidate_tickets)[:GROUP_PROFILE_AGGREGATE_LIMIT]
+        profiles_truncated = bool(candidates_truncated)
+    trusted_route_ids = set(trusted_route_ticket_ids or ())
+
+    counters: Dict[tuple[str, str], Dict[str, Counter]] = {}
+    for ticket in tickets:
+        key = (ticket.binding_id or "legacy", ticket.external_group_id)
+        if key not in normalized_keys:
+            continue
+        bucket = counters.setdefault(key, {"teams": Counter(), "levels": Counter()})
+        team = (
+            ticket.ai_suggested_team
+            if ticket.id in trusted_route_ids
+            and ticket.ai_suggested_team in AI_RESOLVER_TEAMS
+            else None
+        )
+        if team:
+            bucket["teams"][team] += 1
+        level = _support_level_from_fields(
+            priority=ticket.priority,
+            category=ticket.external_category or ticket.category,
+            complexity=ticket.complexity,
+        )
+        bucket["levels"][level] += 1
+
     groups_by_binding: Dict[str, set[str]] = {}
     for binding_id, group_id in normalized_keys:
         groups_by_binding.setdefault(binding_id, set()).add(group_id)
-    ticket_group_scope = or_(*(
-        and_(
-            _binding_key_scope(TicketRecord.binding_id, binding_id),
-            TicketRecord.external_group_id.in_(sorted(group_ids)),
-        )
-        for binding_id, group_ids in sorted(groups_by_binding.items())
-    ))
-
-    completed_at = func.coalesce(
-        TicketRecord.external_resolved_at,
-        TicketRecord.resolved_at,
-        TicketRecord.external_updated_at,
-        TicketRecord.updated_at,
-    )
-    rows = db.query(
-        TicketRecord.binding_id,
-        TicketRecord.external_group_id,
-        TicketRecord.external_category,
-        TicketRecord.category,
-        TicketRecord.ai_suggested_team,
-        TicketRecord.ai_status,
-        TicketRecord.complexity,
-        TicketRecord.priority,
-        func.count(TicketRecord.id),
-    ).filter(
-        TicketRecord.external_group_id.isnot(None),
-        TicketRecord.external_group_id != "",
-        portable_ascii_lower_expression(TicketRecord.status).in_(
-            ["closed", "resolved"]
-        ),
-        completed_at >= since,
-        ticket_group_scope,
-    ).group_by(
-        TicketRecord.binding_id,
-        TicketRecord.external_group_id,
-        TicketRecord.external_category,
-        TicketRecord.category,
-        TicketRecord.ai_suggested_team,
-        TicketRecord.ai_status,
-        TicketRecord.complexity,
-        TicketRecord.priority,
-    ).order_by(
-        TicketRecord.binding_id.asc(),
-        TicketRecord.external_group_id.asc(),
-        TicketRecord.external_category.asc().nullsfirst(),
-        TicketRecord.category.asc().nullsfirst(),
-        TicketRecord.ai_suggested_team.asc().nullsfirst(),
-        TicketRecord.ai_status.asc().nullsfirst(),
-        TicketRecord.complexity.asc().nullsfirst(),
-        TicketRecord.priority.asc().nullsfirst(),
-    ).limit(GROUP_PROFILE_AGGREGATE_LIMIT + 1).all()
-    profiles_truncated = len(rows) > GROUP_PROFILE_AGGREGATE_LIMIT
-    rows = rows[:GROUP_PROFILE_AGGREGATE_LIMIT]
-
-    counters: Dict[tuple[str, str], Dict[str, Counter]] = {}
-    for (
-        binding_id, group_id, external_category, category, ai_team, ai_status,
-        complexity, priority, count,
-    ) in rows:
-        key = (binding_id or "legacy", group_id)
-        bucket = counters.setdefault(key, {"teams": Counter(), "levels": Counter()})
-        normalized_status = (ai_status or "").strip().lower().replace("-", "_")
-        if normalized_status in _TRUSTED_SIGNAL_STATUSES and ai_team in AI_RESOLVER_TEAMS:
-            team = ai_team
-        else:
-            team = _QUALITY_SOURCE_CATEGORY_TEAMS.get((external_category or category or "").strip())
-        if team:
-            bucket["teams"][team] += int(count)
-        level = _support_level_from_fields(
-            priority=priority,
-            category=external_category or category,
-            complexity=complexity,
-        )
-        bucket["levels"][level] += int(count)
 
     directory_group_scope = or_(*(
         and_(
@@ -828,9 +787,14 @@ def build_group_profiles(
 def routing_alert(
     ticket: TicketRecord,
     profile: Optional[Dict[str, Any]],
-    *, now: Optional[datetime] = None,
+    *,
+    now: Optional[datetime] = None,
+    ai_evidence_current: bool = False,
 ) -> Optional[Dict[str, Any]]:
-    expected_team, source = _recommended_team_for_signal(ticket)
+    expected_team, source = _recommended_team_for_signal(
+        ticket,
+        ai_evidence_current=ai_evidence_current,
+    )
     if not profile or not expected_team or not profile.get("functional_team"):
         return None
     if (

@@ -2,8 +2,8 @@ import type {
   PointsNotification,
   Recognition,
   RecommendedSolution,
+  ResolverGroup,
   ResolutionPlan,
-  RouteCandidate,
   RouteRecommendation,
   TicketAnalysisResult,
   TriageResult,
@@ -16,6 +16,27 @@ const DEFAULT_PIPELINE_TIMEOUT_SECONDS = 900;
 const WATCHDOG_MARGIN_SECONDS = 30;
 
 type UnknownRecord = Record<string, unknown>;
+
+const RESOLVER_GROUPS = new Set<ResolverGroup>([
+  "INFRA_HELPDESK",
+  "INFRA_NETWORK",
+  "INFRA_SYSTEMS",
+  "INFRA_ARCH",
+  "APP_CRM_ALMO",
+  "APP_CRM_JAM",
+  "APP_RPA",
+  "APP_SQL",
+  "APP_JDE",
+  "APP_JDE_BA",
+  "APP_KORBER",
+  "APP_AS400",
+  "APP_WEB",
+  "APP_EDI_API",
+  "APP_PM",
+]);
+const ROUTE_LINE_BREAKS = [
+  "\n", "\r", "\v", "\f", "\u001c", "\u001d", "\u001e", "\u0085", "\u2028", "\u2029",
+];
 
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === "object" && value !== null;
@@ -55,28 +76,50 @@ function isTriageResult(value: unknown): value is TriageResult {
     && isFiniteNumber(value.escalation_risk);
 }
 
-function isRouteCandidate(value: unknown): value is RouteCandidate {
-  if (!isRecord(value)) return false;
-  return typeof value.user_id === "string"
-    && typeof value.name === "string"
-    && isFiniteNumber(value.tier)
-    && isFiniteNumber(value.impact_points)
-    && isFiniteNumber(value.momentum)
-    && isFiniteNumber(value.score)
-    && typeof value.tier_ok === "boolean";
+function isResolverGroup(value: unknown): value is ResolverGroup {
+  return typeof value === "string" && RESOLVER_GROUPS.has(value as ResolverGroup);
 }
 
-function isRouteRecommendation(value: unknown): value is RouteRecommendation {
+function isRoutingText(value: unknown, maxLength: number): value is string {
+  return typeof value === "string"
+    && value.trim().length > 0
+    && value === value.trim()
+    && value.length <= maxLength
+    && !ROUTE_LINE_BREAKS.some((separator) => value.includes(separator));
+}
+
+export function isRouteRecommendation(value: unknown): value is RouteRecommendation {
   if (!isRecord(value)) return false;
-  return isNullableString(value.recommended_user_id)
-    && (value.recommended_name === undefined || isNullableString(value.recommended_name))
-    && (value.reasoning === undefined || typeof value.reasoning === "string")
-    && (value.tier_needed === undefined || isFiniteNumber(value.tier_needed))
-    && Array.isArray(value.candidates)
-    && value.candidates.every(isRouteCandidate)
-    && isFiniteNumber(value.total_users)
-    && isFiniteNumber(value.analyzed_users)
-    && typeof value.candidate_pool_truncated === "boolean";
+  const exactKeys = [
+    "primary_group", "secondary_group", "confidence", "business_context",
+    "scope", "affected_service", "failure_domain", "reason",
+  ];
+  const keys = Object.keys(value);
+  const unknownEvidence = (
+    typeof value.affected_service === "string"
+    && value.affected_service.toLocaleLowerCase("en-US") === "unknown"
+  ) || (
+    typeof value.failure_domain === "string"
+    && value.failure_domain.toLocaleLowerCase("en-US") === "unknown"
+  );
+  const selectedGroups = [value.primary_group, value.secondary_group];
+  return keys.length === exactKeys.length
+    && exactKeys.every((key) => Object.prototype.hasOwnProperty.call(value, key))
+    && isResolverGroup(value.primary_group)
+    && (value.secondary_group === null || isResolverGroup(value.secondary_group))
+    && value.secondary_group !== value.primary_group
+    && value.secondary_group !== "INFRA_HELPDESK"
+    && isFiniteNumber(value.confidence)
+    && value.confidence >= 0
+    && value.confidence <= 1
+    && (!unknownEvidence || value.confidence < 0.60)
+    && (value.business_context === "ALMO" || value.business_context === "JAM" || value.business_context === "UNKNOWN")
+    && (!selectedGroups.includes("APP_CRM_ALMO") || value.business_context === "ALMO")
+    && (!selectedGroups.includes("APP_CRM_JAM") || value.business_context === "JAM")
+    && (value.scope === "single_user" || value.scope === "multiple_users" || value.scope === "service_wide" || value.scope === "unknown")
+    && isRoutingText(value.affected_service, 255)
+    && isRoutingText(value.failure_domain, 255)
+    && isRoutingText(value.reason, 1_000);
 }
 
 function isResolutionPlan(value: unknown): value is ResolutionPlan {

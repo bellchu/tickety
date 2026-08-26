@@ -45,7 +45,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             for table_name, table in Base.metadata.tables.items():
                 actual_columns = {column["name"] for column in inspector.get_columns(table_name)}
                 self.assertEqual(actual_columns, set(table.columns.keys()), table_name)
-            self.assertEqual(self._current_revision(engine), "0031")
+            self.assertEqual(self._current_revision(engine), "0032")
             self.assertIn("external_users", inspector.get_table_names())
             self.assertIn("external_conversations", inspector.get_table_names())
             self.assertIn("external_activity_ledger", inspector.get_table_names())
@@ -57,6 +57,20 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("user_external_identity_links", inspector.get_table_names())
             self.assertIn("agent_ticket_state", inspector.get_table_names())
             self.assertIn("intelligence_studies", inspector.get_table_names())
+            ticket_columns = {
+                column["name"] for column in inspector.get_columns("tickets")
+            }
+            self.assertTrue({
+                "ai_suggested_team",
+                "ai_secondary_team",
+                "ai_routing_confidence",
+                "ai_business_context",
+                "ai_routing_scope",
+                "ai_affected_service",
+                "ai_failure_domain",
+                "ai_routing_reason",
+                "ai_routing_input_hash",
+            }.issubset(ticket_columns))
             survey_columns = {
                 column["name"] for column in inspector.get_columns("surveys")
             }
@@ -114,6 +128,59 @@ class DatabaseMigrationTests(unittest.TestCase):
             }
             self.assertNotIn("user_id", session_columns)
             command.check(self.config)
+        finally:
+            engine.dispose()
+
+    def test_routing_migration_accepts_bootstrap_compatible_columns(self):
+        command.upgrade(self.config, "0031")
+        engine = create_engine(self.url)
+        routing_columns = {
+            "ai_secondary_team": "VARCHAR",
+            "ai_routing_confidence": "FLOAT",
+            "ai_business_context": "VARCHAR",
+            "ai_routing_scope": "VARCHAR",
+            "ai_affected_service": "VARCHAR",
+            "ai_failure_domain": "VARCHAR",
+            "ai_routing_reason": "TEXT",
+        }
+        try:
+            with engine.begin() as connection:
+                for column_name, ddl in routing_columns.items():
+                    connection.execute(text(
+                        f"ALTER TABLE tickets ADD COLUMN {column_name} {ddl}"
+                    ))
+                connection.execute(text(
+                    "INSERT INTO tickets "
+                    "(id, subject, ai_suggested_team, ai_secondary_team, "
+                    "ai_routing_confidence, ai_business_context, ai_routing_scope, "
+                    "ai_affected_service, ai_failure_domain, ai_routing_reason) "
+                    "VALUES ('routed-ticket', 'Preserve route', 'APP_WEB', "
+                    "'APP_EDI_API', 0.91, 'UNKNOWN', 'service_wide', "
+                    "'customer portal', 'web-layer failure', 'Observed portal error')"
+                ))
+
+            command.upgrade(self.config, "head")
+
+            ticket_columns = {
+                column["name"] for column in inspect(engine).get_columns("tickets")
+            }
+            self.assertTrue(set(routing_columns).issubset(ticket_columns))
+            with engine.connect() as connection:
+                route = connection.execute(text(
+                    "SELECT ai_suggested_team, ai_secondary_team, "
+                    "ai_routing_confidence, ai_business_context, ai_routing_scope, "
+                    "ai_affected_service, ai_failure_domain, ai_routing_reason "
+                    "FROM tickets WHERE id = 'routed-ticket'"
+                )).mappings().one()
+            self.assertEqual(route["ai_suggested_team"], "APP_WEB")
+            self.assertEqual(route["ai_secondary_team"], "APP_EDI_API")
+            self.assertAlmostEqual(route["ai_routing_confidence"], 0.91)
+            self.assertEqual(route["ai_business_context"], "UNKNOWN")
+            self.assertEqual(route["ai_routing_scope"], "service_wide")
+            self.assertEqual(route["ai_affected_service"], "customer portal")
+            self.assertEqual(route["ai_failure_domain"], "web-layer failure")
+            self.assertEqual(route["ai_routing_reason"], "Observed portal error")
+            self.assertEqual(self._current_revision(engine), "0032")
         finally:
             engine.dispose()
 
@@ -177,7 +244,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertEqual(survey["delivery_status"], "legacy")
             self.assertIsNone(survey["response_token_hash"])
             self.assertEqual(response_count, 1)
-            self.assertEqual(self._current_revision(engine), "0031")
+            self.assertEqual(self._current_revision(engine), "0032")
         finally:
             engine.dispose()
 
@@ -307,7 +374,7 @@ class DatabaseMigrationTests(unittest.TestCase):
                 scopes,
                 "freshservice.tickets.view freshservice.agents.manage",
             )
-            self.assertEqual(self._current_revision(engine), "0031")
+            self.assertEqual(self._current_revision(engine), "0032")
         finally:
             engine.dispose()
 
@@ -366,7 +433,7 @@ class DatabaseMigrationTests(unittest.TestCase):
                     "DELETE FROM ticket_priority_config WHERE name = 'p1'"
                 ))
             command.upgrade(self.config, "head")
-            self.assertEqual(self._current_revision(engine), "0031")
+            self.assertEqual(self._current_revision(engine), "0032")
         finally:
             engine.dispose()
 
@@ -474,7 +541,7 @@ class DatabaseMigrationTests(unittest.TestCase):
                     {"id": "second", "email": "other@example.com", "email_key": "other@example.com"},
                 ],
             )
-            self.assertEqual(self._current_revision(engine), "0031")
+            self.assertEqual(self._current_revision(engine), "0032")
         finally:
             engine.dispose()
 
@@ -502,7 +569,7 @@ class DatabaseMigrationTests(unittest.TestCase):
                     {"id": "legacy-problem", "status": "Under Investigation"},
                 ],
             )
-            self.assertEqual(self._current_revision(engine), "0031")
+            self.assertEqual(self._current_revision(engine), "0032")
         finally:
             engine.dispose()
 
@@ -534,7 +601,7 @@ class DatabaseMigrationTests(unittest.TestCase):
                     {"id": "repair", "status": "Broken"},
                 ],
             )
-            self.assertEqual(self._current_revision(engine), "0031")
+            self.assertEqual(self._current_revision(engine), "0032")
         finally:
             engine.dispose()
 
@@ -607,7 +674,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             }
             self.assertFalse(status_column["nullable"])
             self.assertIn("ck_changes_status_completion", check_names)
-            self.assertEqual(self._current_revision(engine), "0031")
+            self.assertEqual(self._current_revision(engine), "0032")
 
             for values in (
                 "('invalid-null', 'Null status', NULL, NULL)",
@@ -710,7 +777,7 @@ class DatabaseMigrationTests(unittest.TestCase):
                 index["name"] for index in inspect(engine).get_indexes("tickets")
             }
             self.assertIn("ix_tickets_escalation_risk_backfill_pending", indexes)
-            self.assertEqual(self._current_revision(engine), "0031")
+            self.assertEqual(self._current_revision(engine), "0032")
         finally:
             engine.dispose()
 
@@ -757,7 +824,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertEqual(aligned, 1)
             self.assertIsNotNone(manual["due_by"])
             self.assertIsNotNone(manual["resolved_at"])
-            self.assertEqual(self._current_revision(engine), "0031")
+            self.assertEqual(self._current_revision(engine), "0032")
         finally:
             engine.dispose()
 
@@ -798,7 +865,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("ix_surveys_response_token_hash", survey_indexes)
             self.assertIn("fk_surveys_sent_by_users", survey_foreign_keys)
             self.assertIn("uix_survey_response_once", response_constraints)
-            self.assertEqual(self._current_revision(engine), "0031")
+            self.assertEqual(self._current_revision(engine), "0032")
         finally:
             engine.dispose()
 
@@ -867,7 +934,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIsNone(approval["approver_id"])
             self.assertEqual(approval["decision"], "approved")
             self.assertEqual(approval["comment"], "Historical decision")
-            self.assertEqual(self._current_revision(engine), "0031")
+            self.assertEqual(self._current_revision(engine), "0032")
         finally:
             engine.dispose()
 
@@ -956,14 +1023,14 @@ class DatabaseMigrationTests(unittest.TestCase):
             engine.dispose()
 
     def test_demo_schema_guard_rejects_invalid_revision_sets(self):
-        for current_heads in (set(), {"unknown"}, {"0031", "unexpected"}):
+        for current_heads in (set(), {"unknown"}, {"0032", "unexpected"}):
             with self.subTest(current_heads=current_heads):
                 with (
                     patch.object(database, "_sa_inspect") as inspect_schema,
                     patch.object(
                         database,
                         "_database_revision_sets",
-                        return_value=({"0031"}, current_heads),
+                        return_value=({"0032"}, current_heads),
                     ),
                 ):
                     inspect_schema.return_value.has_table.return_value = True

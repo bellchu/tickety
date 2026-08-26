@@ -8,6 +8,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy import case, func, or_
 
 from .database import (
+    AIArtifactRecord,
     ExternalAttachmentRecord,
     SessionLocal,
     SyncStateRecord,
@@ -105,7 +106,7 @@ async def _process_ai_candidates(
     """Process ticket pipelines concurrently with one session per ticket."""
     if not candidates:
         return None
-    from .main import _auto_process
+    from .main import _artifact_is_current, _auto_process
 
     probe = SessionLocal()
     try:
@@ -155,11 +156,12 @@ async def _process_ai_candidates(
                     db.rollback()
                     return None
                 if requested_artifact:
-                    missing = (
-                        ticket.summary is None
-                        if requested_artifact == "summary"
-                        else ticket.recommended_solution is None
-                    )
+                    if requested_artifact == "summary":
+                        missing = ticket.summary is None
+                    elif requested_artifact == "route":
+                        missing = not _artifact_is_current(db, ticket, "route")
+                    else:
+                        missing = ticket.recommended_solution is None
                     if not missing or ticket.ai_status == "queued":
                         db.rollback()
                         return None
@@ -210,20 +212,41 @@ def _auto_triage_job():
         )
         auto_triage = settings_module.automation_enabled("AUTO_TRIAGE_ENABLED", "AUTO_TRIAGE")
         auto_summary = settings_module.automation_enabled("AUTO_SUMMARIZE_ENABLED")
+        auto_route = settings_module.automation_enabled("AUTO_ROUTE_ENABLED")
         auto_resolution = settings_module.automation_enabled("AUTO_RESOLVE_ENABLED")
+        artifact_identity = None
         try:
+            from .main import (
+                AI_ROUTING_PIPELINE_VERSION,
+                _llm_cache_identity,
+                engine as main_engine,
+            )
+
+            artifact_identity = {
+                "expected_pipeline_version": AI_ROUTING_PIPELINE_VERSION,
+                "expected_model": _llm_cache_identity(),
+                "allow_synthetic_artifacts": bool(
+                    getattr(main_engine.llm, "allow_synthetic", False)
+                ),
+            }
             routing_backlog = queue_active_routing_backlog(
-                db, batch_size=batch_size
+                db, batch_size=batch_size, **artifact_identity
             )
             recent = queue_recent_automatic_ai(
                 db,
                 batch_size=max(1, batch_size - int(routing_backlog["queued"])),
+                **artifact_identity,
             ) if int(routing_backlog["queued"]) < batch_size else {
                 "lookback_days": AUTOMATIC_AI_LOOKBACK_DAYS,
                 "queued": 0,
             }
         except Exception as exc:
             db.rollback()
+            # The routing provenance identity is useful only when the
+            # integration scanners completed their schema-backed setup. Do
+            # not let a missing/unavailable integration table cascade into the
+            # independent internal triage lane through a route-artifact query.
+            artifact_identity = None
             routing_backlog = {"enabled": False, "queued": 0}
             recent = {
                 "lookback_days": AUTOMATIC_AI_LOOKBACK_DAYS,
@@ -283,7 +306,7 @@ def _auto_triage_job():
         untriaged = (
             db.query(TicketRecord).filter(
                 active_ticket_filter(db),
-                automatic_ai_policy_eligible_filter(),
+                automatic_ai_policy_eligible_filter({"triage"}),
                 internal_automatic_source,
                 or_(
                     TicketRecord.ai_reasoning.is_(None),
@@ -314,7 +337,7 @@ def _auto_triage_job():
 
         summary_query = db.query(TicketRecord).filter(
             active_ticket_filter(db),
-            automatic_ai_policy_eligible_filter(),
+            automatic_ai_policy_eligible_filter({"summary"}),
             internal_automatic_source,
             TicketRecord.ai_reasoning.isnot(None),
             TicketRecord.summary.is_(None),
@@ -345,7 +368,7 @@ def _auto_triage_job():
 
         resolution_query = db.query(TicketRecord).filter(
             active_ticket_filter(db),
-            automatic_ai_policy_eligible_filter(),
+            automatic_ai_policy_eligible_filter({"resolution"}),
             internal_automatic_source,
             TicketRecord.ai_reasoning.isnot(None),
             TicketRecord.summary.isnot(None),
@@ -374,19 +397,78 @@ def _auto_triage_job():
             if auto_resolution and remaining else []
         )
         no_resolution_ids = [ticket.id for ticket in no_resolution]
+        selected_ids.update(no_resolution_ids)
+        remaining = max(0, batch_size - len(selected_ids))
 
-        if routing_backlog["queued"] or recent["queued"] or queued or untriaged or no_summary or no_resolution:
+        # Preserve the established summary and resolution admission priority.
+        # Resolver routing is independent work and fills only capacity left in
+        # the sweep after those existing lanes have been considered.
+        no_route = []
+        if auto_route and remaining and artifact_identity is not None:
+            current_route_artifact = db.query(AIArtifactRecord.id).filter(
+                AIArtifactRecord.ticket_id == TicketRecord.id,
+                AIArtifactRecord.artifact == "route",
+                AIArtifactRecord.pipeline_version
+                == artifact_identity["expected_pipeline_version"],
+                AIArtifactRecord.model == artifact_identity["expected_model"],
+                AIArtifactRecord.input_hash
+                == TicketRecord.ai_routing_input_hash,
+                AIArtifactRecord.active.is_(True),
+            )
+            if not artifact_identity["allow_synthetic_artifacts"]:
+                current_route_artifact = current_route_artifact.filter(
+                    AIArtifactRecord.synthetic.is_(False)
+                )
+            route_query = db.query(TicketRecord).filter(
+                active_ticket_filter(db),
+                automatic_ai_policy_eligible_filter({"route"}),
+                internal_automatic_source,
+                or_(
+                    TicketRecord.ai_suggested_team.is_(None),
+                    TicketRecord.ai_routing_confidence.is_(None),
+                    TicketRecord.ai_business_context.is_(None),
+                    TicketRecord.ai_routing_scope.is_(None),
+                    TicketRecord.ai_affected_service.is_(None),
+                    TicketRecord.ai_failure_domain.is_(None),
+                    TicketRecord.ai_routing_reason.is_(None),
+                    TicketRecord.ai_routing_input_hash.is_(None),
+                    TicketRecord.ai_status.in_((
+                        "stale", "legacy_stale", "provenance_unknown",
+                    )),
+                    ~current_route_artifact.exists(),
+                ),
+                or_(
+                    TicketRecord.ai_status.is_(None),
+                    TicketRecord.ai_status.notin_(
+                        ["dead_letter", "failed", "paused", "running", "queued"]
+                    ),
+                ),
+            ).order_by(
+                priority_order.asc(),
+                TicketRecord.updated_at.asc(),
+                TicketRecord.id.asc(),
+            )
+            if selected_ids:
+                route_query = route_query.filter(
+                    TicketRecord.id.notin_(selected_ids)
+                )
+            no_route = route_query.limit(remaining).all()
+        no_route_ids = [ticket.id for ticket in no_route]
+
+        if routing_backlog["queued"] or recent["queued"] or queued or untriaged or no_route or no_summary or no_resolution:
             print(
                 f"[auto-triage] routing_backlog={routing_backlog['queued']}, "
                 f"recent={recent['queued']}, {len(queued)} queued, "
                 f"{len(untriaged)} untriaged, "
-                f"{len(no_summary)} no-summary, {len(no_resolution)} no-plan"
+                f"{len(no_route)} no-route, {len(no_summary)} no-summary, "
+                f"{len(no_resolution)} no-plan"
             )
 
         candidates = [
             *((ticket_id, None) for ticket_id in triage_candidate_ids),
             *((ticket_id, "summary") for ticket_id in no_summary_ids),
             *((ticket_id, "resolution") for ticket_id in no_resolution_ids),
+            *((ticket_id, "route") for ticket_id in no_route_ids),
         ]
         capacity_error = asyncio.run(_process_ai_candidates(candidates))
         if capacity_error:

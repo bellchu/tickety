@@ -39,7 +39,7 @@ class LLMCacheIdentityTests(unittest.TestCase):
 
         self.assertNotEqual(first, second)
 
-    def test_existing_manager_identity_tracks_current_dispatch_config(self):
+    def test_existing_manager_identity_is_an_immutable_validated_snapshot(self):
         environment = {
             "APP_MODE": "demo",
             "CUSTOM_API_KEY": "sk-cache-identity-secret",
@@ -52,7 +52,26 @@ class LLMCacheIdentityTests(unittest.TestCase):
             os.environ["CUSTOM_API_BASE"] = "https://provider-b.example/v1"
             second = manager.cache_identity
 
-        self.assertNotEqual(first, second)
+        self.assertEqual(first, second)
+
+    def test_cache_identity_read_never_rebuilds_dispatch_credentials(self):
+        environment = {
+            "APP_MODE": "demo",
+            "FOUNDRY_AUTH_METHOD": "entra",
+            "FOUNDRY_API_BASE": (
+                "https://resource.services.ai.azure.com/openai/v1"
+            ),
+            "LLM_ALLOW_PRIVATE_ENDPOINTS": "true",
+        }
+        with patch.dict(os.environ, environment, clear=True), patch(
+            "app.backend.llm_manager._foundry_api_key"
+        ) as acquire_token:
+            manager = LLMManager("foundry/DeepSeek-V4-Flash")
+            first = manager.cache_identity
+            second = manager.cache_identity
+
+        self.assertEqual(first, second)
+        acquire_token.assert_not_called()
 
     def test_removed_custom_tuning_knobs_do_not_affect_identity(self):
         baseline = self._custom_identity()

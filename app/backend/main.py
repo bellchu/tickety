@@ -12,7 +12,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Collection, Dict, List, Literal, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
@@ -126,6 +126,7 @@ from .llm_manager import (
     refresh_live_models_if_stale,
 )
 from .ai_contracts import (
+    ResolverRoutingAnalysis,
     ResolutionAnalysis,
     SuggestedReply,
     TicketIntelligenceAnswer,
@@ -137,17 +138,22 @@ from .ai_input import (
     prompt_char_limit,
     validate_semantic_advice,
 )
-from .ai_state import invalidate_ticket_ai, invalidate_ticket_resolution
-from .brain import IntelligenceEngine
+from .ai_state import (
+    invalidate_ticket_ai,
+    invalidate_ticket_resolution,
+    merge_terminal_ai_policy_errors,
+)
+from .brain import IntelligenceEngine, routing_public_thread
 from . import intelligence as intel
 from . import ticket_vectors
 from . import agent_workspace
 from .prompts import (
     RAG_SYSTEM_PROMPT, REPLY_SYSTEM_PROMPT, RESOLUTION_SYSTEM_PROMPT,
-    SUMMARY_SYSTEM_PROMPT, TRIAGE_SYSTEM_PROMPT,
+    ROUTING_SYSTEM_PROMPT, SUMMARY_SYSTEM_PROMPT, TRIAGE_SYSTEM_PROMPT,
     RECOGNITIONS, TIER_THRESHOLDS, PRIORITY_POINTS,
     MOMENTUM_BONUS_CAP, MOMENTUM_RESET_HOURS,
 )
+from .routing_policy import routing_business_context, routing_policy_fingerprint
 from .integrations.registry import get_adapter
 from .integrations.sync import (
     AUTOMATIC_FETCH_DAYS,
@@ -193,13 +199,13 @@ from .production_security import (
 
 # Single source of truth for the backend version. Bump when shipping user-visible
 # changes. Build SHA/time are injected at image build time (see Dockerfile).
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 BUILD_SHA = os.getenv("TICKETY_BUILD_SHA", "local")
 BUILD_TIME = os.getenv("TICKETY_BUILD_TIME", "")
 
 
 def _ai_pipeline_contract_version() -> str:
-    """Bind cached AI artifacts to every trusted prompt/output contract."""
+    """Bind non-routing AI artifacts to their trusted prompt/output contracts."""
     contract = {
         "input_policy": "canonical-json-v1;semantic-advice-v1;rag-authority-v1",
         "prompts": {
@@ -230,7 +236,37 @@ def _ai_pipeline_contract_version() -> str:
     return f"2026-07-13.{hashlib.sha256(encoded).hexdigest()[:12]}"
 
 
+def _ai_routing_contract_version() -> str:
+    """Version resolver routing independently from unrelated AI artifacts."""
+    contract = {
+        "input_policy": (
+            "canonical-json-v1;ticket-text-untrusted-v1;"
+            "actor-identity-excluded-v1;public-thread-identity-excluded-v1"
+        ),
+        "routing_context_policy": routing_policy_fingerprint(),
+        "prompt": ROUTING_SYSTEM_PROMPT,
+        "schema": ResolverRoutingAnalysis.model_json_schema(),
+    }
+    encoded = json.dumps(
+        contract,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return f"2026-08-26.route.{hashlib.sha256(encoded).hexdigest()[:12]}"
+
+
 AI_PIPELINE_VERSION = _ai_pipeline_contract_version()
+AI_ROUTING_PIPELINE_VERSION = _ai_routing_contract_version()
+
+
+def _artifact_pipeline_version(artifact: str) -> str:
+    return (
+        AI_ROUTING_PIPELINE_VERSION
+        if artifact == "route"
+        else AI_PIPELINE_VERSION
+    )
 
 app = FastAPI(title=PRODUCT_NAME, version=VERSION)
 
@@ -885,6 +921,14 @@ _PUBLIC_DEMO_AI_FIELDS = {
     "ai_suggested_priority": None,
     "ai_suggested_category": None,
     "ai_suggested_team": None,
+    "ai_secondary_team": None,
+    "ai_routing_confidence": None,
+    "ai_business_context": None,
+    "ai_routing_scope": None,
+    "ai_affected_service": None,
+    "ai_failure_domain": None,
+    "ai_routing_reason": None,
+    "ai_routing_input_hash": None,
     "recommended_team": "Unrouted / Review",
     "recommended_team_basis": "unrouted_review",
     "routing_status": "unrouted_review",
@@ -922,6 +966,51 @@ def _reporter_fallback_identity(reporter: Optional[str]) -> tuple[Optional[str],
     if re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value):
         return None, value.lower()
     return value, None
+
+
+def _current_route_artifact_ticket_ids(
+    db: Session,
+    tickets: Collection[TicketRecord],
+) -> set[str]:
+    """Return tickets whose exact resolver-route provenance is currently trusted."""
+    tickets_by_id = {ticket.id: ticket for ticket in tickets}
+    if not tickets_by_id:
+        return set()
+    route_rows: list[AIArtifactRecord] = []
+    ticket_ids = list(tickets_by_id)
+    # Keep SQLite and provider-specific bind limits bounded while supporting
+    # the larger, already-capped historical profile window.
+    for offset in range(0, len(ticket_ids), 500):
+        query = db.query(AIArtifactRecord).filter(
+            AIArtifactRecord.ticket_id.in_(ticket_ids[offset:offset + 500]),
+            AIArtifactRecord.artifact == "route",
+            AIArtifactRecord.active.is_(True),
+        )
+        if settings_module.is_production_mode() or not bool(
+            getattr(engine.llm, "allow_synthetic", False)
+        ):
+            query = query.filter(AIArtifactRecord.synthetic.is_(False))
+        route_rows.extend(query.all())
+
+    current_model = _llm_cache_identity()
+    current_route_ids: set[str] = set()
+    for artifact in route_rows:
+        artifact_ticket = tickets_by_id.get(artifact.ticket_id)
+        route_payload = (
+            _routing_result_payload(artifact_ticket)
+            if artifact_ticket is not None else None
+        )
+        if (
+            artifact_ticket is not None
+            and route_payload is not None
+            and artifact.pipeline_version == AI_ROUTING_PIPELINE_VERSION
+            and artifact.model == current_model
+            and bool(artifact_ticket.ai_routing_input_hash)
+            and artifact.input_hash == artifact_ticket.ai_routing_input_hash
+            and artifact.content_hash == _routing_payload_content_hash(route_payload)
+        ):
+            current_route_ids.add(artifact.ticket_id)
+    return current_route_ids
 
 
 def _enrich_tickets(db: Session, tickets: list[TicketRecord]) -> None:
@@ -973,36 +1062,12 @@ def _enrich_tickets(db: Session, tickets: list[TicketRecord]) -> None:
         ).group_by(TicketCommentRecord.ticket_id).all()
     )
 
-    # Aggregate AI lifecycle can be ``queued`` while a later summary or
-    # resolution artifact is pending. Preserve a current, non-synthetic triage
-    # classification as routing evidence instead of temporarily reverting the
-    # ticket to "Unrouted / Review". The exact input hash and model/pipeline
-    # checks keep stale classifications fail-closed.
-    triage_rows = db.query(AIArtifactRecord).filter(
-        AIArtifactRecord.ticket_id.in_(ticket_ids),
-        AIArtifactRecord.artifact == "triage",
-        AIArtifactRecord.active.is_(True),
-    )
-    if settings_module.is_production_mode() or not bool(
-        getattr(engine.llm, "allow_synthetic", False)
-    ):
-        triage_rows = triage_rows.filter(AIArtifactRecord.synthetic.is_(False))
-    triage_rows = triage_rows.all()
-    tickets_by_id = {ticket.id: ticket for ticket in tickets}
-    current_triage_ids: set[str] = set()
-    if triage_rows:
-        current_model = _llm_cache_identity()
-        for artifact in triage_rows:
-            artifact_ticket = tickets_by_id.get(artifact.ticket_id)
-            if (
-                artifact_ticket is not None
-                and bool(artifact_ticket.ai_reasoning)
-                and artifact.pipeline_version == AI_PIPELINE_VERSION
-                and artifact.model == current_model
-                and artifact.input_hash
-                == _artifact_input_hash(artifact_ticket, "triage")
-            ):
-                current_triage_ids.add(artifact.ticket_id)
+    # Aggregate AI lifecycle can be ``queued`` while another artifact is
+    # pending. Preserve only a current, non-synthetic resolver-route artifact;
+    # aggregate status, legacy triage categories, and provider assignments are
+    # not routing evidence. Exact input/model/pipeline checks keep stale routes
+    # fail closed.
+    current_route_ids = _current_route_artifact_ticket_ids(db, tickets)
 
     for ticket in tickets:
         ticket.__dict__["assignee_name"] = assignee_names.get(ticket.assignee_id)
@@ -1052,7 +1117,7 @@ def _enrich_tickets(db: Session, tickets: list[TicketRecord]) -> None:
         )
         _enrich_ticket_team(
             ticket,
-            ai_evidence_current=ticket.id in current_triage_ids,
+            ai_evidence_current=ticket.id in current_route_ids,
             terminal_statuses=terminal_statuses,
         )
 
@@ -3430,7 +3495,12 @@ async def create_ticket(
     _require_demo_ticketing()
     import uuid as _uuid
     _reserve_index_write_request(db, user.id)
-    if _automation_enabled("AUTO_TRIAGE_ENABLED", "AUTO_TRIAGE"):
+    if any((
+        _automation_enabled("AUTO_TRIAGE_ENABLED", "AUTO_TRIAGE"),
+        _automation_enabled("AUTO_SUMMARIZE_ENABLED"),
+        _automation_enabled("AUTO_ROUTE_ENABLED"),
+        _automation_enabled("AUTO_RESOLVE_ENABLED"),
+    )):
         # Manual creation can immediately invoke the LLM pipeline. Charge the
         # authenticated caller before persisting the ticket so this indirect
         # path cannot bypass the per-user AI request budget.
@@ -3505,15 +3575,25 @@ def _schedule_ai_retry(
     ticket.ai_attempts = attempts
     ticket.ai_claim_id = None
     ticket.ai_lease_expires_at = None
-    ticket.ai_error = error_code
-    ticket.ai_requested_artifacts = ",".join(sorted(artifacts))
+    ticket.ai_error = merge_terminal_ai_policy_errors(ticket.ai_error, error_code)
+    requested = set(artifacts)
+    if ticket.ai_status == "queued":
+        requested.update(
+            item
+            for item in (ticket.ai_requested_artifacts or "").split(",")
+            if item
+        )
+    ticket.ai_requested_artifacts = ",".join(sorted(requested))
     if terminal or attempts >= max_attempts:
         ticket.ai_status = "dead_letter"
         ticket.ai_next_attempt_at = None
     else:
         ticket.ai_status = "queued"
-        ticket.ai_next_attempt_at = datetime.utcnow() + timedelta(
+        retry_at = datetime.utcnow() + timedelta(
             seconds=min(3600, 30 * (2 ** (attempts - 1)))
+        )
+        ticket.ai_next_attempt_at = max(
+            value for value in (ticket.ai_next_attempt_at, retry_at) if value
         )
     db.commit()
     return True
@@ -3549,7 +3629,10 @@ def _defer_ai_capacity(
     ticket.ai_status = "queued"
     ticket.ai_claim_id = None
     ticket.ai_lease_expires_at = None
-    ticket.ai_error = "provider_capacity"
+    ticket.ai_error = merge_terminal_ai_policy_errors(
+        ticket.ai_error,
+        "provider_capacity",
+    )
     ticket.ai_requested_artifacts = ",".join(sorted(requested))
     ticket.ai_next_attempt_at = datetime.utcnow() + timedelta(
         seconds=max(1, min(int(retry_after_seconds), 172_800))
@@ -3591,7 +3674,12 @@ async def _auto_process(ticket: TicketRecord, db, force: bool = False):
         mark_terminal_ai_not_applicable(ticket)
         db.commit()
         return
-    if not force and not _automation_enabled("AUTO_TRIAGE_ENABLED", "AUTO_TRIAGE"):
+    if not force and not any((
+        _automation_enabled("AUTO_TRIAGE_ENABLED", "AUTO_TRIAGE"),
+        _automation_enabled("AUTO_SUMMARIZE_ENABLED"),
+        _automation_enabled("AUTO_ROUTE_ENABLED"),
+        _automation_enabled("AUTO_RESOLVE_ENABLED"),
+    )):
         return
     requested = {
         item for item in (ticket.ai_requested_artifacts or "").split(",") if item
@@ -3664,7 +3752,6 @@ def _apply_ticket_analysis(ticket: TicketRecord, analysis_data: Dict[str, Any], 
     # update may change the canonical category used by routing and retrieval.
     ticket.ai_suggested_category = analysis_data.get("category")
     ticket.ai_suggested_priority = analysis_data.get("priority")
-    ticket.ai_suggested_team = analysis_data.get("recommended_team")
     ticket.mood = analysis_data.get("mood")
     ticket.complexity = analysis_data.get("complexity", 1)
     ticket.ai_reasoning = analysis_data.get("reasoning")
@@ -3688,7 +3775,61 @@ def _apply_ticket_analysis(ticket: TicketRecord, analysis_data: Dict[str, Any], 
     ticket.status = ticket.workflow_status or ticket.status
 
 
-def _triage_result_payload(ticket: TicketRecord, analysis_data: Dict[str, Any]) -> Dict[str, Any]:
+def _apply_ticket_routing(ticket: TicketRecord, route_data: Dict[str, Any]) -> None:
+    """Persist a validated advisory resolver-group decision."""
+    ticket.ai_suggested_team = route_data["primary_group"]
+    ticket.ai_secondary_team = route_data["secondary_group"]
+    ticket.ai_routing_confidence = route_data["confidence"]
+    ticket.ai_business_context = route_data["business_context"]
+    ticket.ai_routing_scope = route_data["scope"]
+    ticket.ai_affected_service = route_data["affected_service"]
+    ticket.ai_failure_domain = route_data["failure_domain"]
+    ticket.ai_routing_reason = route_data["reason"]
+
+
+def _routing_result_payload(ticket: TicketRecord) -> Optional[Dict[str, Any]]:
+    """Project only complete, closed-set routing records."""
+    if (
+        ticket.ai_suggested_team not in intel.AI_RESOLVER_TEAMS
+        or ticket.ai_routing_confidence is None
+        or not ticket.ai_business_context
+        or not ticket.ai_routing_scope
+        or not ticket.ai_affected_service
+        or not ticket.ai_failure_domain
+        or not ticket.ai_routing_reason
+    ):
+        return None
+    candidate = {
+        "primary_group": ticket.ai_suggested_team,
+        "secondary_group": ticket.ai_secondary_team,
+        "confidence": ticket.ai_routing_confidence,
+        "business_context": ticket.ai_business_context,
+        "scope": ticket.ai_routing_scope,
+        "affected_service": ticket.ai_affected_service,
+        "failure_domain": ticket.ai_failure_domain,
+        "reason": ticket.ai_routing_reason,
+    }
+    try:
+        return ResolverRoutingAnalysis.model_validate(candidate).model_dump()
+    except ValueError:
+        return None
+
+
+def _routing_payload_content_hash(route_data: Dict[str, Any]) -> str:
+    serialized = json.dumps(
+        route_data,
+        sort_keys=True,
+        default=str,
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _triage_result_payload(
+    ticket: TicketRecord,
+    analysis_data: Dict[str, Any],
+    route_data: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     return {
         "ticket_id": ticket.id,
         "sentiment": analysis_data.get("sentiment", "Neutral"),
@@ -3697,9 +3838,11 @@ def _triage_result_payload(ticket: TicketRecord, analysis_data: Dict[str, Any]) 
         "mood": analysis_data.get("mood", "neutral"),
         "complexity": analysis_data.get("complexity", 1),
         "action": analysis_data.get("action", "respond"),
-        "recommended_team": analysis_data.get("recommended_team")
-        or ticket.ai_suggested_team
-        or intel.UNROUTED_REVIEW_TEAM,
+        # Compatibility field for existing clients. It projects only a route
+        # whose exact artifact provenance was checked by the caller.
+        "recommended_team": route_data["primary_group"]
+        if route_data is not None
+        else intel.UNROUTED_REVIEW_TEAM,
         "reasoning": analysis_data.get("reasoning", ""),
         "suggested_response": analysis_data.get("suggested_response"),
         "escalation_risk": ticket.escalation_risk or 0,
@@ -3721,6 +3864,9 @@ def _ticket_analysis_hash(ticket: TicketRecord) -> str:
         "freshservice_category": ticket.external_category or "",
         "freshservice_subcategory": ticket.external_subcategory or "",
         "freshservice_item_category": ticket.external_item_category or "",
+        "routing_business_context": routing_business_context(
+            ticket.external_requester_email or ticket.reporter
+        ),
         "model": _llm_cache_identity(),
         "pipeline": AI_PIPELINE_VERSION,
     }
@@ -3746,8 +3892,14 @@ def _artifact_input_hash(ticket: TicketRecord, artifact: str) -> str:
         "description": ticket.description or "",
         "public_thread": ticket.external_conversation_text or "",
         "model": _llm_cache_identity(),
-        "pipeline": AI_PIPELINE_VERSION,
+        "pipeline": _artifact_pipeline_version(artifact),
     }
+    if artifact == "route":
+        payload.update({
+            "provider_category": ticket.external_category or "",
+            "provider_subcategory": ticket.external_subcategory or "",
+            "provider_item_category": ticket.external_item_category or "",
+        })
     if artifact in {"summary", "resolution"}:
         payload["triage_reasoning"] = ticket.ai_reasoning or ""
     if artifact == "resolution":
@@ -3762,13 +3914,12 @@ def _artifact_input_hash(ticket: TicketRecord, artifact: str) -> str:
         })
     if artifact == "route":
         payload.update({
-            "provider_source_context_hash": ticket.external_source_context_hash,
-            "priority": ticket.priority or "P3",
-            "provider_category": ticket.external_category,
-            "provider_subcategory": ticket.external_subcategory,
-            "provider_item_category": ticket.external_item_category,
-            "provider_group_id": ticket.external_group_id,
-            "provider_responder_id": ticket.external_assignee_id,
+            "public_thread": routing_public_thread(
+                ticket.external_conversation_text or ""
+            ),
+            "routing_business_context": routing_business_context(
+                ticket.external_requester_email or ticket.reporter
+            ),
         })
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -3778,6 +3929,7 @@ def _artifact_is_current(db: Session, ticket: TicketRecord, artifact: str) -> bo
     field_present = {
         "triage": bool(ticket.ai_reasoning),
         "summary": bool(ticket.summary),
+        "route": _routing_result_payload(ticket) is not None,
         "resolution": bool(ticket.recommended_solution),
     }.get(artifact, False)
     if not field_present or ticket.ai_status in {"legacy_stale", "provenance_unknown", "stale"}:
@@ -3786,10 +3938,19 @@ def _artifact_is_current(db: Session, ticket: TicketRecord, artifact: str) -> bo
         AIArtifactRecord.ticket_id == ticket.id,
         AIArtifactRecord.artifact == artifact,
         AIArtifactRecord.input_hash == _artifact_input_hash(ticket, artifact),
-        AIArtifactRecord.pipeline_version == AI_PIPELINE_VERSION,
+        AIArtifactRecord.pipeline_version == _artifact_pipeline_version(artifact),
         AIArtifactRecord.model == _llm_cache_identity(),
         AIArtifactRecord.active.is_(True),
     )
+    if artifact == "route":
+        route_payload = _routing_result_payload(ticket)
+        if route_payload is None or not ticket.ai_routing_input_hash:
+            return False
+        query = query.filter(
+            AIArtifactRecord.input_hash == ticket.ai_routing_input_hash,
+            AIArtifactRecord.content_hash
+            == _routing_payload_content_hash(route_payload)
+        )
     if settings_module.is_production_mode() or not bool(
         getattr(engine.llm, "allow_synthetic", False)
     ):
@@ -3823,13 +3984,14 @@ def _claim_ticket_analysis(
             TicketRecord.ai_model != _llm_cache_identity(),
             TicketRecord.ai_model.is_(None),
         ))
+    retained_policy_errors = merge_terminal_ai_policy_errors(ticket.ai_error)
     changed = query.update(
         {
             TicketRecord.ai_status: "running",
             TicketRecord.ai_claim_id: claim_id,
             TicketRecord.ai_lease_expires_at: now + timedelta(seconds=lease_seconds),
             TicketRecord.ai_started_at: now,
-            TicketRecord.ai_error: None,
+            TicketRecord.ai_error: retained_policy_errors,
             TicketRecord.ai_source_hash: source_hash,
             TicketRecord.ai_pipeline_version: AI_PIPELINE_VERSION,
             TicketRecord.ai_model: _llm_cache_identity(),
@@ -3853,17 +4015,19 @@ def _cached_analysis_payload(ticket: TicketRecord, db: Session) -> Dict[str, Any
         "mood": ticket.mood or "neutral",
         "complexity": ticket.complexity or 1,
         "action": "escalate" if ticket.ai_review_state in {"Escalated", "Escalation Suggested"} else "respond",
-        "recommended_team": ticket.ai_suggested_team
-        or intel.AI_CATEGORY_TEAMS.get(ticket.ai_suggested_category or "")
-        or intel.UNROUTED_REVIEW_TEAM,
         "reasoning": ticket.ai_reasoning or "",
         "suggested_response": ticket.suggested_response,
     }
+    current_route = (
+        _routing_result_payload(ticket)
+        if _artifact_is_current(db, ticket, "route")
+        else None
+    )
     return {
         "ticket_id": ticket.id,
-        "triage": _triage_result_payload(ticket, triage_data),
+        "triage": _triage_result_payload(ticket, triage_data, current_route),
         "summary": ticket.summary,
-        "route": intel.recommend_assignee(db, ticket),
+        "route": current_route,
         "recommended_solution": {
             "ticket_id": ticket.id,
             "plan": plan,
@@ -3887,12 +4051,17 @@ def _record_ai_artifact(
         AIArtifactRecord.artifact == artifact,
         AIArtifactRecord.active.is_(True),
     ).update({AIArtifactRecord.active: False}, synchronize_session=False)
+    input_hash = _artifact_input_hash(ticket, artifact)
+    if artifact == "route":
+        # This persisted digest lets exact-provenance readers validate large
+        # historical sets without materializing ticket bodies or transcripts.
+        ticket.ai_routing_input_hash = input_hash
     serialized = json.dumps(content, sort_keys=True, default=str, ensure_ascii=False)
     db.add(AIArtifactRecord(
         ticket_id=ticket.id,
         artifact=artifact,
-        input_hash=_artifact_input_hash(ticket, artifact),
-        pipeline_version=AI_PIPELINE_VERSION,
+        input_hash=input_hash,
+        pipeline_version=_artifact_pipeline_version(artifact),
         provider=getattr(engine.llm, "provider", "unknown"),
         model=_llm_cache_identity(),
         synthetic=bool(
@@ -3921,7 +4090,7 @@ def _release_analysis_claim_for_access_change(
     ticket.ai_lease_expires_at = None
     ticket.ai_requested_artifacts = None
     ticket.ai_next_attempt_at = None
-    ticket.ai_error = None
+    ticket.ai_error = merge_terminal_ai_policy_errors(ticket.ai_error)
     db.commit()
 
 
@@ -4042,7 +4211,7 @@ async def _run_ticket_analysis(
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
     if not force:
-        persisted_artifacts = artifacts - {"route", "refresh"}
+        persisted_artifacts = artifacts - {"refresh"}
         artifact_cached = bool(persisted_artifacts) and all(
             _artifact_is_current(db, ticket, artifact)
             for artifact in persisted_artifacts
@@ -4071,6 +4240,7 @@ async def _run_ticket_analysis(
 
     errors: List[Dict[str, str]] = []
     capacity_deferrals: Dict[str, float] = {}
+    successful_artifacts: set[str] = set()
     analysis_data = {
         "sentiment": ticket.sentiment or "Neutral",
         "category": ticket.category or "Other",
@@ -4078,12 +4248,89 @@ async def _run_ticket_analysis(
         "mood": ticket.mood or "neutral",
         "complexity": ticket.complexity or 1,
         "action": "escalate" if ticket.ai_review_state == "Escalation Suggested" else "respond",
-        "recommended_team": ticket.ai_suggested_team
-        or intel.AI_CATEGORY_TEAMS.get(ticket.ai_suggested_category or "")
-        or intel.UNROUTED_REVIEW_TEAM,
         "reasoning": ticket.ai_reasoning or "",
         "suggested_response": ticket.suggested_response,
     }
+    route = (
+        _routing_result_payload(ticket)
+        if _artifact_is_current(db, ticket, "route")
+        else None
+    )
+    completed_before_triage: set[str] = set()
+    route_preprocessed = False
+    # Resolver routing has no dependency on the broader triage classification.
+    # Persist it first when both were requested so a malformed/filtered triage
+    # result cannot suppress an otherwise valid resolver recommendation.
+    if "triage" in artifacts and "route" in artifacts:
+        route_preprocessed = True
+        await emit("route", "active")
+        ticket_id = ticket.id
+        try:
+            db.expunge(ticket)
+            db.close()
+            route_result = await asyncio.wait_for(
+                engine.route_ticket({
+                    "subject": ticket.subject,
+                    "description": ticket.description,
+                    "public_thread": ticket.external_conversation_text or "",
+                    "freshservice_category": ticket.external_category or "",
+                    "freshservice_subcategory": ticket.external_subcategory or "",
+                    "freshservice_item_category": ticket.external_item_category or "",
+                    "requester_email": ticket.external_requester_email or ticket.reporter,
+                }),
+                timeout=_pipeline_remaining(pipeline_deadline),
+            )
+            ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
+            if not ticket:
+                raise HTTPException(status_code=404, detail="Ticket not found")
+            ticket = _ensure_analysis_input_current(
+                ticket,
+                db,
+                source_hash,
+                claim_id,
+                analysis_actor_id=analysis_actor_id,
+            )
+            route = route_result
+            _apply_ticket_routing(ticket, route)
+            _record_ai_artifact(db, ticket, "route", route, source_hash)
+            db.commit()
+            db.refresh(ticket)
+            completed_before_triage.add("route")
+            successful_artifacts.add("route")
+            await emit("route", "done")
+        except Exception as exc:
+            db.rollback()
+            claim_terminal = (
+                isinstance(exc, HTTPException)
+                and exc.detail in {
+                    "analysis_input_changed",
+                    "analysis_claim_lost",
+                    "analysis_access_changed",
+                }
+            )
+            if claim_terminal:
+                await emit("route", "error")
+                raise
+            ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
+            if not ticket:
+                raise HTTPException(status_code=404, detail="Ticket not found")
+            ticket = _ensure_analysis_input_current(
+                ticket,
+                db,
+                source_hash,
+                claim_id,
+                analysis_actor_id=analysis_actor_id,
+            )
+            error_code = _analysis_step_error_code(exc)
+            errors.append({"step": "route", "error": error_code})
+            if isinstance(exc, LLMCapacityError):
+                capacity_deferrals["route"] = exc.retry_after_seconds
+            event = "deferred" if isinstance(exc, LLMCapacityError) else "failed"
+            print(
+                f"[analysis] artifact {event} ticket={ticket.id[:8]} "
+                f"step=route code={error_code}"
+            )
+            await emit("route", "error")
     if "triage" in artifacts:
         try:
             await emit("triage", "active")
@@ -4133,6 +4380,7 @@ async def _run_ticket_analysis(
                 ).update({AIArtifactRecord.active: False}, synchronize_session=False)
             _apply_ticket_analysis(ticket, analysis_data, db)
             _record_ai_artifact(db, ticket, "triage", analysis_data, source_hash)
+            successful_artifacts.add("triage")
             db.commit()
             db.refresh(ticket)
             await emit("triage", "done")
@@ -4151,6 +4399,7 @@ async def _run_ticket_analysis(
                 }
             )
             if not claim_terminal:
+                retry_artifacts = requested_artifacts - completed_before_triage
                 error_code = _analysis_step_error_code(exc)
                 error_signature = f"triage:{error_code}"
                 event = "deferred" if isinstance(exc, LLMCapacityError) else "failed"
@@ -4158,11 +4407,67 @@ async def _run_ticket_analysis(
                     f"[analysis] artifact {event} ticket={ticket.id[:8]} "
                     f"step=triage code={error_code}"
                 )
-                if isinstance(exc, LLMCapacityError):
+                if isinstance(exc, LLMContentFilteredError):
+                    combined_errors = [*errors, {
+                        "step": "triage",
+                        "error": "content_filtered",
+                    }]
+                    filtered = db.query(TicketRecord).filter(
+                        TicketRecord.id == ticket.id,
+                        TicketRecord.ai_claim_id == claim_id,
+                    ).with_for_update().first()
+                    if filtered:
+                        filtered.ai_status = (
+                            "triage_completed" if filtered.ai_reasoning else "partial"
+                        )
+                        filtered.ai_error = merge_terminal_ai_policy_errors(
+                            filtered.ai_error,
+                            _analysis_error_signature(combined_errors),
+                            cleared_artifacts=successful_artifacts,
+                        )
+                        filtered.ai_attempts = 0
+                        filtered.ai_requested_artifacts = None
+                        filtered.ai_next_attempt_at = None
+                        filtered.ai_claim_id = None
+                        filtered.ai_lease_expires_at = None
+                        db.commit()
+                    earlier_failures = {
+                        error["step"] for error in errors
+                        if error["step"] != "triage"
+                    }
+                    if earlier_failures:
+                        earlier_errors = [
+                            error for error in errors
+                            if error["step"] in earlier_failures
+                        ]
+                        earlier_signature = _analysis_error_signature(earlier_errors)
+                        earlier_codes = {error["error"] for error in earlier_errors}
+                        if earlier_codes == {"content_filtered"}:
+                            # The artifact-scoped terminal marker was persisted
+                            # above; never redispatch policy-filtered content.
+                            pass
+                        elif earlier_failures.issubset(capacity_deferrals):
+                            _defer_ai_capacity(
+                                db,
+                                ticket.id,
+                                earlier_failures,
+                                max(capacity_deferrals[step] for step in earlier_failures),
+                            )
+                        else:
+                            _schedule_ai_retry(
+                                db,
+                                ticket.id,
+                                earlier_failures,
+                                earlier_signature,
+                                terminal=earlier_codes.issubset({
+                                    "invalid_input", "provider_rejected",
+                                }),
+                            )
+                elif isinstance(exc, LLMCapacityError):
                     _defer_ai_capacity(
                         db,
                         ticket.id,
-                        requested_artifacts,
+                        retry_artifacts,
                         exc.retry_after_seconds,
                         expected_claim_id=claim_id,
                     )
@@ -4170,7 +4475,7 @@ async def _run_ticket_analysis(
                     _schedule_ai_retry(
                         db,
                         ticket.id,
-                        requested_artifacts,
+                        retry_artifacts,
                         error_signature,
                         expected_claim_id=claim_id,
                         terminal=isinstance(
@@ -4196,6 +4501,19 @@ async def _run_ticket_analysis(
         await emit("resolution", "active")
         tasks["resolution"] = asyncio.create_task(
             intel.recommend_resolution(engine.llm, ticket)
+        )
+    if "route" in artifacts and not route_preprocessed:
+        await emit("route", "active")
+        tasks["route"] = asyncio.create_task(
+            engine.route_ticket({
+                "subject": ticket.subject,
+                "description": ticket.description,
+                "public_thread": ticket.external_conversation_text or "",
+                "freshservice_category": ticket.external_category or "",
+                "freshservice_subcategory": ticket.external_subcategory or "",
+                "freshservice_item_category": ticket.external_item_category or "",
+                "requester_email": ticket.external_requester_email or ticket.reporter,
+            })
         )
     if tasks:
         ticket_id = ticket.id
@@ -4263,6 +4581,7 @@ async def _run_ticket_analysis(
                 if summary:
                     ticket.summary = summary
                     _record_ai_artifact(db, ticket, "summary", summary, source_hash)
+                    successful_artifacts.add("summary")
                 await emit("summary", "done")
         if "resolution" in task_results:
             result = task_results["resolution"]
@@ -4281,24 +4600,29 @@ async def _run_ticket_analysis(
                 plan_dict = result
                 ticket.recommended_solution = json.dumps(plan_dict)
                 _record_ai_artifact(db, ticket, "resolution", plan_dict, source_hash)
+                successful_artifacts.add("resolution")
                 await emit("resolution", "done")
+        if "route" in task_results:
+            result = task_results["route"]
+            if isinstance(result, Exception):
+                error_code = _analysis_step_error_code(result)
+                errors.append({"step": "route", "error": error_code})
+                if isinstance(result, LLMCapacityError):
+                    capacity_deferrals["route"] = result.retry_after_seconds
+                event = "deferred" if isinstance(result, LLMCapacityError) else "failed"
+                print(
+                    f"[analysis] artifact {event} ticket={ticket.id[:8]} "
+                    f"step=route code={error_code}"
+                )
+                await emit("route", "error")
+            else:
+                route = result
+                _apply_ticket_routing(ticket, route)
+                _record_ai_artifact(db, ticket, "route", route, source_hash)
+                successful_artifacts.add("route")
+                await emit("route", "done")
         db.commit()
         db.refresh(ticket)
-
-    route = None
-    if "route" in artifacts:
-        try:
-            await emit("route", "active")
-            route = intel.recommend_assignee(db, ticket)
-            await emit("route", "done")
-        except Exception as exc:
-            error_code = _analysis_step_error_code(exc)
-            errors.append({"step": "route", "error": error_code})
-            print(
-                f"[analysis] artifact failed ticket={ticket.id[:8]} "
-                f"step=route code={error_code}"
-            )
-            await emit("route", "error")
 
     documents_changed = 0
     if "refresh" in artifacts:
@@ -4369,7 +4693,11 @@ async def _run_ticket_analysis(
         "partial" if errors else "completed" if complete else "triage_completed"
     )
     error_signature = _analysis_error_signature(errors)
-    ticket.ai_error = error_signature or None
+    ticket.ai_error = merge_terminal_ai_policy_errors(
+        ticket.ai_error,
+        error_signature or None,
+        cleared_artifacts=successful_artifacts,
+    )
     ticket.ai_generated_at = datetime.utcnow()
     ticket.ai_synthetic = db.query(AIArtifactRecord).filter(
         AIArtifactRecord.ticket_id == ticket.id,
@@ -4389,12 +4717,67 @@ async def _run_ticket_analysis(
         error["step"] for error in errors if error["step"] in artifacts
     }
     if failed_artifacts:
-        content_filtered_artifacts = {
-            error["step"]
+        errors_by_artifact = {
+            error["step"]: error["error"]
             for error in errors
-            if error["step"] in artifacts and error["error"] == "content_filtered"
+            if error["step"] in failed_artifacts
         }
-        if failed_artifacts == content_filtered_artifacts:
+        content_filtered_artifacts = {
+            artifact for artifact, code in errors_by_artifact.items()
+            if code == "content_filtered"
+        }
+        terminal_artifacts = {
+            artifact for artifact, code in errors_by_artifact.items()
+            if code in {"invalid_input", "provider_rejected"}
+        }
+        capacity_artifacts = {
+            artifact for artifact in failed_artifacts
+            if artifact in capacity_deferrals
+        }
+        transient_artifacts = (
+            failed_artifacts
+            - content_filtered_artifacts
+            - terminal_artifacts
+            - capacity_artifacts
+        )
+        retryable_artifacts = capacity_artifacts | transient_artifacts
+        if retryable_artifacts:
+            # Artifact outcomes are independent: terminal policy/validation
+            # failures remain recorded but are never included in a retry.
+            if capacity_artifacts:
+                _defer_ai_capacity(
+                    db,
+                    ticket.id,
+                    capacity_artifacts,
+                    max(
+                        capacity_deferrals[artifact]
+                        for artifact in capacity_artifacts
+                    ),
+                )
+            if transient_artifacts:
+                transient_signature = _analysis_error_signature([
+                    error for error in errors
+                    if error["step"] in transient_artifacts
+                ])
+                _schedule_ai_retry(
+                    db,
+                    ticket.id,
+                    transient_artifacts,
+                    transient_signature,
+                )
+        elif terminal_artifacts:
+            terminal_signature = _analysis_error_signature([
+                error for error in errors
+                if error["step"] in terminal_artifacts
+            ])
+            _schedule_ai_retry(
+                db,
+                ticket.id,
+                terminal_artifacts,
+                terminal_signature,
+                terminal=True,
+            )
+        elif failed_artifacts == content_filtered_artifacts:
             # A provider safety filter is an intentional terminal outcome, not
             # an unhealthy workflow or a reason to bypass policy with retries.
             # Keep any completed triage/routing useful and surface the bounded
@@ -4406,32 +4789,17 @@ async def _run_ticket_analysis(
                 filtered.ai_status = (
                     "triage_completed" if filtered.ai_reasoning else "partial"
                 )
-                filtered.ai_error = error_signature
+                filtered.ai_error = merge_terminal_ai_policy_errors(
+                    filtered.ai_error,
+                    error_signature,
+                    cleared_artifacts=successful_artifacts,
+                )
                 filtered.ai_attempts = 0
                 filtered.ai_requested_artifacts = None
                 filtered.ai_next_attempt_at = None
                 filtered.ai_claim_id = None
                 filtered.ai_lease_expires_at = None
                 db.commit()
-        elif failed_artifacts.issubset(capacity_deferrals):
-            _defer_ai_capacity(
-                db,
-                ticket.id,
-                failed_artifacts,
-                max(capacity_deferrals.values()),
-            )
-        else:
-            _schedule_ai_retry(
-                db,
-                ticket.id,
-                failed_artifacts,
-                error_signature,
-                terminal=all(
-                    error["error"] in {"invalid_input", "provider_rejected"}
-                    for error in errors
-                    if error["step"] in failed_artifacts
-                ),
-            )
 
     if errors and len(requested_artifacts) == 1:
         if failed_artifacts and failed_artifacts.issubset(capacity_deferrals):
@@ -4446,7 +4814,7 @@ async def _run_ticket_analysis(
 
     return {
         "ticket_id": ticket.id,
-        "triage": _triage_result_payload(ticket, analysis_data),
+        "triage": _triage_result_payload(ticket, analysis_data, route),
         "summary": summary or ticket.summary,
         "route": route,
         "recommended_solution": {
@@ -9737,11 +10105,27 @@ def intel_service_quality(
         for ticket in tickets
         if ticket.external_group_id
     }
+    profile_since = now - timedelta(days=365)
+    profile_tickets, group_profiles_truncated = (
+        intel.group_profile_ticket_candidates(
+            db,
+            since=profile_since,
+            group_keys=profile_group_keys,
+        )
+    )
+    current_profile_route_ids = _current_route_artifact_ticket_ids(
+        db,
+        profile_tickets,
+    )
     profiles, group_profiles_truncated = intel.build_group_profiles(
         db,
-        since=now - timedelta(days=365),
+        since=profile_since,
         group_keys=profile_group_keys,
+        candidate_tickets=profile_tickets,
+        candidates_truncated=group_profiles_truncated,
+        trusted_route_ticket_ids=current_profile_route_ids,
     )
+    current_route_ids = _current_route_artifact_ticket_ids(db, tickets)
     conversations, truncated_transcript_ticket_ids = (
         intel.bounded_public_conversations_for_tickets(
             db,
@@ -9761,10 +10145,18 @@ def intel_service_quality(
         if profile and (
             profile.get("functional_samples", 0) >= intel._GROUP_PROFILE_MIN_SAMPLE
             and profile.get("functional_confidence", 0) >= intel._GROUP_PROFILE_MIN_CONFIDENCE
-            and intel._recommended_team_for_signal(ticket)[0]
+            and intel._recommended_team_for_signal(
+                ticket,
+                ai_evidence_current=ticket.id in current_route_ids,
+            )[0]
         ):
             routing_profiled += 1
-        route_alert = intel.routing_alert(ticket, profile, now=now)
+        route_alert = intel.routing_alert(
+            ticket,
+            profile,
+            now=now,
+            ai_evidence_current=ticket.id in current_route_ids,
+        )
         if route_alert:
             routing_alerts.append(route_alert)
 
@@ -10462,16 +10854,45 @@ async def intel_route(
     db: Session = Depends(get_db),
     _user: UserRecord = Depends(get_protected_ai_user),
 ):
-    """Routing Agent: recommend the best engineer for a ticket."""
+    """Return the current advisory resolver-group route without generating one."""
     ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
     _authorize_ticket_analysis(_user, ticket, db)
-    _reserve_analytics_request(db, _user.id)
+    route = _routing_result_payload(ticket)
+    if route is None or not _artifact_is_current(db, ticket, "route"):
+        raise HTTPException(status_code=409, detail="routing_not_analyzed")
+    return route
+
+
+@app.post(
+    "/tickets/{ticket_id}/route",
+    response_model=ResolverRoutingAnalysis,
+)
+async def ticket_route(
+    ticket_id: str,
+    force: bool = Query(False, description="Regenerate even if current routing is fresh"),
+    db: Session = Depends(get_db),
+    _user: UserRecord = Depends(get_protected_ai_user),
+):
+    """Generate an advisory resolver-group route; never assign a person or group."""
+    ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    _authorize_ticket_analysis(_user, ticket, db)
+    _reserve_ai_request(db, _user.id, "route")
     ticket, _user = _lock_authorized_ticket_analysis(db, ticket_id, _user)
-    recommendation = intel.recommend_assignee(db, ticket)
-    db.commit()
-    return recommendation
+    result = await _run_ticket_analysis(
+        ticket,
+        db,
+        force=force,
+        artifacts={"route"},
+        analysis_actor_id=_user.id,
+    )
+    route = result.get("route")
+    if route is None:
+        raise HTTPException(status_code=503, detail="routing_unavailable")
+    return route
 
 
 @app.post("/tickets/{ticket_id}/summary")
@@ -13296,7 +13717,7 @@ async def ws_ticket_stream(ws: WebSocket, ticket_id: str):
             {"step": "reading", "label": "Reading ticket details...", "status": "done"},
             {"step": "triage", "label": "Triaging sentiment, category, priority...", "status": "pending"},
             {"step": "summary", "label": "Generating case summary...", "status": "pending"},
-            {"step": "route", "label": "Recommending engineer route...", "status": "pending"},
+            {"step": "route", "label": "Recommending resolver group...", "status": "pending"},
             {"step": "resolution", "label": "Drafting resolution plan...", "status": "pending"},
             {"step": "refresh", "label": "Refreshing ticket intelligence...", "status": "pending"},
             {"step": "done", "label": "Analysis complete", "status": "pending"},

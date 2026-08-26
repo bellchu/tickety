@@ -5,9 +5,17 @@ trust boundary before generated data can affect ticket state or be returned to
 users.
 """
 
+import math
 from typing import Annotated, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 
 ShortText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1_000)]
@@ -36,17 +44,60 @@ RoutingAbstentionReason = Literal[
     "untrusted_ai_status",
     "workspace_mismatch",
 ]
+ResolverGroup = Literal[
+    "INFRA_HELPDESK",
+    "INFRA_NETWORK",
+    "INFRA_SYSTEMS",
+    "INFRA_ARCH",
+    "APP_CRM_ALMO",
+    "APP_CRM_JAM",
+    "APP_RPA",
+    "APP_SQL",
+    "APP_JDE",
+    "APP_JDE_BA",
+    "APP_KORBER",
+    "APP_AS400",
+    "APP_WEB",
+    "APP_EDI_API",
+    "APP_PM",
+]
 AI_RESOLVER_TEAMS = (
-    "Application Support",
-    "Identity and Access",
-    "Network Operations",
-    "Workplace Technology",
+    "INFRA_HELPDESK",
+    "INFRA_NETWORK",
+    "INFRA_SYSTEMS",
+    "INFRA_ARCH",
+    "APP_CRM_ALMO",
+    "APP_CRM_JAM",
+    "APP_RPA",
+    "APP_SQL",
+    "APP_JDE",
+    "APP_JDE_BA",
+    "APP_KORBER",
+    "APP_AS400",
+    "APP_WEB",
+    "APP_EDI_API",
+    "APP_PM",
 )
-ResolverTeam = Literal[
-    "Application Support",
-    "Identity and Access",
-    "Network Operations",
-    "Workplace Technology",
+# Backward-compatible type name for modules that have not yet moved to the
+# dedicated routing contract. It has the same closed resolver-code surface.
+ResolverTeam = ResolverGroup
+RoutingServiceText = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+        max_length=255,
+        pattern=r"^[^\r\n]+$",
+    ),
+]
+RoutingReasonText = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+        max_length=1_000,
+        pattern=r"^[^\r\n]+$",
+    ),
 ]
 
 
@@ -60,8 +111,60 @@ class TriageAnalysis(StrictAIModel):
     priority: Literal["P1", "P2", "P3", "P4"]
     mood: Literal["critical", "urgent", "concerned", "neutral", "satisfied"]
     action: Literal["escalate", "respond", "route"]
-    recommended_team: ResolverTeam
     reasoning: ShortText
+
+
+class ResolverRoutingAnalysis(StrictAIModel):
+    """Closed, dedicated resolver-group decision returned by the routing model."""
+
+    primary_group: ResolverGroup
+    secondary_group: Optional[ResolverGroup]
+    confidence: float = Field(ge=0.0, le=1.0)
+    business_context: Literal["ALMO", "JAM", "UNKNOWN"]
+    scope: Literal["single_user", "multiple_users", "service_wide", "unknown"]
+    affected_service: RoutingServiceText
+    failure_domain: RoutingServiceText
+    reason: RoutingReasonText
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def validate_numeric_confidence(cls, value):
+        # JSON booleans are integers in Python, so reject them explicitly.
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("confidence must be a JSON number")
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            raise ValueError("confidence must be finite")
+        # Keep the persisted/content-hashed representation stable across
+        # database drivers that normalize IEEE-754 negative zero.
+        return 0.0 if numeric == 0 else numeric
+
+    @field_validator("affected_service", "failure_domain", "reason")
+    @classmethod
+    def validate_single_line_text(cls, value: str) -> str:
+        if len(value.splitlines()) != 1:
+            raise ValueError("routing text fields must contain exactly one line")
+        return value
+
+    @model_validator(mode="after")
+    def validate_routing_decision(self):
+        if self.secondary_group == self.primary_group:
+            raise ValueError("secondary group must differ from primary group")
+        if self.secondary_group == "INFRA_HELPDESK":
+            raise ValueError("INFRA_HELPDESK cannot be a secondary group")
+        groups = {self.primary_group, self.secondary_group}
+        if "APP_CRM_ALMO" in groups and self.business_context != "ALMO":
+            raise ValueError("APP_CRM_ALMO requires ALMO business context")
+        if "APP_CRM_JAM" in groups and self.business_context != "JAM":
+            raise ValueError("APP_CRM_JAM requires JAM business context")
+        if (
+            self.affected_service.casefold() == "unknown"
+            or self.failure_domain.casefold() == "unknown"
+        ) and self.confidence >= 0.60:
+            raise ValueError(
+                "unknown service or failure domain requires confidence below 0.60"
+            )
+        return self
 
 
 class SuggestedReply(StrictAIModel):

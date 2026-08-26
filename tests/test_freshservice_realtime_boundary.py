@@ -3,11 +3,12 @@ import unittest
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.backend.database import (
+    AIArtifactRecord,
     Base,
     ExternalActivityRecord,
     ExternalConversationRecord,
@@ -16,7 +17,7 @@ from app.backend.database import (
     TicketCommentRecord,
     TicketRecord,
 )
-from app.backend import main, sync_worker
+from app.backend import main, sync_worker, ticket_vectors
 from app.backend.integrations import sync
 from app.backend.schema import ExternalConversation, ExternalTicket
 
@@ -36,6 +37,17 @@ class _FreshserviceAdapter:
     async def fetch_ticket_conversations(self, external_id, max_pages=None):
         ticket = next(item for item in self.tickets if item.external_id == external_id)
         return ticket.conversations
+
+    async def fetch_ticket_details(self, external_id):
+        return next(item for item in self.tickets if item.external_id == external_id)
+
+    @staticmethod
+    def rate_limit_snapshot():
+        return {"total": 500, "remaining": 499, "used": 1}
+
+    @staticmethod
+    def should_pause_requests():
+        return False
 
 
 class FreshserviceRealtimeBoundaryTests(unittest.TestCase):
@@ -87,6 +99,125 @@ class FreshserviceRealtimeBoundaryTests(unittest.TestCase):
             patch.object(sync.settings_module, "automation_enabled", return_value=True),
         ):
             return sync.sync_tickets_from_external(adapter)
+
+    @staticmethod
+    def _add_complete_route(
+        db,
+        *,
+        ticket_id,
+        created_at,
+        pipeline_version,
+        model,
+    ):
+        route = {
+            "primary_group": "INFRA_NETWORK",
+            "secondary_group": None,
+            "confidence": 0.91,
+            "business_context": "UNKNOWN",
+            "scope": "multiple_users",
+            "affected_service": "corporate VPN",
+            "failure_domain": "shared network failure",
+            "reason": "Multiple users cannot establish the shared VPN connection.",
+        }
+        input_hash = ticket_id[0] * 64
+        ticket = TicketRecord(
+            id=ticket_id,
+            binding_id="binding-1",
+            external_source="freshservice",
+            external_id=ticket_id,
+            subject=f"Complete route for {ticket_id}",
+            status="Open",
+            ai_status="completed",
+            ai_suggested_team=route["primary_group"],
+            ai_secondary_team=route["secondary_group"],
+            ai_routing_confidence=route["confidence"],
+            ai_business_context=route["business_context"],
+            ai_routing_scope=route["scope"],
+            ai_affected_service=route["affected_service"],
+            ai_failure_domain=route["failure_domain"],
+            ai_routing_reason=route["reason"],
+            ai_routing_input_hash=input_hash,
+            created_at=created_at,
+            external_created_at=created_at,
+            external_updated_at=created_at,
+        )
+        db.add(ticket)
+        db.flush()
+        db.add(AIArtifactRecord(
+            ticket_id=ticket.id,
+            artifact="route",
+            input_hash=input_hash,
+            pipeline_version=pipeline_version,
+            provider="custom",
+            model=model,
+            synthetic=False,
+            content_hash=main._routing_payload_content_hash(route),
+            active=True,
+        ))
+        return ticket
+
+    def _add_hydration_ticket(
+        self,
+        db,
+        *,
+        ticket_id,
+        binding_id,
+        external_created_at,
+        external_updated_at,
+        requester_email="requester@nexora.com",
+    ):
+        ticket = self._add_complete_route(
+            db,
+            ticket_id=ticket_id,
+            created_at=external_created_at,
+            pipeline_version="resolver-route-v1",
+            model="resolver-model",
+        )
+        ticket.binding_id = binding_id
+        ticket.external_id = ticket_id
+        ticket.subject = "VPN unavailable"
+        ticket.description = "Initial report"
+        ticket.reporter = requester_email
+        ticket.external_requester_email = requester_email
+        ticket.external_created_at = external_created_at
+        ticket.external_updated_at = external_updated_at
+        ticket.ai_reasoning = "The shared VPN failure is supported by the report."
+        ticket.summary = "The shared VPN is unavailable."
+        ticket.recommended_solution = "Validate the shared VPN service."
+        ticket.ai_source_hash = "s" * 64
+        ticket.ai_pipeline_version = "analysis-v1"
+        ticket.ai_model = "analysis-model"
+        for artifact, marker in (
+            ("triage", "t"),
+            ("summary", "s"),
+            ("resolution", "r"),
+        ):
+            db.add(AIArtifactRecord(
+                ticket_id=ticket.id,
+                artifact=artifact,
+                input_hash="i" * 64,
+                pipeline_version="analysis-v1",
+                provider="custom",
+                model="analysis-model",
+                synthetic=False,
+                content_hash=marker * 64,
+                active=True,
+            ))
+        return ticket
+
+    @staticmethod
+    def _mark_ticket_indexed(db, ticket_id):
+        db.execute(text(
+            "CREATE TABLE IF NOT EXISTS ticket_search_documents ("
+            "source_type TEXT NOT NULL, source_id TEXT NOT NULL)"
+        ))
+        db.execute(
+            text(
+                "INSERT INTO ticket_search_documents (source_type, source_id) "
+                "VALUES ('ticket', :source_id)"
+            ),
+            {"source_id": ticket_id},
+        )
 
     def test_existing_bindings_default_disabled_and_seed_history_never_queues(self):
         historical = self._ticket(self.cutover - timedelta(days=1))
@@ -384,6 +515,355 @@ class FreshserviceRealtimeBoundaryTests(unittest.TestCase):
             self.assertFalse(activity.automatic_ai_eligible)
             self.assertEqual(activity.eligibility_reason, "automatic_ai_paused")
 
+    def test_paused_detail_description_change_invalidates_without_queueing(self):
+        observed_at = self.cutover + timedelta(minutes=10)
+        detail = self._ticket(observed_at)
+        detail.external_id = "paused-detail"
+        detail.created_at = self.cutover + timedelta(minutes=1)
+        detail.description = "Hydrated description changed after list projection."
+        detail.conversations = []
+        adapter = _FreshserviceAdapter([detail])
+
+        with self.session_factory() as db:
+            state = SyncStateRecord(
+                binding_id="binding-paused-detail",
+                provider="freshservice",
+                automatic_ai_enabled=False,
+                automatic_ai_generation=5,
+                automatic_ai_cutover_at=self.cutover,
+                automatic_ai_enabled_at=self.cutover,
+                automatic_ai_paused_at=self.cutover + timedelta(minutes=5),
+            )
+            db.add(state)
+            self._add_hydration_ticket(
+                db,
+                ticket_id=detail.external_id,
+                binding_id=state.binding_id,
+                external_created_at=detail.created_at,
+                external_updated_at=detail.updated_at,
+            )
+            db.commit()
+
+            with patch.object(
+                sync.settings_module,
+                "automation_enabled",
+                return_value=True,
+            ):
+                hydrated, errors, _state = sync._hydrate_freshservice_conversations(
+                    db,
+                    state=state,
+                    adapter=adapter,
+                    binding_id=state.binding_id,
+                    limit=1,
+                )
+
+            self.assertEqual((hydrated, errors), (1, 0))
+            ticket = db.get(TicketRecord, detail.external_id)
+            self.assertEqual(ticket.description, detail.description)
+            self.assertEqual(ticket.ai_status, "stale")
+            self.assertIsNone(ticket.ai_requested_artifacts)
+            self.assertIsNone(ticket.ai_reasoning)
+            self.assertIsNone(ticket.summary)
+            self.assertIsNone(ticket.recommended_solution)
+            self.assertIsNone(ticket.ai_suggested_team)
+            self.assertEqual(
+                db.query(AIArtifactRecord).filter_by(
+                    ticket_id=ticket.id,
+                    active=True,
+                ).count(),
+                0,
+            )
+            activity = db.query(ExternalActivityRecord).filter_by(
+                ticket_id=ticket.id,
+                entity_type="ticket_detail",
+            ).one()
+            self.assertFalse(activity.automatic_ai_eligible)
+            self.assertEqual(activity.eligibility_reason, "automatic_ai_paused")
+            self.assertEqual(
+                set(activity.affected_artifacts.split(",")),
+                {"triage", "summary", "route", "resolution"},
+            )
+
+    def test_never_enabled_detail_context_change_invalidates_route_without_queueing(self):
+        observed_at = self.cutover + timedelta(minutes=10)
+        detail = self._ticket(observed_at)
+        detail.external_id = "never-enabled-detail"
+        detail.created_at = self.cutover + timedelta(minutes=1)
+        detail.requester_email = "requester@almo.example"
+        detail.reporter = detail.requester_email
+        detail.conversations = []
+        adapter = _FreshserviceAdapter([detail])
+
+        with self.session_factory() as db:
+            state = SyncStateRecord(
+                binding_id="binding-never-enabled-detail",
+                provider="freshservice",
+                automatic_ai_enabled=False,
+            )
+            db.add(state)
+            self._add_hydration_ticket(
+                db,
+                ticket_id=detail.external_id,
+                binding_id=state.binding_id,
+                external_created_at=detail.created_at,
+                external_updated_at=detail.updated_at,
+            )
+            db.commit()
+
+            with (
+                patch.dict(
+                    "os.environ",
+                    {"AI_ROUTING_ALMO_EMAIL_DOMAINS": "almo.example"},
+                    clear=False,
+                ),
+                patch.object(
+                    sync.settings_module,
+                    "automation_enabled",
+                    return_value=True,
+                ),
+            ):
+                hydrated, errors, _state = sync._hydrate_freshservice_conversations(
+                    db,
+                    state=state,
+                    adapter=adapter,
+                    binding_id=state.binding_id,
+                    limit=1,
+                )
+
+            self.assertEqual((hydrated, errors), (1, 0))
+            ticket = db.get(TicketRecord, detail.external_id)
+            self.assertEqual(ticket.external_requester_email, detail.requester_email)
+            self.assertEqual(ticket.ai_status, "partial")
+            self.assertIsNone(ticket.ai_requested_artifacts)
+            self.assertIsNone(ticket.ai_suggested_team)
+            self.assertIsNotNone(ticket.ai_reasoning)
+            self.assertIsNotNone(ticket.summary)
+            self.assertIsNotNone(ticket.recommended_solution)
+            self.assertEqual(
+                {
+                    artifact.artifact
+                    for artifact in db.query(AIArtifactRecord).filter_by(
+                        ticket_id=ticket.id,
+                        active=True,
+                    )
+                },
+                {"triage", "summary", "resolution"},
+            )
+            activity = db.query(ExternalActivityRecord).filter_by(
+                ticket_id=ticket.id,
+                entity_type="ticket_detail",
+            ).one()
+            self.assertFalse(activity.automatic_ai_eligible)
+            self.assertEqual(
+                activity.eligibility_reason,
+                "historical_seed_not_eligible",
+            )
+            self.assertEqual(activity.affected_artifacts, "route")
+
+    def test_old_history_details_outside_cutover_or_lookback_never_queue(self):
+        history_at = self.cutover - timedelta(days=90)
+        details = []
+        with self.session_factory() as db:
+            state = SyncStateRecord(
+                binding_id="binding-history-detail",
+                provider="freshservice",
+                automatic_ai_enabled=True,
+                automatic_ai_generation=6,
+                automatic_ai_cutover_at=self.cutover,
+                automatic_ai_enabled_at=self.cutover,
+                history_since_at=history_at - timedelta(days=1),
+                history_until_at=history_at + timedelta(days=1),
+                history_requested_at=self.cutover,
+                history_requested_by="admin",
+                history_complete=False,
+            )
+            db.add(state)
+            for ticket_id, detail_updated_at in (
+                ("history-before-cutover", self.cutover - timedelta(seconds=1)),
+                ("history-outside-lookback", self.cutover + timedelta(minutes=1)),
+            ):
+                detail = self._ticket(detail_updated_at)
+                detail.external_id = ticket_id
+                detail.created_at = history_at
+                detail.description = f"Hydrated historical description for {ticket_id}."
+                detail.conversations = []
+                details.append(detail)
+                self._add_hydration_ticket(
+                    db,
+                    ticket_id=ticket_id,
+                    binding_id=state.binding_id,
+                    external_created_at=history_at,
+                    external_updated_at=history_at,
+                )
+            db.commit()
+            adapter = _FreshserviceAdapter(details)
+
+            with patch.object(
+                sync.settings_module,
+                "automation_enabled",
+                return_value=True,
+            ):
+                hydrated, errors, _state = sync._hydrate_freshservice_conversations(
+                    db,
+                    state=state,
+                    adapter=adapter,
+                    binding_id=state.binding_id,
+                    limit=2,
+                )
+
+            self.assertEqual((hydrated, errors), (2, 0))
+            activities = {
+                activity.ticket_id: activity
+                for activity in db.query(ExternalActivityRecord).filter_by(
+                    entity_type="ticket_detail",
+                )
+            }
+            self.assertEqual(
+                activities["history-before-cutover"].eligibility_reason,
+                "before_cutover",
+            )
+            self.assertEqual(
+                activities["history-outside-lookback"].eligibility_reason,
+                "ticket_created_before_lookback",
+            )
+            for ticket_id in activities:
+                ticket = db.get(TicketRecord, ticket_id)
+                self.assertEqual(ticket.ai_status, "stale")
+                self.assertIsNone(ticket.ai_requested_artifacts)
+                self.assertFalse(activities[ticket_id].automatic_ai_eligible)
+                self.assertEqual(
+                    db.query(AIArtifactRecord).filter_by(
+                        ticket_id=ticket_id,
+                        active=True,
+                    ).count(),
+                    0,
+                )
+
+    def test_indexed_detail_description_correction_refreshes_retrieval_evidence(self):
+        observed_at = self.cutover + timedelta(minutes=10)
+        detail = self._ticket(observed_at)
+        detail.external_id = "indexed-description-detail"
+        detail.created_at = self.cutover + timedelta(minutes=1)
+        detail.description = "Authoritative hydrated description."
+        detail.conversations = []
+        adapter = _FreshserviceAdapter([detail])
+
+        with self.session_factory() as db:
+            state = SyncStateRecord(
+                binding_id="binding-indexed-description",
+                provider="freshservice",
+                automatic_ai_enabled=False,
+                automatic_ai_generation=7,
+                automatic_ai_cutover_at=self.cutover,
+                automatic_ai_enabled_at=self.cutover,
+                automatic_ai_paused_at=self.cutover + timedelta(minutes=5),
+            )
+            db.add(state)
+            self._add_hydration_ticket(
+                db,
+                ticket_id=detail.external_id,
+                binding_id=state.binding_id,
+                external_created_at=detail.created_at,
+                external_updated_at=detail.updated_at,
+            )
+            self._mark_ticket_indexed(db, detail.external_id)
+            db.commit()
+
+            with (
+                patch.object(
+                    ticket_vectors,
+                    "_ticket_document_table_exists",
+                    return_value=True,
+                ),
+                patch.object(
+                    ticket_vectors,
+                    "refresh_ticket_documents_background",
+                    return_value=1,
+                ) as refresh,
+                patch.object(
+                    sync.settings_module,
+                    "automation_enabled",
+                    return_value=True,
+                ),
+            ):
+                hydrated, errors, _state = sync._hydrate_freshservice_conversations(
+                    db,
+                    state=state,
+                    adapter=adapter,
+                    binding_id=state.binding_id,
+                    limit=1,
+                )
+
+            self.assertEqual((hydrated, errors), (1, 0))
+            refresh.assert_called_once()
+            refreshed_ticket = refresh.call_args.args[1]
+            self.assertEqual(refreshed_ticket.id, detail.external_id)
+            self.assertEqual(refreshed_ticket.description, detail.description)
+
+    def test_indexed_detail_context_change_does_not_churn_retrieval_evidence(self):
+        observed_at = self.cutover + timedelta(minutes=10)
+        detail = self._ticket(observed_at)
+        detail.external_id = "indexed-context-detail"
+        detail.created_at = self.cutover + timedelta(minutes=1)
+        detail.requester_email = "requester@almo.example"
+        detail.reporter = detail.requester_email
+        detail.conversations = []
+        adapter = _FreshserviceAdapter([detail])
+
+        with self.session_factory() as db:
+            state = SyncStateRecord(
+                binding_id="binding-indexed-context",
+                provider="freshservice",
+                automatic_ai_enabled=False,
+            )
+            db.add(state)
+            self._add_hydration_ticket(
+                db,
+                ticket_id=detail.external_id,
+                binding_id=state.binding_id,
+                external_created_at=detail.created_at,
+                external_updated_at=detail.updated_at,
+            )
+            self._mark_ticket_indexed(db, detail.external_id)
+            db.commit()
+
+            with (
+                patch.dict(
+                    "os.environ",
+                    {"AI_ROUTING_ALMO_EMAIL_DOMAINS": "almo.example"},
+                    clear=False,
+                ),
+                patch.object(
+                    ticket_vectors,
+                    "_ticket_document_table_exists",
+                    return_value=True,
+                ),
+                patch.object(
+                    ticket_vectors,
+                    "refresh_ticket_documents_background",
+                    return_value=1,
+                ) as refresh,
+                patch.object(
+                    sync.settings_module,
+                    "automation_enabled",
+                    return_value=True,
+                ),
+            ):
+                hydrated, errors, _state = sync._hydrate_freshservice_conversations(
+                    db,
+                    state=state,
+                    adapter=adapter,
+                    binding_id=state.binding_id,
+                    limit=1,
+                )
+
+            self.assertEqual((hydrated, errors), (1, 0))
+            self.assertEqual(
+                db.get(TicketRecord, detail.external_id).external_requester_email,
+                detail.requester_email,
+            )
+            refresh.assert_not_called()
+
     def test_enable_action_creates_boundary_only_when_explicit(self):
         with self.session_factory() as db:
             state = sync.enable_automatic_ai(
@@ -406,6 +886,233 @@ class FreshserviceRealtimeBoundaryTests(unittest.TestCase):
                     reason="must not silently move the boundary",
                     expected_generation=1,
                 )
+
+    def test_assignment_changes_preserve_route_but_category_changes_invalidate_it(self):
+        observed_at = self.cutover + timedelta(minutes=1)
+        external = self._ticket(observed_at)
+        external.requester_email = "requester@nexora.com"
+        external.conversations = []
+        route = {
+            "primary_group": "INFRA_NETWORK",
+            "secondary_group": None,
+            "confidence": 0.91,
+            "business_context": "UNKNOWN",
+            "scope": "multiple_users",
+            "affected_service": "corporate VPN",
+            "failure_domain": "shared network failure",
+            "reason": "Multiple users cannot establish the shared VPN connection.",
+        }
+        with self.session_factory() as db:
+            ticket = TicketRecord(
+                id="local-42",
+                binding_id="legacy",
+                external_source="freshservice",
+                external_id=external.external_id,
+                subject=external.subject,
+                description=external.description,
+                reporter=external.reporter,
+                priority=external.priority,
+                status=external.status,
+                workflow_status=external.status,
+                external_assignee_id=external.assignee_id,
+                external_group_id=external.external_group_id,
+                external_requester_email=external.requester_email,
+                external_category=external.external_category,
+                external_subcategory=external.external_subcategory,
+                external_item_category=external.external_item_category,
+                external_updated_at=external.updated_at,
+                external_created_at=external.created_at,
+                ai_status="completed",
+                ai_suggested_team=route["primary_group"],
+                ai_secondary_team=route["secondary_group"],
+                ai_routing_confidence=route["confidence"],
+                ai_business_context=route["business_context"],
+                ai_routing_scope=route["scope"],
+                ai_affected_service=route["affected_service"],
+                ai_failure_domain=route["failure_domain"],
+                ai_routing_reason=route["reason"],
+            )
+            db.add(ticket)
+            db.flush()
+            main._record_ai_artifact(db, ticket, "route", route, "unused")
+            db.commit()
+
+            assignment_change = external.model_copy(update={
+                "assignee_id": "agent-10",
+                "external_group_id": "group-4",
+                "updated_at": observed_at + timedelta(minutes=1),
+            })
+            sync._upsert_ticket(
+                db,
+                assignment_change,
+                "freshservice",
+                overwrite=True,
+                binding_id="legacy",
+            )
+            ticket = db.get(TicketRecord, "local-42")
+            self.assertEqual(ticket.ai_suggested_team, "INFRA_NETWORK")
+            self.assertTrue(main._artifact_is_current(db, ticket, "route"))
+
+            category_change = assignment_change.model_copy(update={
+                "external_category": "Software",
+                "updated_at": observed_at + timedelta(minutes=2),
+            })
+            sync._upsert_ticket(
+                db,
+                category_change,
+                "freshservice",
+                overwrite=True,
+                binding_id="legacy",
+            )
+            ticket = db.get(TicketRecord, "local-42")
+            self.assertIsNone(ticket.ai_suggested_team)
+            self.assertEqual(ticket.ai_status, "partial")
+            self.assertFalse(
+                db.query(AIArtifactRecord).filter_by(
+                    ticket_id=ticket.id,
+                    artifact="route",
+                    active=True,
+                ).count()
+            )
+
+    def test_category_change_merges_route_resolution_into_delayed_summary_retry(self):
+        observed_at = self.cutover + timedelta(minutes=30)
+        created_at = datetime.utcnow().replace(microsecond=0) - timedelta(days=1)
+        changed = self._ticket(observed_at).model_copy(update={
+            "external_category": "Software",
+            "created_at": created_at,
+            "conversations_loaded": False,
+            "conversations": [],
+        })
+        retry_at = datetime.utcnow().replace(microsecond=0) + timedelta(minutes=20)
+        route = {
+            "primary_group": "INFRA_NETWORK",
+            "secondary_group": None,
+            "confidence": 0.91,
+            "business_context": "UNKNOWN",
+            "scope": "multiple_users",
+            "affected_service": "corporate VPN",
+            "failure_domain": "shared network failure",
+            "reason": "Multiple users cannot establish the shared VPN connection.",
+        }
+
+        with self.session_factory() as db:
+            state = SyncStateRecord(
+                binding_id="binding-1",
+                provider="freshservice",
+                automatic_ai_enabled=True,
+                automatic_ai_generation=1,
+                automatic_ai_cutover_at=self.cutover,
+                automatic_ai_enabled_at=self.cutover,
+            )
+            ticket = TicketRecord(
+                id="category-change-retry",
+                binding_id="binding-1",
+                external_source="freshservice",
+                external_id=changed.external_id,
+                subject=changed.subject,
+                description=changed.description,
+                reporter=changed.reporter,
+                status="Open",
+                workflow_status="Open",
+                priority=changed.priority,
+                ticket_type="incident",
+                external_assignee_id=changed.assignee_id,
+                external_group_id=changed.external_group_id,
+                external_category="Network",
+                external_created_at=created_at,
+                external_updated_at=self.cutover + timedelta(minutes=1),
+                created_at=created_at,
+                ai_reasoning="scope: multiple users; shared VPN failure",
+                recommended_solution="{}",
+                ai_status="queued",
+                ai_requested_artifacts="summary",
+                ai_attempts=2,
+                ai_next_attempt_at=retry_at,
+                ai_error="summary:provider_unavailable",
+                ai_suggested_team=route["primary_group"],
+                ai_secondary_team=route["secondary_group"],
+                ai_routing_confidence=route["confidence"],
+                ai_business_context=route["business_context"],
+                ai_routing_scope=route["scope"],
+                ai_affected_service=route["affected_service"],
+                ai_failure_domain=route["failure_domain"],
+                ai_routing_reason=route["reason"],
+            )
+            db.add_all([state, ticket])
+            db.commit()
+
+            with patch.object(
+                sync.settings_module,
+                "automation_enabled",
+                side_effect=lambda key, *_args: key in {
+                    "AUTO_ROUTE_ENABLED",
+                    "AUTO_RESOLVE_ENABLED",
+                },
+            ):
+                action, _ = sync._apply_external_ticket(
+                    db,
+                    state=state,
+                    ext=changed,
+                    adapter=_FreshserviceAdapter([changed]),
+                    overwrite=True,
+                    binding_id="binding-1",
+                )
+
+            self.assertEqual(action, "updated")
+            ticket = db.get(TicketRecord, "category-change-retry")
+            self.assertEqual(ticket.ai_status, "queued")
+            self.assertEqual(
+                ticket.ai_requested_artifacts,
+                "resolution,route,summary",
+            )
+            self.assertEqual(ticket.ai_attempts, 2)
+            self.assertEqual(ticket.ai_next_attempt_at, retry_at)
+            self.assertEqual(ticket.ai_error, "summary:provider_unavailable")
+            self.assertIsNone(ticket.ai_suggested_team)
+            self.assertIsNone(ticket.recommended_solution)
+
+    def test_business_context_change_queues_only_route_at_ticket_boundary(self):
+        external = self._ticket(self.cutover + timedelta(minutes=1))
+        external.requester_email = "requester@nexora.com"
+        existing = TicketRecord(
+            id="business-context",
+            subject=external.subject,
+            description=external.description,
+            reporter=external.reporter,
+            priority=external.priority,
+            ticket_type="incident",
+            external_priority_code=external.external_priority_code,
+            external_ticket_type_raw=external.ticket_type,
+            external_category=external.external_category,
+            external_subcategory=external.external_subcategory,
+            external_item_category=external.external_item_category,
+            external_requester_email=external.requester_email,
+            external_assignee_id=external.assignee_id,
+            external_group_id=external.external_group_id,
+        )
+
+        assignment_change = external.model_copy(update={
+            "assignee_id": "agent-10",
+            "external_group_id": "group-4",
+        })
+        self.assertEqual(
+            sync._ticket_change_artifacts(existing, assignment_change),
+            set(),
+        )
+
+        with patch.dict(
+            "os.environ",
+            {"AI_ROUTING_ALMO_EMAIL_DOMAINS": "almo.example"},
+            clear=False,
+        ):
+            context_change = assignment_change.model_copy(update={
+                "requester_email": "requester@almo.example",
+            })
+            self.assertEqual(
+                sync._ticket_change_artifacts(existing, context_change),
+                {"route"},
+            )
 
     def test_enabled_binding_queues_recent_seven_day_gaps_in_bounded_sweeps(self):
         now = datetime.utcnow().replace(microsecond=0)
@@ -493,7 +1200,73 @@ class FreshserviceRealtimeBoundaryTests(unittest.TestCase):
             )
             self.assertIsNone(db.get(TicketRecord, "paused").ai_status)
 
-    def test_recent_scanner_skips_terminal_content_filter_without_starving_batch(self):
+    def test_recent_scanner_repairs_stale_route_provenance_idempotently(self):
+        now = datetime.utcnow().replace(microsecond=0)
+        expected_pipeline = "routing-pipeline-v2"
+        expected_model = "llm-provider-v1:current"
+        with self.session_factory() as db:
+            db.add(SyncStateRecord(
+                binding_id="binding-1",
+                provider="freshservice",
+                automatic_ai_enabled=True,
+                automatic_ai_generation=1,
+                automatic_ai_cutover_at=now,
+                automatic_ai_enabled_at=now,
+            ))
+            self._add_complete_route(
+                db,
+                ticket_id="recent-stale-pipeline",
+                created_at=now - timedelta(days=1),
+                pipeline_version="routing-pipeline-v1",
+                model=expected_model,
+            )
+            self._add_complete_route(
+                db,
+                ticket_id="recent-stale-model",
+                created_at=now - timedelta(days=1),
+                pipeline_version=expected_pipeline,
+                model="llm-provider-v1:retired",
+            )
+            self._add_complete_route(
+                db,
+                ticket_id="recent-current-route",
+                created_at=now - timedelta(days=1),
+                pipeline_version=expected_pipeline,
+                model=expected_model,
+            )
+            db.commit()
+
+            with patch.object(
+                sync.settings_module,
+                "automation_enabled",
+                side_effect=lambda key, *_args: key == "AUTO_ROUTE_ENABLED",
+            ):
+                first = sync.queue_recent_automatic_ai(
+                    db,
+                    now=now,
+                    batch_size=5,
+                    expected_pipeline_version=expected_pipeline,
+                    expected_model=expected_model,
+                )
+                second = sync.queue_recent_automatic_ai(
+                    db,
+                    now=now,
+                    batch_size=5,
+                    expected_pipeline_version=expected_pipeline,
+                    expected_model=expected_model,
+                )
+
+            self.assertEqual(first, {"lookback_days": 7, "queued": 2})
+            self.assertEqual(second, {"lookback_days": 7, "queued": 0})
+            for ticket_id in ("recent-stale-pipeline", "recent-stale-model"):
+                ticket = db.get(TicketRecord, ticket_id)
+                self.assertEqual(ticket.ai_status, "queued")
+                self.assertEqual(ticket.ai_requested_artifacts, "route")
+            current = db.get(TicketRecord, "recent-current-route")
+            self.assertEqual(current.ai_status, "completed")
+            self.assertIsNone(current.ai_requested_artifacts)
+
+    def test_recent_scanner_isolates_terminal_content_filter_by_artifact(self):
         now = datetime.utcnow().replace(microsecond=0)
         with self.session_factory() as db:
             db.add(SyncStateRecord(
@@ -536,17 +1309,67 @@ class FreshserviceRealtimeBoundaryTests(unittest.TestCase):
                 return_value=True,
             ):
                 result = sync.queue_recent_automatic_ai(
-                    db, now=now, batch_size=1
+                    db, now=now, batch_size=2
                 )
 
-            self.assertEqual(result, {"lookback_days": 7, "queued": 1})
+            self.assertEqual(result, {"lookback_days": 7, "queued": 2})
             terminal = db.get(TicketRecord, "policy-terminal")
-            self.assertEqual(terminal.ai_status, "triage_completed")
+            self.assertEqual(terminal.ai_status, "queued")
+            self.assertEqual(terminal.ai_requested_artifacts, "route")
             self.assertEqual(terminal.ai_error, "summary:content_filtered")
-            self.assertIsNone(terminal.ai_requested_artifacts)
             eligible = db.get(TicketRecord, "eligible-gap")
             self.assertEqual(eligible.ai_status, "queued")
             self.assertIn("summary", eligible.ai_requested_artifacts.split(","))
+
+    def test_route_content_filter_does_not_block_missing_triage_and_summary(self):
+        now = datetime.utcnow().replace(microsecond=0)
+        with self.session_factory() as db:
+            db.add(SyncStateRecord(
+                binding_id="binding-1",
+                provider="freshservice",
+                automatic_ai_enabled=True,
+                automatic_ai_generation=1,
+                automatic_ai_cutover_at=now,
+                automatic_ai_enabled_at=now,
+            ))
+            db.add(TicketRecord(
+                id="route-policy-terminal",
+                binding_id="binding-1",
+                external_source="freshservice",
+                external_id="route-policy-terminal",
+                subject="Missing independent analysis",
+                recommended_solution="{}",
+                ai_status="partial",
+                ai_error="route:content_filtered",
+                external_created_at=now - timedelta(days=1),
+                external_updated_at=now - timedelta(hours=1),
+            ))
+            db.commit()
+
+            with patch.object(
+                sync.settings_module,
+                "automation_enabled",
+                side_effect=lambda key, *_args: key in {
+                    "AUTO_TRIAGE_ENABLED",
+                    "AUTO_SUMMARIZE_ENABLED",
+                    "AUTO_ROUTE_ENABLED",
+                },
+            ):
+                result = sync.queue_recent_automatic_ai(
+                    db,
+                    now=now,
+                    batch_size=1,
+                )
+
+            self.assertEqual(result, {"lookback_days": 7, "queued": 1})
+            ticket = db.get(TicketRecord, "route-policy-terminal")
+            self.assertEqual(ticket.ai_status, "queued")
+            self.assertEqual(
+                set(ticket.ai_requested_artifacts.split(",")),
+                {"triage", "summary"},
+            )
+            self.assertNotIn("route", ticket.ai_requested_artifacts.split(","))
+            self.assertEqual(ticket.ai_error, "route:content_filtered")
 
     def test_active_routing_backlog_requires_explicit_opt_in_and_is_staged(self):
         now = datetime.utcnow().replace(microsecond=0)
@@ -646,6 +1469,77 @@ class FreshserviceRealtimeBoundaryTests(unittest.TestCase):
                     {"triage", "route"},
                 )
 
+    def test_active_routing_backlog_repairs_stale_route_provenance_idempotently(self):
+        now = datetime.utcnow().replace(microsecond=0)
+        expected_pipeline = "routing-pipeline-v2"
+        expected_model = "llm-provider-v1:current"
+        with self.session_factory() as db:
+            db.add(SyncStateRecord(
+                binding_id="binding-1",
+                provider="freshservice",
+                automatic_ai_enabled=True,
+                automatic_ai_generation=1,
+                automatic_ai_cutover_at=now,
+                automatic_ai_enabled_at=now,
+            ))
+            self._add_complete_route(
+                db,
+                ticket_id="backlog-stale-pipeline",
+                created_at=now - timedelta(days=90),
+                pipeline_version="routing-pipeline-v1",
+                model=expected_model,
+            )
+            self._add_complete_route(
+                db,
+                ticket_id="backlog-stale-model",
+                created_at=now - timedelta(days=90),
+                pipeline_version=expected_pipeline,
+                model="llm-provider-v1:retired",
+            )
+            self._add_complete_route(
+                db,
+                ticket_id="backlog-current-route",
+                created_at=now - timedelta(days=90),
+                pipeline_version=expected_pipeline,
+                model=expected_model,
+            )
+            db.commit()
+
+            with (
+                patch.dict(
+                    "os.environ",
+                    {"AI_ACTIVE_ROUTING_BACKLOG_ENABLED": "true"},
+                    clear=False,
+                ),
+                patch.object(
+                    sync.settings_module,
+                    "automation_enabled",
+                    side_effect=lambda key, *_args: key == "AUTO_ROUTE_ENABLED",
+                ),
+            ):
+                first = sync.queue_active_routing_backlog(
+                    db,
+                    batch_size=5,
+                    expected_pipeline_version=expected_pipeline,
+                    expected_model=expected_model,
+                )
+                second = sync.queue_active_routing_backlog(
+                    db,
+                    batch_size=5,
+                    expected_pipeline_version=expected_pipeline,
+                    expected_model=expected_model,
+                )
+
+            self.assertEqual(first, {"enabled": True, "queued": 2})
+            self.assertEqual(second, {"enabled": True, "queued": 0})
+            for ticket_id in ("backlog-stale-pipeline", "backlog-stale-model"):
+                ticket = db.get(TicketRecord, ticket_id)
+                self.assertEqual(ticket.ai_status, "queued")
+                self.assertEqual(ticket.ai_requested_artifacts, "route")
+            current = db.get(TicketRecord, "backlog-current-route")
+            self.assertEqual(current.ai_status, "completed")
+            self.assertIsNone(current.ai_requested_artifacts)
+
     def test_active_routing_backlog_prioritizes_stale_recovery(self):
         now = datetime.utcnow().replace(microsecond=0)
         with self.session_factory() as db:
@@ -679,7 +1573,7 @@ class FreshserviceRealtimeBoundaryTests(unittest.TestCase):
                     external_updated_at=now - timedelta(days=60),
                     ai_status="stale",
                     ai_reasoning="Prior triage output",
-                    ai_suggested_team="IT Support",
+                    ai_suggested_team="APP_WEB",
                 ),
             ])
             db.commit()
@@ -699,7 +1593,7 @@ class FreshserviceRealtimeBoundaryTests(unittest.TestCase):
             self.assertEqual(stale.ai_status, "queued")
             self.assertEqual(
                 set(stale.ai_requested_artifacts.split(",")),
-                {"triage", "route"},
+                {"route"},
             )
             self.assertIsNone(db.get(TicketRecord, "newer-gap").ai_status)
 

@@ -72,6 +72,14 @@ class TicketRecord(Base):
     ai_suggested_priority = Column(String, nullable=True)
     ai_suggested_category = Column(String, nullable=True)
     ai_suggested_team = Column(String, nullable=True)
+    ai_secondary_team = Column(String, nullable=True)
+    ai_routing_confidence = Column(Float, nullable=True)
+    ai_business_context = Column(String, nullable=True)
+    ai_routing_scope = Column(String, nullable=True)
+    ai_affected_service = Column(String, nullable=True)
+    ai_failure_domain = Column(String, nullable=True)
+    ai_routing_reason = Column(Text, nullable=True)
+    ai_routing_input_hash = Column(String(64), nullable=True, index=True)
 
     # Standalone ticketing fields
     ticket_type = Column(String, default="incident")  # incident | request
@@ -1385,6 +1393,14 @@ def _ensure_columns():
         "ai_suggested_priority": "VARCHAR",
         "ai_suggested_category": "VARCHAR",
         "ai_suggested_team": "VARCHAR",
+        "ai_secondary_team": "VARCHAR",
+        "ai_routing_confidence": "FLOAT",
+        "ai_business_context": "VARCHAR",
+        "ai_routing_scope": "VARCHAR",
+        "ai_affected_service": "VARCHAR",
+        "ai_failure_domain": "VARCHAR",
+        "ai_routing_reason": "TEXT",
+        "ai_routing_input_hash": "VARCHAR(64)",
         "ticket_type": "VARCHAR DEFAULT 'incident'",
         "impact": "VARCHAR",
         "urgency": "VARCHAR",
@@ -1429,6 +1445,10 @@ def _ensure_columns():
         conn.exec_driver_sql(
             "CREATE UNIQUE INDEX IF NOT EXISTS ix_tickets_portal_access_token_hash "
             "ON tickets (portal_access_token_hash)"
+        )
+        conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_tickets_ai_routing_input_hash "
+            "ON tickets (ai_routing_input_hash)"
         )
         conn.exec_driver_sql(
             "UPDATE tickets SET escalation_risk_backfilled_at = "

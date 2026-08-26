@@ -179,6 +179,8 @@ class IntelligenceTerminalPolicyTests(unittest.TestCase):
                 "external_source": "freshservice",
                 "external_group_id": "group-1",
                 "external_category": "Password Reset",
+                "ai_suggested_team": "INFRA_HELPDESK",
+                "ai_status": "completed",
                 "external_created_at": self.now - timedelta(days=3),
                 "external_updated_at": self.now - timedelta(days=2),
                 "summary": "Password reset completed. Please sign in again.",
@@ -209,6 +211,7 @@ class IntelligenceTerminalPolicyTests(unittest.TestCase):
                 db,
                 since=self.now - timedelta(days=30),
                 group_keys={("legacy", "group-1")},
+                trusted_route_ticket_ids={"closed-history"},
             )
             study = intelligence.run_level_zero_study(
                 db, months=6, now=self.now

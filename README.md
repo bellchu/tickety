@@ -166,6 +166,8 @@ LLM_MAX_CONCURRENCY=4
 LLM_DAILY_TOKEN_BUDGET=500000
 LLM_PROVIDER_REQUESTS_PER_MINUTE=120
 LLM_PROVIDER_TOKENS_PER_MINUTE=250000
+AI_ROUTING_ALMO_EMAIL_DOMAINS=
+AI_ROUTING_JAM_EMAIL_DOMAINS=
 AI_PIPELINE_TIMEOUT_SECONDS=900
 AI_BACKGROUND_TICKETS_PER_SWEEP=5
 AI_RISK_BACKFILL_PER_SWEEP=25
@@ -184,6 +186,13 @@ MAX_REQUEST_BODY_BYTES=1048576
 AI_METRICS_RETENTION_DAYS=30
 AI_ARTIFACT_RETENTION_DAYS=90
 ```
+
+Resolver routing is advisory and selects only from Tickety's closed resolver
+codes; it never assigns a Freshservice group or an individual. Optional ALMO
+and JAM context is derived server-side from the comma-separated exact base
+domains above. Subdomains match only on DNS-label boundaries,
+`nexora.com` always remains `UNKNOWN`, and the requester address itself is not
+sent to the model. Leave an allowlist empty when no audited mapping exists.
 
 Provider concurrency uses expiring database-backed leases shared by API and
 worker replicas; request and token ceilings are reserved before each retry.

@@ -25,6 +25,7 @@ from ..database import (
     TicketCommentRecord,
     TicketRecord,
 )
+from ..ai_contracts import ResolverRoutingAnalysis
 from ..schema import ExternalAttachment, ExternalConversation, ExternalTicket, WebhookEvent
 from ..portable_keys import portable_ascii_lower
 from ..attachment_storage import (
@@ -46,7 +47,10 @@ from ..ai_state import (
     has_terminal_ai_policy_outcome,
     invalidate_ticket_ai,
     invalidate_ticket_resolution,
+    invalidate_ticket_routing,
+    merge_terminal_ai_policy_errors,
 )
+from ..routing_policy import routing_business_context
 from ..ai_eligibility import (
     active_ticket_filter,
     mark_terminal_ai_not_applicable,
@@ -81,14 +85,16 @@ def _queue_analysis(
         return
     if not artifacts:
         return
-    if ticket.ai_status == "queued":
+    already_queued = ticket.ai_status == "queued"
+    if already_queued:
         artifacts.update(
             item for item in (ticket.ai_requested_artifacts or "").split(",") if item
         )
     ticket.ai_status = "queued"
     ticket.ai_requested_artifacts = ",".join(sorted(artifacts))
-    ticket.ai_next_attempt_at = None
-    ticket.ai_error = None
+    if not already_queued:
+        ticket.ai_next_attempt_at = None
+        ticket.ai_error = merge_terminal_ai_policy_errors(ticket.ai_error)
 
 
 AUTOMATIC_AI_LOOKBACK_DAYS = 7
@@ -139,19 +145,44 @@ def _ticket_created_within_automatic_window(
     )
 
 
+def _ticket_has_resolver_route(ticket: TicketRecord) -> bool:
+    """Validate the persisted resolver bundle against the authoritative schema."""
+    try:
+        _resolver_route_payload(ticket)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _resolver_route_payload(ticket: TicketRecord) -> dict[str, Any]:
+    return ResolverRoutingAnalysis.model_validate({
+        "primary_group": ticket.ai_suggested_team,
+        "secondary_group": ticket.ai_secondary_team,
+        "confidence": ticket.ai_routing_confidence,
+        "business_context": ticket.ai_business_context,
+        "scope": ticket.ai_routing_scope,
+        "affected_service": ticket.ai_affected_service,
+        "failure_domain": ticket.ai_failure_domain,
+        "reason": ticket.ai_routing_reason,
+    }).model_dump()
+
+
 def _missing_automatic_artifacts(
     ticket: TicketRecord,
     enabled: set[str],
+    *,
+    route_provenance_current: Optional[bool] = None,
 ) -> set[str]:
     """Return only durable AI gaps that can be completed by the worker.
 
-    Routing is deterministic and has no persisted artifact of its own, so it
-    accompanies a generated artifact instead of making an otherwise-complete
-    ticket recur in every lookback sweep.
+    Resolver routing is a persisted LLM artifact and can be enabled or repaired
+    independently of general triage.
     """
-    if has_terminal_ai_policy_outcome(ticket):
-        return set()
-    generated = enabled & {"triage", "summary", "resolution"}
+    generated = enabled & {"triage", "summary", "route", "resolution"}
+    generated = {
+        artifact for artifact in generated
+        if not has_terminal_ai_policy_outcome(ticket, {artifact})
+    }
     if not generated:
         return set()
     stale = (ticket.ai_status or "").strip().lower() in {
@@ -160,17 +191,79 @@ def _missing_automatic_artifacts(
         "provenance_unknown",
     }
     missing: set[str] = set()
-    if "triage" in generated and (
-        stale or not ticket.ai_reasoning or not ticket.ai_suggested_team
-    ):
+    if "triage" in generated and (stale or not ticket.ai_reasoning):
         missing.add("triage")
     if "summary" in generated and (stale or not ticket.summary):
         missing.add("summary")
     if "resolution" in generated and (stale or not ticket.recommended_solution):
         missing.add("resolution")
-    if missing and "route" in enabled:
+    if "route" in generated and (
+        stale
+        or not _ticket_has_resolver_route(ticket)
+        or route_provenance_current is False
+    ):
         missing.add("route")
     return missing
+
+
+def _route_artifact_provenance_current(
+    db: Session,
+    ticket: TicketRecord,
+    *,
+    expected_pipeline_version: Optional[str],
+    expected_model: Optional[str],
+    allow_synthetic_artifacts: bool = False,
+) -> bool:
+    if not _ticket_has_resolver_route(ticket) or not ticket.ai_routing_input_hash:
+        return False
+    if not expected_pipeline_version or not expected_model:
+        return True
+    query = db.query(AIArtifactRecord.id).filter(
+        AIArtifactRecord.ticket_id == ticket.id,
+        AIArtifactRecord.artifact == "route",
+        AIArtifactRecord.pipeline_version == expected_pipeline_version,
+        AIArtifactRecord.model == expected_model,
+        AIArtifactRecord.input_hash == ticket.ai_routing_input_hash,
+        AIArtifactRecord.active.is_(True),
+    )
+    serialized = json.dumps(
+        _resolver_route_payload(ticket),
+        sort_keys=True,
+        default=str,
+        ensure_ascii=False,
+    )
+    query = query.filter(
+        AIArtifactRecord.content_hash
+        == hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    )
+    if not allow_synthetic_artifacts:
+        query = query.filter(AIArtifactRecord.synthetic.is_(False))
+    return query.first() is not None
+
+
+def _route_artifact_gap_filter(
+    db: Session,
+    *,
+    expected_pipeline_version: Optional[str],
+    expected_model: Optional[str],
+    allow_synthetic_artifacts: bool = False,
+):
+    if not expected_pipeline_version or not expected_model:
+        return None
+    query = db.query(AIArtifactRecord.id).filter(
+        AIArtifactRecord.ticket_id == TicketRecord.id,
+        AIArtifactRecord.artifact == "route",
+        AIArtifactRecord.pipeline_version == expected_pipeline_version,
+        AIArtifactRecord.model == expected_model,
+        AIArtifactRecord.input_hash == TicketRecord.ai_routing_input_hash,
+        AIArtifactRecord.active.is_(True),
+    )
+    if not allow_synthetic_artifacts:
+        query = query.filter(AIArtifactRecord.synthetic.is_(False))
+    return or_(
+        TicketRecord.ai_routing_input_hash.is_(None),
+        ~query.exists(),
+    )
 
 
 def _staged_automatic_artifacts(
@@ -178,18 +271,18 @@ def _staged_automatic_artifacts(
     eligible: set[str],
 ) -> set[str]:
     """Admit every missing eligible stage as one durable ticket pipeline."""
-    if has_terminal_ai_policy_outcome(ticket):
-        return set()
     enabled = _enabled_analysis_artifacts()
     requested = eligible & enabled
+    requested = {
+        artifact for artifact in requested
+        if not has_terminal_ai_policy_outcome(ticket, {artifact})
+    }
     if not requested:
         return set()
     stale = (ticket.ai_status or "").strip().lower() in {
         "stale", "legacy_stale", "provenance_unknown",
     }
-    if "triage" in requested and (
-        stale or not ticket.ai_reasoning or not ticket.ai_suggested_team
-    ):
+    if "triage" in requested and (stale or not ticket.ai_reasoning):
         stage = {"triage"}
     else:
         stage = set()
@@ -197,9 +290,7 @@ def _staged_automatic_artifacts(
         stage.add("summary")
     if "resolution" in requested and (stale or not ticket.recommended_solution):
         stage.add("resolution")
-    if not stage:
-        return set()
-    if "route" in requested:
+    if "route" in requested and (stale or not _ticket_has_resolver_route(ticket)):
         stage.add("route")
     return stage
 
@@ -209,6 +300,9 @@ def queue_recent_automatic_ai(
     *,
     now: Optional[datetime] = None,
     batch_size: int = 5,
+    expected_pipeline_version: Optional[str] = None,
+    expected_model: Optional[str] = None,
+    allow_synthetic_artifacts: bool = False,
 ) -> dict[str, int]:
     """Queue missing AI work for external tickets active in the last 7 days.
 
@@ -219,7 +313,7 @@ def queue_recent_automatic_ai(
     selected and completed artifacts are detected before enqueueing.
     """
     enabled = _enabled_analysis_artifacts()
-    generated = enabled & {"triage", "summary", "resolution"}
+    generated = enabled & {"triage", "summary", "route", "resolution"}
     limit = max(1, min(int(batch_size), 25))
     result = {"lookback_days": AUTOMATIC_AI_LOOKBACK_DAYS, "queued": 0}
     if not generated:
@@ -237,10 +331,26 @@ def queue_recent_automatic_ai(
     unavailable_statuses = ("queued", "running", "failed", "dead_letter", "paused")
     gap_filters = []
     if "triage" in generated:
+        gap_filters.append(TicketRecord.ai_reasoning.is_(None))
+    if "route" in generated:
         gap_filters.extend((
-            TicketRecord.ai_reasoning.is_(None),
             TicketRecord.ai_suggested_team.is_(None),
+            TicketRecord.ai_routing_confidence.is_(None),
+            TicketRecord.ai_business_context.is_(None),
+            TicketRecord.ai_routing_scope.is_(None),
+            TicketRecord.ai_affected_service.is_(None),
+            TicketRecord.ai_failure_domain.is_(None),
+            TicketRecord.ai_routing_reason.is_(None),
+            TicketRecord.ai_routing_input_hash.is_(None),
         ))
+        provenance_gap = _route_artifact_gap_filter(
+            db,
+            expected_pipeline_version=expected_pipeline_version,
+            expected_model=expected_model,
+            allow_synthetic_artifacts=allow_synthetic_artifacts,
+        )
+        if provenance_gap is not None:
+            gap_filters.append(provenance_gap)
     if "summary" in generated:
         gap_filters.append(TicketRecord.summary.is_(None))
     if "resolution" in generated:
@@ -254,7 +364,7 @@ def queue_recent_automatic_ai(
             TicketRecord.binding_id == state.binding_id,
             TicketRecord.external_source == state.provider,
             active_ticket_filter(db),
-            automatic_ai_policy_eligible_filter(),
+            automatic_ai_policy_eligible_filter(generated),
             ticket_created_within_filter(cutoff),
             or_(
                 TicketRecord.ai_status.is_(None),
@@ -267,7 +377,17 @@ def queue_recent_automatic_ai(
             TicketRecord.id.asc(),
         ).limit(remaining).all()
         for ticket in tickets:
-            artifacts = _missing_automatic_artifacts(ticket, enabled)
+            artifacts = _missing_automatic_artifacts(
+                ticket,
+                enabled,
+                route_provenance_current=_route_artifact_provenance_current(
+                    db,
+                    ticket,
+                    expected_pipeline_version=expected_pipeline_version,
+                    expected_model=expected_model,
+                    allow_synthetic_artifacts=allow_synthetic_artifacts,
+                ) if "route" in generated else None,
+            )
             if not artifacts:
                 continue
             _queue_analysis(db, ticket, artifacts)
@@ -285,20 +405,24 @@ def queue_active_routing_backlog(
     db: Session,
     *,
     batch_size: int = 5,
+    expected_pipeline_version: Optional[str] = None,
+    expected_model: Optional[str] = None,
+    allow_synthetic_artifacts: bool = False,
 ) -> dict[str, int | bool]:
-    """Queue triage-only work for active external tickets outside lookback.
+    """Queue resolver routing for active external tickets outside lookback.
 
     This bounded repair lane is disabled unless the deployment explicitly
-    opts in. It requires both automatic triage and routing, only considers
-    active tickets under an enabled binding, and never queues summaries or
-    resolution plans. Repeated sweeps are idempotent.
+    opts in. It requires automatic routing, only considers active tickets under
+    an enabled binding, and never queues summaries or resolution plans.
+    General triage accompanies routing only when enabled and missing. Repeated
+    sweeps are idempotent.
     """
     enabled = _enabled_analysis_artifacts()
     result: dict[str, int | bool] = {
         "enabled": active_routing_backlog_enabled(),
         "queued": 0,
     }
-    if not result["enabled"] or not {"triage", "route"}.issubset(enabled):
+    if not result["enabled"] or "route" not in enabled:
         return result
 
     limit = max(1, min(int(batch_size), 25))
@@ -309,6 +433,12 @@ def queue_active_routing_backlog(
     remaining = limit
     unavailable_statuses = ("queued", "running", "failed", "dead_letter", "paused")
     stale_statuses = ("stale", "legacy_stale", "provenance_unknown")
+    provenance_gap = _route_artifact_gap_filter(
+        db,
+        expected_pipeline_version=expected_pipeline_version,
+        expected_model=expected_model,
+        allow_synthetic_artifacts=allow_synthetic_artifacts,
+    )
 
     for state in states:
         if remaining <= 0:
@@ -317,15 +447,22 @@ def queue_active_routing_backlog(
             TicketRecord.binding_id == state.binding_id,
             TicketRecord.external_source == state.provider,
             active_ticket_filter(db),
-            automatic_ai_policy_eligible_filter(),
+            automatic_ai_policy_eligible_filter({"route"}),
             or_(
                 TicketRecord.ai_status.is_(None),
                 TicketRecord.ai_status.notin_(unavailable_statuses),
             ),
             or_(
-                TicketRecord.ai_reasoning.is_(None),
                 TicketRecord.ai_suggested_team.is_(None),
+                TicketRecord.ai_routing_confidence.is_(None),
+                TicketRecord.ai_business_context.is_(None),
+                TicketRecord.ai_routing_scope.is_(None),
+                TicketRecord.ai_affected_service.is_(None),
+                TicketRecord.ai_failure_domain.is_(None),
+                TicketRecord.ai_routing_reason.is_(None),
+                TicketRecord.ai_routing_input_hash.is_(None),
                 TicketRecord.ai_status.in_(stale_statuses),
+                *([provenance_gap] if provenance_gap is not None else []),
             ),
         ).order_by(
             # Recovery work must not be starved by a continuously replenished
@@ -340,7 +477,10 @@ def queue_active_routing_backlog(
             TicketRecord.id.asc(),
         ).limit(remaining).all()
         for ticket in tickets:
-            _queue_analysis(db, ticket, {"triage", "route"})
+            artifacts = {"route"}
+            if "triage" in enabled and not ticket.ai_reasoning:
+                artifacts.add("triage")
+            _queue_analysis(db, ticket, artifacts)
             result["queued"] = int(result["queued"]) + 1
             remaining -= 1
             if remaining <= 0:
@@ -1133,6 +1273,16 @@ def _ticket_change_artifacts(
     if existing.subject != ext.subject or existing.description != ext.description:
         artifacts.update({"triage", "summary", "route", "resolution"})
     if (
+        existing.external_category != ext.external_category
+        or existing.external_subcategory != ext.external_subcategory
+        or existing.external_item_category != ext.external_item_category
+        or routing_business_context(
+            existing.external_requester_email or existing.reporter
+        )
+        != routing_business_context(ext.requester_email or ext.reporter)
+    ):
+        artifacts.add("route")
+    if (
         existing.priority != ext.priority
         or existing.external_priority_code != ext.external_priority_code
         or existing.external_ticket_type_raw != ext.ticket_type
@@ -1142,12 +1292,7 @@ def _ticket_change_artifacts(
         or existing.external_subcategory != ext.external_subcategory
         or existing.external_item_category != ext.external_item_category
     ):
-        artifacts.update({"route", "resolution"})
-    if (
-        existing.external_group_id != ext.external_group_id
-        or existing.external_assignee_id != ext.assignee_id
-    ):
-        artifacts.add("route")
+        artifacts.add("resolution")
     return artifacts
 
 
@@ -1270,6 +1415,15 @@ def _upsert_ticket(
         analysis_input_changed = (
             existing.subject != ext.subject or existing.description != ext.description
         )
+        routing_input_changed = (
+            existing.external_category != ext.external_category
+            or existing.external_subcategory != ext.external_subcategory
+            or existing.external_item_category != ext.external_item_category
+            or routing_business_context(
+                existing.external_requester_email or existing.reporter
+            )
+            != routing_business_context(ext.requester_email or ext.reporter)
+        )
         resolution_input_changed = (
             existing.priority != ext.priority
             or existing.external_priority_code != ext.external_priority_code
@@ -1318,6 +1472,8 @@ def _upsert_ticket(
         existing.external_description_html = ext.description_html
         if analysis_input_changed:
             invalidate_ticket_ai(existing)
+        elif routing_input_changed:
+            invalidate_ticket_routing(existing)
         if resolution_input_changed:
             invalidate_ticket_resolution(existing)
         existing.reporter = ext.reporter
@@ -1736,6 +1892,8 @@ def _hydrate_freshservice_conversations(
     errors = 0
     for ticket in candidates:
         try:
+            detail_artifacts: set[str] = set()
+            detail_description_changed = False
             detail = (
                 asyncio.run(adapter.fetch_ticket_details(ticket.external_id))
                 if hasattr(adapter, "fetch_ticket_details") else None
@@ -1745,14 +1903,34 @@ def _hydrate_freshservice_conversations(
             )
             if detail is not None:
                 normalized_detail = _normalize_external_ticket(detail)
+                detail_description_changed = (
+                    ticket.description != normalized_detail.description
+                )
+                detail_context_changed = routing_business_context(
+                    ticket.external_requester_email or ticket.reporter
+                ) != routing_business_context(
+                    normalized_detail.requester_email or normalized_detail.reporter
+                )
+                if detail_description_changed:
+                    detail_artifacts.update({
+                        "triage", "summary", "route", "resolution",
+                    })
+                    if _ticket_has_ai_material(db, ticket):
+                        invalidate_ticket_ai(ticket)
+                elif detail_context_changed:
+                    detail_artifacts.add("route")
+                    if _ticket_has_ai_material(db, ticket):
+                        invalidate_ticket_routing(ticket)
                 ticket.description = normalized_detail.description
                 ticket.external_description_html = normalized_detail.description_html
                 ticket.external_requester_id = normalized_detail.requester_id
                 ticket.external_requester_name = normalized_detail.requester_name
                 ticket.external_requester_email = normalized_detail.requester_email
                 ticket.external_requester_title = normalized_detail.requester_title
-                if normalized_detail.requester_email:
-                    ticket.reporter = normalized_detail.requester_email
+                ticket.reporter = (
+                    normalized_detail.requester_email
+                    or normalized_detail.reporter
+                )
                 _upsert_embedded_external_user(
                     db,
                     binding_id=binding_id,
@@ -1770,7 +1948,28 @@ def _hydrate_freshservice_conversations(
                     owner_external_id=ticket.external_id or "",
                     attachments=normalized_detail.attachments,
                 )
-            artifacts = _project_conversations(
+                if detail_artifacts:
+                    # Detail hydration may include historical/admin-requested
+                    # records. Invalidate stale artifacts regardless, but only
+                    # admit replacement generation through the same audited
+                    # binding generation, cutover, pause, and lookback policy
+                    # used by ticket/conversation activity.
+                    _created, detail_eligible = _record_activity(
+                        db,
+                        state=state,
+                        ticket=ticket,
+                        entity_type="ticket_detail",
+                        external_id=ticket.external_id or "",
+                        revision_hash=_ticket_revision_hash(normalized_detail),
+                        activity_at=(
+                            normalized_detail.updated_at
+                            or ticket.external_updated_at
+                        ),
+                        artifacts=detail_artifacts,
+                    )
+                    if not detail_eligible:
+                        detail_artifacts = set()
+            artifacts = detail_artifacts | _project_conversations(
                 db,
                 state=state,
                 ticket=ticket,
@@ -1792,6 +1991,12 @@ def _hydrate_freshservice_conversations(
                 _queue_analysis(db, ticket, requested)
             ticket.external_conversations_synced_at = datetime.utcnow()
             db.commit()
+            if detail_description_changed:
+                # Detail hydration can correct the abbreviated list payload.
+                # Keep previously indexed retrieval evidence aligned with the
+                # authoritative description; the helper is a no-op for tickets
+                # that have never been admitted to the shared index.
+                refresh_ticket_documents_if_indexed(db, ticket)
             hydrated += 1
         except Exception as exc:
             if hasattr(exc, "retry_after"):

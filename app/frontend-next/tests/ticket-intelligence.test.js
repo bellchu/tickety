@@ -65,12 +65,13 @@ test("analysis lifecycle renders every operational state without exposing raw st
 });
 
 test("routing, source, and related labels preserve their derivation", () => {
-  assert.equal(routingLabel({ recommended_team: "Freshservice group 2000241178", recommended_team_basis: "source_group" }), "AI team analysis pending");
-  assert.equal(routingLabel({ recommended_team: "Application Support", recommended_team_basis: "ai_team" }), "AI recommended team - Application Support");
-  assert.equal(routingLabel({ recommended_team: "Network Operations", recommended_team_basis: "ai_category" }), "Suggested team - Network Operations (catalog validation pending)");
-  assert.equal(routingLabel({ recommended_team: "Application Support", recommended_team_basis: "source_category" }), "Suggested team - Application Support (Freshservice category)");
-  assert.equal(routingLabel({ recommended_team: "No active routing", recommended_team_basis: "not_applicable" }), "No active route - ticket closed");
-  assert.equal(routingLabel({ recommended_team: "Unrouted / Review", recommended_team_basis: "unrouted_review" }), "Unrouted - review required");
+  assert.equal(routingLabel({ recommended_team: "Freshservice group 2000241178", recommended_team_basis: "source_group", routing_catalog_validated: false }), "AI team analysis pending");
+  assert.equal(routingLabel({ recommended_team: "INFRA_SYSTEMS", recommended_team_basis: "ai_team", routing_catalog_validated: false }), "AI resolver recommendation - INFRA_SYSTEMS (advisory; catalog mapping pending)");
+  assert.equal(routingLabel({ recommended_team: "INFRA_SYSTEMS", recommended_team_basis: "ai_team", routing_catalog_validated: true }), "AI resolver recommendation - INFRA_SYSTEMS");
+  assert.equal(routingLabel({ recommended_team: "Network Operations", recommended_team_basis: "ai_category", routing_catalog_validated: false }), "Suggested team - Network Operations (catalog validation pending)");
+  assert.equal(routingLabel({ recommended_team: "Application Support", recommended_team_basis: "source_category", routing_catalog_validated: false }), "Suggested team - Application Support (Freshservice category)");
+  assert.equal(routingLabel({ recommended_team: "No active routing", recommended_team_basis: "not_applicable", routing_catalog_validated: false }), "No active route - ticket closed");
+  assert.equal(routingLabel({ recommended_team: "Unrouted / Review", recommended_team_basis: "unrouted_review", routing_catalog_validated: false }), "Unrouted - review required");
   assert.equal(sourceKindLabel({ external_source: "freshservice", ticket_type: "service_request" }), "Freshservice Service Request");
   assert.equal(relatedStrength(0.9, "vector"), "Strong match");
   assert.equal(relatedStrength(0.6, "vector"), "Related");

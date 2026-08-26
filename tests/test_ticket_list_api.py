@@ -9,7 +9,6 @@ from sqlalchemy.pool import StaticPool
 
 from app.backend import main
 from app.backend.database import (
-    AIArtifactRecord,
     Base,
     ExternalUserRecord,
     TicketCommentRecord,
@@ -71,6 +70,14 @@ class TicketListApiTests(unittest.TestCase):
             target.external_requester_id = "requester-100"
             target.external_created_at = created + timedelta(minutes=100)
             target.ai_suggested_category = "Network"
+            target.ai_suggested_team = "INFRA_SYSTEMS"
+            target.ai_secondary_team = None
+            target.ai_routing_confidence = 0.94
+            target.ai_business_context = "UNKNOWN"
+            target.ai_routing_scope = "service_wide"
+            target.ai_affected_service = "database platform"
+            target.ai_failure_domain = "replication failure"
+            target.ai_routing_reason = "Replication lag is observed on the database platform."
             target.ai_status = "completed"
             for index, subject in zip(
                 (90, 91, 92, 93),
@@ -88,6 +95,23 @@ class TicketListApiTests(unittest.TestCase):
             # from user input were not escaped.
             tickets[101].external_id = "INCX100A"
             db.add_all(tickets)
+            db.flush()
+            main._record_ai_artifact(
+                db,
+                target,
+                "route",
+                {
+                    "primary_group": target.ai_suggested_team,
+                    "secondary_group": target.ai_secondary_team,
+                    "confidence": target.ai_routing_confidence,
+                    "business_context": target.ai_business_context,
+                    "scope": target.ai_routing_scope,
+                    "affected_service": target.ai_affected_service,
+                    "failure_domain": target.ai_failure_domain,
+                    "reason": target.ai_routing_reason,
+                },
+                "unused",
+            )
             db.add(ExternalUserRecord(
                 id="external-requester-100",
                 binding_id="legacy",
@@ -225,9 +249,9 @@ class TicketListApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual([ticket["id"] for ticket in response.json()], ["ticket-100"])
         self.assertEqual(response.json()[0]["assignee_name"], "Bob Agent")
-        self.assertEqual(response.json()[0]["recommended_team"], "Network Operations")
-        self.assertEqual(response.json()[0]["recommended_team_basis"], "ai_category")
-        self.assertEqual(response.json()[0]["routing_status"], "legacy_ai_category")
+        self.assertEqual(response.json()[0]["recommended_team"], "INFRA_SYSTEMS")
+        self.assertEqual(response.json()[0]["recommended_team_basis"], "ai_team")
+        self.assertEqual(response.json()[0]["routing_status"], "ai_team_recommendation")
         self.assertFalse(response.json()[0]["routing_catalog_validated"])
         self.assertEqual(response.json()[0]["requester_name"], "Riley Requester")
         self.assertEqual(response.json()[0]["requester_email"], "riley.requester@example.com")
@@ -237,11 +261,11 @@ class TicketListApiTests(unittest.TestCase):
             "2026-01-01T15:20:00",
         )
 
-    def test_team_is_unrouted_when_ai_category_is_missing_or_stale(self):
+    def test_team_requires_a_complete_current_route_artifact(self):
         ready = self.client.get("/tickets/ticket-100").json()
         unrouted = self.client.get("/tickets/ticket-099").json()
 
-        self.assertEqual(ready["recommended_team"], "Network Operations")
+        self.assertEqual(ready["recommended_team"], "INFRA_SYSTEMS")
         self.assertEqual(unrouted["recommended_team"], "Unrouted / Review")
         self.assertEqual(unrouted["recommended_team_basis"], "unrouted_review")
         self.assertEqual(unrouted["routing_status"], "unrouted_review")
@@ -250,32 +274,43 @@ class TicketListApiTests(unittest.TestCase):
             "untrusted_ai_status",
         )
 
-    def test_current_triage_keeps_route_while_later_artifact_is_queued(self):
+    def test_current_route_remains_projected_while_later_artifact_is_queued(self):
         with self.session_factory() as db:
             ticket = db.get(TicketRecord, "ticket-099")
-            ticket.ai_suggested_category = "Hardware"
-            ticket.ai_reasoning = "scope: one user; workplace device issue"
+            ticket.ai_suggested_team = "APP_WEB"
+            ticket.ai_secondary_team = None
+            ticket.ai_routing_confidence = 0.89
+            ticket.ai_business_context = "UNKNOWN"
+            ticket.ai_routing_scope = "single_user"
+            ticket.ai_affected_service = "support portal"
+            ticket.ai_failure_domain = "web application failure"
+            ticket.ai_routing_reason = "The failure is observed in the support portal."
             ticket.ai_status = "queued"
             ticket.ai_requested_artifacts = "summary"
             db.flush()
-            db.add(AIArtifactRecord(
-                ticket_id=ticket.id,
-                artifact="triage",
-                input_hash=main._artifact_input_hash(ticket, "triage"),
-                pipeline_version=main.AI_PIPELINE_VERSION,
-                provider="custom",
-                model=main._llm_cache_identity(),
-                synthetic=False,
-                content_hash="current-triage",
-                active=True,
-            ))
+            main._record_ai_artifact(
+                db,
+                ticket,
+                "route",
+                {
+                    "primary_group": "APP_WEB",
+                    "secondary_group": None,
+                    "confidence": 0.89,
+                    "business_context": "UNKNOWN",
+                    "scope": "single_user",
+                    "affected_service": "support portal",
+                    "failure_domain": "web application failure",
+                    "reason": "The failure is observed in the support portal.",
+                },
+                "unused",
+            )
             db.commit()
 
         routed = self.client.get("/tickets/ticket-099").json()
 
-        self.assertEqual(routed["recommended_team"], "Workplace Technology")
-        self.assertEqual(routed["recommended_team_basis"], "ai_category")
-        self.assertEqual(routed["routing_status"], "legacy_ai_category")
+        self.assertEqual(routed["recommended_team"], "APP_WEB")
+        self.assertEqual(routed["recommended_team_basis"], "ai_team")
+        self.assertEqual(routed["routing_status"], "ai_team_recommendation")
 
     def test_enterprise_and_development_tickets_never_default_to_service_desk(self):
         for index in (90, 91, 92, 93):
@@ -285,43 +320,52 @@ class TicketListApiTests(unittest.TestCase):
                 self.assertEqual(ticket["recommended_team_basis"], "unrouted_review")
                 self.assertEqual(
                     ticket["routing_abstention_reason"],
-                    "unsupported_ai_category",
+                    "untrusted_ai_status",
                 )
                 self.assertNotEqual(ticket["recommended_team"], "Service Desk")
 
-    def test_team_mapping_uses_only_valid_ai_issue_type(self):
-        expected = {
-            "Network": "Network Operations",
-            "Access Request": "Identity and Access",
-            "Hardware": "Workplace Technology",
-            "Software": "Application Support",
-        }
-        for issue_type, team in expected.items():
-            with self.subTest(issue_type=issue_type):
-                self.assertEqual(main.intel.recommended_team(issue_type, "completed"), (team, "ai_category"))
+    def test_team_projection_uses_only_current_closed_set_resolver_codes(self):
+        for resolver_group in main.intel.AI_RESOLVER_TEAMS:
+            with self.subTest(resolver_group=resolver_group):
+                self.assertEqual(
+                    main.intel.recommended_team(
+                        None,
+                        "completed",
+                        ai_suggested_team=resolver_group,
+                        ai_evidence_current=True,
+                    ),
+                    (resolver_group, "ai_team"),
+                )
         self.assertEqual(
-            main.intel.recommended_team("Other", "completed"),
+            main.intel.recommended_team(
+                None,
+                "completed",
+                ai_suggested_team="Network Operations",
+                ai_evidence_current=True,
+            ),
             ("Unrouted / Review", "unrouted_review"),
         )
         self.assertEqual(
-            main.intel.recommended_team("Network", "stale"),
-            ("Unrouted / Review", "unrouted_review"),
-        )
-        self.assertEqual(
-            main.intel.recommended_team("Network", None),
+            main.intel.recommended_team(
+                None,
+                "completed",
+                ai_suggested_team="APP_WEB",
+                ai_evidence_current=False,
+            ),
             ("Unrouted / Review", "unrouted_review"),
         )
 
-    def test_routing_prefers_ai_team_over_source_group_and_skips_closed_tickets(self):
+    def test_routing_uses_current_route_not_source_assignment_or_category(self):
         assigned = main.intel.team_routing_decision(
-            "Software",
+            None,
             "completed",
-            ai_suggested_team="Application Support",
+            ai_suggested_team="APP_JDE",
             source_group_id="2000245797",
             source_category="E1 App",
             ticket_status="Open",
+            ai_evidence_current=True,
         )
-        self.assertEqual(assigned.recommended_team, "Application Support")
+        self.assertEqual(assigned.recommended_team, "APP_JDE")
         self.assertEqual(assigned.basis, "ai_team")
         self.assertEqual(assigned.status, "ai_team_recommendation")
         self.assertIsNone(assigned.abstention_reason)
@@ -332,9 +376,10 @@ class TicketListApiTests(unittest.TestCase):
             source_category="Hardware - Printers",
             ticket_status="Open",
         )
-        self.assertEqual(source.recommended_team, "Workplace Technology")
-        self.assertEqual(source.basis, "source_category")
-        self.assertEqual(source.status, "source_category_suggestion")
+        self.assertEqual(source.recommended_team, "Unrouted / Review")
+        self.assertEqual(source.basis, "unrouted_review")
+        self.assertEqual(source.status, "unrouted_review")
+        self.assertEqual(source.abstention_reason, "untrusted_ai_status")
 
         ambiguous = main.intel.team_routing_decision(
             "Other",
@@ -343,7 +388,7 @@ class TicketListApiTests(unittest.TestCase):
             ticket_status="Open",
         )
         self.assertEqual(ambiguous.recommended_team, "Unrouted / Review")
-        self.assertEqual(ambiguous.abstention_reason, "unsupported_ai_category")
+        self.assertEqual(ambiguous.abstention_reason, "untrusted_ai_status")
 
         closed = main.intel.team_routing_decision(
             None,

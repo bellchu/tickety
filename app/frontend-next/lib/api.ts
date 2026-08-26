@@ -57,6 +57,67 @@ async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
   return (await fetchAPIResponse<T>(path, options)).data;
 }
 
+const API_RESOLVER_GROUPS = new Set([
+  "INFRA_HELPDESK", "INFRA_NETWORK", "INFRA_SYSTEMS", "INFRA_ARCH",
+  "APP_CRM_ALMO", "APP_CRM_JAM", "APP_RPA", "APP_SQL", "APP_JDE",
+  "APP_JDE_BA", "APP_KORBER", "APP_AS400", "APP_WEB", "APP_EDI_API",
+  "APP_PM",
+]);
+const ROUTE_LINE_BREAKS = [
+  "\n", "\r", "\v", "\f", "\u001c", "\u001d", "\u001e", "\u0085", "\u2028", "\u2029",
+];
+
+function isResolverRouteText(value: unknown, maxLength: number): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= maxLength
+    && value === value.trim()
+    && !ROUTE_LINE_BREAKS.some((separator) => value.includes(separator));
+}
+
+function isResolverRouteResponse(value: unknown): value is import("./types").RouteRecommendation {
+  if (typeof value !== "object" || value === null) return false;
+  const route = value as Record<string, unknown>;
+  const exactKeys = [
+    "primary_group", "secondary_group", "confidence", "business_context",
+    "scope", "affected_service", "failure_domain", "reason",
+  ];
+  const unknownEvidence = [route.affected_service, route.failure_domain].some(
+    (item) => typeof item === "string" && item.toLowerCase() === "unknown",
+  );
+  const selectedGroups = [route.primary_group, route.secondary_group];
+  return Object.keys(route).length === exactKeys.length
+    && exactKeys.every((key) => Object.prototype.hasOwnProperty.call(route, key))
+    && typeof route.primary_group === "string"
+    && API_RESOLVER_GROUPS.has(route.primary_group)
+    && (route.secondary_group === null || (
+      typeof route.secondary_group === "string"
+      && API_RESOLVER_GROUPS.has(route.secondary_group)
+    ))
+    && route.secondary_group !== route.primary_group
+    && route.secondary_group !== "INFRA_HELPDESK"
+    && typeof route.confidence === "number"
+    && Number.isFinite(route.confidence)
+    && route.confidence >= 0
+    && route.confidence <= 1
+    && (!unknownEvidence || route.confidence < 0.60)
+    && ["ALMO", "JAM", "UNKNOWN"].includes(String(route.business_context))
+    && (!selectedGroups.includes("APP_CRM_ALMO") || route.business_context === "ALMO")
+    && (!selectedGroups.includes("APP_CRM_JAM") || route.business_context === "JAM")
+    && ["single_user", "multiple_users", "service_wide", "unknown"].includes(String(route.scope))
+    && isResolverRouteText(route.affected_service, 255)
+    && isResolverRouteText(route.failure_domain, 255)
+    && isResolverRouteText(route.reason, 1_000);
+}
+
+async function fetchResolverRoute(path: string, options?: RequestInit) {
+  const data = await fetchAPI<unknown>(path, options);
+  if (!isResolverRouteResponse(data)) {
+    throw new APIError("Invalid resolver routing response", 502);
+  }
+  return data;
+}
+
 function reportPath(path: string, filters: import("./types").ReportFilters): string {
   const params = new URLSearchParams({
     start_at: filters.startAt,
@@ -381,7 +442,11 @@ export const api = {
       `/intelligence/health/${encodeURIComponent(reporter)}?window_days=${windowDays}`
     ),
   getIntelRoute: (ticketId: string) =>
-    fetchAPI<import("./types").RouteRecommendation>(`/intelligence/route/${ticketId}`),
+    fetchResolverRoute(`/intelligence/route/${ticketId}`),
+  generateTicketRoute: (ticketId: string, force = false) =>
+    fetchResolverRoute(`/tickets/${ticketId}/route?force=${force ? 1 : 0}`, {
+      method: "POST",
+    }),
   generateTicketSummary: (ticketId: string, force = false) =>
     fetchAPI<import("./types").TicketSummary>(
       `/tickets/${ticketId}/summary?force=${force ? 1 : 0}`,

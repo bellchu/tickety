@@ -19,10 +19,15 @@ from app.backend import main, sync_worker, ticket_vectors
 from app.backend import intelligence
 from app.backend.ai_contracts import (
     ResolutionAnalysis,
+    ResolverRoutingAnalysis,
     TicketSummary,
     TriageAnalysis,
 )
-from app.backend.ai_state import invalidate_ticket_ai, invalidate_ticket_resolution
+from app.backend.ai_state import (
+    invalidate_ticket_ai,
+    invalidate_ticket_resolution,
+    invalidate_ticket_routing,
+)
 from app.backend.database import (
     AIArtifactRecord,
     AIRequestBucketRecord,
@@ -50,6 +55,21 @@ def _completion(payload):
         choices=[SimpleNamespace(message=SimpleNamespace(content=payload))],
         usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
     )
+
+
+def _resolver_route(**overrides):
+    payload = {
+        "primary_group": "INFRA_HELPDESK",
+        "secondary_group": None,
+        "confidence": 0.92,
+        "business_context": "UNKNOWN",
+        "scope": "single_user",
+        "affected_service": "printer",
+        "failure_domain": "endpoint device failure",
+        "reason": "One user's printer reports a paper jam.",
+    }
+    payload.update(overrides)
+    return payload
 
 
 class LLMContractTests(unittest.IsolatedAsyncioTestCase):
@@ -143,7 +163,7 @@ class LLMContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_oversized_raw_prompt_fails_closed_before_provider_dispatch(self):
         provider = AsyncMock(return_value=_completion(
             '{"sentiment":"Neutral","category":"Other","priority":"P3",'
-            '"mood":"neutral","action":"respond","recommended_team":"Application Support",'
+            '"mood":"neutral","action":"respond",'
             '"reasoning":"scope: single user; routine request"}'
         ))
         with (
@@ -171,7 +191,7 @@ class LLMContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_custom_provider_receives_json_object_mode(self):
         provider = AsyncMock(return_value=_completion(
             '{"sentiment":"Neutral","category":"Other","priority":"P3",'
-            '"mood":"neutral","action":"respond","recommended_team":"Application Support",'
+            '"mood":"neutral","action":"respond",'
             '"reasoning":"scope: single user; routine request"}'
         ))
         with (
@@ -276,7 +296,7 @@ class LLMContractTests(unittest.IsolatedAsyncioTestCase):
             active -= 1
             return _completion(
                 '{"sentiment":"Neutral","category":"Other","priority":"P3",'
-                '"mood":"neutral","action":"respond","recommended_team":"Application Support",'
+                '"mood":"neutral","action":"respond",'
                 '"reasoning":"scope: single user; routine request"}'
             )
 
@@ -351,7 +371,6 @@ class LLMContractTests(unittest.IsolatedAsyncioTestCase):
             _completion(
                 '{"sentiment":"Neutral","category":"Other","priority":"P3",'
                 '"mood":"neutral","action":"respond",'
-                '"recommended_team":"Application Support",'
                 '"reasoning":"scope: single user; routine request"}'
             ),
         ])
@@ -457,6 +476,13 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self.engine.dispose()
 
+    def _persist_current_route(self, db, ticket, **overrides):
+        route = _resolver_route(**overrides)
+        main._apply_ticket_routing(ticket, route)
+        db.flush()
+        main._record_ai_artifact(db, ticket, "route", route, "unused")
+        return route
+
     async def test_repeated_unchanged_analysis_uses_persisted_cache(self):
         class FakeLLM:
             model_name = "custom/test"
@@ -484,6 +510,8 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
                         "escalation_advice": "Escalate to hardware support if the path cannot be cleared safely.",
                         "preventive_note": "Use supported paper stock.",
                     }
+                if response_model is ResolverRoutingAnalysis:
+                    return _resolver_route()
                 raise AssertionError(response_model)
 
         fake = FakeLLM()
@@ -500,7 +528,7 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(first["cached"])
         self.assertTrue(second["cached"])
-        self.assertEqual(first_call_count, 3)
+        self.assertEqual(first_call_count, 4)
         self.assertEqual(fake.calls, first_call_count)
 
     async def test_synthetic_artifact_is_explicit_and_cannot_change_priority(self):
@@ -553,6 +581,176 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         finally:
             main.engine.llm = old_llm
 
+    async def _assert_route_survives_triage_failure(
+        self,
+        triage_error,
+        *,
+        expected_error_code,
+        expected_status="queued",
+        expected_requested_artifacts="triage",
+        expected_attempts=1,
+    ):
+        route_payload = _resolver_route(
+            primary_group="INFRA_NETWORK",
+            confidence=0.91,
+            scope="multiple_users",
+            affected_service="corporate network",
+            failure_domain="shared network failure",
+            reason="Multiple users report the same network outage.",
+        )
+
+        class RouteFirstLLM:
+            model_name = "custom/test"
+            is_mock = False
+            allow_synthetic = False
+
+            def __init__(self):
+                self.models = []
+
+            async def analyze(self, _prompt, *, response_model=None, **_kwargs):
+                self.models.append(response_model)
+                if response_model is ResolverRoutingAnalysis:
+                    return route_payload
+                if response_model is TriageAnalysis:
+                    raise triage_error
+                raise AssertionError(response_model)
+
+        fake = RouteFirstLLM()
+        old_llm = main.engine.llm
+        main.engine.llm = fake
+        try:
+            with self.session_factory() as db:
+                ticket = db.get(TicketRecord, "ticket-1")
+                with self.assertRaises(type(triage_error)):
+                    await main._run_ticket_analysis(
+                        ticket,
+                        db,
+                        artifacts={"triage", "route"},
+                    )
+        finally:
+            main.engine.llm = old_llm
+
+        self.assertEqual(
+            fake.models,
+            [ResolverRoutingAnalysis, TriageAnalysis],
+        )
+        with self.session_factory() as db:
+            ticket = db.get(TicketRecord, "ticket-1")
+            self.assertEqual(ticket.ai_suggested_team, "INFRA_NETWORK")
+            self.assertIsNone(ticket.ai_secondary_team)
+            self.assertEqual(ticket.ai_routing_confidence, 0.91)
+            self.assertEqual(ticket.ai_business_context, "UNKNOWN")
+            self.assertEqual(ticket.ai_routing_scope, "multiple_users")
+            self.assertEqual(ticket.ai_affected_service, "corporate network")
+            self.assertEqual(ticket.ai_failure_domain, "shared network failure")
+            self.assertEqual(
+                ticket.ai_routing_reason,
+                "Multiple users report the same network outage.",
+            )
+            self.assertIsNone(ticket.ai_reasoning)
+            self.assertEqual(ticket.ai_status, expected_status)
+            self.assertEqual(ticket.ai_error, f"triage:{expected_error_code}")
+            self.assertEqual(
+                ticket.ai_requested_artifacts,
+                expected_requested_artifacts,
+            )
+            self.assertEqual(ticket.ai_attempts, expected_attempts)
+            if expected_status == "queued":
+                self.assertIsNotNone(ticket.ai_next_attempt_at)
+            else:
+                self.assertIsNone(ticket.ai_next_attempt_at)
+            active = db.query(AIArtifactRecord).filter_by(
+                ticket_id=ticket.id,
+                active=True,
+            ).all()
+            self.assertEqual([artifact.artifact for artifact in active], ["route"])
+
+    async def test_valid_route_survives_invalid_triage_and_is_not_retried(self):
+        await self._assert_route_survives_triage_failure(
+            LLMInvalidOutputError("invalid triage contract"),
+            expected_error_code="invalid_output",
+        )
+
+    async def test_valid_route_survives_filtered_triage_and_is_not_retried(self):
+        await self._assert_route_survives_triage_failure(
+            LLMContentFilteredError("triage content policy"),
+            expected_error_code="content_filtered",
+            expected_status="partial",
+            expected_requested_artifacts=None,
+            expected_attempts=0,
+        )
+
+    async def test_failed_route_remains_retryable_after_triage_succeeds(self):
+        class RouteFailureLLM:
+            model_name = "custom/test"
+            is_mock = False
+            allow_synthetic = False
+
+            def __init__(self):
+                self.models = []
+
+            async def analyze(self, _prompt, *, response_model=None, **_kwargs):
+                self.models.append(response_model)
+                if response_model is ResolverRoutingAnalysis:
+                    raise LLMInvalidOutputError("invalid resolver route")
+                if response_model is TriageAnalysis:
+                    return {
+                        "sentiment": "Moderate",
+                        "category": "Hardware",
+                        "priority": "P3",
+                        "mood": "concerned",
+                        "action": "route",
+                        "reasoning": "scope: single user; printer is blocked",
+                    }
+                raise AssertionError(response_model)
+
+        fake = RouteFailureLLM()
+        old_llm = main.engine.llm
+        main.engine.llm = fake
+        try:
+            with (
+                self.session_factory() as db,
+                patch.object(
+                    ticket_vectors,
+                    "refresh_ticket_documents",
+                    new=AsyncMock(return_value=0),
+                ),
+            ):
+                ticket = db.get(TicketRecord, "ticket-1")
+                result = await main._run_ticket_analysis(
+                    ticket,
+                    db,
+                    artifacts={"triage", "route"},
+                )
+        finally:
+            main.engine.llm = old_llm
+
+        self.assertEqual(
+            fake.models,
+            [ResolverRoutingAnalysis, TriageAnalysis],
+        )
+        self.assertEqual(
+            result["errors"],
+            [{"step": "route", "error": "invalid_output"}],
+        )
+        self.assertIsNone(result["route"])
+        with self.session_factory() as db:
+            ticket = db.get(TicketRecord, "ticket-1")
+            self.assertEqual(
+                ticket.ai_reasoning,
+                "scope: single user; printer is blocked",
+            )
+            self.assertIsNone(ticket.ai_suggested_team)
+            self.assertEqual(ticket.ai_status, "queued")
+            self.assertEqual(ticket.ai_error, "route:invalid_output")
+            self.assertEqual(ticket.ai_requested_artifacts, "route")
+            self.assertEqual(ticket.ai_attempts, 1)
+            active = db.query(AIArtifactRecord).filter_by(
+                ticket_id=ticket.id,
+                active=True,
+            ).all()
+            self.assertEqual([artifact.artifact for artifact in active], ["triage"])
+
     async def test_partial_analysis_classifies_and_queues_only_failed_artifact(self):
         class PartialLLM:
             model_name = "custom/test"
@@ -582,6 +780,8 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
                         "escalation_advice": "Escalate if the path cannot be cleared safely.",
                         "preventive_note": "Use supported paper stock.",
                     }
+                if response_model is ResolverRoutingAnalysis:
+                    return _resolver_route()
                 raise AssertionError(response_model)
 
         old_llm = main.engine.llm
@@ -660,6 +860,183 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(ticket.ai_attempts, 0)
             self.assertIsNone(ticket.ai_requested_artifacts)
             self.assertIsNone(ticket.ai_next_attempt_at)
+
+    async def test_mixed_content_filter_and_transient_retries_only_transient_artifact(self):
+        class MixedFailureLLM:
+            model_name = "custom/test"
+            is_mock = False
+            allow_synthetic = False
+
+            def __init__(self):
+                self.summary_calls = 0
+                self.route_calls = 0
+
+            async def analyze(self, _prompt, *, response_model=None, **_kwargs):
+                if response_model is TicketSummary:
+                    self.summary_calls += 1
+                    raise LLMContentFilteredError("content policy")
+                if response_model is ResolverRoutingAnalysis:
+                    self.route_calls += 1
+                    if self.route_calls == 1:
+                        raise LLMInvalidOutputError("invalid resolver route")
+                    return _resolver_route()
+                raise AssertionError(response_model)
+
+        fake = MixedFailureLLM()
+        old_llm = main.engine.llm
+        main.engine.llm = fake
+        try:
+            with (
+                self.session_factory() as db,
+                patch.object(
+                    ticket_vectors,
+                    "refresh_ticket_documents",
+                    new=AsyncMock(return_value=0),
+                ),
+            ):
+                ticket = db.get(TicketRecord, "ticket-1")
+                ticket.ai_reasoning = "scope: one user; triage remains useful"
+                db.commit()
+                result = await main._run_ticket_analysis(
+                    ticket,
+                    db,
+                    force=True,
+                    artifacts={"summary", "route"},
+                )
+
+                ticket = db.get(TicketRecord, "ticket-1")
+                self.assertEqual(
+                    result["errors"],
+                    [
+                        {"step": "summary", "error": "content_filtered"},
+                        {"step": "route", "error": "invalid_output"},
+                    ],
+                )
+                self.assertEqual(ticket.ai_status, "queued")
+                self.assertEqual(
+                    ticket.ai_error,
+                    "summary:content_filtered,route:invalid_output",
+                )
+                self.assertEqual(ticket.ai_requested_artifacts, "route")
+                self.assertEqual(ticket.ai_attempts, 1)
+                self.assertIsNotNone(ticket.ai_next_attempt_at)
+
+                retry_artifacts = set(ticket.ai_requested_artifacts.split(","))
+                await main._run_ticket_analysis(
+                    ticket,
+                    db,
+                    force=True,
+                    artifacts=retry_artifacts,
+                )
+        finally:
+            main.engine.llm = old_llm
+
+        self.assertEqual(fake.summary_calls, 1)
+        self.assertEqual(fake.route_calls, 2)
+        with self.session_factory() as db:
+            ticket = db.get(TicketRecord, "ticket-1")
+            self.assertEqual(ticket.ai_suggested_team, "INFRA_HELPDESK")
+            self.assertEqual(ticket.ai_error, "summary:content_filtered")
+            self.assertIsNone(ticket.ai_requested_artifacts)
+            self.assertEqual(ticket.ai_attempts, 0)
+
+    async def test_mixed_terminal_capacity_and_transient_keep_independent_retries(self):
+        class MixedFailureLLM:
+            model_name = "custom/test"
+            is_mock = False
+            allow_synthetic = False
+
+            def __init__(self):
+                self.summary_calls = 0
+                self.resolution_calls = 0
+                self.route_calls = 0
+
+            async def analyze(self, _prompt, *, response_model=None, **_kwargs):
+                if response_model is TicketSummary:
+                    self.summary_calls += 1
+                    raise LLMInvalidInputError("summary input rejected")
+                if response_model is ResolutionAnalysis:
+                    self.resolution_calls += 1
+                    if self.resolution_calls == 1:
+                        raise LLMCapacityError("provider capacity", 600)
+                    return {
+                        "root_cause_hypothesis": "Paper is obstructing the feed path.",
+                        "resolution_steps": [
+                            "Power off the printer and clear the documented feed path."
+                        ],
+                        "confidence": "medium",
+                        "estimated_effort": "low",
+                        "escalation_advice": "Escalate if the path cannot be cleared safely.",
+                        "preventive_note": "Use supported paper stock.",
+                    }
+                if response_model is ResolverRoutingAnalysis:
+                    self.route_calls += 1
+                    if self.route_calls == 1:
+                        raise LLMInvalidOutputError("invalid resolver route")
+                    return _resolver_route()
+                raise AssertionError(response_model)
+
+        fake = MixedFailureLLM()
+        old_llm = main.engine.llm
+        main.engine.llm = fake
+        before_attempt = datetime.utcnow()
+        try:
+            with (
+                self.session_factory() as db,
+                patch.object(
+                    ticket_vectors,
+                    "refresh_ticket_documents",
+                    new=AsyncMock(return_value=0),
+                ),
+            ):
+                ticket = db.get(TicketRecord, "ticket-1")
+                ticket.ai_reasoning = "scope: one user; triage remains useful"
+                db.commit()
+                result = await main._run_ticket_analysis(
+                    ticket,
+                    db,
+                    force=True,
+                    artifacts={"summary", "resolution", "route"},
+                )
+
+                ticket = db.get(TicketRecord, "ticket-1")
+                self.assertEqual(
+                    result["errors"],
+                    [
+                        {"step": "summary", "error": "invalid_input"},
+                        {"step": "resolution", "error": "provider_capacity"},
+                        {"step": "route", "error": "invalid_output"},
+                    ],
+                )
+                self.assertEqual(ticket.ai_status, "queued")
+                self.assertIn("summary:invalid_input", ticket.ai_error.split(","))
+                self.assertEqual(ticket.ai_requested_artifacts, "resolution,route")
+                self.assertEqual(ticket.ai_attempts, 1)
+                self.assertGreaterEqual(
+                    ticket.ai_next_attempt_at,
+                    before_attempt + timedelta(seconds=599),
+                )
+
+                retry_artifacts = set(ticket.ai_requested_artifacts.split(","))
+                await main._run_ticket_analysis(
+                    ticket,
+                    db,
+                    force=True,
+                    artifacts=retry_artifacts,
+                )
+        finally:
+            main.engine.llm = old_llm
+
+        self.assertEqual(fake.summary_calls, 1)
+        self.assertEqual(fake.resolution_calls, 2)
+        self.assertEqual(fake.route_calls, 2)
+        with self.session_factory() as db:
+            ticket = db.get(TicketRecord, "ticket-1")
+            self.assertEqual(ticket.ai_error, "summary:invalid_input")
+            self.assertIsNone(ticket.ai_requested_artifacts)
+            self.assertEqual(ticket.ai_attempts, 0)
+            self.assertIsNotNone(ticket.recommended_solution)
+            self.assertEqual(ticket.ai_suggested_team, "INFRA_HELPDESK")
 
     async def test_refresh_failure_uses_the_same_targeted_retry_boundary(self):
         old_llm = main.engine.llm
@@ -927,6 +1304,15 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
                         "escalation_advice": "Escalate if the runbook does not restore service.",
                         "preventive_note": "Monitor the affected segment.",
                     }
+                if response_model is ResolverRoutingAnalysis:
+                    return _resolver_route(
+                        primary_group="INFRA_NETWORK",
+                        confidence=0.88,
+                        scope="multiple_users",
+                        affected_service="corporate network",
+                        failure_domain="shared network failure",
+                        reason="Multiple users report changed network symptoms.",
+                    )
                 raise AssertionError(response_model)
 
         fake = ChangingLLM()
@@ -1174,6 +1560,7 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
             ticket.recommended_solution = "{}"
             ticket.ai_status = "triage_completed"
             ticket.ai_error = "summary:content_filtered"
+            self._persist_current_route(db, ticket)
             db.commit()
         process = AsyncMock()
         with (
@@ -1354,9 +1741,7 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
     def test_worker_never_auto_selects_anonymous_portal_ticket(self):
         with self.session_factory() as db:
             existing = db.get(TicketRecord, "ticket-1")
-            existing.ai_reasoning = "current triage"
-            existing.summary = "current summary"
-            existing.recommended_solution = "{}"
+            db.delete(existing)
             db.add(TicketRecord(
                 id="portal-untrusted",
                 subject="Anonymous input",
@@ -1381,9 +1766,7 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
     def test_worker_processes_portal_ticket_only_after_explicit_queue(self):
         with self.session_factory() as db:
             existing = db.get(TicketRecord, "ticket-1")
-            existing.ai_reasoning = "current triage"
-            existing.summary = "current summary"
-            existing.recommended_solution = "{}"
+            db.delete(existing)
             db.add(TicketRecord(
                 id="portal-approved",
                 subject="Reviewed portal ticket",
@@ -1496,6 +1879,143 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 db.get(TicketRecord, "ticket-1").ai_requested_artifacts,
                 "summary",
             )
+
+    def test_worker_preserves_summary_and_resolution_priority_over_route_only_gaps(self):
+        with self.session_factory() as db:
+            db.delete(db.get(TicketRecord, "ticket-1"))
+            db.add_all([
+                TicketRecord(
+                    id="summary-gap",
+                    subject="Summary gap",
+                    priority="P4",
+                    ai_reasoning="current triage",
+                    summary=None,
+                    recommended_solution="{}",
+                    ai_status="partial",
+                ),
+                TicketRecord(
+                    id="resolution-gap",
+                    subject="Resolution gap",
+                    priority="P4",
+                    ai_reasoning="current triage",
+                    summary="current summary",
+                    recommended_solution=None,
+                    ai_status="partial",
+                ),
+                TicketRecord(
+                    id="higher-priority-route-gap",
+                    subject="Route gap",
+                    priority="P1",
+                    ai_reasoning="current triage",
+                    summary="current summary",
+                    recommended_solution="{}",
+                    ai_status="completed",
+                ),
+            ])
+            db.commit()
+
+        processed = []
+
+        async def capture(ticket, *_args, **_kwargs):
+            processed.append((ticket.id, ticket.ai_requested_artifacts))
+
+        with (
+            patch.dict(
+                os.environ,
+                {"AI_BACKGROUND_TICKETS_PER_SWEEP": "2"},
+                clear=False,
+            ),
+            patch.object(sync_worker, "SessionLocal", self.session_factory),
+            patch.object(
+                sync_worker.settings_module,
+                "automation_enabled",
+                side_effect=lambda key, *_args: key in {
+                    "AUTO_SUMMARIZE_ENABLED",
+                    "AUTO_RESOLVE_ENABLED",
+                    "AUTO_ROUTE_ENABLED",
+                },
+            ),
+            patch.object(
+                sync_worker,
+                "queue_active_routing_backlog",
+                return_value={"enabled": False, "queued": 0},
+            ),
+            patch.object(
+                sync_worker,
+                "queue_recent_automatic_ai",
+                return_value={"lookback_days": 7, "queued": 0},
+            ),
+            patch.object(main, "_auto_process", new=AsyncMock(side_effect=capture)),
+        ):
+            sync_worker._auto_triage_job()
+
+        self.assertEqual(
+            processed,
+            [
+                ("summary-gap", "summary"),
+                ("resolution-gap", "resolution"),
+            ],
+        )
+
+    def test_worker_selects_internal_missing_and_stale_route_only_gaps(self):
+        with self.session_factory() as db:
+            db.delete(db.get(TicketRecord, "ticket-1"))
+            db.add(TicketRecord(
+                id="missing-route",
+                subject="Missing route",
+                ai_reasoning="current triage",
+                summary="current summary",
+                recommended_solution="{}",
+                ai_status="completed",
+            ))
+            stale = TicketRecord(
+                id="stale-route",
+                subject="Stale route",
+                ai_reasoning="current triage",
+                summary="current summary",
+                recommended_solution="{}",
+                ai_status="stale",
+            )
+            db.add(stale)
+            db.flush()
+            self._persist_current_route(db, stale)
+            db.commit()
+
+        processed = []
+
+        async def capture(ticket, *_args, **_kwargs):
+            processed.append((ticket.id, ticket.ai_requested_artifacts))
+
+        with (
+            patch.dict(
+                os.environ,
+                {"AI_BACKGROUND_TICKETS_PER_SWEEP": "2"},
+                clear=False,
+            ),
+            patch.object(sync_worker, "SessionLocal", self.session_factory),
+            patch.object(
+                sync_worker.settings_module,
+                "automation_enabled",
+                side_effect=lambda key, *_args: key == "AUTO_ROUTE_ENABLED",
+            ),
+            patch.object(
+                sync_worker,
+                "queue_active_routing_backlog",
+                return_value={"enabled": False, "queued": 0},
+            ),
+            patch.object(
+                sync_worker,
+                "queue_recent_automatic_ai",
+                return_value={"lookback_days": 7, "queued": 0},
+            ),
+            patch.object(main, "_auto_process", new=AsyncMock(side_effect=capture)),
+        ):
+            sync_worker._auto_triage_job()
+
+        self.assertEqual(
+            set(processed),
+            {("missing-route", "route"), ("stale-route", "route")},
+        )
 
     async def test_worker_rate_defer_cannot_overwrite_live_claim(self):
         with self.session_factory() as db:
@@ -1627,6 +2147,117 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ticket.summary, "valid summary")
         self.assertIsNone(ticket.recommended_solution)
         self.assertEqual(ticket.ai_status, "partial")
+
+    def test_route_invalidation_preserves_queued_summary_retry_state(self):
+        retry_at = datetime.utcnow().replace(microsecond=0) + timedelta(minutes=5)
+        lease_at = retry_at + timedelta(minutes=5)
+        with self.session_factory() as db:
+            ticket = db.get(TicketRecord, "ticket-1")
+            ticket.summary = "A valid summary that must survive route invalidation."
+            ticket.ai_suggested_team = "INFRA_NETWORK"
+            ticket.ai_secondary_team = "APP_EDI_API"
+            ticket.ai_routing_confidence = 0.88
+            ticket.ai_business_context = "UNKNOWN"
+            ticket.ai_routing_scope = "multiple_users"
+            ticket.ai_affected_service = "corporate VPN"
+            ticket.ai_failure_domain = "shared network failure"
+            ticket.ai_routing_reason = "Multiple users cannot establish the VPN."
+            ticket.ai_status = "queued"
+            ticket.ai_requested_artifacts = "summary"
+            ticket.ai_attempts = 3
+            ticket.ai_next_attempt_at = retry_at
+            ticket.ai_claim_id = "stale-route-claim"
+            ticket.ai_lease_expires_at = lease_at
+            db.add_all([
+                AIArtifactRecord(
+                    ticket_id=ticket.id,
+                    artifact="route",
+                    input_hash="a" * 64,
+                    pipeline_version="current-pipeline",
+                    provider="custom",
+                    model="current-model",
+                    synthetic=False,
+                    content_hash="b" * 64,
+                    active=True,
+                ),
+                AIArtifactRecord(
+                    ticket_id=ticket.id,
+                    artifact="summary",
+                    input_hash="c" * 64,
+                    pipeline_version="current-pipeline",
+                    provider="custom",
+                    model="current-model",
+                    synthetic=False,
+                    content_hash="d" * 64,
+                    active=True,
+                ),
+            ])
+            db.flush()
+
+            invalidate_ticket_routing(ticket)
+            db.commit()
+
+            ticket = db.get(TicketRecord, "ticket-1")
+            self.assertIsNone(ticket.ai_suggested_team)
+            self.assertIsNone(ticket.ai_secondary_team)
+            self.assertIsNone(ticket.ai_routing_confidence)
+            self.assertIsNone(ticket.ai_business_context)
+            self.assertIsNone(ticket.ai_routing_scope)
+            self.assertIsNone(ticket.ai_affected_service)
+            self.assertIsNone(ticket.ai_failure_domain)
+            self.assertIsNone(ticket.ai_routing_reason)
+            self.assertEqual(
+                ticket.summary,
+                "A valid summary that must survive route invalidation.",
+            )
+            self.assertEqual(ticket.ai_status, "queued")
+            self.assertEqual(ticket.ai_requested_artifacts, "summary")
+            self.assertEqual(ticket.ai_attempts, 3)
+            self.assertEqual(ticket.ai_next_attempt_at, retry_at)
+            self.assertIsNone(ticket.ai_claim_id)
+            self.assertIsNone(ticket.ai_lease_expires_at)
+            active = {
+                row.artifact: row.active
+                for row in db.query(AIArtifactRecord).filter_by(ticket_id=ticket.id)
+            }
+            self.assertEqual(active, {"route": False, "summary": True})
+
+    def test_route_input_ignores_assignment_but_tracks_category_and_business_context(self):
+        ticket = TicketRecord(
+            id="ticket-route-input",
+            subject="ERP transaction rejected",
+            description="The interface delivered the request and JDE rejected it.",
+            reporter="requester@nexora.com",
+            external_requester_email="requester@nexora.com",
+            external_category="E1 App",
+            external_subcategory="Transactions",
+            external_item_category="Sales order",
+            assignee_id="agent-a",
+            external_assignee_id="provider-agent-a",
+            external_group_id="provider-group-a",
+        )
+        original = main._artifact_input_hash(ticket, "route")
+
+        ticket.assignee_id = "agent-b"
+        ticket.external_assignee_id = "provider-agent-b"
+        ticket.external_group_id = "provider-group-b"
+        self.assertEqual(main._artifact_input_hash(ticket, "route"), original)
+
+        ticket.external_category = "EDI / Integrations"
+        category_hash = main._artifact_input_hash(ticket, "route")
+        self.assertNotEqual(category_hash, original)
+
+        with patch.dict(
+            os.environ,
+            {"AI_ROUTING_ALMO_EMAIL_DOMAINS": "almo.example"},
+            clear=False,
+        ):
+            before_context = main._artifact_input_hash(ticket, "route")
+            ticket.external_requester_email = "requester@almo.example"
+            self.assertNotEqual(
+                main._artifact_input_hash(ticket, "route"),
+                before_context,
+            )
 
     def test_invalidation_deactivates_persisted_artifact_provenance(self):
         with self.session_factory() as db:

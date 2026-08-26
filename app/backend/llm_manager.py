@@ -1094,6 +1094,7 @@ class LLMManager:
         self.model_name = raw
         self.provider = resolve_provider(raw)
         self.provider_cfg = PROVIDERS[self.provider]
+        validated_api_base = ""
 
         if self.provider == "foundry":
             auth_method = foundry_auth_method()
@@ -1101,27 +1102,40 @@ class LLMManager:
             self.is_mock = (
                 auth_method == "api_key" and self.api_key in _PLACEHOLDER_VALUES
             )
-            if not self.is_mock:
-                foundry_base = (os.getenv("FOUNDRY_API_BASE") or "").strip()
-                if not foundry_base:
-                    raise ValueError(
-                        "FOUNDRY_API_BASE is required when Microsoft Foundry is configured"
-                    )
+            foundry_base = (os.getenv("FOUNDRY_API_BASE") or "").strip()
+            if not self.is_mock and not foundry_base:
+                raise ValueError(
+                    "FOUNDRY_API_BASE is required when Microsoft Foundry is configured"
+                )
+            if foundry_base:
                 from .settings import _validate_foundry_base_url
 
-                _validate_foundry_base_url(foundry_base)
+                validated_api_base = _validate_foundry_base_url(foundry_base)
         else:
             self.api_key = os.getenv("CUSTOM_API_KEY")
             self.is_mock = self.api_key in _PLACEHOLDER_VALUES
-            if not self.is_mock:
-                custom_base = (os.getenv("CUSTOM_API_BASE") or "").strip()
-                if not custom_base:
-                    raise ValueError(
-                        "CUSTOM_API_BASE is required when Custom AI API is configured"
-                    )
+            custom_base = (os.getenv("CUSTOM_API_BASE") or "").strip()
+            if not self.is_mock and not custom_base:
+                raise ValueError(
+                    "CUSTOM_API_BASE is required when Custom AI API is configured"
+                )
+            if custom_base:
                 from .settings import _validate_llm_base_url
 
-                _validate_llm_base_url(custom_base)
+                validated_api_base = _validate_llm_base_url(custom_base)
+        # Cache identity is a credential-free immutable configuration snapshot.
+        # Settings changes rebuild the manager, while ordinary cache reads must
+        # never resolve DNS or acquire an Entra bearer token.
+        identity_kwargs = {
+            "model": raw.split("/", 1)[1],
+            "custom_llm_provider": "openai",
+        }
+        if validated_api_base:
+            identity_kwargs["api_base"] = validated_api_base
+        self._cache_identity = _provider_cache_identity(
+            self.provider,
+            identity_kwargs,
+        )
         self.allow_synthetic = (
             _enabled(os.getenv("LLM_ALLOW_SYNTHETIC"))
             and (os.getenv("APP_MODE") or "production").strip().lower() != "production"
@@ -1153,11 +1167,8 @@ class LLMManager:
 
     @property
     def cache_identity(self) -> str:
-        """Opaque cache key for the provider configuration used right now."""
-        provider_kwargs = _validated_provider_kwargs(
-            self.provider_cfg["build"](self, self.model_name)
-        )
-        return _provider_cache_identity(self.provider, provider_kwargs)
+        """Opaque cache key for this manager's validated static configuration."""
+        return self._cache_identity
 
     # ── public API ─────────────────────────────────────────────
 
@@ -1555,6 +1566,46 @@ class LLMManager:
             "draft a professional",
             "background ticket database analyst",
         ))
+        if response_name == "ResolverRoutingAnalysis":
+            wide_scope = any(
+                marker in text
+                for marker in (
+                    "all users", "multiple users", "entire team", "whole team",
+                    "site-wide", "company-wide", "organization-wide",
+                    "service outage",
+                )
+            )
+            business_context = (
+                "ALMO"
+                if '"business_context_hint":"almo"' in text
+                else "JAM"
+                if '"business_context_hint":"jam"' in text
+                else "UNKNOWN"
+            )
+            if wide_scope and any(
+                marker in text
+                for marker in ("vpn", "wi-fi", "wifi", "dns", "routing", "packet loss")
+            ):
+                return {
+                    "primary_group": "INFRA_NETWORK",
+                    "secondary_group": None,
+                    "confidence": 0.82,
+                    "business_context": business_context,
+                    "scope": "multiple_users",
+                    "affected_service": "shared network connectivity",
+                    "failure_domain": "shared network path failure",
+                    "reason": "Multiple users are reported affected by a shared connectivity failure.",
+                }
+            return {
+                "primary_group": "INFRA_HELPDESK",
+                "secondary_group": None,
+                "confidence": 0.42,
+                "business_context": business_context,
+                "scope": "unknown",
+                "affected_service": "unknown",
+                "failure_domain": "initial triage required",
+                "reason": "The synthetic provider has insufficient direct failure evidence for specialist routing.",
+            }
         if response_name == "TriageAnalysis" or (
             not non_triage_task
             and (
@@ -1579,7 +1630,6 @@ class LLMManager:
                         "priority": "P2",
                         "mood": "concerned",
                         "action": "route",
-                        "recommended_team": "Network Operations",
                         "reasoning": "scope: single user; VPN access is blocking one requester without evidence of wider impact.",
                     }
                 return {
@@ -1588,7 +1638,6 @@ class LLMManager:
                     "priority": "P1",
                     "mood": "urgent",
                     "action": "escalate",
-                    "recommended_team": "Network Operations",
                     "reasoning": "scope: organization-wide; VPN instability is affecting business operations.",
                 }
             if ("database" in text or "production" in text) and wide_scope:
@@ -1598,7 +1647,6 @@ class LLMManager:
                     "priority": "P1",
                     "mood": "critical",
                     "action": "escalate",
-                    "recommended_team": "Application Support",
                     "reasoning": "scope: customer-facing service; a production outage requires immediate escalation.",
                 }
             if "password" in text or "access" in text:
@@ -1608,7 +1656,6 @@ class LLMManager:
                     "priority": "P4",
                     "mood": "concerned",
                     "action": "respond",
-                    "recommended_team": "Identity and Access",
                     "reasoning": "scope: single user; this is a routine access request with no wider operational impact.",
                 }
             return {
@@ -1617,7 +1664,6 @@ class LLMManager:
                 "priority": "P4",
                 "mood": "neutral",
                 "action": "respond",
-                "recommended_team": "Application Support",
                 "reasoning": "scope: single user; this is a routine request with little present operational impact.",
             }
         elif (
@@ -1661,6 +1707,5 @@ class LLMManager:
             "priority": "P3",
             "mood": "neutral",
             "action": "respond",
-            "recommended_team": "Application Support",
             "reasoning": "Mock response.",
         }
