@@ -488,7 +488,7 @@ export default function AIStatusPage() {
               <input
                 value={searchInput}
                 onChange={(event) => setSearchInput(event.target.value)}
-                placeholder="Ticket subject, Tickety ID, or external ID"
+                placeholder="Ticket subject, Tickety OPS Tower ID, or external ID"
                 className="input-base pl-9"
               />
             </label>

@@ -9,7 +9,7 @@ _ADAPTERS = {}
 
 
 class StandaloneAdapter(BaseITSMAdapter):
-    """No-op adapter for standalone mode — Tickety manages tickets internally."""
+    """No-op adapter for standalone mode — Tickety OPS Tower manages tickets internally."""
 
     provider_name = "standalone"
 
@@ -83,7 +83,7 @@ def configured_provider() -> str:
         and provider != "freshservice"
     ):
         raise ValueError(
-            "Production Tickety runs only as a read-only Freshservice sidecar"
+            "Production Tickety OPS Tower runs only as a read-only Freshservice sidecar"
         )
     return provider
 
@@ -99,7 +99,7 @@ def get_adapter(provider: str = None, *, binding=None) -> BaseITSMAdapter:
         and provider != "freshservice"
     ):
         raise ValueError(
-            "Production Tickety runs only as a read-only Freshservice sidecar"
+            "Production Tickety OPS Tower runs only as a read-only Freshservice sidecar"
         )
     cache_key = provider
     config = None

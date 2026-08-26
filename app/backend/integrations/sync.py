@@ -109,7 +109,7 @@ def active_routing_backlog_enabled() -> bool:
 def ticket_created_within_filter(cutoff: datetime):
     """Return the authoritative creation-time predicate for bounded AI work.
 
-    Freshservice creation time wins whenever it is present. Tickety's local
+    Freshservice creation time wins whenever it is present. Tickety OPS Tower's local
     creation time is only a fallback for records whose provider creation time
     is unavailable; otherwise importing an old provider ticket today would
     incorrectly make it eligible for automatic analysis.
@@ -3072,7 +3072,7 @@ async def async_sync_external_users(
     *,
     binding_id: str = "legacy",
 ) -> dict:
-    """Refresh external profiles without creating or updating Tickety users."""
+    """Refresh external profiles without creating or updating Tickety OPS Tower users."""
     adapter = adapter or get_adapter()
     try:
         raw_users = await adapter.fetch_external_users()

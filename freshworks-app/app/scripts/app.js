@@ -7,16 +7,16 @@
   function fail(error) {
     hide("loading");
     const node = document.getElementById("error");
-    node.textContent = error && error.message ? error.message : "Tickety could not establish a trusted embedded session.";
+    node.textContent = error && error.message ? error.message : "Tickety OPS Tower could not establish a trusted embedded session.";
     show("error");
   }
 
   function parseTemplateResponse(result) {
     if (!result || result.status < 200 || result.status >= 300) {
-      throw new Error("Tickety returned an unsuccessful response.");
+      throw new Error("Tickety OPS Tower returned an unsuccessful response.");
     }
     try { return JSON.parse(result.response || "{}"); }
-    catch { throw new Error("Tickety returned an invalid response."); }
+    catch { throw new Error("Tickety OPS Tower returned an invalid response."); }
   }
 
   function unwrap(data, key) {

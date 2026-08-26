@@ -6,7 +6,7 @@
 
 ---
 
-Tickety — a read-only AI sidekick for an existing ITSM system. Freshservice is the current system of record; Tickety imports tickets and agent data, stores intelligence locally, and never writes back.
+Tickety OPS Tower — a read-only AI sidekick for an existing ITSM system. Freshservice is the current system of record; Tickety OPS Tower imports tickets and agent data, stores intelligence locally, and never writes back.
 
 ## Screenshots
 
@@ -51,7 +51,7 @@ open http://localhost:3000
 This starts the demo configuration, including PostgreSQL and migrations. For
 the fail-closed Docker Compose production entrypoint, fixed Cloudflare Tunnel
 mapping, upgrades, or data-retention instructions, see the
-[deployment guide](docs/deployment.md). Tickety has one production target:
+[deployment guide](docs/deployment.md). Tickety OPS Tower has one production target:
 `https://tickety.nexora.com`.
 
 > **Demo mode is on by default.** Public browsing does not require login. Sign in
@@ -72,7 +72,7 @@ available without changing the public browsing mode.
 
 ## AI APIs
 
-Tickety exposes exactly two AI entries. Microsoft Foundry is the default; a
+Tickety OPS Tower exposes exactly two AI entries. Microsoft Foundry is the default; a
 single simplified Custom AI API is available for another OpenAI-compatible
 endpoint. Named direct-provider and aggregator routes are not accepted.
 
@@ -103,7 +103,7 @@ also provides **Fetch Latest Models** for an immediate refresh.
 
 ### Ticket Intelligence Retrieval
 
-Tickety can maintain a pgvector-backed retrieval index for tickets, public
+Tickety OPS Tower can maintain a pgvector-backed retrieval index for tickets, public
 ticket comments, and knowledge-base articles. This keeps LLM analysis cheap: SQL and
 vector search narrow the database first, then the LLM only sees a short context
 set.
@@ -234,7 +234,7 @@ environment through the ignored `.env` file, then use the audited
 
 For an isolated Freshservice proof of concept, see the [Freshservice trial POC guide](docs/freshservice-trial-poc.md). Trial bindings use a dedicated POC deployment and are never promoted into production.
 
-Production Tickety is a one-way Freshservice sidecar. The provider adapter exposes only reads, the capability manifest permanently marks provider mutations unsupported, and the Freshworks package contains no write template. Manual ticket creation, ticket field updates, bulk lifecycle changes, deletion, and requester-portal submission are demo-only; make authoritative changes in Freshservice. AI summaries, retrieval indexes, recommendations, and other derived artifacts remain local to Tickety.
+Production Tickety OPS Tower is a one-way Freshservice sidecar. The provider adapter exposes only reads, the capability manifest permanently marks provider mutations unsupported, and the Freshworks package contains no write template. Manual ticket creation, ticket field updates, bulk lifecycle changes, deletion, and requester-portal submission are demo-only; make authoritative changes in Freshservice. AI summaries, retrieval indexes, recommendations, and other derived artifacts remain local to Tickety OPS Tower.
 
 Freshservice synchronization is checkpointed and rate-aware. Every sweep reads
 current-day and newly updated tickets first, commits each page before requesting
@@ -250,9 +250,9 @@ Every fetched ticket's Freshservice status is reconciled into
 closed source states are displayed as `Closed`, with provider resolution
 timestamps retained when available.
 
-Identity is also one-way and non-federated: Tickety owns its own users, passwords, sessions, and roles. Freshservice agents and requesters are copied into a separate read-only external directory for ticket context only. Provider sync never creates or updates Tickety users, matches accounts by email/name, grants a Tickety role/session, assigns a local owner, or routes points to a local user.
+Identity is also one-way and non-federated: Tickety OPS Tower owns its own users, passwords, sessions, and roles. Freshservice agents and requesters are copied into a separate read-only external directory for ticket context only. Provider sync never creates or updates Tickety OPS Tower users, matches accounts by email/name, grants a Tickety OPS Tower role/session, assigns a local owner, or routes points to a local user.
 
-Tickety ships in **demo mode** for evaluation with anonymous read access and an
+Tickety OPS Tower ships in **demo mode** for evaluation with anonymous read access and an
 explicitly authenticated administrator feature path. Production remains the
 required mode for private deployments and deployment-managed security controls.
 Set deployment environment/Secret values before starting production workloads:
@@ -328,7 +328,7 @@ through the same provider-wide Foundry budgets as realtime work.
 | SLA | Per-priority clocks, breach detection, escalation risk scoring, compliance reports |
 | Engagement | Impact points, tier promotions (T1&ndash;T8), momentum streaks, recognition badges, leaderboard |
 | Auth / RBAC | Cookie-based sessions, admin / supervisor / agent roles, login page, SSO (OIDC) |
-| Email | Private SendGrid delivery to Tickety/synced agents or synced Freshservice requesters, with server-resolved recipients and per-user limits |
+| Email | Private SendGrid delivery to Tickety OPS Tower/synced agents or synced Freshservice requesters, with server-resolved recipients and per-user limits |
 
 ## API
 
@@ -338,7 +338,7 @@ through the same provider-wide Foundry budgets as realtime work.
 | `POST /tickets` | Demo only: create a local sample ticket |
 | `PATCH /tickets/:id` | Demo only: update a local sample ticket |
 | `GET /tickets/:id/comments` | List comments (public and private) |
-| `POST /tickets/:id/comments` | Add a Tickety-local annotation; never sent to Freshservice |
+| `POST /tickets/:id/comments` | Add a local Tickety OPS Tower annotation; never sent to Freshservice |
 | `GET /tickets/:id/audit` | Audit log for a ticket |
 | `POST /tickets/bulk` | Demo only: bulk-update local sample tickets |
 | `GET /ticket-intelligence/search?q=...` | Retrieve the most relevant ticket/comment/KB snippets for a question |

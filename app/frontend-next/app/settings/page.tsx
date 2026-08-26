@@ -428,7 +428,7 @@ export default function SettingsPage() {
     return (
       <ErrorState
         title="Session status could not be checked"
-        description="Tickety could not determine whether this session may access administration controls."
+        description="Tickety OPS Tower could not determine whether this session may access administration controls."
         actionLabel="Retry session check"
         onRetry={() => void authQuery.refetch()}
         retrying={authQuery.isFetching}
@@ -675,7 +675,7 @@ export default function SettingsPage() {
         {activeTab === "integrations" && (
         <SettingsTabPanel tab="integrations">
         {/* ═══ Ticketing Mode ═══ */}
-        <SettingsSection id="settings-ticketing" title="Freshservice sidecar" subtitle="Tickety imports Freshservice records for local intelligence and never writes back to the system of record">
+        <SettingsSection id="settings-ticketing" title="Freshservice sidecar" subtitle="Tickety OPS Tower imports Freshservice records for local intelligence and never writes back to the system of record">
           <Field label="Provider">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
               {PROVIDER_OPTIONS.map((provider) => {
@@ -851,7 +851,7 @@ export default function SettingsPage() {
         <CategorySection />
 
         {/* ═══ Organization / Branding ═══ */}
-        <SettingsSection id="settings-workspace" title="Organization" subtitle="Customize the workspace name and branding shown across Tickety">
+        <SettingsSection id="settings-workspace" title="Organization" subtitle="Customize the workspace name and branding shown across Tickety OPS Tower">
           <Field label="Organization Name">
             <input type="text" value={form.ORG_NAME || ""} onChange={(e) => handleChange("ORG_NAME", e.target.value)} placeholder="Acme IT Support" className="input-base" />
           </Field>
@@ -899,7 +899,7 @@ export default function SettingsPage() {
               <input type="email" value={form.SENDGRID_FROM_EMAIL || ""} onChange={(event) => handleChange("SENDGRID_FROM_EMAIL", event.target.value)} placeholder="support@example.com" className="input-base" />
             </Field>
             <Field label="Sender name">
-              <input type="text" maxLength={100} value={form.SENDGRID_FROM_NAME || ""} onChange={(event) => handleChange("SENDGRID_FROM_NAME", event.target.value)} placeholder={form.ORG_NAME || "Tickety"} className="input-base" />
+              <input type="text" maxLength={100} value={form.SENDGRID_FROM_NAME || ""} onChange={(event) => handleChange("SENDGRID_FROM_NAME", event.target.value)} placeholder={form.ORG_NAME || "Tickety OPS Tower"} className="input-base" />
             </Field>
             <Field label="Reply-to email">
               <input type="email" value={form.SENDGRID_REPLY_TO_EMAIL || ""} onChange={(event) => handleChange("SENDGRID_REPLY_TO_EMAIL", event.target.value)} placeholder="helpdesk@example.com (optional)" className="input-base" />
@@ -1070,7 +1070,7 @@ export default function SettingsPage() {
           )}
         </SettingsSection>
 
-        <SettingsSection title="User & IAM" subtitle="Manage who can access Tickety and what operational permissions they receive.">
+        <SettingsSection title="User & IAM" subtitle="Manage who can access Tickety OPS Tower and what operational permissions they receive.">
           <div className="rounded-xl border border-linen-400 bg-linen-100 p-4 sm:p-5">
             <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
               <div className="max-w-2xl">
@@ -1623,7 +1623,7 @@ function AgentSection() {
           <div className="min-w-0">
           <p className="text-sm font-semibold text-ink-700">Separate identity domain</p>
           <p className="mt-1 max-w-3xl text-xs leading-5 text-ink-500">
-            This directory is a read-only snapshot for ticket context. Tickety sign-in, roles, passwords, profiles, and local assignments remain controlled only from the local user roster.
+            This directory is a read-only snapshot for ticket context. Tickety OPS Tower sign-in, roles, passwords, profiles, and local assignments remain controlled only from the local user roster.
           </p>
           </div>
         </div>

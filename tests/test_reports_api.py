@@ -260,7 +260,7 @@ class ReportsApiTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["statuses"], ["Closed", "Escalated", "Open"])
         self.assertIn("freshservice", payload["sources"])
-        self.assertIn("Tickety", payload["sources"])
+        self.assertIn("Tickety OPS Tower", payload["sources"])
         self.assertEqual(
             {item["id"] for item in payload["assignees"]},
             {"agent-one", "agent-two"},

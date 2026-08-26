@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure Tickety RAG retrieval against a labelled JSONL dataset.
+"""Measure Tickety OPS Tower RAG retrieval against a labelled JSONL dataset.
 
 Each JSONL row must contain:
   {"question": "...", "expected": [{"source_type": "ticket", "source_id": "..."}]}

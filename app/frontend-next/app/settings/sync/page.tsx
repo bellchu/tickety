@@ -194,7 +194,7 @@ export default function TicketSyncStatusPage() {
 
       {status.last_status === "throttled" && (
         <Alert variant="warning" title="Freshservice requested a pause">
-          Tickety will issue no more provider requests until {formatDate(status.next_retry_at)}. This is a normal rate-protection state, not a failed sync.
+          Tickety OPS Tower will issue no more provider requests until {formatDate(status.next_retry_at)}. This is a normal rate-protection state, not a failed sync.
         </Alert>
       )}
       {status.last_status === "error" && (

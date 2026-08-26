@@ -22,7 +22,7 @@ Usage:
     --expected-full-sha FULL_GIT_SHA --expected-short-sha SHORT_GIT_SHA
   scripts/verify-compose-production.sh --self-test
 
-Verify the fixed Tickety production path:
+Verify the fixed Tickety OPS Tower production path:
   https://tickety.nexora.com
     -> Cloudflare Tunnel
     -> https://localhost:443

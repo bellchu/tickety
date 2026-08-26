@@ -1,4 +1,4 @@
-"""Dedicated production entrypoint for Tickety scheduled jobs."""
+"""Dedicated production entrypoint for Tickety OPS Tower scheduled jobs."""
 
 import signal
 import threading

@@ -151,7 +151,7 @@ class FreshserviceAdapter(BaseITSMAdapter):
         unknown = sorted(set(scopes) - ALLOWED_FRESHSERVICE_OAUTH_SCOPES)
         if unknown:
             raise ValueError(
-                "Freshservice OAuth scopes exceed Tickety's read-only allowlist: "
+                "Freshservice OAuth scopes exceed Tickety OPS Tower's read-only allowlist: "
                 + ", ".join(unknown)
             )
         if "freshservice.tickets.view" not in scopes:

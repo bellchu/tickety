@@ -214,7 +214,7 @@ class EmailRouteTests(unittest.TestCase):
             "APP_MODE": "production",
             "SENDGRID_API_KEY": "SG.route-secret",
             "SENDGRID_FROM_EMAIL": "support@example.com",
-            "SENDGRID_FROM_NAME": "Tickety Support",
+            "SENDGRID_FROM_NAME": "Tickety OPS Tower Support",
             "EMAIL_SENDS_PER_MINUTE": "5",
             "EMAIL_RECIPIENTS_PER_DAY": "500",
         }, clear=False)
@@ -352,7 +352,7 @@ class EmailRouteTests(unittest.TestCase):
             email_service.EmailAddress("requester@example.com", "Requesting User"),
         ])
         self.assertEqual(send.call_args.kwargs["subject"], "Ticket update")
-        self.assertIn("Sent by Admin Sender via Tickety.", send.call_args.kwargs["body"])
+        self.assertIn("Sent by Admin Sender via Tickety OPS Tower.", send.call_args.kwargs["body"])
 
     def test_arbitrary_or_cross_audience_recipient_ids_are_rejected(self):
         with patch.object(main, "send_sendgrid_email", new=AsyncMock()) as send:

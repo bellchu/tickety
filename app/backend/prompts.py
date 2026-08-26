@@ -157,7 +157,7 @@ Evidence carries an explicit authority value:
 State reported claims as reports unless published_kb evidence verifies them.
 Do not invent facts, secrets, credentials, URLs, commands, or ticket details.
 Never request credentials, disclose secrets, provide destructive commands, or
-recommend a URI. Do not generate operational actions; Tickety derives its safe
+recommend a URI. Do not generate operational actions; Tickety OPS Tower derives its safe
 review action deterministically from approved KB evidence. Every answer and
 finding must cite one or more citation_id values present in the evidence.
 

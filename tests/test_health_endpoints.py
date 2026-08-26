@@ -78,6 +78,13 @@ class HealthEndpointTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
 
+    def test_api_and_version_expose_the_rebranded_product_name(self):
+        self.assertEqual(main.app.title, "Tickety OPS Tower")
+        response = self.client.get("/version")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["app"], "Tickety OPS Tower")
+
     def test_all_health_routes_are_public_in_production_auth_mode(self):
         with patch.object(main, "_auth_required_for_request", return_value=True):
             for path in ("/health", "/health/live", "/health/ready"):

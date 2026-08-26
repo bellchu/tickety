@@ -23,7 +23,7 @@ export default function GlobalError({
         <main className="nexora-ambient grid min-h-screen place-items-center p-6">
           <div className="w-full max-w-md rounded-2xl border border-linen-400 bg-white p-7 text-center shadow-[var(--shadow-raised)]">
             <div aria-hidden="true" className="nexora-spectrum mx-auto h-1 w-20 rounded-full" />
-            <h1 className="mt-5 text-xl font-semibold text-ink-700">Tickety needs a fresh start</h1>
+            <h1 className="mt-5 text-xl font-semibold text-ink-700">Tickety OPS Tower needs a fresh start</h1>
             <p className="mt-2 text-sm leading-6 text-ink-500">
               An unexpected application error interrupted this session. Retry without losing your saved service data.
             </p>

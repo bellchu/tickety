@@ -154,15 +154,15 @@ test("missing trusted agent context fails closed before any request", async () =
   expect(document.getElementById("error").textContent).toContain("required installation or agent context");
 });
 
-test("unsuccessful and invalid Tickety responses fail closed", async () => {
+test("unsuccessful and invalid Tickety OPS Tower responses fail closed", async () => {
   const client = baseClient({ id: 99 });
   client.request.invokeTemplate.mockResolvedValueOnce({ status: 403, response: "{}" });
   await loadApp(client);
-  expect(document.getElementById("error").textContent).toBe("Tickety returned an unsuccessful response.");
+  expect(document.getElementById("error").textContent).toBe("Tickety OPS Tower returned an unsuccessful response.");
 
   installDom();
   const invalidClient = baseClient({ id: 99 });
   invalidClient.request.invokeTemplate.mockResolvedValueOnce({ status: 201, response: "not-json" });
   await loadApp(invalidClient);
-  expect(document.getElementById("error").textContent).toBe("Tickety returned an invalid response.");
+  expect(document.getElementById("error").textContent).toBe("Tickety OPS Tower returned an invalid response.");
 });

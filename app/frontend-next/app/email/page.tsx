@@ -130,11 +130,11 @@ export default function EmailPage() {
         <Skeleton className="h-20 w-full" />
       ) : statusQuery.isError ? (
         <Alert variant="danger" title="Email status unavailable" action={<Button size="sm" variant="secondary" onClick={() => void statusQuery.refetch()}>Retry</Button>}>
-          Tickety could not confirm whether SendGrid is configured.
+          Tickety OPS Tower could not confirm whether SendGrid is configured.
         </Alert>
       ) : configured ? (
         <Alert variant="success" title="SendGrid is ready">
-          Messages are sent from the verified {statusQuery.data?.from_name || "Tickety"} sender. Recipient addresses remain private from one another.
+          Messages are sent from the verified {statusQuery.data?.from_name || "Tickety OPS Tower"} sender. Recipient addresses remain private from one another.
         </Alert>
       ) : (
         <Alert variant="warning" title="SendGrid setup required" action={isAdmin ? <Link href="/settings#settings-email" className="text-xs font-semibold text-semantic-primary hover:underline">Configure email</Link> : undefined}>
@@ -159,7 +159,7 @@ export default function EmailPage() {
             <h2 id="email-recipient-heading" className="text-sm font-semibold text-ink-700">Choose recipients</h2>
             <p className="mt-1 text-xs leading-5 text-ink-500">Select up to {MAX_RECIPIENTS} recipients from one audience per message.</p>
             <div className="mt-4 grid grid-cols-2 gap-2" role="group" aria-label="Recipient audience">
-              <AudienceButton active={audience === "agents"} icon={Users} label="Agents" description="Tickety and synced agents" onClick={() => changeAudience("agents")} />
+              <AudienceButton active={audience === "agents"} icon={Users} label="Agents" description="Tickety OPS Tower and synced agents" onClick={() => changeAudience("agents")} />
               <AudienceButton active={audience === "users"} icon={UserRound} label="Users" description="Synced requesters" onClick={() => changeAudience("users")} />
             </div>
             <label className="relative mt-4 block">
@@ -217,7 +217,7 @@ export default function EmailPage() {
           <div className="flex items-start justify-between gap-4">
             <div>
               <h2 className="text-sm font-semibold text-ink-700">Compose message</h2>
-              <p className="mt-1 text-xs leading-5 text-ink-500">Plain-text delivery with your Tickety identity added to the footer.</p>
+              <p className="mt-1 text-xs leading-5 text-ink-500">Plain-text delivery with your Tickety OPS Tower identity added to the footer.</p>
             </div>
             <span className="rounded-full border border-linen-400 bg-linen-100 px-2.5 py-1 text-[11px] font-semibold capitalize text-ink-500">{audience}</span>
           </div>

@@ -185,7 +185,7 @@ deploy_docker() {
     --expected-full-sha "$build_full_sha" \
     --expected-short-sha "$build_sha"
   frontend_binding=$("${COMPOSE[@]}" port frontend 3000)
-  echo "Tickety production is verified at https://tickety.nexora.com (local binding $frontend_binding, build $build_sha)"
+  echo "Tickety OPS Tower production is verified at https://tickety.nexora.com (local binding $frontend_binding, build $build_sha)"
 }
 
 MODE=${1:-}
@@ -197,7 +197,7 @@ shift
 
 if [[ $MODE != docker ]]; then
   echo "Unsupported deployment mode: $MODE" >&2
-  echo "Tickety production must use ./deploy.sh docker and the fixed Compose/Cloudflare mapping." >&2
+  echo "Tickety OPS Tower production must use ./deploy.sh docker and the fixed Compose/Cloudflare mapping." >&2
   usage >&2
   exit 1
 fi

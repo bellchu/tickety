@@ -1,6 +1,6 @@
-# Tickety identity
+# Tickety OPS Tower identity
 
-Tickety uses the **Precision Window**: two balanced forms surrounding a
+Tickety OPS Tower uses the **Precision Window**: two balanced forms surrounding a
 protected central case. The refined internal corners communicate rigor without
 losing calmness. The relationship represents shared operational
 visibility—customer and service team, intake and ownership, or two teams
@@ -18,7 +18,7 @@ Left   M12 8H26Q28 8 28 10V14Q28 16 26 16H18Q16 16 16 18V46Q16 48 18 48H26Q28 48
 Right  M52 8H38Q36 8 36 10V14Q36 16 38 16H46Q48 16 48 18V46Q48 48 46 48H38Q36 48 36 50V54Q36 56 38 56H52Q56 56 56 52V12Q56 8 52 8Z
 ```
 
-The wordmark pairs the symbol with the full name `Tickety` in Geist Medium
+The wordmark pairs the symbol with the full name `Tickety OPS Tower` in Geist Medium
 500, falling back to Arial and then the system sans serif. Use approximately
 `-0.025em` tracking and an 8 px gap beside a 32 px mark. The symbol is not a
 letterform and never replaces the T in the written product name.

@@ -1,6 +1,6 @@
-# Deploying Tickety
+# Deploying Tickety OPS Tower
 
-Tickety has one production environment and one supported production release
+Tickety OPS Tower has one production environment and one supported production release
 path:
 
 - public origin: `https://tickety.nexora.com`

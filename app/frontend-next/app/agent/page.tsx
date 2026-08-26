@@ -5,7 +5,7 @@ import { Skeleton } from "@/components/ui";
 
 export const metadata: Metadata = {
   title: "Agent workspace",
-  description: "A focused personal and team ticket workspace for Tickety agents.",
+  description: "A focused personal and team ticket workspace for Tickety OPS Tower agents.",
 };
 
 export default function AgentPage() {

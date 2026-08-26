@@ -1,5 +1,6 @@
 import Image from "next/image";
 import { cn } from "@/lib/utils";
+import { PRODUCT_LOCKUP_NAME, PRODUCT_NAME } from "@/lib/brand";
 
 type MarkTone = "gradient" | "solid" | "dark" | "reversed";
 type LogoSize = "sm" | "md" | "lg" | "xl";
@@ -40,7 +41,7 @@ const logoSizes: Record<
   xl: { width: 137, height: 26, product: "text-[11px]", descriptor: "text-[8px]", gap: "gap-3" },
 };
 
-/** Nexora parent identity paired with the Tickety service-operations product. */
+/** Nexora parent identity paired with the Tickety OPS Tower product. */
 export function TicketyLogo({
   className,
   inverse = false,
@@ -56,7 +57,7 @@ export function TicketyLogo({
 
   return (
     <span
-      aria-label="Nexora Tickety"
+      aria-label={PRODUCT_LOCKUP_NAME}
       className={cn(
         "inline-flex items-center",
         sizing.gap,
@@ -75,7 +76,7 @@ export function TicketyLogo({
       <span aria-hidden="true" className="h-6 w-px shrink-0 bg-ink-700/20" />
       <span aria-hidden="true" className="flex min-w-0 flex-col justify-center leading-none">
         <span className={cn("whitespace-nowrap font-mono font-medium uppercase tracking-[0.18em] text-ink-700", sizing.product)}>
-          Tickety
+          {PRODUCT_NAME}
         </span>
         {showDescriptor && (
           <span className={cn("mt-1 whitespace-nowrap font-mono uppercase tracking-[0.08em] text-ink-400", sizing.descriptor)}>

@@ -102,6 +102,7 @@ from .schema import (
     TicketAttachment,
 )
 from .attachment_storage import AzureBlobAttachmentStore, AttachmentStorageError
+from .branding import PRODUCT_NAME
 from .email_service import (
     EmailAddress,
     EmailConfigurationError,
@@ -231,7 +232,7 @@ def _ai_pipeline_contract_version() -> str:
 
 AI_PIPELINE_VERSION = _ai_pipeline_contract_version()
 
-app = FastAPI(title="Tickety", version=VERSION)
+app = FastAPI(title=PRODUCT_NAME, version=VERSION)
 
 
 @app.exception_handler(LLMAnalysisError)
@@ -847,7 +848,7 @@ async def version():
     """Build/version info for the footer. Lets you identify exactly which
     image a running container uses (version + git SHA + build timestamp)."""
     return {
-        "app": "Tickety",
+        "app": PRODUCT_NAME,
         "component": "backend",
         "version": VERSION,
         "build_sha": BUILD_SHA,
@@ -2133,7 +2134,7 @@ def _normalized_http_origin(value: str) -> Optional[str]:
 def _survey_response_url(request: Request, token: str) -> str:
     configured = (os.getenv("FRONTEND_URL") or "").strip().rstrip("/")
     if settings_module.is_production_mode():
-        # Production survey capabilities may only be delivered to Tickety's
+        # Production survey capabilities may only be delivered to Tickety OPS Tower's
         # fixed public origin. Missing, alternate, or path-bearing config is a
         # hard failure rather than a Host-header-derived fallback.
         if configured != SURVEY_PRODUCTION_ORIGIN:
@@ -2629,10 +2630,10 @@ def _is_terminal_status(db: Session, status: Optional[str]) -> bool:
 
 
 def _require_demo_ticketing() -> None:
-    """Keep production Tickety on the read-only sidecar boundary.
+    """Keep production Tickety OPS Tower on the read-only sidecar boundary.
 
     Demo mode retains local ticket CRUD for the bundled showcase data. In a
-    real deployment, Freshservice owns ticket lifecycle and Tickety stores
+    real deployment, Freshservice owns ticket lifecycle and Tickety OPS Tower stores
     only synchronized projections plus local intelligence.
     """
     if settings_module.is_production_mode():
@@ -2640,7 +2641,7 @@ def _require_demo_ticketing() -> None:
             status_code=409,
             detail=(
                 "Freshservice is the authoritative ticket system; "
-                "Tickety production ticket lifecycle is read-only"
+                f"{PRODUCT_NAME} production ticket lifecycle is read-only"
             ),
         )
 
@@ -5265,7 +5266,7 @@ async def analyze_ticket_intelligence(
         return allowed_citations[citation]["authority"] == "published_kb"
 
     # The model does not select or author actions. Approved KB candidates are
-    # ranked by retrieval, and Tickety emits only a deterministic review step.
+    # ranked by retrieval, and Tickety OPS Tower emits only a deterministic review step.
     trusted_action_citations = [
         item["citation_id"]
         for item in context
@@ -5424,7 +5425,7 @@ async def set_agent_identity_link(
     if claimed:
         raise HTTPException(
             status_code=409,
-            detail="That external agent is already linked to another Tickety user",
+            detail=f"That external agent is already linked to another {PRODUCT_NAME} user",
         )
     now = datetime.utcnow()
     link = db.query(UserExternalIdentityLinkRecord).filter(
@@ -6470,7 +6471,7 @@ def _report_group_expression(group_by: str):
         ),
         "source": func.coalesce(
             func.nullif(TicketRecord.external_source, ""),
-            "Tickety",
+            PRODUCT_NAME,
         ),
         "ticket_type": func.coalesce(
             func.nullif(TicketRecord.ticket_type, ""),
@@ -6526,10 +6527,10 @@ async def report_options(
 
     sources = distinct_values(TicketRecord.external_source)
     if (
-        "Tickety" not in sources
+        PRODUCT_NAME not in sources
         and query.filter(func.nullif(TicketRecord.external_source, "").is_(None)).first()
     ):
-        sources.insert(0, "Tickety")
+        sources.insert(0, PRODUCT_NAME)
     assignees = query.join(
         UserRecord,
         TicketRecord.assignee_id == UserRecord.id,
@@ -7157,7 +7158,7 @@ def _embedded_ticket_context(
         TicketRecord.external_id == external_ticket_id,
     ).first()
     if not ticket:
-        raise HTTPException(status_code=404, detail="Ticket has not been synchronized to Tickety")
+        raise HTTPException(status_code=404, detail=f"Ticket has not been synchronized to {PRODUCT_NAME}")
     return principal, ticket
 
 
@@ -7663,7 +7664,7 @@ async def sync_external_user_directory(
     db: Session = Depends(get_db),
     _user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
 ):
-    """Refresh provider-owned profiles without changing Tickety accounts."""
+    """Refresh provider-owned profiles without changing Tickety OPS Tower accounts."""
     adapter, effective_binding_id = _sync_adapter_for_binding(db, binding_id)
     result = await async_sync_external_users(
         adapter, binding_id=effective_binding_id
@@ -7993,7 +7994,7 @@ async def send_email_message(
         recipient_ids=payload.recipient_ids,
     )
     _reserve_email_request(db, user.id, len(recipients))
-    delivery_body = f"{payload.body}\n\n—\nSent by {user.name} via Tickety."
+    delivery_body = f"{payload.body}\n\n—\nSent by {user.name} via {PRODUCT_NAME}."
     try:
         message_id = await send_sendgrid_email(
             recipients,
@@ -12708,7 +12709,7 @@ async def send_survey(
     try:
         message_id = await send_sendgrid_email(
             [EmailAddress(email=recipient_email, name=recipient_name)],
-            subject="How was your Tickety support experience?",
+            subject=f"How was your {PRODUCT_NAME} support experience?",
             body=delivery_body,
         )
     except EmailConfigurationError:

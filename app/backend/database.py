@@ -298,7 +298,7 @@ class ExternalUserRecord(Base):
     """Read-only projection of a user owned by an external ITSM provider.
 
     This table intentionally has no foreign key or mapping to ``users``.
-    Tickety accounts and provider identities are separate security domains.
+    Tickety OPS Tower accounts and provider identities are separate security domains.
     """
     __tablename__ = "external_users"
 
@@ -913,7 +913,7 @@ class SessionRecord(Base):
 
 
 class SsoIdentityRecord(Base):
-    """Stable OIDC subject linked to a local Tickety account.
+    """Stable OIDC subject linked to a local Tickety OPS Tower account.
 
     Email is retained only as an audit/display value. Authentication resolves
     the immutable issuer + subject pair so renamed or recycled email addresses
@@ -1779,7 +1779,7 @@ def _verify_demo_schema_before_bootstrap() -> None:
     except Exception:
         raise RuntimeError(
             "Demo database is Alembic-managed but not at the required migration "
-            "revision; run `alembic upgrade head` before starting Tickety. If a "
+            "revision; run `alembic upgrade head` before starting Tickety OPS Tower. If a "
             "legacy bootstrap already modified this versioned schema, restore a "
             "verified backup or repair it through the migration recovery process."
         ) from None

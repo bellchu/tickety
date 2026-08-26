@@ -383,7 +383,7 @@ def run_seed():
         db.flush()
 
         # Provider-owned demo directory. These records intentionally have no
-        # relationship to the Tickety users above.
+        # relationship to the Tickety OPS Tower users above.
         for external_user in EXTERNAL_USERS:
             db.add(ExternalUserRecord(
                 id=external_user["id"],

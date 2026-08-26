@@ -294,7 +294,7 @@ export function AgentWorkspace() {
         <aside className="min-w-0 border-b border-linen-400 bg-linen-100 lg:overflow-y-auto lg:border-b-0 lg:border-r" aria-label="Mailbox folders">
           <div className="border-b border-linen-300 p-4">
             <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-400">My work</p>
-            <p className="mt-1 break-words text-sm font-semibold text-ink-700 [overflow-wrap:anywhere]">{bootstrapQuery.data?.identity?.name || "Tickety assignments"}</p>
+            <p className="mt-1 break-words text-sm font-semibold text-ink-700 [overflow-wrap:anywhere]">{bootstrapQuery.data?.identity?.name || "Tickety OPS Tower assignments"}</p>
             {bootstrapQuery.data?.identity?.email && <p className="mt-0.5 break-words text-[11px] text-ink-400 [overflow-wrap:anywhere]">{bootstrapQuery.data.identity.email}</p>}
           </div>
           <nav className="grid grid-cols-2 gap-1 p-2 sm:grid-cols-3 lg:block" aria-label="Personal ticket folders">

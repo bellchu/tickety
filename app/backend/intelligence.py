@@ -1,8 +1,8 @@
-"""SupportLogic-inspired "ambient agents" for Tickety.
+"""SupportLogic-inspired "ambient agents" for Tickety OPS Tower.
 
 These are deterministic/heuristic agents (plus one LLM-backed summarizer) that
 run on demand over the existing ticket + user data. They mirror the spirit of
-SupportLogic's ambient AI workforce, scoped to what Tickety already stores:
+SupportLogic's ambient AI workforce, scoped to what Tickety OPS Tower already stores:
 
   - Escalation Risk Agent   predict escalation risk per ticket
   - SLA Agent               watch SLA clocks, flag pre-breach + breaches
@@ -364,7 +364,7 @@ _TRUSTED_AI_ROUTING_STATUSES = {"completed", "partial", "triage_completed"}
 class TeamRoutingDecision:
     """AI resolver-team projection until catalog-bound group routing is enabled.
 
-    ``ai_team`` is selected from Tickety's closed set of resolver teams, while
+    ``ai_team`` is selected from Tickety OPS Tower's closed set of resolver teams, while
     ``ai_category`` remains a compatibility fallback for older artifacts.
     Neither is represented as a validated Freshservice resolver-group route.
     Every untrusted or unmapped outcome fails closed to an explicit review
@@ -413,7 +413,7 @@ def team_routing_decision(
 
     ``source_group_id`` is accepted for compatibility with existing callers,
     but it represents the provider's current assignment and never influences
-    Tickety's recommendation.
+    Tickety OPS Tower's recommendation.
     """
     if portable_ascii_lower(ticket_status) in _normalized_terminal_statuses(
         terminal_statuses
@@ -1736,7 +1736,7 @@ def _non_portal_ticket_query(db: Session):
 
 
 def _trusted_text_evidence_query(db: Session):
-    """Use only Tickety-owned prose for cross-ticket text aggregation."""
+    """Use only Tickety OPS Tower-owned prose for cross-ticket text aggregation."""
     return db.query(TicketRecord).filter(or_(
         TicketRecord.external_source.is_(None),
         func.lower(TicketRecord.external_source).in_(["manual", "standalone"]),

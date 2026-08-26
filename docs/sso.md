@@ -1,6 +1,6 @@
 # Single sign-on with Microsoft Entra ID or Okta
 
-Tickety supports one active OpenID Connect provider per deployment. Microsoft
+Tickety OPS Tower supports one active OpenID Connect provider per deployment. Microsoft
 Entra ID and Okta have presets, so the deployment only needs the provider's
 tenant/domain, client ID, and client secret. The discovery URL and the sign-in
 callback are derived automatically.
@@ -14,10 +14,10 @@ https://tickety.nexora.com/api/auth/sso/callback
 `FRONTEND_URL` must be the matching HTTPS origin, without a path. Apply database
 migration `0011` before enabling SSO.
 
-## Configure from Tickety Settings
+## Configure from Tickety OPS Tower Settings
 
 The preferred workflow is **Settings → Access → Security & Authentication**.
-An authenticated Tickety administrator can select Entra or Okta, enter the
+An authenticated Tickety OPS Tower administrator can select Entra or Okta, enter the
 provider values, group allowlist, and client secret, then enable SSO. These
 values are stored as administrator-approved settings and reload after a restart;
 `TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED` is not required for SSO configuration.
@@ -26,7 +26,7 @@ browser. Runtime mode, `FRONTEND_URL`, login enforcement, cookies, CORS, and the
 callback path remain deployment-owned security boundaries.
 
 When switching from Entra to Okta (or changing the client ID), re-enter the new
-provider's client secret in the same save. Tickety deliberately refuses to reuse
+provider's client secret in the same save. Tickety OPS Tower deliberately refuses to reuse
 the previous provider's secret. The ignored Compose `.env` values below remain
 available for initial bootstrap and break-glass recovery.
 
@@ -34,23 +34,23 @@ available for initial bootstrap and break-glass recovery.
 
 Create a Microsoft Entra **App registration** for a server-side web application:
 
-1. Select the single-tenant account type for the Tickety organization's
+1. Select the single-tenant account type for the Tickety OPS Tower organization's
    directory.
-2. Add a **Web** redirect URI using the exact Tickety callback above.
+2. Add a **Web** redirect URI using the exact Tickety OPS Tower callback above.
 3. Create a client secret. Copy the secret **value** when it is shown, rather
    than the secret ID.
 4. Copy the **Application (client) ID** and **Directory (tenant) ID** from the
-   app registration. Tickety intentionally requires the tenant GUID and does
+   app registration. Tickety OPS Tower intentionally requires the tenant GUID and does
    not accept `common`, `organizations`, or `consumers` authorities.
 5. In the corresponding Enterprise application, assign only the users or
    groups that should be able to sign in. Requiring assignment is recommended.
 6. Create the **IT agents** security group and copy its immutable **Object ID**.
    In the app registration's Token configuration, add the `groups` claim and
    select **Groups assigned to the application**. Assign IT agents to the
-   enterprise application and configure that Object ID in Tickety. Do not use
+   enterprise application and configure that Object ID in Tickety OPS Tower. Do not use
    the editable group display name as an authorization boundary.
 
-Tickety requests only `openid email profile`; it does not call Microsoft Graph.
+Tickety OPS Tower requests only `openid email profile`; it does not call Microsoft Graph.
 The preset follows Microsoft's tenant-specific OIDC discovery and validates the
 ID token's signature, issuer, audience, expiry, and nonce. See Microsoft's
 [OIDC protocol documentation](https://learn.microsoft.com/en-us/entra/identity-platform/v2-protocols-oidc)
@@ -78,12 +78,12 @@ Create an Okta app integration using **OIDC - OpenID Connect** and **Web
 Application**:
 
 1. Enable the Authorization Code grant.
-2. Add the exact Tickety callback as a Sign-in redirect URI.
+2. Add the exact Tickety OPS Tower callback as a Sign-in redirect URI.
 3. Copy the Client ID and Client Secret.
-4. Assign the app only to the users or groups that should have Tickety access.
+4. Assign the app only to the users or groups that should have Tickety OPS Tower access.
 5. Copy the Okta organization domain, such as `company.okta.com`.
 
-Tickety defaults to Okta's built-in org authorization server (`org`), which is
+Tickety OPS Tower defaults to Okta's built-in org authorization server (`org`), which is
 the simplest choice for OIDC SSO. Enter `default` or another authorization
 server ID only when that custom server and its access policy are already
 configured. Okta documents that custom authorization servers can require the
@@ -110,11 +110,11 @@ SSO_AUTO_PROVISION=false
 
 ## Account access and user experience
 
-- Keep `SSO_AUTO_PROVISION=false` when Tickety access should be pre-approved.
+- Keep `SSO_AUTO_PROVISION=false` when Tickety OPS Tower access should be pre-approved.
   Create the local user with the same email first; the first verified SSO login
   links that user to the provider's immutable issuer and subject.
 - With auto-provisioning enabled, a new SSO identity creates an active local
-  user with the `agent` role. Identity-provider claims never grant Tickety
+  user with the `agent` role. Identity-provider claims never grant Tickety OPS Tower
   administrator or supervisor roles.
 - `SSO_ALLOWED_DOMAINS` is an additional comma-separated restriction. Provider
   application assignment remains the primary access boundary.
@@ -125,10 +125,10 @@ SSO_AUTO_PROVISION=false
   “groups assigned to the application” claim mode so the IT agents group is
   emitted without requiring Microsoft Graph permissions.
 - Later email/name changes do not change the account binding. Deactivating the
-  local Tickety user blocks SSO access.
+  local Tickety OPS Tower user blocks SSO access.
 - The login page makes the configured provider the primary action and keeps
   local password login behind a secondary choice. After SSO, users return to
-  the protected page they originally requested. Tickety sign-out ends the local
+  the protected page they originally requested. Tickety OPS Tower sign-out ends the local
   session; it does not sign the browser out of Entra ID or Okta.
 
 ## Verification and troubleshooting
@@ -145,7 +145,7 @@ the exact redirect URI. Then test with an assigned user and confirm:
 1. a protected destination is restored after authentication;
 2. an unassigned or unprovisioned user gets a friendly denial and no session;
 3. a deactivated local user cannot sign in;
-4. local sign-out removes the Tickety session.
+4. local sign-out removes the Tickety OPS Tower session.
 
 `ready:false` means a deployment-owned value is absent or invalid. A redirect
 URI mismatch must be corrected at the provider; do not add alternate callbacks

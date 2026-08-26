@@ -223,7 +223,7 @@ function FreshserviceSourcePanel({ ticket }: { ticket: Ticket }) {
       </div>
       <dl className="mt-4 grid divide-y divide-linen-300 overflow-hidden rounded-xl border border-linen-300 bg-linen-100 sm:grid-cols-3 sm:divide-x sm:divide-y-0">
         <div className="px-3 py-2.5"><dt className="text-[10px] font-semibold uppercase tracking-wide text-ink-400">Freshservice ID</dt><dd className="mt-0.5 font-mono text-sm font-medium text-ink-700">{ticket.external_id || "—"}</dd></div>
-        <div className="px-3 py-2.5"><dt className="text-[10px] font-semibold uppercase tracking-wide text-ink-400">Tickety owner</dt><dd className="mt-0.5 text-sm font-medium text-ink-700">{ticket.assignee_name || "Unassigned"}</dd></div>
+        <div className="px-3 py-2.5"><dt className="text-[10px] font-semibold uppercase tracking-wide text-ink-400">Tickety OPS Tower owner</dt><dd className="mt-0.5 text-sm font-medium text-ink-700">{ticket.assignee_name || "Unassigned"}</dd></div>
         <div className="px-3 py-2.5"><dt className="text-[10px] font-semibold uppercase tracking-wide text-ink-400">ITSM assignee</dt><dd className="mt-0.5 text-sm font-medium text-ink-700">{ticket.external_assignee_name || ticket.external_assignee_id || "Unassigned"}</dd></div>
       </dl>
     </details>

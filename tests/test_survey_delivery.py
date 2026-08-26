@@ -107,7 +107,7 @@ class SurveyDeliveryTests(unittest.TestCase):
                 "CORS_ALLOW_ORIGINS": PRODUCTION_ORIGIN,
                 "SENDGRID_API_KEY": "SG.survey-test",
                 "SENDGRID_FROM_EMAIL": "support@example.com",
-                "SENDGRID_FROM_NAME": "Tickety Support",
+                "SENDGRID_FROM_NAME": "Tickety OPS Tower Support",
                 "EMAIL_SENDS_PER_MINUTE": "20",
                 "EMAIL_RECIPIENTS_PER_DAY": "500",
                 "SURVEY_LOOKUP_GLOBAL_PER_MINUTE": "600",

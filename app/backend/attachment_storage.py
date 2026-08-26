@@ -1,7 +1,7 @@
 """Private object storage for provider-owned ticket attachments.
 
 Blob URLs and credentials never leave this module. Callers persist only a
-deterministic blob key and serve bytes through Tickety's authorization layer.
+deterministic blob key and serve bytes through Tickety OPS Tower's authorization layer.
 """
 
 from __future__ import annotations

@@ -26,7 +26,7 @@ test("intelligence cockpit is decision-first and isolates backlog hygiene", () =
   assert.ok(capacity > assurance, "team capacity follows live service assurance");
   assert.ok(patterns > capacity, "patterns are supporting context, not the lead");
   assert.ok(automation > patterns, "one-time automation discovery is separated from live operations");
-  assert.match(page, /eyebrow="Tickety Operations"/);
+  assert.match(page, /eyebrow="Tickety OPS Tower"/);
   assert.match(page, /title="OPS Tower"/);
   assert.match(page, /Command the Queue\. The intelligence behind every ticket\./);
   assert.match(page, /A decision-first view of current service risk, queue health, team capacity, and emerging demand\. Legacy records are isolated from live operational signals\./);

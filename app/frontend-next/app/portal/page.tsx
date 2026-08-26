@@ -231,7 +231,7 @@ export default function PortalPage() {
               <p className="mt-5 max-w-xl text-base leading-7 text-ink-500 sm:text-lg">
                 {isDemoPortal
                   ? "Submit a support request in a few minutes. You will receive a private tracking link to follow its progress—no account required."
-                  : "Create and update requests in your organization’s Freshservice portal. Tickety only imports provider data for local analysis and never writes ticket changes back."}
+                  : "Create and update requests in your organization’s Freshservice portal. Tickety OPS Tower only imports provider data for local analysis and never writes ticket changes back."}
               </p>
               <div className="mt-7 flex flex-wrap gap-x-6 gap-y-3 text-sm text-ink-500">
                 <span className="inline-flex items-center gap-2"><Check className="h-4 w-4 text-semantic-success" aria-hidden="true" />Clear request updates</span>
@@ -356,7 +356,7 @@ export default function PortalPage() {
               <Badge variant="info" icon={<ShieldCheck className="h-3 w-3" />}>Freshservice is authoritative</Badge>
               <h2 id="freshservice-authority-title" className="mt-4 font-serif text-3xl tracking-[-0.025em] text-ink-700">Submit requests in Freshservice</h2>
               <p className="mt-3 max-w-2xl text-sm leading-6 text-ink-500">
-                This production Tickety deployment is intentionally read-only. Use your organization’s Freshservice portal to create, edit, reply to, or close a ticket.
+                This production Tickety OPS Tower deployment is intentionally read-only. Use your organization’s Freshservice portal to create, edit, reply to, or close a ticket.
               </p>
             </section>
           )}

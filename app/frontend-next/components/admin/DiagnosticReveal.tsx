@@ -51,7 +51,7 @@ export function DiagnosticReveal({
             <p role="alert" className="rounded-md border border-rust-400/30 bg-[var(--color-danger-soft)] px-3 py-2 text-xs text-rust-600">Diagnostic logs could not be loaded.</p>
           )}
           {query.data && query.data.entries.length === 0 && (
-            <p className="rounded-md border border-linen-400 bg-linen-50 px-3 py-2 text-xs leading-5 text-ink-500">No durable diagnostic log was recorded for this condition. Process-level logs may still exist outside Tickety.</p>
+            <p className="rounded-md border border-linen-400 bg-linen-50 px-3 py-2 text-xs leading-5 text-ink-500">No durable diagnostic log was recorded for this condition. Process-level logs may still exist outside Tickety OPS Tower.</p>
           )}
           {query.data && query.data.entries.length > 0 && (
             <div className="max-h-72 space-y-2 overflow-auto rounded-lg bg-[#071322] p-3 text-slate-200 shadow-inner">

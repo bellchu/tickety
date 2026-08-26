@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
-  <title id="title">Nexora Tickety</title>
-  <desc id="desc">Nexora spectrum app icon for Tickety service operations.</desc>
+  <title id="title">Nexora Tickety OPS Tower</title>
+  <desc id="desc">Nexora spectrum app icon for Tickety OPS Tower service operations.</desc>
   <defs>
     <linearGradient id="spectrum" x1="8" y1="10" x2="56" y2="54" gradientUnits="userSpaceOnUse">
       <stop stop-color="#E11BCC"/>

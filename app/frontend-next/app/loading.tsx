@@ -14,7 +14,7 @@ export default function Loading() {
         ))}
       </div>
       <Skeleton className="h-64" rounded="lg" />
-      <span className="sr-only">Loading Tickety workspace…</span>
+      <span className="sr-only">Loading Tickety OPS Tower workspace…</span>
     </div>
   );
 }

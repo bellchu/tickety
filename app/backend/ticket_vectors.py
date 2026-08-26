@@ -1461,7 +1461,7 @@ def _shape_result(row: Any, score: float, method: str) -> dict[str, Any]:
     if source_type == "ticket" and hasattr(row, "authoritative_external_source"):
         # Retrieval SQL resolves this from the current ticket row. A copied
         # document metadata value must not be able to upgrade external content
-        # to an authenticated Tickety report.
+        # to an authenticated Tickety OPS Tower report.
         metadata["external_source"] = (
             getattr(row, "authoritative_external_source", None) or ""
         )

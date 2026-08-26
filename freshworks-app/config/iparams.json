@@ -1,6 +1,6 @@
 {
   "tickety_host": {
-    "display_name": "Tickety API host",
+    "display_name": "Tickety OPS Tower API host",
     "description": "Public HTTPS hostname only, for example poc.tickety.example",
     "type": "text",
     "required": true,
@@ -11,19 +11,19 @@
     }
   },
   "binding_id": {
-    "display_name": "Tickety binding ID",
-    "description": "Binding ID created by the Tickety integration admin API",
+    "display_name": "Tickety OPS Tower binding ID",
+    "description": "Binding ID created by the Tickety OPS Tower integration admin API",
     "type": "text",
     "required": true,
     "secure": false,
     "regex": {
       "uuid": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$",
-      "uuid-error": "Enter the UUID returned by the Tickety integration binding API"
+      "uuid-error": "Enter the UUID returned by the Tickety OPS Tower integration binding API"
     }
   },
   "bootstrap_secret": {
     "display_name": "Embedded app bootstrap secret",
-    "description": "Must match FRESHWORKS_APP_BOOTSTRAP_SECRET in the isolated Tickety deployment",
+    "description": "Must match FRESHWORKS_APP_BOOTSTRAP_SECRET in the isolated Tickety OPS Tower deployment",
     "type": "text",
     "required": true,
     "secure": true

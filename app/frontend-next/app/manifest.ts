@@ -1,9 +1,10 @@
 import type { MetadataRoute } from "next";
+import { PRODUCT_MARKETING_TITLE, PRODUCT_NAME } from "@/lib/brand";
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: "Tickety by Nexora — Intelligent Service Operations",
-    short_name: "Nexora Tickety",
+    name: PRODUCT_MARKETING_TITLE,
+    short_name: PRODUCT_NAME,
     description:
       "AI-assisted service operations for decisive triage, accountable ownership, and faster resolution.",
     start_url: "/",

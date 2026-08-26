@@ -19,7 +19,7 @@ class BaseITSMAdapter(ABC):
     def capability_manifest(self) -> dict[str, dict[str, Any]]:
         """Declare the one-way sidecar contract shared by every provider.
 
-        Provider records are authoritative. Tickety may import them and store
+        Provider records are authoritative. Tickety OPS Tower may import them and store
         local intelligence, but provider mutations are intentionally outside
         the adapter interface.
         """

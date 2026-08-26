@@ -148,7 +148,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <TicketyLogo size="lg" />
           <h1 className="mt-5 text-lg font-semibold text-ink-700">Workspace connection unavailable</h1>
           <p className="mt-2 text-sm leading-6 text-ink-500">
-            Tickety could not verify this session, so protected workspace data remains hidden. Check your connection and retry.
+            Tickety OPS Tower could not verify this session, so protected workspace data remains hidden. Check your connection and retry.
           </p>
           <button
             type="button"

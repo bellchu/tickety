@@ -1,4 +1,4 @@
-"""Strict contracts for every LLM-backed Tickety task.
+"""Strict contracts for every LLM-backed Tickety OPS Tower task.
 
 Provider JSON mode is only a formatting hint.  These models are the actual
 trust boundary before generated data can affect ticket state or be returned to

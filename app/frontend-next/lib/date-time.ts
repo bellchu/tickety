@@ -4,7 +4,7 @@ const NAIVE_ISO_DATE_TIME = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/;
 const ISO_TIME_ZONE = /(?:z|[+-]\d{2}(?::?\d{2})?)$/i;
 
 /**
- * Parse an instant returned by the Tickety API.
+ * Parse an instant returned by the Tickety OPS Tower API.
  *
  * Database datetimes are stored as UTC without an offset, so a naive ISO
  * datetime from the API must be made explicit before it reaches Date. Values

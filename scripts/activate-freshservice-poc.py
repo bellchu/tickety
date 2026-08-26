@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Create, validate, and conditionally activate a Freshservice trial binding.
 
-The script reads provider credentials from the Tickety process environment and
+The script reads provider credentials from the Tickety OPS Tower process environment and
 never prints the account host, API key, cookies, or provider response bodies.
 """
 
@@ -48,7 +48,7 @@ def _freshservice_domain() -> str:
 def _request(client: httpx.Client, method: str, path: str, **kwargs) -> httpx.Response:
     response = client.request(method, path.lstrip("/"), **kwargs)
     if response.status_code >= 400:
-        raise RuntimeError(f"Tickety API request failed: {method} {path} status={response.status_code}")
+        raise RuntimeError(f"Tickety OPS Tower API request failed: {method} {path} status={response.status_code}")
     return response
 
 
@@ -75,7 +75,7 @@ def main() -> int:
             if cookie.name.endswith("session")
         ]
         if len(session_cookies) != 1:
-            raise RuntimeError("Tickety login did not issue exactly one session cookie")
+            raise RuntimeError("Tickety OPS Tower login did not issue exactly one session cookie")
         # Loopback uses HTTP, so an RFC-compliant client will not automatically
         # return a Secure cookie. Explicitly replay the just-issued opaque
         # cookie only to the configured loopback/API base for this process.

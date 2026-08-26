@@ -164,7 +164,7 @@ export function AIThinkingStream({ ticketId, hasExisting, recoveryState, onCompl
 
       {result && result.errors.length > 0 && (
         <Alert className="mt-4" variant="warning" title="Analysis completed with partial results">
-          {analysisErrorDetails(result.errors)}. Available results remain visible. Tickety will automatically retry only the missing steps while retry capacity remains.
+          {analysisErrorDetails(result.errors)}. Available results remain visible. Tickety OPS Tower will automatically retry only the missing steps while retry capacity remains.
         </Alert>
       )}
 

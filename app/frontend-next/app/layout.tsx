@@ -4,6 +4,7 @@ import { dmMono, dmSans } from "./fonts";
 import { Providers } from "./providers";
 import { AppShell } from "@/components/layout/AppShell";
 import { AppErrorBoundary } from "@/components/layout/AppErrorBoundary";
+import { PRODUCT_LOCKUP_NAME, PRODUCT_MARKETING_TITLE, PRODUCT_NAME } from "@/lib/brand";
 
 export const dynamic = "force-dynamic";
 
@@ -15,10 +16,10 @@ const metadataBase = new URL(
 
 export const metadata: Metadata = {
   metadataBase,
-  applicationName: "Nexora Tickety",
+  applicationName: PRODUCT_NAME,
   title: {
-    default: "Tickety by Nexora — Intelligent Service Operations",
-    template: "%s · Nexora Tickety",
+    default: PRODUCT_MARKETING_TITLE,
+    template: `%s · ${PRODUCT_NAME}`,
   },
   description:
     "AI-assisted service operations for decisive triage, accountable ownership, and faster resolution.",
@@ -33,8 +34,8 @@ export const metadata: Metadata = {
   },
   openGraph: {
     type: "website",
-    siteName: "Nexora Tickety",
-    title: "Tickety by Nexora — Intelligent Service Operations",
+    siteName: PRODUCT_NAME,
+    title: PRODUCT_MARKETING_TITLE,
     description:
       "Resolve what matters with clear triage, accountable ownership, and auditable service operations.",
     images: [
@@ -42,13 +43,13 @@ export const metadata: Metadata = {
         url: "/opengraph-image.png",
         width: 1200,
         height: 630,
-        alt: "Nexora Tickety — Resolve what matters.",
+        alt: `${PRODUCT_LOCKUP_NAME} — Resolve what matters.`,
       },
     ],
   },
   twitter: {
     card: "summary_large_image",
-    title: "Tickety by Nexora — Intelligent Service Operations",
+    title: PRODUCT_MARKETING_TITLE,
     description:
       "Resolve what matters with clear triage, accountable ownership, and auditable service operations.",
     images: ["/twitter-image.png"],

@@ -1,6 +1,6 @@
 # Database migrations
 
-Tickety uses Alembic as the only production schema authority. Application
+Tickety OPS Tower uses Alembic as the only production schema authority. Application
 processes verify that the database is at the repository's migration head and exit
 without running `create_all` or ad-hoc DDL when `APP_MODE=production`.
 Demo compatibility bootstrap also refuses to overlay current ORM metadata on a

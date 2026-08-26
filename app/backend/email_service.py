@@ -13,6 +13,8 @@ from typing import Iterable
 
 import httpx
 
+from .branding import PRODUCT_NAME
+
 
 SENDGRID_MAIL_SEND_URL = "https://api.sendgrid.com/v3/mail/send"
 _EMAIL_PATTERN = re.compile(
@@ -76,7 +78,7 @@ def get_sendgrid_config() -> SendGridConfig:
     from_name = (
         os.getenv("SENDGRID_FROM_NAME")
         or os.getenv("ORG_NAME")
-        or "Tickety"
+        or PRODUCT_NAME
     )
     reply_to_email = (os.getenv("SENDGRID_REPLY_TO_EMAIL") or "").strip()
     if not api_key or not from_email:
@@ -102,10 +104,10 @@ def sendgrid_status() -> dict:
     from_email = (os.getenv("SENDGRID_FROM_EMAIL") or "").strip()
     try:
         from_name = normalize_sender_name(
-            os.getenv("SENDGRID_FROM_NAME") or os.getenv("ORG_NAME") or "Tickety"
+            os.getenv("SENDGRID_FROM_NAME") or os.getenv("ORG_NAME") or PRODUCT_NAME
         )
     except ValueError:
-        from_name = "Tickety"
+        from_name = PRODUCT_NAME
     configured = False
     if api_key_set and from_email:
         try:

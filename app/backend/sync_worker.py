@@ -233,7 +233,7 @@ def _auto_triage_job():
                 "[auto-triage] recent lookback unavailable "
                 f"kind={type(exc).__name__}"
             )
-        # Only Tickety-owned records are eligible for the generic gap scan.
+        # Only Tickety OPS Tower-owned records are eligible for the generic gap scan.
         # External tickets reach the queue only through the audited binding
         # switch plus realtime/seven-day eligibility; Portal tickets still
         # require an explicit authenticated request. The queued query remains

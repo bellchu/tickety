@@ -220,7 +220,7 @@ const postureConfig = {
 function IntelligenceHeader() {
   return (
     <PageHeader
-      eyebrow="Tickety Operations"
+      eyebrow="Tickety OPS Tower"
       icon={<Sparkles className="h-4 w-4" />}
       title="OPS Tower"
       description={<><span className="font-medium text-ink-600">Command the Queue. The intelligence behind every ticket.</span>{" "}A decision-first view of current service risk, queue health, team capacity, and emerging demand. Legacy records are isolated from live operational signals.</>}
@@ -539,7 +539,7 @@ function OperationalPosture({ data, onShowAttention, onShowSla }: { data: Intell
     + data.posture_metrics.escalation_prone;
   const showUnassigned = () => setEvidence({
     title: "Unassigned active tickets",
-    description: "Active tickets in the selected activity window that do not have a Tickety or provider owner.",
+    description: "Active tickets in the selected activity window that do not have a Tickety OPS Tower or provider owner.",
     items: attentionEvidenceItems(data.unassigned_evidence.items),
     expectedCount: data.posture_metrics.unassigned_open,
     truncated: data.unassigned_evidence.items_truncated,
@@ -838,7 +838,7 @@ function ServiceQualityPanels({ query }: { query: UseQueryResult<ServiceQualityR
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
             {([0, 1, 2, 3] as const).map((level) => <CompactMetric key={level} label={`Level ${level}`} value={data.level_distribution[String(level) as "0" | "1" | "2" | "3"] ?? 0} icon={level === 0 ? <Bot className="h-3.5 w-3.5" /> : <Layers3 className="h-3.5 w-3.5" />} />)}
           </div>
-          <Alert variant="info" title="Assigned level is inferred" className="mt-4 text-xs">Until provider tiers exist, Tickety learns a group’s typical level from completed work and only calls a mismatch when the sample is large and consistent enough.</Alert>
+          <Alert variant="info" title="Assigned level is inferred" className="mt-4 text-xs">Until provider tiers exist, Tickety OPS Tower learns a group’s typical level from completed work and only calls a mismatch when the sample is large and consistent enough.</Alert>
           {mismatches.length === 0 ? <EmptyPanel title="No confident level mismatch" description="No calibrated active ticket is clearly above or below its current group’s inferred level." /> : (
             <div className="mt-4 space-y-2">
               {mismatches.slice(0, 6).map((item) => (
@@ -970,7 +970,7 @@ function SlaMonitoringPanel({ query }: { query: UseQueryResult<SlaMonitoringResp
                     onClick={() => openAssigneeEvidence({ name: group.name, id: group.id, source: group.source, ticketCount: group.ticketCount, clockCount: group.clockCount })}
                     className="group flex min-w-0 items-center justify-between gap-3 rounded-lg border border-linen-300 bg-linen-50 px-3 py-2.5 text-left transition-colors hover:border-ink-400 hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
                   >
-                    <span className="min-w-0"><span className="block truncate text-xs font-semibold text-ink-700">{group.name}</span><span className="mt-0.5 block text-[10px] text-ink-400">{group.source === "provider" ? "Provider agent" : group.source === "tickety" ? "Tickety agent" : "No mapped owner"} · {group.clockCount} clock{group.clockCount === 1 ? "" : "s"}</span></span>
+                    <span className="min-w-0"><span className="block truncate text-xs font-semibold text-ink-700">{group.name}</span><span className="mt-0.5 block text-[10px] text-ink-400">{group.source === "provider" ? "Provider agent" : group.source === "tickety" ? "Tickety OPS Tower agent" : "No mapped owner"} · {group.clockCount} clock{group.clockCount === 1 ? "" : "s"}</span></span>
                     <span className="flex shrink-0 items-center gap-1.5 font-mono text-xs font-semibold tabular-nums text-semantic-danger">{group.ticketCount} ticket{group.ticketCount === 1 ? "" : "s"}<ArrowRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" aria-hidden="true" /></span>
                   </button>
                 ))}
@@ -1048,7 +1048,7 @@ function WorkloadPanel({ query, slaQuery, windowDays }: { query: UseQueryResult<
   const agents = query.data?.agents ?? [];
   const maxOpen = Math.max(1, ...agents.map((agent) => agent.open_tickets));
   return (
-    <Panel title="Assignment balance" description={query.data?.workforce_source === "provider" ? "Authoritative provider-agent assignments and completion outcomes in the same activity window. Breach counts open their ticket evidence." : "Active Tickety assignments and completion outcomes in the same activity window. Breach counts open their ticket evidence."} icon={<Users className="h-4 w-4" />}>
+    <Panel title="Assignment balance" description={query.data?.workforce_source === "provider" ? "Authoritative provider-agent assignments and completion outcomes in the same activity window. Breach counts open their ticket evidence." : "Active Tickety OPS Tower assignments and completion outcomes in the same activity window. Breach counts open their ticket evidence."} icon={<Users className="h-4 w-4" />}>
       {query.isLoading ? <PanelLoading /> : query.isError ? <PanelError title="Workload unavailable" onRetry={() => void query.refetch()} retrying={query.isFetching} /> : agents.length === 0 ? <EmptyPanel title="No active agent roster" description="No active agents or supervisors are available for workload analysis." /> : (
         <div className="space-y-3">
           {slaQuery.isError && <Alert variant="warning" title="SLA breach indicators unavailable" action={<Button variant="secondary" size="sm" onClick={() => void slaQuery.refetch()} pending={slaQuery.isFetching} pendingLabel="Retrying…">Retry</Button>}>Missing breach links do not mean an agent has zero breaches. Reload the SLA evidence before using this panel for assignment decisions.</Alert>}

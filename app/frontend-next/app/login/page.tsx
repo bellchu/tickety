@@ -100,7 +100,7 @@ export default function LoginPage() {
   return (
     <main className="nexora-ambient min-h-screen p-3 sm:p-5 lg:p-6">
       <div className="relative mx-auto grid min-h-[calc(100vh-1.5rem)] w-full max-w-[1440px] overflow-hidden rounded-xl border border-linen-400 bg-white shadow-[0_24px_80px_rgba(1,13,27,0.13)] before:absolute before:inset-x-0 before:top-0 before:z-20 before:h-[3px] before:[background:var(--brand-spectrum)] sm:min-h-[calc(100vh-2.5rem)] lg:grid-cols-[minmax(0,1.05fr)_minmax(440px,0.95fr)]">
-        <section className="relative hidden overflow-hidden bg-[#010D1B] px-12 py-11 text-white lg:flex lg:flex-col" aria-label="Tickety product overview">
+        <section className="relative hidden overflow-hidden bg-[#010D1B] px-12 py-11 text-white lg:flex lg:flex-col" aria-label="Tickety OPS Tower product overview">
           <div className="absolute -right-24 -top-28 h-80 w-80 rounded-full bg-[#E11BCC]/15 blur-3xl" aria-hidden="true" />
           <div className="absolute -bottom-36 left-1/4 h-96 w-96 rounded-full bg-[#00F3D1]/10 blur-3xl" aria-hidden="true" />
 
@@ -117,7 +117,7 @@ export default function LoginPage() {
               Move support work forward with confidence.
             </h2>
             <p className="mt-6 max-w-lg text-base leading-7 text-[#C9CDD3]">
-              Tickety gives service teams a calm, shared view of the work that needs attention now—and the context to act on it.
+              Tickety OPS Tower gives service teams a calm, shared view of the work that needs attention now—and the context to act on it.
             </p>
 
             <ul className="mt-9 space-y-4" aria-label="Workspace capabilities">

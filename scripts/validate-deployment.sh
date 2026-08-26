@@ -8,7 +8,7 @@ usage() {
   cat <<'EOF'
 Usage: scripts/validate-deployment.sh [--require-docker]
 
-Validate the only supported Tickety production release path: Docker Compose to
+Validate the only supported Tickety OPS Tower production release path: Docker Compose to
 https://tickety.nexora.com through the fixed local Cloudflare Tunnel mapping.
 
 Options:
