@@ -97,7 +97,7 @@ export function Sidebar({
       aria-modal={open ? "true" : undefined}
       role={open ? "dialog" : undefined}
       className={cn(
-        "fixed inset-y-0 left-0 z-50 flex w-[17rem] flex-col overflow-hidden border-r border-white/10 bg-[#010D1B] text-white shadow-2xl transition-transform duration-200 ease-out after:absolute after:inset-y-0 after:right-0 after:w-[2px] after:[background:var(--brand-spectrum)] lg:translate-x-0 lg:shadow-none",
+        "fixed inset-y-0 left-0 z-50 flex w-[var(--app-sidebar-width)] flex-col overflow-hidden border-r border-white/10 bg-[#010D1B] text-white shadow-2xl transition-transform duration-200 ease-out after:absolute after:inset-y-0 after:right-0 after:w-px after:[background:var(--brand-spectrum)] lg:translate-x-0 lg:shadow-none",
         open ? "translate-x-0" : "-translate-x-full"
       )}
     >

@@ -164,7 +164,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <AppExperience realtimeEnabled={authContext?.auth_kind === "session"}>
-      <div className="nexora-ambient min-h-screen">
+      <div className="nexora-ambient min-h-screen [--app-sidebar-width:15rem]">
         <a
           href="#main-content"
           className="fixed left-4 top-3 z-[70] -translate-y-20 rounded-md bg-ink-700 px-3 py-2 text-sm font-semibold text-white shadow-lg transition-transform focus:translate-y-0 focus:outline-none focus:ring-2 focus:ring-white"
@@ -186,7 +186,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           />
         )}
 
-        <div className="flex min-h-screen w-full min-w-0 flex-col lg:pl-[17rem]">
+        <div className="flex min-h-screen w-full min-w-0 flex-col lg:pl-[var(--app-sidebar-width)]">
           <header className="sticky top-0 z-30 flex h-16 items-center justify-between border-b border-linen-300 bg-linen-50/95 px-4 shadow-[0_1px_0_rgba(1,13,27,0.02)] backdrop-blur-md lg:hidden">
             <Link
               href="/"
