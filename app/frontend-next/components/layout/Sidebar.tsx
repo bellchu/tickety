@@ -34,6 +34,7 @@ import {
   Activity,
   Mail,
   BriefcaseBusiness,
+  Waypoints,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -54,6 +55,7 @@ const navigationIcons: Record<NavigationIconKey, typeof LayoutDashboard> = {
   leaderboard: TrendingUp,
   reports: BarChart3,
   intelligence: Radar,
+  routing: Waypoints,
 };
 
 function initials(name?: string) {

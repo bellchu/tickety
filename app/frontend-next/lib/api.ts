@@ -365,6 +365,59 @@ export const api = {
     fetchAPI<import("./types").RoutingCatalogRecommendationsResponse>(
       "/admin/routing-catalog/recommendations"
     ),
+  getRoutingTriageStatus: () =>
+    fetchAPI<import("./types").RoutingTriageStatus>("/admin/routing-triage/status"),
+  updateRoutingTriageAutomation: (payload: {
+    auto_triage_enabled: boolean;
+    auto_routing_enabled: boolean;
+  }) => fetchAPI<import("./types").RoutingTriageStatus>(
+    "/admin/routing-triage/automation",
+    { method: "PUT", body: JSON.stringify(payload) },
+  ),
+  triageAllUntriaged: (windowUnit: "days" | "weeks", windowValue: number) =>
+    fetchAPI<{ found: number; queued: number; window_days: number }>(
+      `/admin/sync/triage-all?window_unit=${windowUnit}&window_value=${windowValue}`,
+      { method: "POST" },
+    ),
+  getAgentTeamMappings: (params: { search?: string; active?: boolean; limit?: number; offset?: number } = {}) => {
+    const query = new URLSearchParams();
+    if (params.search) query.set("search", params.search);
+    if (params.active !== undefined) query.set("active", String(params.active));
+    query.set("limit", String(params.limit ?? 50));
+    query.set("offset", String(params.offset ?? 0));
+    return fetchAPI<import("./types").AgentTeamMappingList>(
+      `/admin/agent-team-mappings?${query.toString()}`,
+    );
+  },
+  updateAgentTeamMapping: (
+    userId: string,
+    resolverGroups: import("./types").ResolverGroup[],
+    expectedResolverGroups: import("./types").ResolverGroup[],
+  ) => fetchAPI<import("./types").AgentTeamMapping>(
+    `/admin/agent-team-mappings/${encodeURIComponent(userId)}`,
+    {
+      method: "PUT",
+      body: JSON.stringify({
+        resolver_groups: resolverGroups,
+        expected_resolver_groups: expectedResolverGroups,
+      }),
+    },
+  ),
+  getRoutingRules: () =>
+    fetchAPI<import("./types").RoutingRuleList>("/admin/routing-rules"),
+  createRoutingRule: (payload: import("./types").RoutingRuleDraft) =>
+    fetchAPI<import("./types").RoutingRule>("/admin/routing-rules", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateRoutingRule: (
+    ruleId: number,
+    payload: import("./types").RoutingRuleDraft,
+    expectedVersion: number,
+  ) => fetchAPI<import("./types").RoutingRule>(`/admin/routing-rules/${ruleId}`, {
+    method: "PUT",
+    body: JSON.stringify({ ...payload, expected_version: expectedVersion }),
+  }),
   // Intelligence agents
   getIntelOverview: (windowDays = 30) =>
     fetchAPI<import("./types").IntelligenceOverviewResponse>(

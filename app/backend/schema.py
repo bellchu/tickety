@@ -403,6 +403,144 @@ class ResolverCatalogRecommendationResponse(BaseModel):
         return self
 
 
+class RoutingAutomationFeatureState(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    configured: bool
+    effective: bool
+
+
+class RoutingTriageManagementStatusResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["1"]
+    generated_at: datetime
+    advisory_only: Literal[True]
+    catalog_mapping_status: Literal["pending"]
+    catalog_mapping_write_available: Literal[False]
+    automation_controls_editable: bool
+    rule_controls_editable: bool
+    triage_queue_action_available: Literal[True]
+    auto_triage: RoutingAutomationFeatureState
+    auto_routing: RoutingAutomationFeatureState
+    resolver_groups: List[ResolverGroup] = Field(..., min_length=15, max_length=15)
+
+    @field_validator("resolver_groups")
+    @classmethod
+    def validate_resolver_groups(cls, value):
+        if len(set(value)) != 15 or set(value) != set(AI_RESOLVER_TEAMS):
+            raise ValueError("resolver_groups must contain the closed resolver taxonomy")
+        return value
+
+
+class RoutingTriageAutomationUpdate(StrictWriteModel):
+    auto_triage_enabled: bool
+    auto_routing_enabled: bool
+
+
+class AgentResolverTeamMappingItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: str
+    user_name: str
+    title: Optional[str] = None
+    role: Literal["admin", "supervisor", "agent"]
+    is_active: bool
+    resolver_groups: List[ResolverGroup] = Field(default_factory=list, max_length=15)
+    updated_at: Optional[datetime] = None
+
+    @field_validator("resolver_groups")
+    @classmethod
+    def unique_groups(cls, value):
+        if len(value) != len(set(value)):
+            raise ValueError("resolver groups must be unique")
+        return value
+
+
+class AgentResolverTeamMappingListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    generated_at: datetime
+    editable: bool
+    items: List[AgentResolverTeamMappingItem]
+    total: int = Field(..., ge=0)
+    limit: int = Field(..., ge=1, le=200)
+    offset: int = Field(..., ge=0)
+    has_more: bool
+
+
+class AgentResolverTeamMappingUpdate(StrictWriteModel):
+    resolver_groups: List[ResolverGroup] = Field(default_factory=list, max_length=15)
+    expected_resolver_groups: List[ResolverGroup] = Field(default_factory=list, max_length=15)
+
+    @field_validator("resolver_groups", "expected_resolver_groups")
+    @classmethod
+    def unique_mapping_groups(cls, value):
+        if len(value) != len(set(value)):
+            raise ValueError("resolver groups must be unique")
+        return value
+
+
+class RoutingRuleBase(StrictWriteModel):
+    name: str = Field(..., min_length=1, max_length=80, pattern=r"^[A-Za-z0-9][A-Za-z0-9 _./&()-]*$")
+    description: Optional[str] = Field(None, max_length=240)
+    enabled: bool = True
+    priority: int = Field(100, ge=1, le=1000)
+    business_context: Optional[Literal["ALMO", "JAM", "UNKNOWN"]] = None
+    scope: Optional[Literal["single_user", "multiple_users", "service_wide", "unknown"]] = None
+    service_contains: Optional[str] = Field(None, min_length=2, max_length=80, pattern=r"^[A-Za-z0-9][A-Za-z0-9 _./&()-]*$")
+    failure_domain_contains: Optional[str] = Field(None, min_length=2, max_length=80, pattern=r"^[A-Za-z0-9][A-Za-z0-9 _./&()-]*$")
+    primary_group: ResolverGroup
+    secondary_group: Optional[ResolverGroup] = None
+
+    @field_validator("name", "description", "service_contains", "failure_domain_contains")
+    @classmethod
+    def normalize_rule_text(cls, value):
+        if value is None:
+            return None
+        normalized = " ".join(value.split())
+        return normalized or None
+
+    @model_validator(mode="after")
+    def validate_rule(self):
+        if not any((
+            self.business_context,
+            self.scope,
+            self.service_contains,
+            self.failure_domain_contains,
+        )):
+            raise ValueError("at least one structured match condition is required")
+        if self.secondary_group == self.primary_group:
+            raise ValueError("secondary group must differ from primary group")
+        if self.secondary_group == "INFRA_HELPDESK":
+            raise ValueError("Helpdesk cannot be configured as a secondary group")
+        return self
+
+
+class RoutingRuleCreate(RoutingRuleBase):
+    pass
+
+
+class RoutingRuleUpdate(RoutingRuleBase):
+    expected_version: int = Field(..., ge=1)
+
+
+class RoutingRuleOut(RoutingRuleBase):
+    id: int
+    version: int = Field(..., ge=1)
+    created_at: datetime
+    updated_at: datetime
+
+
+class RoutingRuleListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    generated_at: datetime
+    editable: bool
+    core_policy_protected: Literal[True]
+    items: List[RoutingRuleOut] = Field(default_factory=list, max_length=200)
+
+
 class TriageResult(BaseModel):
     ticket_id: str
     sentiment: str

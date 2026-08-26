@@ -15,7 +15,8 @@ export type NavigationIconKey =
   | "surveys"
   | "leaderboard"
   | "reports"
-  | "intelligence";
+  | "intelligence"
+  | "routing";
 
 export interface NavigationItem {
   href: string;
@@ -70,6 +71,12 @@ export const navigationSections: readonly NavigationSection[] = [
         href: "/intelligence",
         label: "OPS Tower",
         icon: "intelligence",
+        visibility: "intelligence",
+      },
+      {
+        href: "/routing",
+        label: "Routing & triage",
+        icon: "routing",
         visibility: "intelligence",
       },
     ],

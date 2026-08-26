@@ -30,6 +30,8 @@ from .database import (
     ExternalUserRecord, ExternalGroupRecord, ExternalGroupMembershipRecord,
     IntelligenceStudyRecord,
     UserExternalIdentityLinkRecord, UserExternalIdentityAuditRecord,
+    AgentResolverTeamMappingRecord, AgentResolverTeamMappingAuditRecord,
+    RoutingRuleRecord, RoutingRuleAuditRecord,
     AgentTicketStateRecord, SyncStateRecord,
     TicketCommentRecord, TicketCategoryRecord, TicketAuditLogRecord,
     SessionRecord, KbArticleRecord, TicketLinkRecord,
@@ -100,6 +102,10 @@ from .schema import (
     IntegrationBindingCreate, IntegrationBindingSuspend,
     FreshworksBootstrapRequest, FreshworksBootstrapRedeem,
     ResolverCatalogRecommendationResponse,
+    RoutingTriageManagementStatusResponse, RoutingTriageAutomationUpdate,
+    AgentResolverTeamMappingItem, AgentResolverTeamMappingListResponse,
+    AgentResolverTeamMappingUpdate,
+    RoutingRuleCreate, RoutingRuleUpdate, RoutingRuleOut, RoutingRuleListResponse,
     TicketAttachment,
 )
 from .attachment_storage import AzureBlobAttachmentStore, AttachmentStorageError
@@ -147,6 +153,7 @@ from .ai_state import (
 from .brain import IntelligenceEngine, routing_public_thread
 from . import intelligence as intel
 from . import resolver_catalog
+from . import routing_rules
 from . import ticket_vectors
 from . import agent_workspace
 from .prompts import (
@@ -3859,7 +3866,13 @@ def _analysis_pipeline_timeout_seconds() -> int:
     return _bounded_env_int("AI_PIPELINE_TIMEOUT_SECONDS", 900, 120, 3600)
 
 
-def _artifact_input_hash(ticket: TicketRecord, artifact: str) -> str:
+def _artifact_input_hash(
+    ticket: TicketRecord,
+    artifact: str,
+    *,
+    db: Optional[Session] = None,
+    routing_rule_fingerprint_override: Optional[str] = None,
+) -> str:
     payload: Dict[str, Any] = {
         "artifact": artifact,
         "subject": ticket.subject or "",
@@ -3894,7 +3907,16 @@ def _artifact_input_hash(ticket: TicketRecord, artifact: str) -> str:
             "routing_business_context": routing_business_context(
                 ticket.external_requester_email or ticket.reporter
             ),
+            "routing_rules": routing_rule_fingerprint_override,
         })
+        if payload["routing_rules"] is None:
+            if db is not None:
+                payload["routing_rules"] = routing_rules.rules_fingerprint(db)
+            else:
+                # Pure hash callers (including migration and contract tests)
+                # have no transaction from which to read configuration. Live
+                # artifact readers and writers always supply their session.
+                payload["routing_rules"] = routing_rules.EMPTY_RULES_FINGERPRINT
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
@@ -3911,7 +3933,7 @@ def _artifact_is_current(db: Session, ticket: TicketRecord, artifact: str) -> bo
     query = db.query(AIArtifactRecord).filter(
         AIArtifactRecord.ticket_id == ticket.id,
         AIArtifactRecord.artifact == artifact,
-        AIArtifactRecord.input_hash == _artifact_input_hash(ticket, artifact),
+        AIArtifactRecord.input_hash == _artifact_input_hash(ticket, artifact, db=db),
         AIArtifactRecord.pipeline_version == _artifact_pipeline_version(artifact),
         AIArtifactRecord.model == _llm_cache_identity(),
         AIArtifactRecord.active.is_(True),
@@ -4025,7 +4047,7 @@ def _record_ai_artifact(
         AIArtifactRecord.artifact == artifact,
         AIArtifactRecord.active.is_(True),
     ).update({AIArtifactRecord.active: False}, synchronize_session=False)
-    input_hash = _artifact_input_hash(ticket, artifact)
+    input_hash = _artifact_input_hash(ticket, artifact, db=db)
     if artifact == "route":
         # This persisted digest lets exact-provenance readers validate large
         # historical sets without materializing ticket bodies or transcripts.
@@ -4240,6 +4262,10 @@ async def _run_ticket_analysis(
         await emit("route", "active")
         ticket_id = ticket.id
         try:
+            organization_routing_rules = routing_rules.active_rule_payloads(db)
+            routing_rule_fingerprint = routing_rules.payload_fingerprint(
+                organization_routing_rules
+            )
             db.expunge(ticket)
             db.close()
             route_result = await asyncio.wait_for(
@@ -4251,7 +4277,7 @@ async def _run_ticket_analysis(
                     "freshservice_subcategory": ticket.external_subcategory or "",
                     "freshservice_item_category": ticket.external_item_category or "",
                     "requester_email": ticket.external_requester_email or ticket.reporter,
-                }),
+                }, organization_routing_rules=organization_routing_rules),
                 timeout=_pipeline_remaining(pipeline_deadline),
             )
             ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
@@ -4264,6 +4290,9 @@ async def _run_ticket_analysis(
                 claim_id,
                 analysis_actor_id=analysis_actor_id,
             )
+            routing_rules.lock_policy_for_write(db)
+            if routing_rules.rules_fingerprint(db) != routing_rule_fingerprint:
+                raise HTTPException(status_code=409, detail="analysis_input_changed")
             route = route_result
             _apply_ticket_routing(ticket, route)
             _record_ai_artifact(db, ticket, "route", route, source_hash)
@@ -4478,6 +4507,10 @@ async def _run_ticket_analysis(
         )
     if "route" in artifacts and not route_preprocessed:
         await emit("route", "active")
+        organization_routing_rules = routing_rules.active_rule_payloads(db)
+        routing_rule_fingerprint = routing_rules.payload_fingerprint(
+            organization_routing_rules
+        )
         tasks["route"] = asyncio.create_task(
             engine.route_ticket({
                 "subject": ticket.subject,
@@ -4487,7 +4520,7 @@ async def _run_ticket_analysis(
                 "freshservice_subcategory": ticket.external_subcategory or "",
                 "freshservice_item_category": ticket.external_item_category or "",
                 "requester_email": ticket.external_requester_email or ticket.reporter,
-            })
+            }, organization_routing_rules=organization_routing_rules)
         )
     if tasks:
         ticket_id = ticket.id
@@ -4578,6 +4611,15 @@ async def _run_ticket_analysis(
                 await emit("resolution", "done")
         if "route" in task_results:
             result = task_results["route"]
+            routing_rules.lock_policy_for_write(db)
+            if (
+                not isinstance(result, Exception)
+                and routing_rules.rules_fingerprint(db) != routing_rule_fingerprint
+            ):
+                result = HTTPException(
+                    status_code=409,
+                    detail="analysis_input_changed",
+                )
             if isinstance(result, Exception):
                 error_code = _analysis_step_error_code(result)
                 errors.append({"step": "route", "error": error_code})
@@ -7636,6 +7678,7 @@ def get_routing_catalog_recommendations(
     response.headers["Cache-Control"] = "private, no-store"
     _reserve_analytics_request(db, user.id)
     now = datetime.utcnow()
+    rule_fingerprint = routing_rules.rules_fingerprint(db)
     return resolver_catalog.recommend_resolver_catalog_mappings(
         db,
         generated_at=now,
@@ -7645,8 +7688,303 @@ def get_routing_catalog_recommendations(
             not settings_module.is_production_mode()
             and bool(getattr(engine.llm, "allow_synthetic", False))
         ),
-        input_hash_for_ticket=lambda ticket: _artifact_input_hash(ticket, "route"),
+        input_hash_for_ticket=lambda ticket: _artifact_input_hash(
+            ticket,
+            "route",
+            routing_rule_fingerprint_override=rule_fingerprint,
+        ),
     )
+
+
+def _routing_management_status(user: UserRecord) -> dict[str, Any]:
+    return {
+        "schema_version": "1",
+        "generated_at": datetime.utcnow(),
+        "advisory_only": True,
+        "catalog_mapping_status": "pending",
+        "catalog_mapping_write_available": False,
+        "automation_controls_editable": (user.role or "").lower() == "admin",
+        "rule_controls_editable": (user.role or "").lower() in {"admin", "supervisor"},
+        "triage_queue_action_available": True,
+        "auto_triage": {
+            "configured": settings_module.get_bool("AUTO_TRIAGE_ENABLED"),
+            "effective": settings_module.automation_enabled(
+                "AUTO_TRIAGE_ENABLED", "AUTO_TRIAGE"
+            ),
+        },
+        "auto_routing": {
+            "configured": settings_module.get_bool("AUTO_ROUTE_ENABLED"),
+            "effective": settings_module.automation_enabled("AUTO_ROUTE_ENABLED"),
+        },
+        "resolver_groups": list(intel.AI_RESOLVER_TEAMS),
+    }
+
+
+@app.get(
+    "/admin/routing-triage/status",
+    response_model=RoutingTriageManagementStatusResponse,
+)
+def get_routing_triage_status(
+    response: Response,
+    user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
+):
+    response.headers["Cache-Control"] = "private, no-store"
+    return _routing_management_status(user)
+
+
+@app.put(
+    "/admin/routing-triage/automation",
+    response_model=RoutingTriageManagementStatusResponse,
+)
+def update_routing_triage_automation(
+    payload: RoutingTriageAutomationUpdate,
+    response: Response,
+    user: UserRecord = Depends(require_protected_ai_role("admin")),
+):
+    response.headers["Cache-Control"] = "private, no-store"
+    try:
+        settings_module.update_settings({
+            "AUTO_TRIAGE_ENABLED": str(payload.auto_triage_enabled).lower(),
+            "AUTO_ROUTE_ENABLED": str(payload.auto_routing_enabled).lower(),
+        }, actor_id=user.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Settings could not be persisted") from exc
+    return _routing_management_status(user)
+
+
+def _agent_team_mapping_item(
+    user: UserRecord,
+    rows: list[AgentResolverTeamMappingRecord],
+) -> dict[str, Any]:
+    updated_at = max((row.updated_at for row in rows), default=None)
+    return {
+        "user_id": user.id,
+        "user_name": user.name,
+        "title": user.title,
+        "role": (user.role or "agent").lower(),
+        "is_active": bool(user.is_active),
+        "resolver_groups": sorted(row.resolver_group for row in rows),
+        "updated_at": updated_at,
+    }
+
+
+@app.get(
+    "/admin/agent-team-mappings",
+    response_model=AgentResolverTeamMappingListResponse,
+)
+def list_agent_team_mappings(
+    response: Response,
+    search: Optional[str] = Query(None, max_length=80),
+    active: Optional[bool] = Query(True),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
+):
+    response.headers["Cache-Control"] = "private, no-store"
+    query = db.query(UserRecord).filter(
+        func.lower(UserRecord.role).in_(("admin", "supervisor", "agent"))
+    )
+    if active is not None:
+        query = query.filter(UserRecord.is_active.is_(active))
+    normalized_search = " ".join((search or "").split()).lower()
+    if normalized_search:
+        normalized_search = (
+            normalized_search.replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        query = query.filter(
+            portable_ascii_lower_expression(UserRecord.name).like(
+                f"%{normalized_search}%", escape="\\"
+            )
+        )
+    total = query.count()
+    users = query.order_by(
+        portable_ascii_lower_expression(UserRecord.name).asc(),
+        UserRecord.id.asc(),
+    ).offset(offset).limit(limit).all()
+    user_ids = [row.id for row in users]
+    memberships: dict[str, list[AgentResolverTeamMappingRecord]] = {
+        user_id: [] for user_id in user_ids
+    }
+    if user_ids:
+        for row in db.query(AgentResolverTeamMappingRecord).filter(
+            AgentResolverTeamMappingRecord.user_id.in_(user_ids)
+        ).order_by(
+            AgentResolverTeamMappingRecord.resolver_group.asc()
+        ).all():
+            memberships[row.user_id].append(row)
+    return {
+        "generated_at": datetime.utcnow(),
+        "editable": (user.role or "").lower() == "admin",
+        "items": [
+            _agent_team_mapping_item(row, memberships[row.id]) for row in users
+        ],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": offset + len(users) < total,
+    }
+
+
+@app.put(
+    "/admin/agent-team-mappings/{user_id}",
+    response_model=AgentResolverTeamMappingItem,
+)
+def update_agent_team_mapping(
+    user_id: str,
+    payload: AgentResolverTeamMappingUpdate,
+    db: Session = Depends(get_db),
+    actor: UserRecord = Depends(require_protected_ai_role("admin")),
+):
+    target = db.query(UserRecord).filter(UserRecord.id == user_id).with_for_update().first()
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not target.is_active or (target.role or "").lower() not in {
+        "admin", "supervisor", "agent"
+    }:
+        raise HTTPException(status_code=409, detail="Only active operational users can be mapped")
+    current_rows = db.query(AgentResolverTeamMappingRecord).filter(
+        AgentResolverTeamMappingRecord.user_id == user_id
+    ).order_by(AgentResolverTeamMappingRecord.resolver_group.asc()).all()
+    current = sorted(row.resolver_group for row in current_rows)
+    expected = sorted(payload.expected_resolver_groups)
+    if current != expected:
+        raise HTTPException(status_code=409, detail="Agent team mapping changed; refresh and retry")
+    requested = sorted(payload.resolver_groups)
+    if requested != current:
+        current_set = set(current)
+        requested_set = set(requested)
+        db.query(AgentResolverTeamMappingRecord).filter(
+            AgentResolverTeamMappingRecord.user_id == user_id,
+            AgentResolverTeamMappingRecord.resolver_group.in_(current_set - requested_set),
+        ).delete(synchronize_session=False)
+        for resolver_group in sorted(requested_set - current_set):
+            db.add(AgentResolverTeamMappingRecord(
+                user_id=user_id,
+                resolver_group=resolver_group,
+                created_by=actor.id,
+            ))
+        db.add(AgentResolverTeamMappingAuditRecord(
+            user_id=user_id,
+            actor_id=actor.id,
+            previous_groups=json.dumps(current, separators=(",", ":")),
+            new_groups=json.dumps(requested, separators=(",", ":")),
+        ))
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Agent team mapping changed; refresh and retry") from exc
+    rows = db.query(AgentResolverTeamMappingRecord).filter(
+        AgentResolverTeamMappingRecord.user_id == user_id
+    ).all()
+    return _agent_team_mapping_item(target, rows)
+
+
+def _routing_rule_out(rule: RoutingRuleRecord) -> dict[str, Any]:
+    return routing_rules.rule_snapshot(rule)
+
+
+def _invalidate_routing_artifacts_for_rule_change(db: Session) -> None:
+    """Make every pre-change route fail closed and eligible for regeneration."""
+    db.query(AIArtifactRecord).filter(
+        AIArtifactRecord.artifact == "route",
+        AIArtifactRecord.active.is_(True),
+    ).update({AIArtifactRecord.active: False}, synchronize_session=False)
+    db.query(TicketRecord).filter(
+        TicketRecord.ai_routing_input_hash.isnot(None)
+    ).update({TicketRecord.ai_routing_input_hash: None}, synchronize_session=False)
+
+
+@app.get("/admin/routing-rules", response_model=RoutingRuleListResponse)
+def list_routing_rules(
+    response: Response,
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
+):
+    response.headers["Cache-Control"] = "private, no-store"
+    rows = db.query(RoutingRuleRecord).order_by(
+        RoutingRuleRecord.priority.asc(), RoutingRuleRecord.id.asc()
+    ).limit(200).all()
+    return {
+        "generated_at": datetime.utcnow(),
+        "editable": True,
+        "core_policy_protected": True,
+        "items": [_routing_rule_out(row) for row in rows],
+    }
+
+
+@app.post("/admin/routing-rules", response_model=RoutingRuleOut, status_code=201)
+def create_routing_rule(
+    payload: RoutingRuleCreate,
+    db: Session = Depends(get_db),
+    actor: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
+):
+    routing_rules.lock_policy_for_write(db)
+    values = payload.model_dump()
+    row = RoutingRuleRecord(**values, created_by=actor.id, updated_by=actor.id)
+    db.add(row)
+    db.flush()
+    snapshot = _routing_rule_out(row)
+    db.add(RoutingRuleAuditRecord(
+        rule_id=row.id,
+        action="created",
+        actor_id=actor.id,
+        previous_snapshot=None,
+        new_snapshot=json.dumps(snapshot, default=str, sort_keys=True),
+    ))
+    _invalidate_routing_artifacts_for_rule_change(db)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Routing rule could not be created") from exc
+    db.refresh(row)
+    return _routing_rule_out(row)
+
+
+@app.put("/admin/routing-rules/{rule_id}", response_model=RoutingRuleOut)
+def update_routing_rule(
+    rule_id: int,
+    payload: RoutingRuleUpdate,
+    db: Session = Depends(get_db),
+    actor: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
+):
+    routing_rules.lock_policy_for_write(db)
+    row = db.query(RoutingRuleRecord).filter(
+        RoutingRuleRecord.id == rule_id
+    ).with_for_update().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Routing rule not found")
+    if row.version != payload.expected_version:
+        raise HTTPException(status_code=409, detail="Routing rule changed; refresh and retry")
+    previous = _routing_rule_out(row)
+    for key, value in payload.model_dump(exclude={"expected_version"}).items():
+        setattr(row, key, value)
+    row.version += 1
+    row.updated_by = actor.id
+    row.updated_at = datetime.utcnow()
+    db.flush()
+    current = _routing_rule_out(row)
+    db.add(RoutingRuleAuditRecord(
+        rule_id=row.id,
+        action="updated",
+        actor_id=actor.id,
+        previous_snapshot=json.dumps(previous, default=str, sort_keys=True),
+        new_snapshot=json.dumps(current, default=str, sort_keys=True),
+    ))
+    _invalidate_routing_artifacts_for_rule_change(db)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Routing rule changed; refresh and retry") from exc
+    db.refresh(row)
+    return _routing_rule_out(row)
 
 
 @app.get("/admin/integrations/bindings/{binding_id}/capabilities")

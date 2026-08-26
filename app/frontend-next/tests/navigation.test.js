@@ -45,7 +45,7 @@ test("navigation destinations are unique and remain directly reachable", () => {
   const items = navigationSections.flatMap((section) => section.items);
   const hrefs = items.map((item) => item.href);
   assert.equal(new Set(hrefs).size, hrefs.length);
-  assert.equal(items.length, 15);
+  assert.equal(items.length, 16);
   assert.ok(items.every((item) => item.href.startsWith("/")));
 });
 
@@ -61,6 +61,7 @@ test("mobile context labels cover nested and utility routes", () => {
   assert.equal(getCurrentNavigationItem("/agent")?.label, "Agent");
   assert.equal(getCurrentNavigationItem("/email")?.label, "Email");
   assert.equal(getCurrentNavigationItem("/intelligence")?.label, "OPS Tower");
+  assert.equal(getCurrentNavigationItem("/routing")?.label, "Routing & triage");
   assert.equal(getCurrentNavigationItem("/settings/security")?.label, "Settings");
   assert.equal(getCurrentNavigationItem("/settings/status/ai")?.label, "Status");
   assert.equal(getCurrentNavigationItem("/profile")?.label, "My profile");

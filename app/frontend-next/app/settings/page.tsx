@@ -204,8 +204,6 @@ export default function SettingsPage() {
   const [freshserviceAuthMode, setFreshserviceAuthMode] = useState<FreshserviceAuthMode>("api");
   const [repairWindowUnit, setRepairWindowUnit] = useState<MaintenanceWindowUnit>("days");
   const [repairWindowValue, setRepairWindowValue] = useState(7);
-  const [triageWindowUnit, setTriageWindowUnit] = useState<MaintenanceWindowUnit>("days");
-  const [triageWindowValue, setTriageWindowValue] = useState(7);
   const [activeTab, setActiveTab] = useState<SettingsTabId>("overview");
   const pendingHashScrollRef = useRef<string | null>(null);
   const appMode = ((form.APP_MODE || data?.APP_MODE) as string) || "demo";
@@ -311,10 +309,6 @@ export default function SettingsPage() {
   const repairMut = useMutation({
     mutationFn: () => postMaintenanceAction(`/api/admin/sync/repair?window_unit=${repairWindowUnit}&window_value=${repairWindowValue}`),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["tickets"] }); },
-  });
-
-  const triageAllMut = useMutation({
-    mutationFn: () => postMaintenanceAction(`/api/admin/sync/triage-all?window_unit=${triageWindowUnit}&window_value=${triageWindowValue}`),
   });
 
   const handleChange = (key: keyof SettingsType, value: string) => {
@@ -653,9 +647,7 @@ export default function SettingsPage() {
         <SettingsSection id="settings-automation" title="AI Automation" subtitle="Toggle which ambient AI agents run automatically on incoming tickets">
           <div className="space-y-2">
             {[
-              { key: "AUTO_TRIAGE_ENABLED", label: "Auto-Triage", desc: "Sentiment, category, priority, mood, complexity analysis on every new ticket" },
               { key: "AUTO_SUMMARIZE_ENABLED", label: "Auto-Summarization", desc: "Generate 2-3 sentence case summaries for support managers" },
-              { key: "AUTO_ROUTE_ENABLED", label: "Auto-Routing", desc: "Provide advisory resolver-group routing for incoming tickets" },
               { key: "AUTO_RESOLVE_ENABLED", label: "Auto-Resolution", desc: "Generate step-by-step resolution plans with root-cause hypothesis" },
               { key: "AUTO_SYSTEMIC_ENABLED", label: "Systemic Issue Detection", desc: "Cluster similar tickets to surface broad business-impact patterns" },
             ].map((t) => (
@@ -667,6 +659,10 @@ export default function SettingsPage() {
                 onChange={(v) => handleChange(t.key as keyof SettingsType, v ? "true" : "false")}
               />
             ))}
+          </div>
+          <div className="mt-4 flex flex-col gap-3 rounded-xl border border-linen-400 bg-linen-100 p-4 sm:flex-row sm:items-center sm:justify-between">
+            <div><p className="text-sm font-semibold text-ink-700">Routing &amp; triage control plane</p><p className="mt-1 text-xs leading-5 text-ink-500">Manage auto-triage, advisory routing, structured rules, and local agent team mappings in the protected operations workspace.</p></div>
+            <Link href="/routing" className="inline-flex min-h-10 shrink-0 items-center justify-center rounded-lg bg-semantic-primary px-4 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-semantic-primary-hover">Open routing &amp; triage</Link>
           </div>
         </SettingsSection>
         </SettingsTabPanel>
@@ -1101,18 +1097,6 @@ export default function SettingsPage() {
               onWindowUnitChange={(unit) => { setRepairWindowUnit(unit); setRepairWindowValue((value) => Math.min(value, unit === "days" ? 7 : 4)); }}
               onWindowValueChange={setRepairWindowValue}
               resultFormatter={(r: any) => `Queued ${r.queued ?? 0} ticket${r.queued === 1 ? "" : "s"} from the selected ${r.window_days ?? 0}-day window`}
-            />
-            <MaintenanceButton
-              label="Triage All Untriaged"
-              description="Queue untriaged tickets only when they were created inside the selected recent window."
-              icon={Activity}
-              mutation={triageAllMut}
-              loadingText="Triaging…"
-              windowUnit={triageWindowUnit}
-              windowValue={triageWindowValue}
-              onWindowUnitChange={(unit) => { setTriageWindowUnit(unit); setTriageWindowValue((value) => Math.min(value, unit === "days" ? 7 : 4)); }}
-              onWindowValueChange={setTriageWindowValue}
-              resultFormatter={(r: any) => `Found ${r.found ?? 0} and queued ${r.queued ?? 0} within the selected ${r.window_days ?? 0}-day window`}
             />
           </div>
         </SettingsSection>

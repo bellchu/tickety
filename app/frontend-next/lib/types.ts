@@ -811,6 +811,66 @@ export interface RoutingCatalogRecommendationsResponse {
   unmapped_codes_scope: RoutingCatalogScope | null;
 }
 
+export interface RoutingTriageStatus {
+  schema_version: "1";
+  generated_at: string;
+  advisory_only: true;
+  catalog_mapping_status: "pending";
+  catalog_mapping_write_available: false;
+  automation_controls_editable: boolean;
+  rule_controls_editable: boolean;
+  triage_queue_action_available: true;
+  auto_triage: { configured: boolean; effective: boolean };
+  auto_routing: { configured: boolean; effective: boolean };
+  resolver_groups: ResolverGroup[];
+}
+
+export interface AgentTeamMapping {
+  user_id: string;
+  user_name: string;
+  title: string | null;
+  role: "admin" | "supervisor" | "agent";
+  is_active: boolean;
+  resolver_groups: ResolverGroup[];
+  updated_at: string | null;
+}
+
+export interface AgentTeamMappingList {
+  generated_at: string;
+  editable: boolean;
+  items: AgentTeamMapping[];
+  total: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
+}
+
+export interface RoutingRule {
+  id: number;
+  name: string;
+  description: string | null;
+  enabled: boolean;
+  priority: number;
+  business_context: "ALMO" | "JAM" | "UNKNOWN" | null;
+  scope: "single_user" | "multiple_users" | "service_wide" | "unknown" | null;
+  service_contains: string | null;
+  failure_domain_contains: string | null;
+  primary_group: ResolverGroup;
+  secondary_group: ResolverGroup | null;
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export type RoutingRuleDraft = Omit<RoutingRule, "id" | "version" | "created_at" | "updated_at">;
+
+export interface RoutingRuleList {
+  generated_at: string;
+  editable: boolean;
+  core_policy_protected: true;
+  items: RoutingRule[];
+}
+
 export interface WorkloadAgent {
   user_id: string;
   name: string;

@@ -120,6 +120,7 @@ class IntelligenceEngine:
         ticket_data: dict,
         *,
         requester_email: str | None = None,
+        organization_routing_rules: list[dict] | None = None,
     ) -> dict:
         """Return a dedicated resolver decision without exposing identity data."""
         context_hint = routing_business_context(
@@ -153,7 +154,10 @@ class IntelligenceEngine:
                 "freshservice_subcategory": 255,
                 "freshservice_item_category": 255,
             },
-            fixed_fields={"business_context_hint": context_hint},
+            fixed_fields={
+                "business_context_hint": context_hint,
+                "organization_routing_rules": organization_routing_rules or [],
+            },
         )
         analysis = await self.llm.analyze(
             routing_prompt,

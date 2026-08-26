@@ -471,6 +471,163 @@ class UserExternalIdentityAuditRecord(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
 
 
+class AgentResolverTeamMappingRecord(Base):
+    """Tickety-owned membership of an operational user in resolver teams.
+
+    Provider directory memberships remain read-only projections. These rows
+    are the explicit local management layer and never write back to the ITSM
+    provider.
+    """
+
+    __tablename__ = "agent_resolver_team_mappings"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(
+        String,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    resolver_group = Column(String(32), nullable=False)
+    created_by = Column(
+        String,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "resolver_group",
+            name="uix_agent_resolver_team_membership",
+        ),
+        CheckConstraint(
+            "resolver_group IN ("
+            "'INFRA_HELPDESK','INFRA_NETWORK','INFRA_SYSTEMS','INFRA_ARCH',"
+            "'APP_CRM_ALMO','APP_CRM_JAM','APP_RPA','APP_SQL','APP_JDE',"
+            "'APP_JDE_BA','APP_KORBER','APP_AS400','APP_WEB','APP_EDI_API',"
+            "'APP_PM')",
+            name="ck_agent_resolver_group_code",
+        ),
+        Index(
+            "ix_agent_resolver_team_lookup",
+            "resolver_group",
+            "user_id",
+        ),
+    )
+
+
+class AgentResolverTeamMappingAuditRecord(Base):
+    """Immutable before/after evidence for local resolver-team membership."""
+
+    __tablename__ = "agent_resolver_team_mapping_audit"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # Deliberately not a foreign key: the subject identifier remains as audit
+    # evidence after an account is purged.
+    user_id = Column(String, nullable=False)
+    actor_id = Column(
+        String,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    previous_groups = Column(Text, nullable=False)
+    new_groups = Column(Text, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index(
+            "ix_agent_resolver_team_audit_subject",
+            "user_id",
+            "created_at",
+        ),
+    )
+
+
+class RoutingRuleRecord(Base):
+    """Versioned, structured routing guidance managed outside core code."""
+
+    __tablename__ = "routing_rules"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(80), nullable=False)
+    description = Column(String(240), nullable=True)
+    enabled = Column(Boolean, nullable=False, default=True)
+    priority = Column(Integer, nullable=False, default=100)
+    business_context = Column(String(16), nullable=True)
+    scope = Column(String(24), nullable=True)
+    service_contains = Column(String(80), nullable=True)
+    failure_domain_contains = Column(String(80), nullable=True)
+    primary_group = Column(String(32), nullable=False)
+    secondary_group = Column(String(32), nullable=True)
+    version = Column(Integer, nullable=False, default=1)
+    created_by = Column(String, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    updated_by = Column(String, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        CheckConstraint("priority BETWEEN 1 AND 1000", name="ck_routing_rule_priority"),
+        CheckConstraint("version >= 1", name="ck_routing_rule_version"),
+        CheckConstraint(
+            "business_context IS NOT NULL OR scope IS NOT NULL OR "
+            "service_contains IS NOT NULL OR failure_domain_contains IS NOT NULL",
+            name="ck_routing_rule_has_condition",
+        ),
+        CheckConstraint(
+            "business_context IS NULL OR business_context IN ('ALMO','JAM','UNKNOWN')",
+            name="ck_routing_rule_business_context",
+        ),
+        CheckConstraint(
+            "scope IS NULL OR scope IN ('single_user','multiple_users','service_wide','unknown')",
+            name="ck_routing_rule_scope",
+        ),
+        CheckConstraint(
+            "primary_group IN ("
+            "'INFRA_HELPDESK','INFRA_NETWORK','INFRA_SYSTEMS','INFRA_ARCH',"
+            "'APP_CRM_ALMO','APP_CRM_JAM','APP_RPA','APP_SQL','APP_JDE',"
+            "'APP_JDE_BA','APP_KORBER','APP_AS400','APP_WEB','APP_EDI_API','APP_PM')",
+            name="ck_routing_rule_primary_group",
+        ),
+        CheckConstraint(
+            "secondary_group IS NULL OR secondary_group IN ("
+            "'INFRA_HELPDESK','INFRA_NETWORK','INFRA_SYSTEMS','INFRA_ARCH',"
+            "'APP_CRM_ALMO','APP_CRM_JAM','APP_RPA','APP_SQL','APP_JDE',"
+            "'APP_JDE_BA','APP_KORBER','APP_AS400','APP_WEB','APP_EDI_API','APP_PM')",
+            name="ck_routing_rule_secondary_group",
+        ),
+        CheckConstraint(
+            "secondary_group IS NULL OR secondary_group <> primary_group",
+            name="ck_routing_rule_distinct_groups",
+        ),
+        Index("ix_routing_rules_active_priority", "enabled", "priority", "id"),
+    )
+
+
+class RoutingRuleAuditRecord(Base):
+    """Immutable snapshots for every routing-rule configuration change."""
+
+    __tablename__ = "routing_rule_audit"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    rule_id = Column(Integer, nullable=False)
+    action = Column(String(16), nullable=False)
+    actor_id = Column(String, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    previous_snapshot = Column(Text, nullable=True)
+    new_snapshot = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_routing_rule_audit_subject", "rule_id", "created_at"),
+    )
+
+
 class AgentTicketStateRecord(Base):
     """Local mailbox state; it never mutates the provider ticket."""
     __tablename__ = "agent_ticket_state"
