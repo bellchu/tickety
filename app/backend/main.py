@@ -99,6 +99,7 @@ from .schema import (
     PortalTicketCreate, PortalTicketOut, PortalTicketCreated,
     IntegrationBindingCreate, IntegrationBindingSuspend,
     FreshworksBootstrapRequest, FreshworksBootstrapRedeem,
+    ResolverCatalogRecommendationResponse,
     TicketAttachment,
 )
 from .attachment_storage import AzureBlobAttachmentStore, AttachmentStorageError
@@ -145,6 +146,7 @@ from .ai_state import (
 )
 from .brain import IntelligenceEngine, routing_public_thread
 from . import intelligence as intel
+from . import resolver_catalog
 from . import ticket_vectors
 from . import agent_workspace
 from .prompts import (
@@ -973,44 +975,16 @@ def _current_route_artifact_ticket_ids(
     tickets: Collection[TicketRecord],
 ) -> set[str]:
     """Return tickets whose exact resolver-route provenance is currently trusted."""
-    tickets_by_id = {ticket.id: ticket for ticket in tickets}
-    if not tickets_by_id:
-        return set()
-    route_rows: list[AIArtifactRecord] = []
-    ticket_ids = list(tickets_by_id)
-    # Keep SQLite and provider-specific bind limits bounded while supporting
-    # the larger, already-capped historical profile window.
-    for offset in range(0, len(ticket_ids), 500):
-        query = db.query(AIArtifactRecord).filter(
-            AIArtifactRecord.ticket_id.in_(ticket_ids[offset:offset + 500]),
-            AIArtifactRecord.artifact == "route",
-            AIArtifactRecord.active.is_(True),
-        )
-        if settings_module.is_production_mode() or not bool(
-            getattr(engine.llm, "allow_synthetic", False)
-        ):
-            query = query.filter(AIArtifactRecord.synthetic.is_(False))
-        route_rows.extend(query.all())
-
-    current_model = _llm_cache_identity()
-    current_route_ids: set[str] = set()
-    for artifact in route_rows:
-        artifact_ticket = tickets_by_id.get(artifact.ticket_id)
-        route_payload = (
-            _routing_result_payload(artifact_ticket)
-            if artifact_ticket is not None else None
-        )
-        if (
-            artifact_ticket is not None
-            and route_payload is not None
-            and artifact.pipeline_version == AI_ROUTING_PIPELINE_VERSION
-            and artifact.model == current_model
-            and bool(artifact_ticket.ai_routing_input_hash)
-            and artifact.input_hash == artifact_ticket.ai_routing_input_hash
-            and artifact.content_hash == _routing_payload_content_hash(route_payload)
-        ):
-            current_route_ids.add(artifact.ticket_id)
-    return current_route_ids
+    return resolver_catalog.current_route_artifact_ticket_ids(
+        db,
+        tickets,
+        pipeline_version=AI_ROUTING_PIPELINE_VERSION,
+        model=_llm_cache_identity(),
+        allow_synthetic=(
+            not settings_module.is_production_mode()
+            and bool(getattr(engine.llm, "allow_synthetic", False))
+        ),
+    )
 
 
 def _enrich_tickets(db: Session, tickets: list[TicketRecord]) -> None:
@@ -7647,6 +7621,32 @@ def list_integration_bindings(
         IntegrationBindingRecord.created_at.desc()
     ).all()
     return {"bindings": [serialize_binding(row) for row in rows]}
+
+
+@app.get(
+    "/admin/routing-catalog/recommendations",
+    response_model=ResolverCatalogRecommendationResponse,
+)
+def get_routing_catalog_recommendations(
+    response: Response,
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(require_protected_ai_role("admin", "supervisor")),
+):
+    """Recommend resolver-code mappings without changing provider state."""
+    response.headers["Cache-Control"] = "private, no-store"
+    _reserve_analytics_request(db, user.id)
+    now = datetime.utcnow()
+    return resolver_catalog.recommend_resolver_catalog_mappings(
+        db,
+        generated_at=now,
+        pipeline_version=AI_ROUTING_PIPELINE_VERSION,
+        model=_llm_cache_identity(),
+        allow_synthetic=(
+            not settings_module.is_production_mode()
+            and bool(getattr(engine.llm, "allow_synthetic", False))
+        ),
+        input_hash_for_ticket=lambda ticket: _artifact_input_hash(ticket, "route"),
+    )
 
 
 @app.get("/admin/integrations/bindings/{binding_id}/capabilities")

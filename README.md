@@ -195,6 +195,18 @@ domains above. Subdomains match only on DNS-label boundaries,
 `nexora.com` always remains `UNKNOWN`, and the requester address itself is not
 sent to the model. Leave an allowlist empty when no audited mapping exists.
 
+Admins and supervisors can review read-only resolver-catalog recommendations
+in the Intelligence cockpit. Over a fixed 365-day window, the deterministic
+recommender correlates current, synchronized ticket assignments with current
+provider group membership inside the exact binding/provider/workspace scope.
+It accepts only provenance-current resolver artifacts, lets each ticket support
+at most one group, requires a
+multi-agent sample with sufficient dominance and coverage, and reports a
+sample-adjusted Wilson confidence score. Ambiguous memberships and bounded or
+stale evidence fail closed. Recommendations expose aggregate counts only and
+never create a catalog mapping, change a ticket assignment, or write to the
+provider.
+
 Provider concurrency uses expiring database-backed leases shared by API and
 worker replicas; request and token ceilings are reserved before each retry.
 The background worker admits at most `AI_BACKGROUND_TICKETS_PER_SWEEP` tickets
@@ -377,6 +389,7 @@ through the same provider-wide Foundry budgets as realtime work.
 | `GET /intelligence/alerts` | Escalation-prone tickets, SLA at-risk/breached |
 | `GET /intelligence/systemic` | Systemic issue clusters |
 | `GET /leaderboard` | Agent leaderboard (points, tier, rank) |
+| `GET /admin/routing-catalog/recommendations` | Admin/supervisor: read-only, aggregate resolver-code to provider-group recommendations; never applies a mapping |
 | `GET /admin/sync/status` | Admin: recent, historical, conversation, and Freshservice rate-budget checkpoints |
 | `POST /admin/sync/trigger` | Admin: run one bounded provider sync sweep |
 | `POST /auth/login` | Session login (cookie) |

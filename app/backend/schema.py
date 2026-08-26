@@ -4,6 +4,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from typing import Optional, List, Literal
 from datetime import datetime, timezone
 
+from .ai_contracts import AI_RESOLVER_TEAMS, ResolverGroup
+
 
 def _reject_nul(value: Optional[str]) -> Optional[str]:
     if value is not None and "\x00" in value:
@@ -166,6 +168,239 @@ class AIAnalysis(BaseModel):
     action: str
     reasoning: str
     suggested_response: Optional[str] = None
+
+
+class ResolverCatalogScope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    binding_id: str = Field(..., min_length=1, max_length=255)
+    provider: str = Field(..., min_length=1, max_length=64)
+    workspace_id: Optional[str] = Field(None, max_length=255)
+
+
+class ResolverCatalogThresholds(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    minimum_group_tickets: int = Field(..., ge=1, le=10_000)
+    minimum_distinct_agents: int = Field(..., ge=1, le=10_000)
+    minimum_top_share: float = Field(..., ge=0.0, le=1.0)
+    minimum_runner_up_lead: float = Field(..., ge=0.0, le=1.0)
+    minimum_evidence_coverage: float = Field(..., ge=0.0, le=1.0)
+    minimum_confidence: float = Field(..., ge=0.0, le=1.0)
+    history_ticket_limit: int = Field(..., ge=1, le=100_000)
+
+
+class ResolverCatalogCoverage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_ticket_count: int = Field(..., ge=0)
+    analyzed_ticket_count: int = Field(..., ge=0)
+    trusted_route_ticket_count: int = Field(..., ge=0)
+    membership_eligible_ticket_count: int = Field(..., ge=0)
+    unambiguous_ticket_count: int = Field(..., ge=0)
+    ambiguous_membership_ticket_count: int = Field(..., ge=0)
+    without_membership_evidence_ticket_count: int = Field(..., ge=0)
+    excluded_ambiguous_or_unmatched_ticket_count: int = Field(..., ge=0)
+    history_truncated: bool
+    catalog_scopes_truncated: bool
+
+    @model_validator(mode="after")
+    def validate_coverage_counts(self):
+        if self.analyzed_ticket_count != self.candidate_ticket_count:
+            raise ValueError("analyzed count must match the bounded candidate set")
+        if self.trusted_route_ticket_count > self.analyzed_ticket_count:
+            raise ValueError("trusted routes cannot exceed analyzed candidates")
+        if self.membership_eligible_ticket_count > self.trusted_route_ticket_count:
+            raise ValueError("membership evidence cannot exceed trusted routes")
+        if (
+            self.unambiguous_ticket_count
+            + self.ambiguous_membership_ticket_count
+            > self.membership_eligible_ticket_count
+        ):
+            raise ValueError("membership evidence counts exceed eligible tickets")
+        if self.without_membership_evidence_ticket_count != (
+            self.trusted_route_ticket_count - self.membership_eligible_ticket_count
+        ):
+            raise ValueError("unmatched membership count is inconsistent")
+        if self.excluded_ambiguous_or_unmatched_ticket_count != (
+            self.trusted_route_ticket_count - self.unambiguous_ticket_count
+        ):
+            raise ValueError("excluded evidence count is inconsistent")
+        return self
+
+
+class ResolverCatalogRecommendationItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    resolver_code: ResolverGroup
+    scope: ResolverCatalogScope
+    provider_group_id: str = Field(..., min_length=1, max_length=255)
+    provider_group_name: str = Field(..., min_length=1, max_length=255)
+    trusted_ticket_count: int = Field(..., ge=0)
+    membership_eligible_ticket_count: int = Field(..., ge=0)
+    unambiguous_ticket_count: int = Field(..., ge=0)
+    ambiguous_membership_ticket_count: int = Field(..., ge=0)
+    evidence_ticket_count: int = Field(..., ge=0)
+    direct_assignment_ticket_count: int = Field(..., ge=0)
+    sole_membership_ticket_count: int = Field(..., ge=0)
+    distinct_agent_count: int = Field(..., ge=0)
+    candidate_group_count: int = Field(..., ge=1)
+    runner_up_ticket_count: int = Field(..., ge=0)
+    group_share: float = Field(..., ge=0.0, le=1.0)
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    runner_up_lead: float = Field(..., ge=0.0, le=1.0)
+    evidence_coverage: float = Field(..., ge=0.0, le=1.0)
+    reason: str = Field(..., min_length=1, max_length=500)
+    advisory_only: Literal[True]
+
+    @model_validator(mode="after")
+    def validate_aggregate_evidence(self):
+        if self.direct_assignment_ticket_count + self.sole_membership_ticket_count != (
+            self.evidence_ticket_count
+        ):
+            raise ValueError("recommendation evidence split is inconsistent")
+        if self.evidence_ticket_count > self.unambiguous_ticket_count:
+            raise ValueError("group evidence cannot exceed unambiguous evidence")
+        if self.unambiguous_ticket_count > self.membership_eligible_ticket_count:
+            raise ValueError("unambiguous evidence cannot exceed eligible evidence")
+        if self.membership_eligible_ticket_count > self.trusted_ticket_count:
+            raise ValueError("eligible evidence cannot exceed trusted evidence")
+        if self.distinct_agent_count > self.evidence_ticket_count:
+            raise ValueError("agent aggregate cannot exceed group evidence")
+        if self.runner_up_ticket_count > self.unambiguous_ticket_count:
+            raise ValueError("runner-up evidence cannot exceed the evidence set")
+        if self.confidence > self.group_share:
+            raise ValueError("sample-adjusted confidence cannot exceed group share")
+        return self
+
+
+ResolverCatalogGapReason = Literal[
+    "no_trusted_history",
+    "no_unambiguous_membership_evidence",
+    "insufficient_evidence_coverage",
+    "insufficient_ticket_sample",
+    "insufficient_agent_diversity",
+    "low_dominance",
+    "ambiguous_lead",
+    "catalog_group_unavailable",
+    "evidence_truncated",
+    "low_sample_adjusted_confidence",
+]
+
+
+class ResolverCatalogGap(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    resolver_code: ResolverGroup
+    scope: ResolverCatalogScope
+    reason: ResolverCatalogGapReason
+    trusted_ticket_count: int = Field(..., ge=0)
+    membership_eligible_ticket_count: int = Field(..., ge=0)
+    unambiguous_ticket_count: int = Field(..., ge=0)
+    ambiguous_membership_ticket_count: int = Field(..., ge=0)
+    leading_ticket_count: int = Field(..., ge=0)
+    leading_distinct_agent_count: int = Field(..., ge=0)
+    candidate_group_count: int = Field(..., ge=0)
+
+    @model_validator(mode="after")
+    def validate_gap_aggregates(self):
+        if self.membership_eligible_ticket_count > self.trusted_ticket_count:
+            raise ValueError("eligible gap evidence cannot exceed trusted evidence")
+        if (
+            self.unambiguous_ticket_count
+            + self.ambiguous_membership_ticket_count
+            > self.membership_eligible_ticket_count
+        ):
+            raise ValueError("gap membership counts exceed eligible evidence")
+        if self.leading_ticket_count > self.unambiguous_ticket_count:
+            raise ValueError("leading gap evidence exceeds unambiguous evidence")
+        if self.leading_distinct_agent_count > self.leading_ticket_count:
+            raise ValueError("leading agent aggregate exceeds leading evidence")
+        return self
+
+
+class ResolverCatalogRecommendationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["1"]
+    generated_at: datetime
+    window_start_at: datetime
+    window_days: Literal[365]
+    advisory_only: Literal[True]
+    mapping_applied: Literal[False]
+    no_mapping_applied: Literal[True]
+    thresholds: ResolverCatalogThresholds
+    coverage: ResolverCatalogCoverage
+    ready: bool
+    scopes: List[ResolverCatalogScope] = Field(default_factory=list, max_length=50)
+    recommendations: List[ResolverCatalogRecommendationItem] = Field(
+        default_factory=list,
+        max_length=750,
+    )
+    scoped_gaps: List[ResolverCatalogGap] = Field(
+        default_factory=list,
+        max_length=750,
+    )
+    unmapped_codes: List[ResolverGroup] = Field(default_factory=list, max_length=15)
+    unmapped_codes_scope: Optional[ResolverCatalogScope] = None
+
+    @model_validator(mode="after")
+    def validate_recommendation_partition(self):
+        scope_keys = {
+            (scope.binding_id, scope.provider, scope.workspace_id)
+            for scope in self.scopes
+        }
+        if len(scope_keys) != len(self.scopes):
+            raise ValueError("catalog scopes must be unique")
+        recommendation_keys = {
+            (
+                item.scope.binding_id,
+                item.scope.provider,
+                item.scope.workspace_id,
+                item.resolver_code,
+            )
+            for item in self.recommendations
+        }
+        if len(recommendation_keys) != len(self.recommendations):
+            raise ValueError("resolver recommendations must be unique per scope")
+        gap_keys = {
+            (
+                item.scope.binding_id,
+                item.scope.provider,
+                item.scope.workspace_id,
+                item.resolver_code,
+            )
+            for item in self.scoped_gaps
+        }
+        if len(gap_keys) != len(self.scoped_gaps):
+            raise ValueError("resolver gaps must be unique per scope")
+        if recommendation_keys.intersection(gap_keys):
+            raise ValueError("a scoped resolver code cannot be mapped and a gap")
+        item_scope_keys = {key[:3] for key in recommendation_keys.union(gap_keys)}
+        if not item_scope_keys.issubset(scope_keys):
+            raise ValueError("recommendation evidence references an unknown scope")
+        for scope_key in scope_keys:
+            scoped_codes = {
+                key[3] for key in recommendation_keys.union(gap_keys)
+                if key[:3] == scope_key
+            }
+            if scoped_codes != set(AI_RESOLVER_TEAMS):
+                raise ValueError("each catalog scope must classify every resolver code")
+        if self.ready != bool(self.recommendations):
+            raise ValueError("readiness must reflect emitted recommendations")
+        if len(self.unmapped_codes) != len(set(self.unmapped_codes)):
+            raise ValueError("unmapped resolver codes must be unique")
+        if not self.scopes:
+            if set(self.unmapped_codes) != set(AI_RESOLVER_TEAMS):
+                raise ValueError("an empty catalog must mark every resolver code unmapped")
+            if self.unmapped_codes_scope is not None:
+                raise ValueError("an empty catalog cannot name an unmapped scope")
+        elif len(self.scopes) == 1:
+            if self.unmapped_codes_scope != self.scopes[0]:
+                raise ValueError("single-scope unmapped codes require that exact scope")
+        elif self.unmapped_codes or self.unmapped_codes_scope is not None:
+            raise ValueError("multi-scope gaps must remain scoped")
+        return self
 
 
 class TriageResult(BaseModel):

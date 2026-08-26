@@ -43,6 +43,7 @@ import type {
   IntelTrendsResponse,
   IntelWorkloadResponse,
   LevelZeroStudy,
+  RoutingCatalogRecommendationsResponse,
   ServiceQualityResponse,
   SlaMonitoringItem,
   SlaMonitoringResponse,
@@ -309,6 +310,10 @@ function IntelligenceCockpit() {
     queryKey: ["intelligence", "sla-monitoring", windowDays],
     queryFn: () => api.getIntelSlaMonitoring(windowDays),
   });
+  const routingCatalogQuery = useQuery({
+    queryKey: ["intelligence", "routing-catalog-recommendations"],
+    queryFn: api.getRoutingCatalogRecommendations,
+  });
 
   const refreshAll = () => queryClient.invalidateQueries({ queryKey: ["intelligence"] });
   const overview = overviewQuery.data;
@@ -387,6 +392,18 @@ function IntelligenceCockpit() {
           <div className="space-y-4 border-t border-linen-400 p-4 sm:p-5">
             <ServiceQualityPanels key={`quality-${windowDays}`} query={qualityQuery} />
             <SlaMonitoringPanel key={`sla-${windowDays}`} query={slaMonitoringQuery} />
+          </div>
+        </details>
+
+        <details data-intelligence-section="routing-catalog-recommendations" className="group rounded-2xl border border-linen-400 bg-linen-50 shadow-sm">
+          <CockpitDisclosureSummary
+            title="Resolver catalog recommendations"
+            description="Read-only evidence for linking supported resolver codes to synchronized provider groups. This snapshot is independent of the operational activity-window control."
+            status={routingCatalogQuery.isError ? routingCatalogQuery.data ? "Prior snapshot" : "Needs retry" : routingCatalogQuery.isLoading ? "Loading" : "Advisory only"}
+            warning={routingCatalogQuery.isError}
+          />
+          <div className="border-t border-linen-400 p-4 sm:p-5">
+            <RoutingCatalogRecommendationsPanel query={routingCatalogQuery} />
           </div>
         </details>
 
@@ -1116,6 +1133,153 @@ function AccountHealthResult({ data }: { data: AccountHealth }) {
       <div className="flex items-center gap-4"><div className="grid h-20 w-20 shrink-0 place-items-center rounded-full border-[8px] border-linen-300"><span className="font-mono text-xl font-semibold tabular-nums text-ink-700">{data.health_score}</span></div><div className="min-w-0"><Badge variant={data.churn_risk === "high" ? "danger" : data.churn_risk === "medium" ? "warning" : "success"} dot>{data.churn_risk} experience risk</Badge><p className="mt-2 text-sm text-ink-600">{data.open} open · {data.resolved} resolved · {data.total} active tickets</p><p className="mt-1 text-xs leading-5 text-ink-500">Average escalation risk {data.avg_escalation_risk} · negative sentiment {(data.negative_sentiment_ratio * 100).toFixed(0)}%</p></div></div>
       <SamplingNotice analyzed={data.analyzed_tickets} total={data.total} />
     </div>
+  );
+}
+
+function routingCatalogPercent(value: number): string {
+  if (!Number.isFinite(value)) return "Unavailable";
+  return `${Math.round(Math.min(1, Math.max(0, value)) * 100)}%`;
+}
+
+function RoutingCatalogRecommendationsPanel({ query }: { query: UseQueryResult<RoutingCatalogRecommendationsResponse, Error> }) {
+  const data = query.data;
+  const advisoryConfirmed = Boolean(
+    data?.advisory_only
+    && data.mapping_applied === false
+    && data.no_mapping_applied,
+  );
+  const providerMembershipMissing = Boolean(
+    data
+    && data.coverage.trusted_route_ticket_count > 0
+    && data.coverage.membership_eligible_ticket_count === 0,
+  );
+
+  return (
+    <Panel
+      title="Resolver-code mapping evidence"
+      description="Current synchronized ticket assignments are correlated with provider group membership over a fixed evidence window."
+      icon={<Waypoints className="h-4 w-4" />}
+      action={<Badge variant="info">Read only</Badge>}
+    >
+      {query.isLoading ? (
+        <PanelLoading rows={3} />
+      ) : query.isError && !data ? (
+        <ErrorState
+          density="compact"
+          title="Resolver mapping recommendations unavailable"
+          description="No mapping was made. Retry to load a new read-only view of the existing evidence."
+          onRetry={() => void query.refetch()}
+          retrying={query.isFetching}
+        />
+      ) : !data ? (
+        <EmptyPanel
+          title="No recommendation snapshot returned"
+          description="No resolver-group mapping was created or changed."
+        />
+      ) : (
+        <div className="space-y-4">
+          {query.isError && (
+            <Alert variant="warning" title="Refresh failed — prior snapshot retained" className="text-xs">
+              The latest read-only refresh did not complete. The generated time below identifies the unchanged snapshot; no mapping was made.
+            </Alert>
+          )}
+          <Alert
+            variant={advisoryConfirmed ? "info" : "warning"}
+            title={advisoryConfirmed ? "Advisory only — no mapping was made" : "Advisory status was not confirmed"}
+            className="text-xs"
+          >
+            {advisoryConfirmed
+              ? "These recommendations do not modify ticket routing, provider groups, or application settings. Validate the evidence before any separately authorized mapping change."
+              : "This page remains read only, but the response did not confirm that no mapping was applied. Treat the snapshot as unavailable for decision-making."}
+          </Alert>
+
+          <div className="flex flex-wrap gap-2" aria-label="Resolver recommendation snapshot">
+            <Badge>{data.window_days.toLocaleString()}-day evidence window</Badge>
+            <Badge>{data.recommendations.length.toLocaleString()} recommendation{data.recommendations.length === 1 ? "" : "s"}</Badge>
+            <Badge variant={data.scoped_gaps.length ? "warning" : "success"}>{data.scoped_gaps.length.toLocaleString()} scoped gap{data.scoped_gaps.length === 1 ? "" : "s"}</Badge>
+            <Badge variant={data.unmapped_codes.length ? "warning" : "success"}>{data.unmapped_codes.length.toLocaleString()} unmapped</Badge>
+            <Badge>Generated {formatLocalDateTime(data.generated_at)}</Badge>
+          </div>
+
+          <dl className="grid min-w-0 gap-3 rounded-xl bg-linen-100 p-4 sm:grid-cols-2 xl:grid-cols-4" aria-label="Resolver recommendation coverage">
+            <div className="min-w-0"><dt className="text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-400">Candidate tickets</dt><dd className="mt-1 font-mono text-sm tabular-nums text-ink-700">{data.coverage.candidate_ticket_count.toLocaleString()}</dd></div>
+            <div className="min-w-0"><dt className="text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-400">Trusted routes</dt><dd className="mt-1 font-mono text-sm tabular-nums text-ink-700">{data.coverage.trusted_route_ticket_count.toLocaleString()}</dd></div>
+            <div className="min-w-0"><dt className="text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-400">Unambiguous assignments</dt><dd className="mt-1 font-mono text-sm tabular-nums text-ink-700">{data.coverage.unambiguous_ticket_count.toLocaleString()}</dd></div>
+            <div className="min-w-0"><dt className="text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-400">Ambiguous memberships</dt><dd className="mt-1 font-mono text-sm tabular-nums text-ink-700">{data.coverage.ambiguous_membership_ticket_count.toLocaleString()}</dd></div>
+          </dl>
+
+          {providerMembershipMissing && (
+            <Alert variant="warning" title="Provider group membership is not ready" className="text-xs">
+              Trusted resolver routes exist, but no active provider agent/group membership matched the same binding and workspace. Complete the Freshservice directory sync; no fallback recommendation was created.
+            </Alert>
+          )}
+
+          {(data.coverage.history_truncated || data.coverage.catalog_scopes_truncated) && (
+            <Alert variant="warning" title="Recommendation evidence is bounded" className="text-xs">
+              {data.coverage.history_truncated && <>The ticket history reached its {data.thresholds.history_ticket_limit.toLocaleString()}-ticket safety limit. </>}
+              {data.coverage.catalog_scopes_truncated && <>The provider catalog reached its scope safety limit. </>}
+              Coverage totals describe only the bounded evidence returned; no missing evidence was inferred.
+            </Alert>
+          )}
+
+          {data.unmapped_codes.length > 0 && (
+            <Alert variant="warning" title="Resolver codes remain unmapped" className="text-xs">
+              <p>No provider group met the evidence threshold for these codes. No fallback mapping was guessed.</p>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {data.unmapped_codes.map((code) => <Badge key={code}>{code}</Badge>)}
+              </div>
+            </Alert>
+          )}
+
+          {data.recommendations.length === 0 ? (
+            <EmptyPanel
+              title="No evidence-backed mappings to recommend"
+              description="The snapshot completed without a provider-group recommendation. Existing mappings remain unchanged."
+            />
+          ) : (
+            <div className="space-y-3">
+              {data.recommendations.map((recommendation) => {
+                const scope = recommendation.scope;
+                return (
+                  <article
+                    key={JSON.stringify([recommendation.resolver_code, scope.binding_id, scope.provider, scope.workspace_id, recommendation.provider_group_id])}
+                    className="rounded-xl border border-linen-300 p-4"
+                  >
+                    <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Badge variant="info">{recommendation.resolver_code}</Badge>
+                          <ArrowRight className="h-4 w-4 text-ink-400" aria-hidden="true" />
+                          <ListText text={recommendation.provider_group_name} lines={2} className="text-sm font-semibold leading-5 text-ink-700" />
+                        </div>
+                        <ListText
+                          text={`${scope.provider} · external group ${recommendation.provider_group_id}${scope.workspace_id ? ` · workspace ${scope.workspace_id}` : ""} · binding ${scope.binding_id}`}
+                          lines={2}
+                          className="mt-2 text-xs leading-5 text-ink-500"
+                        />
+                      </div>
+                      <div className="flex shrink-0 flex-wrap gap-1.5 sm:justify-end">
+                        <Badge variant={recommendation.confidence >= 0.85 ? "success" : recommendation.confidence >= 0.6 ? "info" : "warning"} dot>
+                          {routingCatalogPercent(recommendation.confidence)} confidence
+                        </Badge>
+                        <Badge>{routingCatalogPercent(recommendation.evidence_coverage)} evidence coverage</Badge>
+                      </div>
+                    </div>
+
+                    <dl className="mt-4 grid min-w-0 gap-3 rounded-lg bg-linen-100 p-3 sm:grid-cols-3">
+                      <div className="min-w-0"><dt className="text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-400">Evidence tickets</dt><dd className="mt-1 font-mono text-sm tabular-nums text-ink-700">{recommendation.evidence_ticket_count.toLocaleString()} / {recommendation.trusted_ticket_count.toLocaleString()}</dd></div>
+                      <div className="min-w-0"><dt className="text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-400">Distinct agents</dt><dd className="mt-1 font-mono text-sm tabular-nums text-ink-700">{recommendation.distinct_agent_count.toLocaleString()}</dd></div>
+                      <div className="min-w-0"><dt className="text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-400">Group share</dt><dd className="mt-1 font-mono text-sm tabular-nums text-ink-700">{routingCatalogPercent(recommendation.group_share)}</dd></div>
+                    </dl>
+                    <ListText text={recommendation.reason} lines={3} className="mt-3 text-xs leading-5 text-ink-500" />
+                  </article>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </Panel>
   );
 }
 

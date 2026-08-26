@@ -361,6 +361,10 @@ export const api = {
     fetchAPI<{ status: string; providers_queried: string[]; total_models: number; results: Record<string, number> }>(
       "/admin/llm/refresh-models", { method: "POST" }
     ),
+  getRoutingCatalogRecommendations: () =>
+    fetchAPI<import("./types").RoutingCatalogRecommendationsResponse>(
+      "/admin/routing-catalog/recommendations"
+    ),
   // Intelligence agents
   getIntelOverview: (windowDays = 30) =>
     fetchAPI<import("./types").IntelligenceOverviewResponse>(

@@ -722,6 +722,95 @@ export interface RouteRecommendation {
   reason: string;
 }
 
+export interface RoutingCatalogScope {
+  binding_id: string;
+  provider: string;
+  workspace_id: string | null;
+}
+
+export interface RoutingCatalogRecommendation {
+  resolver_code: ResolverGroup;
+  scope: RoutingCatalogScope;
+  trusted_ticket_count: number;
+  membership_eligible_ticket_count: number;
+  unambiguous_ticket_count: number;
+  ambiguous_membership_ticket_count: number;
+  provider_group_id: string;
+  provider_group_name: string;
+  evidence_ticket_count: number;
+  direct_assignment_ticket_count: number;
+  sole_membership_ticket_count: number;
+  distinct_agent_count: number;
+  candidate_group_count: number;
+  runner_up_ticket_count: number;
+  group_share: number;
+  confidence: number;
+  runner_up_lead: number;
+  evidence_coverage: number;
+  advisory_only: true;
+  reason: string;
+}
+
+export interface RoutingCatalogScopedGap {
+  resolver_code: ResolverGroup;
+  scope: RoutingCatalogScope;
+  trusted_ticket_count: number;
+  membership_eligible_ticket_count: number;
+  unambiguous_ticket_count: number;
+  ambiguous_membership_ticket_count: number;
+  reason:
+    | "no_trusted_history"
+    | "no_unambiguous_membership_evidence"
+    | "insufficient_evidence_coverage"
+    | "insufficient_ticket_sample"
+    | "insufficient_agent_diversity"
+    | "low_dominance"
+    | "ambiguous_lead"
+    | "low_sample_adjusted_confidence"
+    | "catalog_group_unavailable"
+    | "evidence_truncated";
+  leading_ticket_count: number;
+  leading_distinct_agent_count: number;
+  candidate_group_count: number;
+}
+
+export interface RoutingCatalogRecommendationsResponse {
+  schema_version: "1";
+  window_days: number;
+  generated_at: string;
+  window_start_at: string;
+  advisory_only: true;
+  mapping_applied: false;
+  no_mapping_applied: true;
+  thresholds: {
+    minimum_group_tickets: number;
+    minimum_distinct_agents: number;
+    minimum_top_share: number;
+    minimum_runner_up_lead: number;
+    minimum_evidence_coverage: number;
+    minimum_confidence: number;
+    history_ticket_limit: number;
+  };
+  coverage: {
+    candidate_ticket_count: number;
+    analyzed_ticket_count: number;
+    trusted_route_ticket_count: number;
+    membership_eligible_ticket_count: number;
+    unambiguous_ticket_count: number;
+    ambiguous_membership_ticket_count: number;
+    without_membership_evidence_ticket_count: number;
+    excluded_ambiguous_or_unmatched_ticket_count: number;
+    history_truncated: boolean;
+    catalog_scopes_truncated: boolean;
+  };
+  ready: boolean;
+  scopes: RoutingCatalogScope[];
+  recommendations: RoutingCatalogRecommendation[];
+  scoped_gaps: RoutingCatalogScopedGap[];
+  unmapped_codes: ResolverGroup[];
+  unmapped_codes_scope: RoutingCatalogScope | null;
+}
+
 export interface WorkloadAgent {
   user_id: string;
   name: string;
