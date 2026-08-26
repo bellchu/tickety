@@ -5,6 +5,8 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 COMPOSE_FILE="$ROOT_DIR/docker-compose.yml"
 readonly PRODUCTION_HOST=tickety.nexora.com
 readonly PRODUCTION_URL=https://tickety.nexora.com
+readonly AUXILIARY_SSH_HOST=ticketyssh.nexora.com
+readonly AUXILIARY_SSH_SERVICE=ssh://localhost:22
 readonly LOCAL_DOCKER_HOST=unix:///var/run/docker.sock
 EXPECTED_FULL_SHA=""
 EXPECTED_SHORT_SHA=""
@@ -28,6 +30,9 @@ Verify the fixed Tickety OPS Tower production path:
     -> https://localhost:443
     -> Compose tunnel-proxy
     -> frontend:3000
+
+The same host and tunnel also carry the separately audited administrative path:
+  ticketyssh.nexora.com -> ssh://localhost:22
 
 --mapping-only performs the read-only pre-deployment target and Compose topology
 check. Full verification additionally proves runtime health, local and public
@@ -109,11 +114,15 @@ validate_sha_pair() {
 validate_tunnel_config_line() {
   local config_line=$1
 
-  "$PYTHON" - "$config_line" "$PRODUCTION_HOST" <<'PY'
+  "$PYTHON" - \
+    "$config_line" \
+    "$PRODUCTION_HOST" \
+    "$AUXILIARY_SSH_HOST" \
+    "$AUXILIARY_SSH_SERVICE" <<'PY'
 import json
 import sys
 
-line, expected_host = sys.argv[1:]
+line, expected_host, expected_ssh_host, expected_ssh_service = sys.argv[1:]
 marker = "config="
 if marker not in line:
     raise SystemExit("Cloudflare configuration evidence has no config payload")
@@ -127,22 +136,23 @@ except (json.JSONDecodeError, TypeError) as exc:
 if not isinstance(config, dict):
     raise SystemExit("Cloudflare configuration payload must be an object")
 ingress = config.get("ingress")
-if not isinstance(ingress, list) or len(ingress) != 2:
-    raise SystemExit("Cloudflare ingress must contain exactly the production rule and 404 fallback")
-production, fallback = ingress
-if not isinstance(production, dict) or not isinstance(fallback, dict):
-    raise SystemExit("Cloudflare ingress rules must be objects")
-if production.get("hostname") != expected_host:
-    raise SystemExit(f"Cloudflare hostname is not the fixed production host {expected_host}")
-if production.get("service") != "https://localhost:443":
-    raise SystemExit("Cloudflare production origin is not https://localhost:443")
-origin_request = production.get("originRequest")
-if not isinstance(origin_request, dict) or origin_request.get("noTLSVerify") is not True:
-    raise SystemExit("Cloudflare production origin must explicitly allow the Caddy internal certificate")
-if fallback.get("service") != "http_status:404" or fallback.get("hostname") is not None:
-    raise SystemExit("Cloudflare ingress must end with an unscoped 404 fallback")
-if any(rule.get("hostname") not in (None, expected_host) for rule in ingress):
-    raise SystemExit("Cloudflare ingress contains an unexpected hostname")
+expected_ingress = [
+    {
+        "hostname": expected_host,
+        "originRequest": {"noTLSVerify": True},
+        "service": "https://localhost:443",
+    },
+    {
+        "hostname": expected_ssh_host,
+        "service": expected_ssh_service,
+    },
+    {"service": "http_status:404"},
+]
+if ingress != expected_ingress:
+    raise SystemExit(
+        "Cloudflare ingress must exactly match the ordered production web rule, "
+        "audited SSH rule, and unscoped 404 fallback"
+    )
 PY
 }
 
@@ -394,6 +404,7 @@ validate_cloudflare_mapping() {
   fi
 
   echo "Cloudflare production mapping verified: $PRODUCTION_HOST -> https://localhost:443 (pid=$cloudflared_pid)."
+  echo "Cloudflare auxiliary SSH mapping verified: $AUXILIARY_SSH_HOST -> $AUXILIARY_SSH_SERVICE."
   echo "Cloudflare configuration evidence: $config_line"
 }
 
@@ -1019,7 +1030,7 @@ self_test() {
   local short_sha=0123456789ab
   local ready='{"status":"ready","checks":{"database":"ok"}}'
   local version='{"component":"backend","version":"1.0.0","build_sha":"0123456789ab","build_time":"2026-08-26T00:00:00Z"}'
-  local good_mapping='config={"ingress":[{"hostname":"tickety.nexora.com","originRequest":{"noTLSVerify":true},"service":"https://localhost:443"},{"service":"http_status:404"}]} version=1'
+  local good_mapping='config={"ingress":[{"hostname":"tickety.nexora.com","originRequest":{"noTLSVerify":true},"service":"https://localhost:443"},{"hostname":"ticketyssh.nexora.com","service":"ssh://localhost:22"},{"service":"http_status:404"}]} version=1'
   local good_convergence='{"dry-run":true,"id":"Container tickety-postgres-1","status":"Running"}
 {"dry-run":true,"id":"Container tickety-postgres-1","status":"Healthy"}
 {"dry-run":true,"id":"Container tickety-migrate-1","status":"Starting"}
@@ -1054,6 +1065,20 @@ permissions-policy: accelerometer=(), autoplay=(), camera=(), geolocation=(), gy
     "${good_mapping/https:\/\/localhost:443/http:\/\/localhost:3000}"
   expect_failure validate_tunnel_config_line \
     "${good_mapping/\"noTLSVerify\":true/\"noTLSVerify\":false}"
+  expect_failure validate_tunnel_config_line \
+    "${good_mapping/ticketyssh.nexora.com/unexpected-ssh.nexora.com}"
+  expect_failure validate_tunnel_config_line \
+    "${good_mapping/ssh:\/\/localhost:22/ssh:\/\/localhost:2222}"
+  expect_failure validate_tunnel_config_line \
+    "${good_mapping/,{\"hostname\":\"ticketyssh.nexora.com\",\"service\":\"ssh:\/\/localhost:22\"}/}"
+  expect_failure validate_tunnel_config_line \
+    "${good_mapping/\"noTLSVerify\":true/\"noTLSVerify\":true,\"httpHostHeader\":\"localhost\"}"
+  expect_failure validate_tunnel_config_line \
+    "${good_mapping/{\"service\":\"http_status:404\"}/{\"hostname\":null,\"service\":\"http_status:404\"}}"
+  expect_failure validate_tunnel_config_line \
+    'config={"ingress":[{"hostname":"ticketyssh.nexora.com","service":"ssh://localhost:22"},{"hostname":"tickety.nexora.com","originRequest":{"noTLSVerify":true},"service":"https://localhost:443"},{"service":"http_status:404"}]} version=1'
+  expect_failure validate_tunnel_config_line \
+    "${good_mapping/{\"service\":\"http_status:404\"}/{\"hostname\":\"extra.nexora.com\",\"service\":\"http:\/\/localhost:8080\"},{\"service\":\"http_status:404\"}}"
   validate_compose_convergence_output "$good_convergence" >/dev/null
   expect_failure validate_compose_convergence_output ''
   expect_failure validate_compose_convergence_output 'not-json'

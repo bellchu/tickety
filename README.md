@@ -52,7 +52,8 @@ This starts the demo configuration, including PostgreSQL and migrations. For
 the fail-closed Docker Compose production entrypoint, fixed Cloudflare Tunnel
 mapping, upgrades, or data-retention instructions, see the
 [deployment guide](docs/deployment.md). Tickety OPS Tower has one production target:
-`https://tickety.nexora.com`.
+`https://tickety.nexora.com`. The co-resident `ticketyssh.nexora.com` tunnel
+ingress is administrative SSH access only and is never a production web target.
 
 > **Demo mode is on by default.** Public browsing does not require login. Sign in
 > with the seeded administrator to configure the workspace and use protected AI,

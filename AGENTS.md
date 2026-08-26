@@ -8,6 +8,8 @@
 
 2. 以每次重新猜测部署目标为耻，以复用固定目标映射为荣
    - 固定生产映射：`https://tickety.nexora.com` 通过 Cloudflare Tunnel 转发到本机 `https://localhost:443`，由 Compose `tunnel-proxy` 转发到 `frontend:3000`。
+   - 同机辅助映射：同一主机和 Cloudflare Tunnel 还承载 `ticketyssh.nexora.com` 到 `ssh://localhost:22` 的管理入口；该入口仅用于 SSH，不得作为生产 Web 环境、健康状态或构建验证证据。
+   - 必需行为：Cloudflare ingress 必须严格依次为带 `originRequest.noTLSVerify=true` 的生产 Web 映射、上述 SSH 辅助映射和无 hostname 的 `http_status:404` 回退；不得接受其他 hostname、服务目标、规则属性或顺序。
    - 必需行为：使用 `docker compose` 构建和发布，并在发布前后验证 Compose 配置、服务健康、公网就绪状态与预期 Git 提交的构建元数据。
    - 冲突处理：若 Compose、Cloudflare Tunnel 或公网构建证据互相矛盾，停止发布并请求用户决定；不得自行改写固定映射。
    - 完成证据：所有 Compose 服务均就绪，`https://tickety.nexora.com` 返回就绪状态与预期构建。

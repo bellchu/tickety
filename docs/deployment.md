@@ -7,12 +7,15 @@ path:
 - Cloudflare Tunnel origin: `https://localhost:443`
 - Compose proxy: `tunnel-proxy`
 - application target: `frontend:3000`
+- co-resident administrative ingress: `ticketyssh.nexora.com -> ssh://localhost:22`
 - release command: `./deploy.sh docker`
 
 Do not use another hostname, a direct frontend port, Kubernetes, Helm, or a
 different tunnel as production evidence. If the Compose topology, the applied
 Cloudflare configuration, or the public build evidence disagree, stop the
 release and resolve the conflict before changing infrastructure.
+`ticketyssh.nexora.com` is an auxiliary SSH route on the same host and tunnel;
+it is never application readiness, version, monitoring, or deployment evidence.
 
 ## Local demo
 
@@ -93,10 +96,13 @@ infrastructure:
 scripts/verify-compose-production.sh --mapping-only
 ```
 
-The preflight proves that the active Cloudflare process has exactly the
-`tickety.nexora.com -> https://localhost:443` ingress plus its 404 fallback,
-that Compose binds TCP 443 on IPv4 loopback, and that `tunnel-proxy` forwards to
-`frontend:3000`. It also rejects `DOCKER_HOST`/`DOCKER_CONTEXT` overrides,
+The preflight proves that the active Cloudflare process has exactly the ordered
+`tickety.nexora.com -> https://localhost:443` web ingress with
+`originRequest.noTLSVerify=true`, the co-resident
+`ticketyssh.nexora.com -> ssh://localhost:22` administrative ingress, and the
+unscoped 404 fallback. It also proves that Compose binds TCP 443 on IPv4
+loopback and that `tunnel-proxy` forwards to `frontend:3000`. It rejects
+`DOCKER_HOST`/`DOCKER_CONTEXT` overrides,
 requires the active Docker context to resolve to
 `unix:///var/run/docker.sock`, and pins every build, rollout, and verification
 command to that local socket.
