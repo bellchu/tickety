@@ -49,6 +49,7 @@ from .ai_input import (
 )
 from .privacy import redact_text
 from .prompts import RESOLUTION_SYSTEM_PROMPT, SUMMARY_SYSTEM_PROMPT
+from .sla_policy import ticket_is_sla_exempt
 
 # ── Tunables ──────────────────────────────────────────────────────────────
 
@@ -169,7 +170,7 @@ def escalation_risk(t: TicketRecord, now: Optional[datetime] = None) -> int:
     # Age decay: ramp risk as a case sits unresolved past half its SLA window.
     sla_h = SLA_HOURS.get(t.priority, DEFAULT_SLA_HOURS)
     age = _age_hours(t, now)
-    if _open(t):
+    if _open(t) and not ticket_is_sla_exempt(t):
         if age > sla_h:
             score += 15  # past SLA
         elif age > sla_h / 2:
@@ -184,6 +185,7 @@ def escalation_risk(t: TicketRecord, now: Optional[datetime] = None) -> int:
 def sla_status(t: TicketRecord, now: Optional[datetime] = None) -> Dict[str, Any]:
     """Return SLA clock state for a ticket."""
     now = now or datetime.utcnow()
+    sla_exempt = ticket_is_sla_exempt(t)
     configured_sla_h = SLA_HOURS.get(t.priority, DEFAULT_SLA_HOURS)
     start = t.external_created_at or t.created_at or now
     due_at = t.resolution_due_at or t.external_due_by or t.due_by
@@ -199,10 +201,11 @@ def sla_status(t: TicketRecord, now: Optional[datetime] = None) -> Dict[str, Any
     )
     elapsed = max(0.0, (end - start).total_seconds() / 3600.0)
     remaining_h = (due_at - end).total_seconds() / 3600.0
-    breached = remaining_h <= 0 and _open(t)
+    breached = remaining_h <= 0 and _open(t) and not sla_exempt
     at_risk = (
         not breached
         and _open(t)
+        and not sla_exempt
         and remaining_h <= sla_h * SLA_AT_RISK_THRESHOLD
         and remaining_h > 0
     )
@@ -212,8 +215,8 @@ def sla_status(t: TicketRecord, now: Optional[datetime] = None) -> Dict[str, Any
         "priority": t.priority,
         "sla_target_hours": sla_h,
         "elapsed_hours": round(elapsed, 2),
-        "remaining_hours": round(max(0.0, remaining_h), 2),
-        "overdue_hours": round(max(0.0, -remaining_h), 2),
+        "remaining_hours": 0.0 if sla_exempt else round(max(0.0, remaining_h), 2),
+        "overdue_hours": 0.0 if sla_exempt else round(max(0.0, -remaining_h), 2),
         "due_at": due_at.isoformat(),
         "target_source": target_source,
         "status": "breached" if breached else ("at_risk" if at_risk else "on_track"),
@@ -231,7 +234,8 @@ def prioritize_score(t: TicketRecord, now: Optional[datetime] = None) -> int:
     # Age pressure: how far through its SLA window the case is.
     sla_h = SLA_HOURS.get(t.priority, DEFAULT_SLA_HOURS)
     age = _age_hours(t, now)
-    score += min(30, (age / max(1, sla_h)) * 30)
+    if not ticket_is_sla_exempt(t):
+        score += min(30, (age / max(1, sla_h)) * 30)
     score += (t.complexity or 1) * 2
     return _clamp(score)
 
@@ -989,6 +993,7 @@ def first_response_sla_status(
     *, now: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     now = now or datetime.utcnow()
+    sla_exempt = ticket_is_sla_exempt(ticket)
     started_at = ticket.external_created_at or ticket.created_at or now
     due_at = ticket.external_fr_due_by or ticket.response_due_at
     if due_at and due_at > started_at:
@@ -1014,7 +1019,7 @@ def first_response_sla_status(
     )
     observed_at = responded_at or (now if _open(ticket) else terminal_at)
     delta_hours = (due_at - observed_at).total_seconds() / 3600.0
-    if not conversation_coverage and responded_at is None:
+    if sla_exempt or (not conversation_coverage and responded_at is None):
         status = "unmeasured"
         breached = False
         approaching = False
@@ -1039,8 +1044,8 @@ def first_response_sla_status(
         "started_at": started_at.isoformat(),
         "due_at": due_at.isoformat(),
         "completed_at": responded_at.isoformat() if responded_at else None,
-        "remaining_hours": round(max(0.0, delta_hours), 2),
-        "overdue_hours": round(max(0.0, -delta_hours), 2),
+        "remaining_hours": 0.0 if sla_exempt else round(max(0.0, delta_hours), 2),
+        "overdue_hours": 0.0 if sla_exempt else round(max(0.0, -delta_hours), 2),
         "is_open": _open(ticket),
     }
 
@@ -1050,6 +1055,7 @@ def resolution_sla_monitor_status(
     *, now: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     now = now or datetime.utcnow()
+    sla_exempt = ticket_is_sla_exempt(ticket)
     started_at = ticket.external_created_at or ticket.created_at or now
     due_at = ticket.resolution_due_at or ticket.external_due_by or ticket.due_by
     configured = float(SLA_HOURS.get(ticket.priority, DEFAULT_SLA_HOURS))
@@ -1063,7 +1069,7 @@ def resolution_sla_monitor_status(
     completed_at = ticket.external_resolved_at or ticket.resolved_at
     observed_at = completed_at or (now if _open(ticket) else ticket.external_updated_at or ticket.updated_at or now)
     delta_hours = (due_at - observed_at).total_seconds() / 3600.0
-    if not _open(ticket) and completed_at is None:
+    if sla_exempt or (not _open(ticket) and completed_at is None):
         status = "unmeasured"
         breached = False
         approaching = False
@@ -1088,8 +1094,8 @@ def resolution_sla_monitor_status(
         "started_at": started_at.isoformat(),
         "due_at": due_at.isoformat(),
         "completed_at": completed_at.isoformat() if completed_at else None,
-        "remaining_hours": round(max(0.0, delta_hours), 2),
-        "overdue_hours": round(max(0.0, -delta_hours), 2),
+        "remaining_hours": 0.0 if sla_exempt else round(max(0.0, delta_hours), 2),
+        "overdue_hours": 0.0 if sla_exempt else round(max(0.0, -delta_hours), 2),
         "is_open": _open(ticket),
     }
 

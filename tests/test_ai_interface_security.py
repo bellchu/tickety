@@ -351,7 +351,11 @@ class ProtectedAIRouteTests(unittest.TestCase):
 
     def test_anonymous_demo_cannot_read_ai_category_aggregate_reports(self):
         with patch.object(main.settings_module, "is_production_mode", return_value=False):
-            for path in ("/reports/by-category", "/reports/resolution-time"):
+            for path in (
+                "/reports/by-category",
+                "/reports/resolution-time",
+                "/reports/series",
+            ):
                 with self.subTest(path=path):
                     response = self.client.get(path)
                     self.assertEqual(response.status_code, 401)
@@ -1275,6 +1279,31 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
                     external_resolved_at=now - timedelta(days=1),
                     external_due_by=now - timedelta(days=2),
                 ),
+                TicketRecord(
+                    id="paused-sla-breach",
+                    subject="Paused after due date",
+                    status="Paused",
+                    priority="P1",
+                    external_source="freshservice",
+                    external_created_at=now - timedelta(hours=5),
+                    external_updated_at=now - timedelta(minutes=3),
+                    external_fr_due_by=now - timedelta(hours=3),
+                    external_due_by=now - timedelta(hours=1),
+                    external_conversations_synced_at=now,
+                ),
+                TicketRecord(
+                    id="on-hold-sla-breach",
+                    subject="On hold after due date",
+                    status="Open",
+                    external_status="On Hold",
+                    priority="P1",
+                    external_source="freshservice",
+                    external_created_at=now - timedelta(hours=5),
+                    external_updated_at=now - timedelta(minutes=2),
+                    external_fr_due_by=now - timedelta(hours=3),
+                    external_due_by=now - timedelta(hours=1),
+                    external_conversations_synced_at=now,
+                ),
             ])
             db.add(ExternalConversationRecord(
                 id="late-first-response",
@@ -1295,17 +1324,30 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
         self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
         with patch.object(main, "_reserve_analytics_request"):
             response = self.client.get("/intelligence/sla-monitoring?window_days=30")
+            sla_response = self.client.get("/intelligence/sla?window_days=30")
 
         self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(sla_response.status_code, 200, sla_response.text)
         payload = response.json()
         reactive = {(item["ticket_id"], item["metric"]): item for item in payload["reactive"]}
         proactive = {(item["ticket_id"], item["metric"]): item for item in payload["proactive"]}
         self.assertEqual(reactive[("active-sla-breach", "first_response")]["breach_state"], "historical")
         self.assertEqual(reactive[("active-sla-breach", "resolution")]["breach_state"], "active")
-        self.assertEqual(reactive[("historical-resolution-breach", "resolution")]["breach_state"], "historical")
         self.assertIn(("approaching-sla", "first_response"), proactive)
         self.assertIn(("approaching-sla", "resolution"), proactive)
+        exempt_ticket_ids = {
+            "historical-resolution-breach",
+            "paused-sla-breach",
+            "on-hold-sla-breach",
+        }
+        self.assertTrue(all(key[0] not in exempt_ticket_ids for key in reactive))
+        self.assertTrue(all(key[0] not in exempt_ticket_ids for key in proactive))
+        self.assertGreaterEqual(payload["scope"]["unmeasured_clocks"], 6)
         self.assertGreaterEqual(payload["by_priority"]["P1"]["resolution"]["breached"], 1)
+        sla_ids = {item["ticket_id"] for item in sla_response.json()["items"]}
+        self.assertIn("active-sla-breach", sla_ids)
+        self.assertIn("approaching-sla", sla_ids)
+        self.assertTrue(sla_ids.isdisjoint(exempt_ticket_ids))
 
     def test_level_zero_study_is_complete_persisted_and_explicitly_rerun(self):
         now = datetime.utcnow()

@@ -88,6 +88,11 @@ test("every report request and CSV export use the same encoded criteria", async 
     status: "Closed & verified",
     priority: "P1",
     category: "Network / VPN",
+    assigneeId: "agent & one",
+    source: "Fresh Service",
+    ticketType: "service_request",
+    resolutionState: "resolved",
+    slaState: "within_sla",
   };
 
   try {
@@ -98,10 +103,11 @@ test("every report request and CSV export use the same encoded criteria", async 
       api.getReportByStatus(filters),
       api.getReportSlaCompliance(filters),
       api.getReportResolutionTime(filters),
+      api.getReportSeries(filters, "avg_resolution_hours", "assignee"),
     ]);
     const exported = await api.downloadReportCsv(filters);
 
-    assert.equal(calls.length, 7);
+    assert.equal(calls.length, 8);
     for (const call of calls) {
       const url = new URL(call, "https://tickety.nexora.com");
       assert.equal(url.searchParams.get("start_at"), filters.startAt);
@@ -110,7 +116,15 @@ test("every report request and CSV export use the same encoded criteria", async 
       assert.equal(url.searchParams.get("status"), "Closed & verified");
       assert.equal(url.searchParams.get("priority"), "P1");
       assert.equal(url.searchParams.get("category"), "Network / VPN");
+      assert.equal(url.searchParams.get("assignee_id"), "agent & one");
+      assert.equal(url.searchParams.get("source"), "Fresh Service");
+      assert.equal(url.searchParams.get("ticket_type"), "service_request");
+      assert.equal(url.searchParams.get("resolution_state"), "resolved");
+      assert.equal(url.searchParams.get("sla_state"), "within_sla");
     }
+    const seriesCall = new URL(calls.find((call) => call.includes("/reports/series")), "https://tickety.nexora.com");
+    assert.equal(seriesCall.searchParams.get("metric"), "avg_resolution_hours");
+    assert.equal(seriesCall.searchParams.get("group_by"), "assignee");
     assert.equal(exported.filename, "filtered-report.csv");
     assert.equal(exported.rowCount, 3);
     assert.equal(await exported.blob.text(), "Ticket ID\nT-1\n");

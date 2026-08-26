@@ -1330,6 +1330,12 @@ export interface NotificationConfig {
 
 export type ReportDateField = "created" | "resolved";
 
+export type ReportType = "overview" | "volume" | "breakdown" | "resolution" | "sla";
+export type ReportGroupBy = "status" | "priority" | "category" | "assignee" | "source" | "ticket_type";
+export type ReportMetric = "ticket_count" | "avg_resolution_hours" | "sla_compliance";
+export type ReportResolutionState = "open" | "resolved";
+export type ReportSlaState = "breached" | "within_sla" | "not_tracked";
+
 export interface ReportFilters {
   startAt: string;
   endAt: string;
@@ -1337,6 +1343,32 @@ export interface ReportFilters {
   status?: string;
   priority?: string;
   category?: string;
+  assigneeId?: string;
+  source?: string;
+  ticketType?: string;
+  resolutionState?: ReportResolutionState;
+  slaState?: ReportSlaState;
+}
+
+export interface ReportSeriesResponse {
+  metric: ReportMetric;
+  group_by: ReportGroupBy;
+  labels: string[];
+  values: number[];
+  counts: number[];
+  unit: "tickets" | "hours" | "percent";
+  total_groups: number;
+  truncated: boolean;
+}
+
+export interface ReportOptions {
+  statuses: string[];
+  priorities: string[];
+  categories: string[];
+  sources: string[];
+  ticket_types: string[];
+  assignees: Array<{ id: string; name: string }>;
+  has_unassigned: boolean;
 }
 
 export interface ReportSummary {

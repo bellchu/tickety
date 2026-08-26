@@ -278,6 +278,61 @@ class AgentWorkspaceTests(unittest.TestCase):
         detail = self.client.get("/tickets/outside-scope")
         self.assertEqual(detail.status_code, 200)
 
+    def test_sla_risk_excludes_paused_and_on_hold_assignments(self):
+        now = datetime.utcnow()
+        with self.session_factory() as db:
+            db.add_all([
+                self._ticket(
+                    "paused-mine",
+                    "Paused assigned work",
+                    now - timedelta(hours=8),
+                    assignee_id="agent-local",
+                    workflow_status="Paused",
+                    response_due_at=now - timedelta(hours=2),
+                ),
+                self._ticket(
+                    "on-hold-mine",
+                    "On-hold assigned work",
+                    now - timedelta(hours=8),
+                    assignee_id="agent-local",
+                    external_status="On Hold",
+                    response_due_at=now - timedelta(hours=2),
+                ),
+                self._ticket(
+                    "explicitly-paused-mine",
+                    "Explicitly paused assigned work",
+                    now - timedelta(hours=8),
+                    assignee_id="agent-local",
+                    response_due_at=now - timedelta(hours=2),
+                    sla_paused_at=now - timedelta(hours=3),
+                ),
+            ])
+            db.commit()
+
+        bootstrap = self.client.get("/agent-workspace/bootstrap")
+        sla_folder = self.client.get(
+            "/agent-workspace/tickets",
+            params={"scope": "mine", "folder": "sla_at_risk"},
+        )
+        inbox = self.client.get(
+            "/agent-workspace/tickets",
+            params={"scope": "mine", "folder": "inbox"},
+        )
+
+        self.assertEqual(bootstrap.status_code, 200, bootstrap.text)
+        self.assertEqual(bootstrap.json()["counts"]["sla_at_risk"], 1)
+        self.assertEqual([item["id"] for item in sla_folder.json()], ["local-mine"])
+        exempt_ids = {
+            "paused-mine",
+            "on-hold-mine",
+            "explicitly-paused-mine",
+        }
+        exempt_rows = [item for item in inbox.json() if item["id"] in exempt_ids]
+        self.assertEqual({item["id"] for item in exempt_rows}, exempt_ids)
+        for item in exempt_rows:
+            self.assertFalse(item["sla_at_risk"])
+            self.assertNotIn("SLA is overdue", item["next_best_reasons"])
+
     def test_admin_can_create_and_audit_an_explicit_identity_link(self):
         self.current_user = UserRecord(
             id="admin-local",

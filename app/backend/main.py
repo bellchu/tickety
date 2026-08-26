@@ -60,6 +60,7 @@ from .ai_eligibility import (
     terminal_ticket_filter,
     terminal_status_names as shared_terminal_status_names,
 )
+from .sla_policy import sla_eligible_filter, ticket_is_sla_exempt
 from .schema import (
     Ticket, User, UserSummary, Recognition, SyncStatus,
     AIStatusResponse, AIRetryQueueActionResponse, AIRetryScheduleRequest,
@@ -1290,11 +1291,12 @@ def _agent_next_best_score_expression(needs_reply, now: datetime):
         value=TicketRecord.priority,
         else_=4,
     )
+    sla_eligible = sla_eligible_filter()
     sla_score = case(
-        (deadline <= now, 35),
-        (deadline <= now + timedelta(hours=1), 28),
-        (deadline <= now + timedelta(hours=4), 18),
-        (deadline <= now + timedelta(hours=24), 8),
+        (and_(sla_eligible, deadline <= now), 35),
+        (and_(sla_eligible, deadline <= now + timedelta(hours=1)), 28),
+        (and_(sla_eligible, deadline <= now + timedelta(hours=4)), 18),
+        (and_(sla_eligible, deadline <= now + timedelta(hours=24)), 8),
         else_=0,
     )
     risk_score = case(
@@ -1316,6 +1318,8 @@ def _agent_next_best_score_expression(needs_reply, now: datetime):
 
 
 def _agent_sla_deadline(ticket: TicketRecord, *, needs_reply: bool) -> Optional[datetime]:
+    if ticket_is_sla_exempt(ticket):
+        return None
     if needs_reply:
         return ticket.response_due_at or ticket.external_fr_due_by
     return (
@@ -1501,11 +1505,13 @@ async def get_agent_workspace_bootstrap(
     now = datetime.utcnow()
     sla_deadline = _agent_sla_deadline_expression(needs_reply)
     active = active_ticket_filter(db)
+    sla_eligible = sla_eligible_filter(_terminal_status_names(db))
     counts = {
         "inbox": db.query(TicketRecord).filter(mine_filter, active).count(),
         "needs_reply": db.query(TicketRecord).filter(mine_filter, active, needs_reply).count(),
         "sla_at_risk": db.query(TicketRecord).filter(
-            mine_filter, active, sla_deadline.isnot(None), sla_deadline <= now + timedelta(hours=4)
+            mine_filter, active, sla_eligible,
+            sla_deadline.isnot(None), sla_deadline <= now + timedelta(hours=4)
         ).count(),
         "starred": db.query(TicketRecord).join(
             AgentTicketStateRecord,
@@ -1585,6 +1591,7 @@ async def list_agent_workspace_tickets(
     elif folder == "sla_at_risk":
         sla_deadline = _agent_sla_deadline_expression(needs_reply)
         q = q.filter(
+            sla_eligible_filter(_terminal_status_names(db)),
             sla_deadline.isnot(None),
             sla_deadline <= now + timedelta(hours=4),
         )
@@ -5216,6 +5223,11 @@ class ReportFilters:
     status: Optional[str]
     priority: Optional[str]
     category: Optional[str]
+    assignee_id: Optional[str]
+    source: Optional[str]
+    ticket_type: Optional[str]
+    resolution_state: Optional[str]
+    sla_state: Optional[str]
 
 
 def _report_filters(
@@ -5225,6 +5237,17 @@ def _report_filters(
     status: Optional[str] = Query(default=None, max_length=100),
     priority: Optional[str] = Query(default=None, max_length=100),
     category: Optional[str] = Query(default=None, max_length=100),
+    assignee_id: Optional[str] = Query(default=None, max_length=255),
+    source: Optional[str] = Query(default=None, max_length=100),
+    ticket_type: Optional[str] = Query(default=None, max_length=100),
+    resolution_state: Optional[str] = Query(
+        default=None,
+        pattern="^(open|resolved)$",
+    ),
+    sla_state: Optional[str] = Query(
+        default=None,
+        pattern="^(breached|within_sla|not_tracked)$",
+    ),
 ) -> ReportFilters:
     """Normalize the shared report selection, bounded to 30 days by default."""
     now = datetime.utcnow().replace(microsecond=0)
@@ -5250,6 +5273,11 @@ def _report_filters(
         status=(status or "").strip() or None,
         priority=(priority or "").strip() or None,
         category=(category or "").strip() or None,
+        assignee_id=(assignee_id or "").strip() or None,
+        source=(source or "").strip() or None,
+        ticket_type=(ticket_type or "").strip() or None,
+        resolution_state=resolution_state,
+        sla_state=sla_state,
     )
 
 
@@ -5266,6 +5294,27 @@ def _report_date_column(filters: ReportFilters):
         _report_resolved_at_column()
         if filters.date_field == "resolved"
         else _report_created_at_column()
+    )
+
+
+def _report_sla_deadline_column():
+    return func.coalesce(
+        TicketRecord.resolution_due_at,
+        TicketRecord.external_due_by,
+        TicketRecord.due_by,
+    )
+
+
+def _sla_breached_condition(now: datetime, db: Session):
+    deadline = _report_sla_deadline_column()
+    resolved_at = _report_resolved_at_column()
+    return and_(
+        sla_eligible_filter(_terminal_status_names(db)),
+        deadline.isnot(None),
+        or_(
+            and_(resolved_at.isnot(None), resolved_at > deadline),
+            and_(resolved_at.is_(None), deadline < now),
+        ),
     )
 
 
@@ -5287,19 +5336,273 @@ def _report_ticket_query(db: Session, filters: ReportFilters, user: UserRecord):
         query = query.filter(TicketRecord.priority == filters.priority)
     if filters.category:
         query = query.filter(TicketRecord.category == filters.category)
+    if filters.assignee_id == "__unassigned__":
+        query = query.filter(
+            func.nullif(TicketRecord.assignee_id, "").is_(None),
+            func.nullif(TicketRecord.external_assignee_id, "").is_(None),
+        )
+    elif filters.assignee_id:
+        query = query.filter(TicketRecord.assignee_id == filters.assignee_id)
+    if filters.source:
+        if filters.source.lower() == "tickety":
+            query = query.filter(func.nullif(TicketRecord.external_source, "").is_(None))
+        else:
+            query = query.filter(
+                func.lower(TicketRecord.external_source) == filters.source.lower()
+            )
+    if filters.ticket_type:
+        query = query.filter(
+            func.lower(TicketRecord.ticket_type) == filters.ticket_type.lower()
+        )
+    terminal = _terminal_status_names(db)
+    if filters.resolution_state == "resolved":
+        query = query.filter(func.lower(TicketRecord.status).in_(terminal))
+    elif filters.resolution_state == "open":
+        query = query.filter(func.lower(TicketRecord.status).notin_(terminal))
+    if filters.sla_state:
+        eligible = sla_eligible_filter(terminal)
+        deadline = _report_sla_deadline_column()
+        breached = _sla_breached_condition(datetime.utcnow(), db)
+        if filters.sla_state == "breached":
+            query = query.filter(breached)
+        elif filters.sla_state == "within_sla":
+            query = query.filter(eligible, deadline.isnot(None), ~breached)
+        else:
+            query = query.filter(or_(~eligible, deadline.is_(None)))
     return query
 
 
-def _sla_breached_condition(now: datetime):
-    deadline = func.coalesce(TicketRecord.resolution_due_at, TicketRecord.due_by)
-    resolved_at = _report_resolved_at_column()
-    return and_(
-        deadline.isnot(None),
-        or_(
-            and_(resolved_at.isnot(None), resolved_at > deadline),
-            and_(resolved_at.is_(None), deadline < now),
+_REPORT_SERIES_ROW_LIMIT = 50_000
+_REPORT_SERIES_GROUP_LIMIT = 100
+
+
+def _report_group_expression(group_by: str):
+    expressions = {
+        "status": func.coalesce(func.nullif(TicketRecord.status, ""), "No status"),
+        "priority": func.coalesce(func.nullif(TicketRecord.priority, ""), "No priority"),
+        "category": func.coalesce(func.nullif(TicketRecord.category, ""), "Uncategorized"),
+        "assignee": func.coalesce(
+            func.nullif(UserRecord.name, ""),
+            func.nullif(ExternalUserRecord.name, ""),
+            func.nullif(TicketRecord.external_assignee_id, ""),
+            "Unassigned",
         ),
+        "source": func.coalesce(
+            func.nullif(TicketRecord.external_source, ""),
+            "Tickety",
+        ),
+        "ticket_type": func.coalesce(
+            func.nullif(TicketRecord.ticket_type, ""),
+            "Unspecified",
+        ),
+    }
+    return expressions[group_by]
+
+
+def _report_series_query(
+    db: Session,
+    filters: ReportFilters,
+    user: UserRecord,
+    group_by: str,
+):
+    query = _report_ticket_query(db, filters, user)
+    if group_by == "assignee":
+        query = query.outerjoin(
+            UserRecord,
+            TicketRecord.assignee_id == UserRecord.id,
+        ).outerjoin(
+            ExternalUserRecord,
+            and_(
+                ExternalUserRecord.binding_id == TicketRecord.binding_id,
+                ExternalUserRecord.provider == TicketRecord.external_source,
+                ExternalUserRecord.external_id == TicketRecord.external_assignee_id,
+                func.lower(ExternalUserRecord.user_type) == "agent",
+            ),
+        )
+    return query, _report_group_expression(group_by)
+
+
+@app.get("/reports/options")
+async def report_options(
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(get_current_user),
+):
+    """Return filter values visible inside the caller's ticket scope."""
+    query = db.query(TicketRecord)
+    allowed_assignee_id = _ticket_scope_assignee_id(user)
+    if allowed_assignee_id is not None:
+        query = query.filter(or_(
+            TicketRecord.assignee_id.is_(None),
+            TicketRecord.assignee_id == allowed_assignee_id,
+        ))
+
+    def distinct_values(column):
+        rows = query.with_entities(column).filter(
+            column.isnot(None),
+            column != "",
+        ).distinct().order_by(column).all()
+        return [row[0] for row in rows]
+
+    sources = distinct_values(TicketRecord.external_source)
+    if (
+        "Tickety" not in sources
+        and query.filter(func.nullif(TicketRecord.external_source, "").is_(None)).first()
+    ):
+        sources.insert(0, "Tickety")
+    assignees = query.join(
+        UserRecord,
+        TicketRecord.assignee_id == UserRecord.id,
+    ).with_entities(
+        UserRecord.id,
+        UserRecord.name,
+    ).distinct().order_by(UserRecord.name).all()
+    has_unassigned = query.filter(
+        func.nullif(TicketRecord.assignee_id, "").is_(None),
+        func.nullif(TicketRecord.external_assignee_id, "").is_(None),
+    ).first() is not None
+    return {
+        "statuses": distinct_values(TicketRecord.status),
+        "priorities": distinct_values(TicketRecord.priority),
+        "categories": distinct_values(TicketRecord.category),
+        "sources": sources,
+        "ticket_types": distinct_values(TicketRecord.ticket_type),
+        "assignees": [{"id": row.id, "name": row.name} for row in assignees],
+        "has_unassigned": has_unassigned,
+    }
+
+
+@app.get("/reports/series")
+async def reports_series(
+    metric: str = Query(
+        default="ticket_count",
+        pattern="^(ticket_count|avg_resolution_hours|sla_compliance)$",
+    ),
+    group_by: str = Query(
+        default="status",
+        pattern="^(status|priority|category|assignee|source|ticket_type)$",
+    ),
+    filters: ReportFilters = Depends(_report_filters),
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(require_authenticated_role(
+        "admin", "supervisor", "agent"
+    )),
+):
+    """Build a count, resolution, or SLA series for a selected dimension."""
+    _reserve_analytics_request(db, user.id)
+    query, group_expression = _report_series_query(
+        db,
+        filters,
+        user,
+        group_by,
     )
+
+    if metric == "ticket_count":
+        total_groups = int(query.with_entities(
+            func.count(func.distinct(group_expression))
+        ).scalar() or 0)
+        rows = query.with_entities(
+            group_expression.label("group_label"),
+            func.count().label("sample_count"),
+        ).group_by(group_expression).order_by(
+            func.count().desc(),
+            group_expression,
+        ).limit(_REPORT_SERIES_GROUP_LIMIT).all()
+        return {
+            "metric": metric,
+            "group_by": group_by,
+            "labels": [str(row.group_label) for row in rows],
+            "values": [int(row.sample_count) for row in rows],
+            "counts": [int(row.sample_count) for row in rows],
+            "unit": "tickets",
+            "total_groups": total_groups,
+            "truncated": total_groups > len(rows),
+        }
+
+    if metric == "avg_resolution_hours":
+        resolved_query = query.filter(_report_resolved_at_column().isnot(None))
+        total_groups = int(resolved_query.with_entities(
+            func.count(func.distinct(group_expression))
+        ).scalar() or 0)
+        rows = resolved_query.with_entities(
+            group_expression.label("group_label"),
+            _report_created_at_column().label("report_created_at"),
+            _report_resolved_at_column().label("report_resolved_at"),
+        ).order_by(
+            _report_date_column(filters).desc(),
+            TicketRecord.id.asc(),
+        ).limit(_REPORT_SERIES_ROW_LIMIT + 1).all()
+        truncated_rows = len(rows) > _REPORT_SERIES_ROW_LIMIT
+        grouped: Dict[str, List[float]] = {}
+        for row in rows[:_REPORT_SERIES_ROW_LIMIT]:
+            if not row.report_created_at or not row.report_resolved_at:
+                continue
+            duration = (
+                row.report_resolved_at - row.report_created_at
+            ).total_seconds() / 3600
+            if duration < 0:
+                continue
+            grouped.setdefault(str(row.group_label), []).append(duration)
+        ordered = sorted(
+            grouped.items(),
+            key=lambda item: (-sum(item[1]) / len(item[1]), item[0].lower()),
+        )[:_REPORT_SERIES_GROUP_LIMIT]
+        return {
+            "metric": metric,
+            "group_by": group_by,
+            "labels": [label for label, _values in ordered],
+            "values": [
+                round(sum(values) / len(values), 1)
+                for _label, values in ordered
+            ],
+            "counts": [len(values) for _label, values in ordered],
+            "unit": "hours",
+            "total_groups": total_groups,
+            "truncated": truncated_rows or total_groups > len(ordered),
+        }
+
+    now = datetime.utcnow()
+    eligible_query = query.filter(
+        sla_eligible_filter(_terminal_status_names(db)),
+        _report_sla_deadline_column().isnot(None),
+    )
+    total_groups = int(eligible_query.with_entities(
+        func.count(func.distinct(group_expression))
+    ).scalar() or 0)
+    rows = eligible_query.with_entities(
+        group_expression.label("group_label"),
+        func.count().label("sample_count"),
+        func.sum(case(
+            (_sla_breached_condition(now, db), 1),
+            else_=0,
+        )).label("breached_count"),
+    ).group_by(group_expression).all()
+    compliance_rows = sorted(
+        (
+            (
+                str(row.group_label),
+                int(row.sample_count),
+                int(row.breached_count or 0),
+            )
+            for row in rows
+        ),
+        key=lambda row: (
+            -round((row[1] - row[2]) / row[1] * 100, 1),
+            row[0].lower(),
+        ),
+    )[:_REPORT_SERIES_GROUP_LIMIT]
+    return {
+        "metric": metric,
+        "group_by": group_by,
+        "labels": [label for label, _total, _breached in compliance_rows],
+        "values": [
+            round((total - breached) / total * 100, 1)
+            for _label, total, breached in compliance_rows
+        ],
+        "counts": [total for _label, total, _breached in compliance_rows],
+        "unit": "percent",
+        "total_groups": total_groups,
+        "truncated": total_groups > len(compliance_rows),
+    }
 
 
 @app.get("/reports/summary", response_model=ReportSummary)
@@ -5315,8 +5618,7 @@ async def reports_summary(
     open_t = query.filter(func.lower(TicketRecord.status).notin_(terminal)).count()
     resolved = query.filter(func.lower(TicketRecord.status).in_(terminal)).count()
     breached = query.filter(
-        _sla_breached_condition(now),
-        func.lower(TicketRecord.status).notin_(terminal),
+        _sla_breached_condition(now, db),
     ).count()
 
     resolved_tickets = query.with_entities(
@@ -5416,7 +5718,9 @@ async def reports_sla_compliance(
 ):
     """SLA compliance rate by priority for the selected tickets."""
     now = datetime.utcnow()
-    query = _report_ticket_query(db, filters, user)
+    query = _report_ticket_query(db, filters, user).filter(
+        sla_eligible_filter(_terminal_status_names(db))
+    )
     priorities = [
         row.priority
         for row in query.with_entities(TicketRecord.priority)
@@ -5430,7 +5734,7 @@ async def reports_sla_compliance(
         total = query.filter(TicketRecord.priority == priority_name).count()
         breached = query.filter(
             TicketRecord.priority == priority_name,
-            _sla_breached_condition(now),
+            _sla_breached_condition(now, db),
         ).count()
         compliance = round(((total - breached) / total * 100), 1) if total else 100.0
         result[priority_name] = {
@@ -5517,8 +5821,13 @@ async def export_report_csv(
         _report_resolved_at_column().label("report_resolved_at"),
         func.coalesce(
             TicketRecord.resolution_due_at,
+            TicketRecord.external_due_by,
             TicketRecord.due_by,
         ).label("report_due_at"),
+        case(
+            (sla_eligible_filter(_terminal_status_names(db)), True),
+            else_=False,
+        ).label("report_sla_eligible"),
     ).order_by(
         _report_date_column(filters).desc(),
         TicketRecord.id.asc(),
@@ -5560,7 +5869,8 @@ async def export_report_csv(
                     2,
                 )
             sla_breached = bool(
-                row.report_due_at
+                row.report_sla_eligible
+                and row.report_due_at
                 and (
                     (row.report_resolved_at and row.report_resolved_at > row.report_due_at)
                     or (not row.report_resolved_at and row.report_due_at < now)
@@ -8300,7 +8610,9 @@ async def intel_sla(
     """SLA Agent: SLA clock state for every open ticket."""
     _reserve_analytics_request(db, _user.id)
     now = datetime.utcnow()
-    open_query = _open_ticket_query(db, _intelligence_cutoff(now, window_days))
+    open_query = _open_ticket_query(
+        db, _intelligence_cutoff(now, window_days)
+    ).filter(sla_eligible_filter(_terminal_status_names(db)))
     total_open = open_query.count()
     candidates = open_query.order_by(
         *_intelligence_candidate_order()

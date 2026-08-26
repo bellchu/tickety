@@ -66,6 +66,11 @@ function reportPath(path: string, filters: import("./types").ReportFilters): str
   if (filters.status) params.set("status", filters.status);
   if (filters.priority) params.set("priority", filters.priority);
   if (filters.category) params.set("category", filters.category);
+  if (filters.assigneeId) params.set("assignee_id", filters.assigneeId);
+  if (filters.source) params.set("source", filters.source);
+  if (filters.ticketType) params.set("ticket_type", filters.ticketType);
+  if (filters.resolutionState) params.set("resolution_state", filters.resolutionState);
+  if (filters.slaState) params.set("sla_state", filters.slaState);
   return `${path}?${params.toString()}`;
 }
 
@@ -488,6 +493,18 @@ export const api = {
     ),
   getReportResolutionTime: (filters: import("./types").ReportFilters) =>
     fetchAPI<import("./types").ReportResolutionTimeResponse>(reportPath("/reports/resolution-time", filters)),
+  getReportOptions: () =>
+    fetchAPI<import("./types").ReportOptions>("/reports/options"),
+  getReportSeries: (
+    filters: import("./types").ReportFilters,
+    metric: import("./types").ReportMetric,
+    groupBy: import("./types").ReportGroupBy,
+  ) => {
+    const path = reportPath("/reports/series", filters);
+    return fetchAPI<import("./types").ReportSeriesResponse>(
+      `${path}&metric=${encodeURIComponent(metric)}&group_by=${encodeURIComponent(groupBy)}`,
+    );
+  },
   downloadReportCsv,
   // Projects
   getProjects: () => fetchAPI<import("./types").Project[]>("/projects"),

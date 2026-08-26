@@ -73,11 +73,36 @@ test("report charts allocate multi-line labels outside the plotting area", () =>
   assert.match(reports, /function wrapChartLabel/);
   assert.match(reports, /function categoryChartHeight/);
   assert.match(reports, /tick=\{<WrappedYAxisTick \/>\}/);
-  assert.match(reports, /aria-label="Ticket category legend"/);
-  assert.equal((reports.match(/isAnimationActive=\{false\}/g) || []).length, 4);
+  assert.match(reports, /label="Ticket category legend"/);
+  assert.match(reports, /label="Custom report legend"/);
+  assert.ok((reports.match(/isAnimationActive=\{false\}/g) || []).length >= 4);
   assert.doesNotMatch(reports, /<Legend/);
   assert.match(reports, /<PageFrame width="wide">/);
   assert.match(pageLayout, /mx-auto min-w-0 w-full/);
+});
+
+test("report builder exposes distinct outputs, groupings, and shared criteria", () => {
+  const reports = read("app", "reports", "page.tsx");
+  const api = read("lib", "api.ts");
+
+  for (const label of [
+    "Operational overview",
+    "Ticket volume trend",
+    "Ticket breakdown",
+    "Resolution performance",
+    "SLA performance",
+  ]) {
+    assert.match(reports, new RegExp(label));
+  }
+  for (const grouping of ["status", "priority", "category", "assignee", "source", "ticket_type"]) {
+    assert.match(reports, new RegExp(`\\["${grouping}",`));
+  }
+  for (const criterion of ["assigneeId", "source", "ticketType", "resolutionState", "slaState"]) {
+    assert.match(reports, new RegExp(criterion));
+  }
+  assert.match(reports, /Generate report/);
+  assert.match(api, /getReportSeries/);
+  assert.match(api, /downloadReportCsv/);
 });
 
 test("secondary lists safely wrap external and AI-generated content", () => {
