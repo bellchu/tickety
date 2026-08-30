@@ -1,0 +1,149 @@
+name: tickety
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-pgvector/pgvector:0.8.6-pg16}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-tickety}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-tickety}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  migrate:
+    image: tickety-backend:latest
+    build:
+      context: .
+      target: backend
+    command: ["alembic", "upgrade", "head"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Override this with a URL-encoded DATABASE_URL if POSTGRES_PASSWORD
+      # contains reserved URL characters.
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "on-failure:3"
+
+  backend:
+    image: tickety-backend:latest
+    build:
+      context: .
+      target: backend
+    command: ["uvicorn", "app.backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      APP_MODE: ${APP_MODE:-production}
+      TICKETY_DEPLOYMENT_CLASS: ${TICKETY_DEPLOYMENT_CLASS:-production}
+      FRESHWORKS_APP_BOOTSTRAP_SECRET: ${FRESHWORKS_APP_BOOTSTRAP_SECRET:-}
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+      TICKETY_PROCESS_ROLE: api
+      TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED: ${TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED:-false}
+      DIRECTORY_PEOPLE_READ_ENABLED: ${DIRECTORY_PEOPLE_READ_ENABLED:-true}
+      DIRECTORY_PEOPLE_WRITE_ENABLED: ${DIRECTORY_PEOPLE_WRITE_ENABLED:-true}
+      REMOTE_AGENT_TEAM_ELIGIBLE: ${REMOTE_AGENT_TEAM_ELIGIBLE:-true}
+      DIRECTORY_SYNC_ENABLED: ${DIRECTORY_SYNC_ENABLED:-true}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  worker:
+    image: tickety-backend:latest
+    build:
+      context: .
+      target: backend
+    command: ["python", "-m", "app.backend.worker"]
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      APP_MODE: ${APP_MODE:-production}
+      TICKETY_DEPLOYMENT_CLASS: ${TICKETY_DEPLOYMENT_CLASS:-production}
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+      TICKETY_PROCESS_ROLE: worker
+      TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED: ${TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED:-false}
+      DIRECTORY_PEOPLE_READ_ENABLED: ${DIRECTORY_PEOPLE_READ_ENABLED:-true}
+      DIRECTORY_PEOPLE_WRITE_ENABLED: ${DIRECTORY_PEOPLE_WRITE_ENABLED:-true}
+      REMOTE_AGENT_TEAM_ELIGIBLE: ${REMOTE_AGENT_TEAM_ELIGIBLE:-true}
+      DIRECTORY_SYNC_ENABLED: ${DIRECTORY_SYNC_ENABLED:-true}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; os.kill(1, 0)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  frontend:
+    image: tickety-frontend:latest
+    build:
+      context: .
+      target: frontend
+    command: ["node", "server.js"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${TICKETY_PORT:-3000}:3000"
+    environment:
+      # Browser traffic stays same-origin; these server-only values let the
+      # Next.js HTTP and WebSocket proxies reach the private API service.
+      BACKEND_URL: http://backend:8000
+      SITE_URL: ${FRONTEND_URL:-}
+      MAX_REQUEST_BODY_BYTES: ${MAX_REQUEST_BODY_BYTES:-1048576}
+      BACKEND_REQUEST_TIMEOUT_MS: ${BACKEND_REQUEST_TIMEOUT_MS:-900000}
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health/ready').then((response) => { if (!response.ok) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  tunnel-proxy:
+    image: ${CADDY_IMAGE:-caddy:2.10-alpine}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:443:443"
+    volumes:
+      - ./deploy/local-tunnel/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      frontend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "--quiet", "--spider", "https://localhost/api/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

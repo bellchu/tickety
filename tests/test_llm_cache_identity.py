@@ -1,0 +1,182 @@
+import os
+import re
+import subprocess
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from app.backend.llm_manager import LLMManager
+
+
+class LLMCacheIdentityTests(unittest.TestCase):
+    def test_first_import_uses_bundled_cost_map_without_network_fetch(self):
+        environment = os.environ.copy()
+        environment.pop("LITELLM_LOCAL_MODEL_COST_MAP", None)
+        repository = Path(__file__).resolve().parents[1]
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import os; import app.backend.llm_manager; "
+                    "assert os.environ['LITELLM_LOCAL_MODEL_COST_MAP'] == 'true'"
+                ),
+            ],
+            cwd=repository,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+
+        combined_output = completed.stdout + completed.stderr
+        self.assertEqual(completed.returncode, 0, combined_output)
+        self.assertNotIn("Failed to fetch remote model cost map", combined_output)
+
+    def test_main_import_defers_llm_validation_until_database_settings_load(self):
+        environment = os.environ.copy()
+        environment.update({
+            "APP_MODE": "production",
+            "DEFAULT_MODEL": "custom/deferred-model",
+            "CUSTOM_API_KEY": "configured-at-startup",
+            "CUSTOM_API_BASE": "",
+        })
+        repository = Path(__file__).resolve().parents[1]
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import app.backend.main as main; "
+                    "assert type(main.llm_mgr).__name__ == "
+                    "'_DeferredLLMManager'"
+                ),
+            ],
+            cwd=repository,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+
+        self.assertEqual(
+            completed.returncode,
+            0,
+            completed.stdout + completed.stderr,
+        )
+
+    def _custom_identity(self, **overrides: str) -> str:
+        environment = {
+            "APP_MODE": "demo",
+            "CUSTOM_API_KEY": "fixture-secret-cache-identity",
+            "CUSTOM_API_BASE": "https://provider-a.example/v1",
+            "LLM_ALLOW_PRIVATE_ENDPOINTS": "true",
+        }
+        environment.update(overrides)
+        with patch.dict(os.environ, environment, clear=True):
+            return LLMManager("custom/shared-model").cache_identity
+
+    def test_identity_is_stable_opaque_and_secret_safe(self):
+        first = self._custom_identity()
+        second = self._custom_identity(CUSTOM_API_BASE="https://provider-a.example/v1/")
+
+        self.assertEqual(first, second)
+        self.assertRegex(
+            first,
+            re.compile(r"^llm-provider-v1:[0-9a-f]{64}$"),
+        )
+        self.assertNotIn("provider-a.example", first)
+        self.assertNotIn("fixture-secret-cache-identity", first)
+        self.assertNotIn("shared-model", first)
+
+    def test_same_model_changes_identity_when_validated_endpoint_changes(self):
+        first = self._custom_identity()
+        second = self._custom_identity(
+            CUSTOM_API_BASE="https://provider-b.example/v1"
+        )
+
+        self.assertNotEqual(first, second)
+
+    def test_existing_manager_identity_is_an_immutable_validated_snapshot(self):
+        environment = {
+            "APP_MODE": "demo",
+            "CUSTOM_API_KEY": "fixture-secret-cache-identity",
+            "CUSTOM_API_BASE": "https://provider-a.example/v1",
+            "LLM_ALLOW_PRIVATE_ENDPOINTS": "true",
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            manager = LLMManager("custom/shared-model")
+            first = manager.cache_identity
+            os.environ["CUSTOM_API_BASE"] = "https://provider-b.example/v1"
+            second = manager.cache_identity
+
+        self.assertEqual(first, second)
+
+    def test_cache_identity_read_never_rebuilds_dispatch_credentials(self):
+        environment = {
+            "APP_MODE": "demo",
+            "FOUNDRY_AUTH_METHOD": "entra",
+            "FOUNDRY_API_BASE": (
+                "https://resource.services.ai.azure.com/openai/v1"
+            ),
+            "LLM_ALLOW_PRIVATE_ENDPOINTS": "true",
+        }
+        with patch.dict(os.environ, environment, clear=True), patch(
+            "app.backend.llm_manager._foundry_api_key"
+        ) as acquire_token:
+            manager = LLMManager("foundry/DeepSeek-V4-Flash")
+            first = manager.cache_identity
+            second = manager.cache_identity
+
+        self.assertEqual(first, second)
+        acquire_token.assert_not_called()
+
+    def test_removed_custom_tuning_knobs_do_not_affect_identity(self):
+        baseline = self._custom_identity()
+        self.assertEqual(
+            baseline,
+            self._custom_identity(
+                CUSTOM_PROVIDER_TYPE="anthropic",
+                CUSTOM_API_VERSION="2025-01-01",
+                CUSTOM_TEMPERATURE="0.8",
+                CUSTOM_MAX_TOKENS="1024",
+            ),
+        )
+
+    def test_credential_rotation_does_not_create_a_persisted_secret_verifier(self):
+        baseline = self._custom_identity()
+        rotated = self._custom_identity(CUSTOM_API_KEY="sk-different-secret")
+
+        self.assertEqual(baseline, rotated)
+
+    def test_foundry_endpoint_trailing_slash_is_canonicalized(self):
+        environment = {
+            "APP_MODE": "demo",
+            "FOUNDRY_API_KEY": "foundry-secret",
+            "FOUNDRY_API_BASE": "https://resource.services.ai.azure.com/openai/v1",
+            "LLM_ALLOW_PRIVATE_ENDPOINTS": "true",
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            implicit = LLMManager("foundry/DeepSeek-V4-Flash")
+        environment["FOUNDRY_API_BASE"] += "/"
+        with patch.dict(os.environ, environment, clear=True):
+            explicit = LLMManager("foundry/DeepSeek-V4-Flash")
+
+        self.assertEqual(implicit.cache_identity, explicit.cache_identity)
+
+    def test_identity_rejects_an_unvalidated_provider_endpoint(self):
+        with patch.dict(os.environ, {
+            "APP_MODE": "demo",
+            "CUSTOM_API_KEY": "custom-secret",
+            "CUSTOM_API_BASE": "https://provider.example/v1?tenant=secret",
+            "LLM_ALLOW_PRIVATE_ENDPOINTS": "true",
+        }, clear=True):
+            with self.assertRaisesRegex(ValueError, "query string"):
+                LLMManager("custom/gpt-4.1-mini")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,916 @@
+import os
+import re
+import sys
+import threading
+import ipaddress
+import socket
+import uuid
+from urllib.parse import urlparse
+from typing import Optional
+
+from dotenv import load_dotenv
+
+from .database import SessionLocal, SettingsRecord
+from .email_service import normalize_email_address, normalize_sender_name
+
+load_dotenv()
+
+_ENV_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".env")
+
+_SENSITIVE_KEYS = {
+    "DATABASE_URL",
+    "FOUNDRY_API_KEY",
+    "CUSTOM_API_KEY",
+    "FRESHSERVICE_API_KEY",
+    "JIRA_API_TOKEN",
+    "FRESHSERVICE_OAUTH_CLIENT_SECRET",
+    "FRESHSERVICE_OAUTH_ACCESS_TOKEN",
+    "FRESHSERVICE_OAUTH_REFRESH_TOKEN",
+    "WEBHOOK_SECRET",
+    "SSO_CLIENT_SECRET",
+    "AZURE_STORAGE_CONNECTION_STRING",
+    "SENDGRID_API_KEY",
+}
+
+_PLACEHOLDER_VALUES = {
+    "sk-your-key-here",
+    "your-key-here",
+    "your-provider-api-key",
+    "your-webhook-secret",
+    "your-foundry-key-here",
+    "your-custom-key-here",
+}
+
+_ALL_KEYS = [
+    # Runtime mode / security
+    "APP_MODE",
+    "TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED",
+    "CORS_ALLOW_ORIGINS",
+    "COOKIE_SECURE",
+    "COOKIE_SAMESITE",
+    "LLM_ALLOW_PRIVATE_ENDPOINTS",
+    "LLM_ALLOW_INSECURE_ENDPOINTS",
+    "LLM_ALLOWED_PROVIDER_HOSTS",
+    # Deliberately small LLM surface: Microsoft Foundry plus one custom API.
+    "FOUNDRY_API_KEY",
+    "FOUNDRY_API_BASE",
+    "FOUNDRY_AUTH_METHOD",
+    "CUSTOM_API_KEY",
+    "CUSTOM_API_BASE",
+    "DEFAULT_MODEL",
+    "LLM_ALLOW_SYNTHETIC",
+    "LLM_REQUEST_TIMEOUT_SECONDS",
+    "LLM_OVERALL_TIMEOUT_SECONDS",
+    "LLM_MAX_PROMPT_CHARS",
+    "LLM_MAX_CONCURRENCY",
+    "LLM_PERSIST_METRICS",
+    "LLM_DAILY_TOKEN_BUDGET",
+    "LLM_PROVIDER_REQUESTS_PER_MINUTE",
+    "LLM_PROVIDER_TOKENS_PER_MINUTE",
+    "LLM_ENFORCE_PROVIDER_LIMITS",
+    "AI_USER_REQUESTS_PER_MINUTE",
+    "AI_USER_REQUESTS_PER_DAY",
+    "AI_SYSTEM_REQUESTS_PER_MINUTE",
+    "AI_SYSTEM_REQUESTS_PER_DAY",
+    "ANALYTICS_USER_REQUESTS_PER_MINUTE",
+    "ANALYTICS_USER_REQUESTS_PER_DAY",
+    "AI_INDEX_WRITES_PER_MINUTE",
+    "AI_INDEX_WRITES_PER_DAY",
+    "PORTAL_TICKETS_PER_MINUTE",
+    "PORTAL_TICKETS_PER_DAY",
+    "PORTAL_TICKETS_GLOBAL_PER_MINUTE",
+    "PORTAL_TICKETS_GLOBAL_PER_DAY",
+    "AI_ANALYSIS_LEASE_SECONDS",
+    "AI_ANALYSIS_MAX_ATTEMPTS",
+    "AI_PIPELINE_TIMEOUT_SECONDS",
+    "AI_BACKGROUND_TICKETS_PER_SWEEP",
+    "TICKET_EMBEDDING_ENABLED",
+    "TICKET_EMBEDDING_MODEL",
+    "TICKET_EMBEDDING_DIMENSIONS",
+    "TICKET_EMBEDDING_TIMEOUT_SECONDS",
+    "TICKET_EMBEDDING_MAX_CHARS",
+    "TICKET_EMBEDDING_MAX_COMMENTS_PER_REFRESH",
+    "TICKET_VECTOR_MIN_SCORE",
+    "TICKET_RAG_SCOPE_KEY",
+    "TICKET_RAG_V2_SCOPE_ALLOWLIST",
+    "TICKET_RAG_V2_WRITE_ENABLED",
+    "TICKET_RAG_V2_WORKER_ENABLED",
+    "TICKET_RAG_V2_READ_ENABLED",
+    "TICKET_RAG_CHUNK_TARGET_TOKENS",
+    "TICKET_RAG_CHUNK_MAX_TOKENS",
+    "TICKET_RAG_CHUNK_OVERLAP_TOKENS",
+    "TICKET_RAG_EMBED_BATCH_SIZE",
+    "TICKET_RAG_EMBED_LEASE_SECONDS",
+    "TICKET_RAG_WORKER_POLL_SECONDS",
+    "TICKET_RAG_QUERY_CACHE_TTL_SECONDS",
+    "TICKET_RAG_QUERY_CACHE_MAX_ROWS",
+    "TICKET_RAG_SNAPSHOT_TTL_SECONDS",
+    "DATABASE_URL",
+    "ITSM_PROVIDER",
+    "FRESHSERVICE_DOMAIN",
+    "FRESHWORKS_ORG_DOMAIN",
+    "FRESHSERVICE_API_KEY",
+    "FRESHSERVICE_WORKSPACE_ID",
+    "FRESHSERVICE_TICKET_INCLUDES",
+    "FRESHSERVICE_AGENT_STATE",
+    "FRESHSERVICE_MIN_INTERVAL_SECONDS",
+    "FRESHSERVICE_RATE_LIMIT_RESERVE",
+    "FRESHSERVICE_RECENT_PAGES_PER_SYNC",
+    "FRESHSERVICE_HISTORY_PAGES_PER_SYNC",
+    "FRESHSERVICE_CONVERSATIONS_PER_SYNC",
+    "FRESHSERVICE_ATTACHMENTS_PER_SYNC",
+    "ATTACHMENT_STORAGE_PROVIDER",
+    "ATTACHMENT_MAX_BYTES",
+    "AZURE_STORAGE_ACCOUNT_URL",
+    "AZURE_STORAGE_CONTAINER",
+    "FRESHSERVICE_OAUTH_CLIENT_ID",
+    "FRESHSERVICE_OAUTH_CLIENT_SECRET",
+    "FRESHSERVICE_OAUTH_REDIRECT_URI",
+    "FRESHSERVICE_OAUTH_SCOPES",
+    "FRESHSERVICE_OAUTH_ACCESS_TOKEN",
+    "FRESHSERVICE_OAUTH_REFRESH_TOKEN",
+    "JIRA_BASE_URL",
+    "JIRA_EMAIL",
+    "JIRA_API_TOKEN",
+    "JIRA_PROJECT_KEY",
+    "JIRA_ISSUE_TYPE",
+    "WEBHOOK_SECRET",
+    "WEBHOOK_MAX_AGE_SECONDS",
+    "SYNC_INTERVAL_SECONDS",
+    "DIRECTORY_PEOPLE_READ_ENABLED",
+    "DIRECTORY_PEOPLE_WRITE_ENABLED",
+    "REMOTE_AGENT_TEAM_ELIGIBLE",
+    "REMOTE_REQUESTER_TEAM_ELIGIBLE",
+    "AUTO_EXACT_EMAIL_LINK_ENABLED",
+    "DIRECTORY_SYNC_ENABLED",
+    "DIRECTORY_SYNC_INTERVAL_SECONDS",
+    "DIRECTORY_SYNC_LEASE_SECONDS",
+    "DIRECTORY_STALE_AFTER_SECONDS",
+    "NEXT_PUBLIC_API_URL",
+    "NEXT_PUBLIC_WS_URL",
+    "FRONTEND_URL",
+    # Outbound email
+    "SENDGRID_API_KEY",
+    "SENDGRID_FROM_EMAIL",
+    "SENDGRID_FROM_NAME",
+    "SENDGRID_REPLY_TO_EMAIL",
+    "EMAIL_SENDS_PER_MINUTE",
+    "EMAIL_RECIPIENTS_PER_DAY",
+    # AI automation toggles
+    "SLA_P1_HOURS",
+    "SLA_P2_HOURS",
+    "SLA_P3_HOURS",
+    "SLA_P4_HOURS",
+    # Organization / branding
+    "ORG_NAME",
+    "ORG_LOGO_URL",
+    "ORG_PRIMARY_COLOR",
+    # AI automation toggles
+    "AUTO_TRIAGE_ENABLED",
+    "AUTO_SUMMARIZE_ENABLED",
+    "AUTO_ROUTE_ENABLED",
+    "AUTO_RESOLVE_ENABLED",
+    "AUTO_SYSTEMIC_ENABLED",
+    # Auth / Security
+    "LOGIN_REQUIRED",
+    "SSO_ENABLED",
+    "SSO_PROVIDER",
+    "SSO_ENTRA_TENANT_ID",
+    "SSO_OKTA_DOMAIN",
+    "SSO_OKTA_AUTH_SERVER_ID",
+    "SSO_CLIENT_ID",
+    "SSO_CLIENT_SECRET",
+    "SSO_DISCOVERY_URL",
+    "SSO_REDIRECT_URI",
+    "SSO_ALLOWED_DOMAINS",
+    "SSO_ALLOWED_GROUP_IDS",
+    "SSO_AUTO_PROVISION",
+]
+
+# Keys that are static infra config
+_READONLY_KEYS = {
+    "APP_MODE",
+    "TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED",
+    "DATABASE_URL",
+    "NEXT_PUBLIC_API_URL",
+    "NEXT_PUBLIC_WS_URL",
+    "LLM_ALLOW_PRIVATE_ENDPOINTS",
+    "LLM_ALLOW_INSECURE_ENDPOINTS",
+    "LLM_ALLOWED_PROVIDER_HOSTS",
+    "WEBHOOK_MAX_AGE_SECONDS",
+    "TICKET_RAG_SCOPE_KEY",
+    "TICKET_RAG_V2_SCOPE_ALLOWLIST",
+    "DIRECTORY_PEOPLE_READ_ENABLED",
+    "DIRECTORY_PEOPLE_WRITE_ENABLED",
+    "REMOTE_AGENT_TEAM_ELIGIBLE",
+    "REMOTE_REQUESTER_TEAM_ELIGIBLE",
+    "AUTO_EXACT_EMAIL_LINK_ENABLED",
+    "DIRECTORY_SYNC_ENABLED",
+    "DIRECTORY_SYNC_INTERVAL_SECONDS",
+    "DIRECTORY_SYNC_LEASE_SECONDS",
+    "DIRECTORY_STALE_AFTER_SECONDS",
+}
+
+_LLM_BASE_URL_KEYS = {
+    "FOUNDRY_API_BASE",
+    "CUSTOM_API_BASE",
+}
+
+_PRODUCTION_ENV_ONLY_KEYS = (
+    _SENSITIVE_KEYS
+    - {"FRESHSERVICE_OAUTH_ACCESS_TOKEN", "FRESHSERVICE_OAUTH_REFRESH_TOKEN"}
+) | _LLM_BASE_URL_KEYS | {
+    "CORS_ALLOW_ORIGINS",
+    "COOKIE_SECURE",
+    "COOKIE_SAMESITE",
+    "WEBHOOK_MAX_AGE_SECONDS",
+    "LOGIN_REQUIRED",
+    "DEFAULT_MODEL",
+    "FOUNDRY_AUTH_METHOD",
+    "LLM_ALLOW_SYNTHETIC",
+    "LLM_REQUEST_TIMEOUT_SECONDS",
+    "LLM_OVERALL_TIMEOUT_SECONDS",
+    "LLM_MAX_PROMPT_CHARS",
+    "LLM_MAX_CONCURRENCY",
+    "LLM_PERSIST_METRICS",
+    "LLM_DAILY_TOKEN_BUDGET",
+    "LLM_PROVIDER_REQUESTS_PER_MINUTE",
+    "LLM_PROVIDER_TOKENS_PER_MINUTE",
+    "LLM_ENFORCE_PROVIDER_LIMITS",
+    "AI_USER_REQUESTS_PER_MINUTE",
+    "AI_USER_REQUESTS_PER_DAY",
+    "AI_SYSTEM_REQUESTS_PER_MINUTE",
+    "AI_SYSTEM_REQUESTS_PER_DAY",
+    "ANALYTICS_USER_REQUESTS_PER_MINUTE",
+    "ANALYTICS_USER_REQUESTS_PER_DAY",
+    "AI_INDEX_WRITES_PER_MINUTE",
+    "AI_INDEX_WRITES_PER_DAY",
+    "PORTAL_TICKETS_PER_MINUTE",
+    "PORTAL_TICKETS_PER_DAY",
+    "PORTAL_TICKETS_GLOBAL_PER_MINUTE",
+    "PORTAL_TICKETS_GLOBAL_PER_DAY",
+    "AI_ANALYSIS_LEASE_SECONDS",
+    "AI_ANALYSIS_MAX_ATTEMPTS",
+    "AI_PIPELINE_TIMEOUT_SECONDS",
+    "AI_BACKGROUND_TICKETS_PER_SWEEP",
+    "TICKET_EMBEDDING_ENABLED",
+    "TICKET_EMBEDDING_MODEL",
+    "TICKET_EMBEDDING_DIMENSIONS",
+    "TICKET_EMBEDDING_TIMEOUT_SECONDS",
+    "TICKET_EMBEDDING_MAX_CHARS",
+    "TICKET_EMBEDDING_MAX_COMMENTS_PER_REFRESH",
+    "TICKET_VECTOR_MIN_SCORE",
+    "TICKET_RAG_V2_WRITE_ENABLED",
+    "TICKET_RAG_V2_WORKER_ENABLED",
+    "TICKET_RAG_V2_READ_ENABLED",
+    "TICKET_RAG_CHUNK_TARGET_TOKENS",
+    "TICKET_RAG_CHUNK_MAX_TOKENS",
+    "TICKET_RAG_CHUNK_OVERLAP_TOKENS",
+    "TICKET_RAG_EMBED_BATCH_SIZE",
+    "TICKET_RAG_EMBED_LEASE_SECONDS",
+    "TICKET_RAG_WORKER_POLL_SECONDS",
+    "TICKET_RAG_QUERY_CACHE_TTL_SECONDS",
+    "TICKET_RAG_QUERY_CACHE_MAX_ROWS",
+    "TICKET_RAG_SNAPSHOT_TTL_SECONDS",
+    "AUTO_TRIAGE_ENABLED",
+    "AUTO_SUMMARIZE_ENABLED",
+    "AUTO_ROUTE_ENABLED",
+    "AUTO_RESOLVE_ENABLED",
+    "AUTO_SYSTEMIC_ENABLED",
+    "ITSM_PROVIDER",
+    "FRESHSERVICE_DOMAIN",
+    "FRESHWORKS_ORG_DOMAIN",
+    "FRESHSERVICE_WORKSPACE_ID",
+    "FRESHSERVICE_TICKET_INCLUDES",
+    "FRESHSERVICE_AGENT_STATE",
+    "FRESHSERVICE_MIN_INTERVAL_SECONDS",
+    "FRESHSERVICE_RATE_LIMIT_RESERVE",
+    "FRESHSERVICE_RECENT_PAGES_PER_SYNC",
+    "FRESHSERVICE_HISTORY_PAGES_PER_SYNC",
+    "FRESHSERVICE_CONVERSATIONS_PER_SYNC",
+    "FRESHSERVICE_ATTACHMENTS_PER_SYNC",
+    "ATTACHMENT_STORAGE_PROVIDER",
+    "ATTACHMENT_MAX_BYTES",
+    "AZURE_STORAGE_ACCOUNT_URL",
+    "AZURE_STORAGE_CONTAINER",
+    "FRESHSERVICE_OAUTH_CLIENT_ID",
+    "FRESHSERVICE_OAUTH_REDIRECT_URI",
+    "FRESHSERVICE_OAUTH_SCOPES",
+    "JIRA_BASE_URL",
+    "JIRA_EMAIL",
+    "JIRA_PROJECT_KEY",
+    "JIRA_ISSUE_TYPE",
+    "SYNC_INTERVAL_SECONDS",
+    "DIRECTORY_PEOPLE_READ_ENABLED",
+    "DIRECTORY_PEOPLE_WRITE_ENABLED",
+    "REMOTE_AGENT_TEAM_ELIGIBLE",
+    "REMOTE_REQUESTER_TEAM_ELIGIBLE",
+    "AUTO_EXACT_EMAIL_LINK_ENABLED",
+    "DIRECTORY_SYNC_ENABLED",
+    "DIRECTORY_SYNC_INTERVAL_SECONDS",
+    "DIRECTORY_SYNC_LEASE_SECONDS",
+    "DIRECTORY_STALE_AFTER_SECONDS",
+    "SENDGRID_FROM_EMAIL",
+    "SENDGRID_FROM_NAME",
+    "SENDGRID_REPLY_TO_EMAIL",
+    "EMAIL_SENDS_PER_MINUTE",
+    "EMAIL_RECIPIENTS_PER_DAY",
+    "SSO_ENABLED",
+    "SSO_PROVIDER",
+    "SSO_ENTRA_TENANT_ID",
+    "SSO_OKTA_DOMAIN",
+    "SSO_OKTA_AUTH_SERVER_ID",
+    "SSO_CLIENT_ID",
+    "SSO_CLIENT_SECRET",
+    "SSO_DISCOVERY_URL",
+    "SSO_REDIRECT_URI",
+    "SSO_ALLOWED_DOMAINS",
+    "SSO_ALLOWED_GROUP_IDS",
+    "SSO_AUTO_PROVISION",
+}
+
+# Production values saved through the authenticated admin endpoint override
+# deployment defaults. Truly static process/bootstrap settings remain in
+# _READONLY_KEYS and cannot be changed through the application.
+_PRODUCTION_ADMIN_PORTAL_KEYS = _PRODUCTION_ENV_ONLY_KEYS - _READONLY_KEYS
+_PRODUCTION_SSO_PORTAL_KEYS = {
+    "SSO_ENABLED",
+    "SSO_PROVIDER",
+    "SSO_ENTRA_TENANT_ID",
+    "SSO_OKTA_DOMAIN",
+    "SSO_OKTA_AUTH_SERVER_ID",
+    "SSO_CLIENT_ID",
+    "SSO_CLIENT_SECRET",
+    "SSO_DISCOVERY_URL",
+    "SSO_ALLOWED_DOMAINS",
+    "SSO_ALLOWED_GROUP_IDS",
+    "SSO_AUTO_PROVISION",
+}
+_CLEARABLE_PORTAL_KEYS = _PRODUCTION_SSO_PORTAL_KEYS | {
+    "SENDGRID_REPLY_TO_EMAIL",
+}
+_ADMIN_PORTAL_APPROVAL_PREFIX = "__ADMIN_PORTAL_APPROVED__:"
+
+_lock = threading.Lock()
+_loaded = False
+
+
+def _truthy(value: Optional[str]) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_llm_base_url(value: str) -> str:
+    """Validate provider URL policy without depending on live DNS.
+
+    Settings persistence and process initialization use this path. Every
+    outbound provider path must still call ``_validate_llm_base_url`` so DNS
+    results are checked for private or reserved destinations immediately
+    before network I/O.
+    """
+    if not value or value != value.strip() or any(ord(char) < 32 for char in value):
+        raise ValueError("LLM base URL contains invalid whitespace or control characters")
+    parsed = urlparse(value)
+    if parsed.scheme not in {"https", "http"} or not parsed.hostname:
+        raise ValueError("LLM base URL must be an absolute HTTP(S) URL")
+    if parsed.username or parsed.password:
+        raise ValueError("LLM base URL must not contain credentials")
+    if parsed.query or parsed.fragment:
+        raise ValueError("LLM base URL must not contain a query string or fragment")
+    if parsed.scheme != "https" and not _truthy(os.getenv("LLM_ALLOW_INSECURE_ENDPOINTS")):
+        raise ValueError("LLM base URL must use HTTPS")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("LLM base URL contains an invalid port") from exc
+    if (
+        port not in {None, 443}
+        and not _truthy(os.getenv("LLM_ALLOW_INSECURE_ENDPOINTS"))
+    ):
+        raise ValueError("LLM base URL must use the standard HTTPS port")
+
+    hostname = parsed.hostname.lower().rstrip(".")
+    if (os.getenv("APP_MODE") or "production").strip().lower() == "production":
+        allowed_hosts = {
+            *{
+                host.strip().lower().rstrip(".")
+                for host in (os.getenv("LLM_ALLOWED_PROVIDER_HOSTS") or "").split(",")
+                if host.strip()
+            },
+        }
+        if hostname not in allowed_hosts:
+            raise ValueError("LLM base URL hostname is not in LLM_ALLOWED_PROVIDER_HOSTS")
+    if _truthy(os.getenv("LLM_ALLOW_PRIVATE_ENDPOINTS")):
+        return value.rstrip("/")
+    if hostname == "localhost" or hostname.endswith((".localhost", ".local", ".internal")):
+        raise ValueError("LLM base URL must not target a local hostname")
+
+    # IP literals do not require DNS, so reject non-public literals even on
+    # configuration-only paths. Hostnames are resolved at the outbound-I/O
+    # boundary below.
+    try:
+        literal_address = ipaddress.ip_address(hostname)
+    except ValueError:
+        literal_address = None
+    if literal_address is not None and not literal_address.is_global:
+        raise ValueError("LLM base URL must not target a private or reserved address")
+    return value.rstrip("/")
+
+
+def _validate_public_llm_resolution(value: str) -> str:
+    if _truthy(os.getenv("LLM_ALLOW_PRIVATE_ENDPOINTS")):
+        return value
+    parsed = urlparse(value)
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    try:
+        literal_address = ipaddress.ip_address(hostname)
+    except ValueError:
+        literal_address = None
+    if literal_address is not None:
+        addresses = {str(literal_address)}
+    else:
+        try:
+            addresses = {
+                item[4][0]
+                for item in socket.getaddrinfo(hostname, parsed.port or 443)
+            }
+        except socket.gaierror as exc:
+            raise ValueError("LLM base URL hostname could not be resolved") from exc
+    for address in addresses:
+        ip = ipaddress.ip_address(address)
+        if not ip.is_global:
+            raise ValueError("LLM base URL must not target a private or reserved address")
+    return value
+
+
+def _validate_llm_base_url(value: str) -> str:
+    normalized = _normalize_llm_base_url(value)
+    return _validate_public_llm_resolution(normalized)
+
+
+def _normalize_foundry_base_url(value: str) -> str:
+    """Validate Microsoft Foundry URL policy without resolving the hostname."""
+    normalized = _normalize_llm_base_url(value)
+    parsed = urlparse(normalized)
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    if not hostname.endswith((".services.ai.azure.com", ".openai.azure.com")):
+        raise ValueError("Foundry endpoint must use a Microsoft Azure hostname")
+    if parsed.path.rstrip("/") != "/openai/v1":
+        raise ValueError("Foundry endpoint path must end with /openai/v1")
+    return normalized
+
+
+def _validate_foundry_base_url(value: str) -> str:
+    """Validate Foundry policy and public DNS immediately before network I/O."""
+    normalized = _normalize_foundry_base_url(value)
+    return _validate_public_llm_resolution(normalized)
+
+
+def get_bool(key: str, default: bool = False, aliases: tuple[str, ...] = ()) -> bool:
+    """Read an env-style boolean with optional legacy aliases."""
+    for candidate in (key, *aliases):
+        value = os.getenv(candidate)
+        if value is not None and value != "":
+            return _truthy(value)
+    return default
+
+
+def get_int(
+    key: str,
+    *,
+    default: int,
+    minimum: Optional[int] = None,
+    maximum: Optional[int] = None,
+) -> int:
+    """Read a bounded integer setting after worker/admin overrides load."""
+    try:
+        value = int(os.getenv(key, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+def app_mode() -> str:
+    raw_mode = os.getenv("APP_MODE")
+    if raw_mode is None or not raw_mode.strip():
+        return "production"
+    mode = raw_mode.strip().lower()
+    if mode not in {"demo", "production"}:
+        raise ValueError("APP_MODE must be either 'demo' or 'production'")
+    return mode
+
+
+def is_demo_mode() -> bool:
+    return app_mode() == "demo"
+
+
+def is_production_mode() -> bool:
+    return app_mode() == "production"
+
+
+def admin_settings_portal_enabled() -> bool:
+    """Whether production admin-approved DB overrides are enabled."""
+    return get_bool("TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED", default=False)
+
+
+def automation_enabled(key: str, legacy_alias: Optional[str] = None) -> bool:
+    """Return whether an automatic AI workflow is explicitly enabled.
+
+    Demo installations may use real providers, but background automation is
+    only safe once the demo is access-controlled.  Explicitly queued work is
+    handled separately by the worker and intentionally does not use this
+    gate.
+    """
+    aliases = (legacy_alias,) if legacy_alias else ()
+    if not get_bool(key, default=False, aliases=aliases):
+        return False
+    return not is_demo_mode() or get_bool("LOGIN_REQUIRED", default=False)
+
+
+def _mask(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    if value in _PLACEHOLDER_VALUES:
+        return ""
+    return "****"
+
+
+def _read_db_overrides() -> dict:
+    """Return settings overrides stored in DB (key -> value)."""
+    db = SessionLocal()
+    try:
+        # SettingsRecord also carries bounded internal state. Never turn an
+        # arbitrary or legacy row into a process environment variable.
+        rows = db.query(SettingsRecord).filter(SettingsRecord.key.in_(_ALL_KEYS)).all()
+        return {r.key: r.value for r in rows}
+    except Exception:
+        return {}
+    finally:
+        db.close()
+
+
+def _read_portal_approved_keys() -> set[str]:
+    """Return keys explicitly saved by an authenticated production admin."""
+    db = SessionLocal()
+    try:
+        rows = db.query(SettingsRecord.key).filter(
+            SettingsRecord.key.like(f"{_ADMIN_PORTAL_APPROVAL_PREFIX}%")
+        ).all()
+        return {
+            key.removeprefix(_ADMIN_PORTAL_APPROVAL_PREFIX)
+            for key, in rows
+            if key.startswith(_ADMIN_PORTAL_APPROVAL_PREFIX)
+        }
+    except Exception:
+        return set()
+    finally:
+        db.close()
+
+
+def _write_db_overrides(
+    updates: dict,
+    *,
+    actor_id: Optional[str] = None,
+    approved_keys: Optional[set[str]] = None,
+):
+    db = SessionLocal()
+    try:
+        for key, value in updates.items():
+            existing = db.query(SettingsRecord).filter(SettingsRecord.key == key).first()
+            if existing:
+                existing.value = value
+            else:
+                db.add(SettingsRecord(key=key, value=value))
+        if actor_id:
+            for key in sorted(approved_keys or set()):
+                marker_key = f"{_ADMIN_PORTAL_APPROVAL_PREFIX}{key}"
+                marker = db.query(SettingsRecord).filter(
+                    SettingsRecord.key == marker_key
+                ).first()
+                if marker:
+                    marker.value = actor_id
+                else:
+                    db.add(SettingsRecord(key=marker_key, value=actor_id))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def load_settings_into_env() -> bool:
+    """At startup, hydrate os.environ with DB-stored overrides so every
+    module that reads env once at import time still sees the saved values."""
+    global _loaded
+    with _lock:
+        overrides = _read_db_overrides()
+        production = is_production_mode()
+        # Only overrides carrying an approval marker written by an
+        # authenticated administrator may supersede production defaults.
+        approved_keys = _read_portal_approved_keys() if production else set()
+        changed = False
+        for key, value in overrides.items():
+            if key not in _ALL_KEYS or key in _READONLY_KEYS:
+                continue
+            if production and key in _PRODUCTION_ENV_ONLY_KEYS:
+                if key not in approved_keys:
+                    continue
+            if value is not None:
+                if key in _LLM_BASE_URL_KEYS and value:
+                    value = (
+                        _normalize_foundry_base_url(value)
+                        if key == "FOUNDRY_API_BASE"
+                        else _normalize_llm_base_url(value)
+                    )
+                changed = changed or os.getenv(key) != value
+                os.environ[key] = value
+        validate_effective_llm_urls()
+        _loaded = True
+        return changed
+
+
+def validate_effective_llm_urls() -> None:
+    """Validate stored URL policy without coupling app readiness to DNS."""
+    for key in _LLM_BASE_URL_KEYS:
+        value = (os.getenv(key) or "").strip()
+        if value:
+            os.environ[key] = (
+                _normalize_foundry_base_url(value)
+                if key == "FOUNDRY_API_BASE"
+                else _normalize_llm_base_url(value)
+            )
+    from .llm_manager import foundry_auth_method, resolve_provider
+
+    foundry_auth_method()
+    default_model = (os.getenv("DEFAULT_MODEL") or "").strip()
+    if default_model:
+        resolve_provider(default_model)
+    embedding_model = (os.getenv("TICKET_EMBEDDING_MODEL") or "").strip()
+    if embedding_model:
+        resolve_provider(embedding_model)
+
+
+def get_settings() -> dict:
+    with _lock:
+        result = {}
+        for key in _ALL_KEYS:
+            val = os.getenv(key, "")
+            if key in _SENSITIVE_KEYS:
+                result[key] = _mask(val)
+                result[f"{key}__set"] = bool(val) and val not in _PLACEHOLDER_VALUES
+            else:
+                result[key] = val
+        return result
+
+
+def update_settings(payload: dict, *, actor_id: Optional[str] = None) -> dict:
+    with _lock:
+        production = is_production_mode()
+        base_url_credentials = {
+            "FOUNDRY_API_BASE": "FOUNDRY_API_KEY",
+            "CUSTOM_API_BASE": "CUSTOM_API_KEY",
+        }
+        for base_key, credential_key in base_url_credentials.items():
+            if base_key not in payload:
+                continue
+            if base_key == "FOUNDRY_API_BASE" and str(
+                payload.get("FOUNDRY_AUTH_METHOD")
+                or os.getenv("FOUNDRY_AUTH_METHOD")
+                or "api_key"
+            ).strip().lower() == "entra":
+                continue
+            proposed_base = str(payload.get(base_key) or "").strip().rstrip("/")
+            current_base = str(os.getenv(base_key) or "").strip().rstrip("/")
+            if not proposed_base or "****" in proposed_base:
+                continue
+            current_credential = os.getenv(credential_key)
+            replacement = payload.get(credential_key)
+            replacement_is_real = (
+                isinstance(replacement, str)
+                and bool(replacement.strip())
+                and "****" not in replacement
+                and replacement.strip() not in _PLACEHOLDER_VALUES
+            )
+            if (
+                proposed_base != current_base
+                and current_credential
+                and current_credential not in _PLACEHOLDER_VALUES
+                and not replacement_is_real
+            ):
+                raise ValueError(
+                    f"Changing {base_key} requires re-entering {credential_key}"
+                )
+        proposed_provider = str(payload.get("SSO_PROVIDER") or os.getenv("SSO_PROVIDER") or "").strip()
+        proposed_client_id = str(payload.get("SSO_CLIENT_ID") or os.getenv("SSO_CLIENT_ID") or "").strip()
+        provider_changed = "SSO_PROVIDER" in payload and proposed_provider != str(os.getenv("SSO_PROVIDER") or "").strip()
+        client_changed = "SSO_CLIENT_ID" in payload and proposed_client_id != str(os.getenv("SSO_CLIENT_ID") or "").strip()
+        if (provider_changed or client_changed) and os.getenv("SSO_CLIENT_SECRET"):
+            replacement = payload.get("SSO_CLIENT_SECRET")
+            if not (
+                isinstance(replacement, str)
+                and replacement.strip()
+                and "****" not in replacement
+            ):
+                raise ValueError(
+                    "Changing the SSO provider or client ID requires re-entering SSO_CLIENT_SECRET"
+                )
+        updates = {}
+        for key in _ALL_KEYS:
+            if key not in payload or key in _READONLY_KEYS:
+                continue
+            if production and key in _PRODUCTION_ENV_ONLY_KEYS:
+                if not actor_id:
+                    continue
+            new_val = payload.get(key)
+            if new_val is None:
+                continue
+            if isinstance(new_val, str):
+                new_val = new_val.strip()
+            # Never accept a masked echo (e.g. "sk-5****") for a secret —
+            # it's the redacted value we returned on GET, not a real key.
+            # Skipping it preserves the previously stored value.
+            if key in _SENSITIVE_KEYS and ("****" in new_val or new_val in _PLACEHOLDER_VALUES):
+                continue
+            if new_val == "":
+                if key in _SENSITIVE_KEYS:
+                    continue
+                if key not in _CLEARABLE_PORTAL_KEYS:
+                    new_val = os.getenv(key, "")
+            if key in _LLM_BASE_URL_KEYS and new_val:
+                new_val = (
+                    _normalize_foundry_base_url(new_val)
+                    if key == "FOUNDRY_API_BASE"
+                    else _normalize_llm_base_url(new_val)
+                )
+            if key in {"DEFAULT_MODEL", "TICKET_EMBEDDING_MODEL"}:
+                from .llm_manager import resolve_provider
+
+                resolve_provider(new_val)
+            if key == "FOUNDRY_AUTH_METHOD" and new_val not in {"api_key", "entra"}:
+                raise ValueError("FOUNDRY_AUTH_METHOD must be 'api_key' or 'entra'")
+            if key == "SSO_PROVIDER" and new_val not in {"entra", "okta", "oidc"}:
+                raise ValueError("SSO_PROVIDER must be 'entra', 'okta', or 'oidc'")
+            if key == "SSO_ENTRA_TENANT_ID" and new_val:
+                try:
+                    new_val = str(uuid.UUID(new_val))
+                except ValueError as exc:
+                    raise ValueError("SSO_ENTRA_TENANT_ID must be a tenant ID GUID") from exc
+            if key == "SSO_ALLOWED_GROUP_IDS" and new_val:
+                provider = str(payload.get("SSO_PROVIDER") or os.getenv("SSO_PROVIDER") or "entra")
+                if provider == "entra":
+                    try:
+                        new_val = ",".join(
+                            str(uuid.UUID(value.strip()))
+                            for value in new_val.split(",")
+                            if value.strip()
+                        )
+                    except ValueError as exc:
+                        raise ValueError(
+                            "SSO_ALLOWED_GROUP_IDS must contain Entra group object ID GUIDs"
+                        ) from exc
+            if key == "FRESHSERVICE_OAUTH_SCOPES" and new_val:
+                from .integrations.freshservice import FreshserviceAdapter
+
+                new_val = FreshserviceAdapter._validate_oauth_scopes(new_val)
+            if key in {"SENDGRID_FROM_EMAIL", "SENDGRID_REPLY_TO_EMAIL"} and new_val:
+                try:
+                    new_val = normalize_email_address(new_val)
+                except ValueError as exc:
+                    raise ValueError(f"{key} must be a valid email address") from exc
+            if key == "SENDGRID_FROM_NAME" and new_val:
+                try:
+                    new_val = normalize_sender_name(new_val)
+                except ValueError as exc:
+                    raise ValueError("SENDGRID_FROM_NAME is invalid") from exc
+                if not new_val:
+                    raise ValueError("SENDGRID_FROM_NAME cannot be blank")
+            if key == "ATTACHMENT_STORAGE_PROVIDER" and new_val not in {
+                "", "azure_blob",
+            }:
+                raise ValueError(
+                    "ATTACHMENT_STORAGE_PROVIDER must be 'azure_blob' or blank"
+                )
+            if key == "AZURE_STORAGE_ACCOUNT_URL" and new_val:
+                parsed = urlparse(new_val)
+                if (
+                    parsed.scheme != "https"
+                    or not parsed.hostname
+                    or parsed.username
+                    or parsed.password
+                    or parsed.query
+                    or parsed.fragment
+                    or not parsed.hostname.endswith(".blob.core.windows.net")
+                ):
+                    raise ValueError(
+                        "AZURE_STORAGE_ACCOUNT_URL must be an Azure Blob HTTPS account URL"
+                    )
+                new_val = new_val.rstrip("/")
+            if key == "AZURE_STORAGE_CONTAINER" and new_val:
+                if not re.fullmatch(
+                    r"[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?", new_val
+                ):
+                    raise ValueError("AZURE_STORAGE_CONTAINER is not a valid container name")
+            freshservice_numeric_bounds = {
+                "FRESHSERVICE_MIN_INTERVAL_SECONDS": (0.25, 60.0, float),
+                "FRESHSERVICE_RATE_LIMIT_RESERVE": (2, 10_000, int),
+                "FRESHSERVICE_RECENT_PAGES_PER_SYNC": (1, 10, int),
+                "FRESHSERVICE_HISTORY_PAGES_PER_SYNC": (1, 5, int),
+                "FRESHSERVICE_CONVERSATIONS_PER_SYNC": (0, 5, int),
+                "FRESHSERVICE_ATTACHMENTS_PER_SYNC": (0, 20, int),
+                "ATTACHMENT_MAX_BYTES": (1_048_576, 104_857_600, int),
+            }
+            if key in freshservice_numeric_bounds and new_val:
+                minimum, maximum, parser = freshservice_numeric_bounds[key]
+                try:
+                    parsed = parser(new_val)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"{key} must be numeric") from exc
+                if parsed < minimum or parsed > maximum:
+                    raise ValueError(
+                        f"{key} must be between {minimum} and {maximum}"
+                    )
+                new_val = str(parsed)
+            email_numeric_bounds = {
+                "EMAIL_SENDS_PER_MINUTE": (1, 60),
+                "EMAIL_RECIPIENTS_PER_DAY": (1, 10_000),
+            }
+            if key in email_numeric_bounds and new_val:
+                minimum, maximum = email_numeric_bounds[key]
+                try:
+                    parsed = int(new_val)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"{key} must be an integer") from exc
+                if parsed < minimum or parsed > maximum:
+                    raise ValueError(
+                        f"{key} must be between {minimum} and {maximum}"
+                    )
+                new_val = str(parsed)
+            updates[key] = new_val
+
+        if updates:
+            approved_keys = {
+                key
+                for key in updates
+                if production and (
+                    key in _PRODUCTION_ADMIN_PORTAL_KEYS
+                    or key in _PRODUCTION_SSO_PORTAL_KEYS
+                )
+            }
+            if actor_id or approved_keys:
+                _write_db_overrides(
+                    updates,
+                    actor_id=actor_id,
+                    approved_keys=approved_keys,
+                )
+            else:
+                _write_db_overrides(updates)
+            for key, value in updates.items():
+                os.environ[key] = value
+
+    if updates:
+        _reset_runtime()
+    return get_settings()
+
+
+def refresh_settings_from_db() -> bool:
+    """Apply newly admin-approved overrides in long-running worker processes."""
+    changed = load_settings_into_env()
+    if changed:
+        _reset_runtime(restart_scheduler=False)
+    return changed
+
+
+def _reset_runtime(*, restart_scheduler: bool = True):
+    """Reset cached adapters and restart sync worker to pick up new env values."""
+    try:
+        from . import llm_manager
+
+        llm_manager.invalidate_model_catalog_refresh()
+    except Exception as e:
+        print(f"[settings] invalidate model catalog error kind={type(e).__name__}")
+
+    try:
+        from .integrations import registry
+        registry._ADAPTERS.clear()
+    except Exception as e:
+        print(f"[settings] clear adapters error kind={type(e).__name__}")
+
+    if restart_scheduler:
+        try:
+            from . import sync_worker
+            sync_worker.stop_sync_worker()
+            sync_worker.start_sync_worker()
+        except Exception as e:
+            print(f"[settings] restart sync worker error kind={type(e).__name__}")
+
+    try:
+        main_module = sys.modules.get("app.backend.main")
+        if main_module is not None:
+            main_module.llm_mgr = main_module.LLMManager()
+            main_module.engine.llm = main_module.llm_mgr
+    except Exception as e:
+        print(f"[settings] reset llm manager error kind={type(e).__name__}")

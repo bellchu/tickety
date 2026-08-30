@@ -1,0 +1,34 @@
+# OCI production baseline. Keep credentials in an external Secret manager or
+# in an uncommitted values file; do not put real secrets in this file.
+
+config:
+  appMode: production
+  deploymentClass: production
+  loginRequired: true
+  frontendUrl: https://tickety.situ.io
+  corsAllowOrigins: https://tickety.situ.io
+  cookieSecure: true
+  cookieSameSite: lax
+
+frontend:
+  service:
+    type: ClusterIP
+
+ingress:
+  enabled: true
+  # The OCI K3s Traefik controller owns ingresses without an explicit class.
+  # Public TLS terminates at the managed HTTPS edge in front of this origin.
+  className: ""
+  host: tickety.situ.io
+  tls: []
+
+postgresql:
+  enabled: true
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClass: ""
+
+# Use existingSecret for production credentials whenever possible.
+existingSecret: ""
+secrets: {}

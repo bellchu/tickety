@@ -1,0 +1,36 @@
+"use client";
+
+import { useQuery } from "@tanstack/react-query";
+import { AlertOctagon, CalendarCheck, Flame, Heart, Lock, Medal, ShieldCheck, Sparkles, Zap } from "lucide-react";
+import { ImpactBar } from "@/components/engagement/ImpactBar";
+import { LogoutButton } from "@/components/layout/LogoutButton";
+import { Badge, EmptyState, ErrorState, Skeleton } from "@/components/ui";
+import { api } from "@/lib/api";
+import { ALL_RECOGNITION_KEYS, RECOGNITION_META } from "@/lib/recognitions";
+import { cn } from "@/lib/utils";
+import { PageFrame, PageHeader } from "@/components/layout/PageLayout";
+
+const ICONS: Record<string, React.ReactNode> = { medal: <Medal className="h-5 w-5" />, flame: <Flame className="h-5 w-5" />, "alert-octagon": <AlertOctagon className="h-5 w-5" />, zap: <Zap className="h-5 w-5" />, heart: <Heart className="h-5 w-5" />, "calendar-check": <CalendarCheck className="h-5 w-5" /> };
+
+function initials(name: string) { return name.split(" ").filter(Boolean).map((part) => part[0]).join("").slice(0, 2).toUpperCase() || "?"; }
+
+export default function ProfilePage() {
+  const meQuery = useQuery({ queryKey: ["me"], queryFn: api.getMe });
+  const authQuery = useQuery({ queryKey: ["auth-me"], queryFn: api.getAuthMe, retry: false });
+  const recognitionsQuery = useQuery({ queryKey: ["recognitions", meQuery.data?.id], queryFn: () => api.getRecognitions(meQuery.data!.id), enabled: Boolean(meQuery.data) });
+  const unlocked = new Set((recognitionsQuery.data ?? [])
+    .map((item) => item.recognition_key)
+    .filter((key) => ALL_RECOGNITION_KEYS.includes(key)));
+
+  if (meQuery.isLoading) return <ProfileSkeleton />;
+  if (meQuery.isError || !meQuery.data) return <PageFrame><ErrorState title="Your profile could not be loaded" description="Performance and recognition data are temporarily unavailable." onRetry={() => void meQuery.refetch()} retrying={meQuery.isFetching} /></PageFrame>;
+  const me = meQuery.data;
+
+  return <PageFrame>
+    <PageHeader eyebrow="Personal performance" icon={<Sparkles className="h-4 w-4" />} title="My profile" description="Your account details, operational impact, momentum, and earned recognition." actions={authQuery.data?.auth_kind === "session" ? <LogoutButton /> : undefined} />
+    <section className="overflow-hidden rounded-2xl border border-linen-400 bg-linen-50 shadow-sm" aria-labelledby="identity-heading"><div className="bg-ink-700 p-5 text-white sm:p-7"><div className="flex flex-col gap-5 sm:flex-row sm:items-center"><span aria-hidden="true" className="grid h-16 w-16 shrink-0 place-items-center rounded-2xl bg-white/10 text-xl font-semibold ring-1 ring-white/15">{initials(me.name)}</span><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h2 id="identity-heading" className="min-w-0 whitespace-normal break-words text-2xl font-semibold tracking-[-0.03em] [overflow-wrap:anywhere]">{me.name}</h2><Badge className="border-white/15 bg-white/10 text-white">Tier {me.tier}</Badge></div><p className="mt-1 break-words text-sm text-white/70 [overflow-wrap:anywhere]">{me.title || "Title not set"}</p><p className="mt-1 break-words text-xs text-white/60 [overflow-wrap:anywhere]">{me.email || "Email not available"}</p></div><div className="min-w-28 rounded-xl bg-white/10 px-4 py-3 ring-1 ring-white/10"><p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-white/60">Momentum</p><p className="mt-1 text-2xl font-semibold tabular-nums text-white">{me.momentum.toLocaleString()}</p></div></div></div><div className="p-5 sm:p-7"><div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between"><div><p className="text-xs font-semibold uppercase tracking-[0.1em] text-ink-400">Impact progression</p><p className="mt-1 text-sm text-ink-500">Contribution points determine your current operational tier.</p></div><p className="text-3xl font-semibold tracking-[-0.04em] tabular-nums text-ink-700">{me.impact_points.toLocaleString()} <span className="text-sm font-medium tracking-normal text-ink-400">points</span></p></div><ImpactBar points={me.impact_points} tier={me.tier} momentum={me.momentum} /></div></section>
+    <section aria-labelledby="recognition-heading"><div className="flex flex-col gap-3 xs:flex-row xs:items-end xs:justify-between"><div><h2 id="recognition-heading" className="text-lg font-semibold text-ink-700">Recognition wall</h2><p className="mt-1 text-sm text-ink-500">{unlocked.size} of {ALL_RECOGNITION_KEYS.length} milestones earned</p></div><Badge className="self-start xs:self-auto" variant="info" icon={<Sparkles className="h-3 w-3" />}>{Math.round((unlocked.size / Math.max(ALL_RECOGNITION_KEYS.length, 1)) * 100)}% complete</Badge></div>{recognitionsQuery.isLoading ? <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-3" aria-busy="true" aria-label="Loading recognitions">{Array.from({ length: 6 }, (_, index) => <Skeleton key={index} className="h-28" />)}</div> : recognitionsQuery.isError ? <ErrorState className="mt-4" title="Recognitions could not be loaded" description="Your profile remains available; milestone status may be out of date." onRetry={() => void recognitionsQuery.refetch()} retrying={recognitionsQuery.isFetching} /> : ALL_RECOGNITION_KEYS.length === 0 ? <EmptyState className="mt-4" icon={<ShieldCheck className="h-5 w-5" />} title="No recognition milestones configured" description="Milestones will appear here when the recognition program is configured." /> : <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-3">{ALL_RECOGNITION_KEYS.map((key) => { const meta = RECOGNITION_META[key]; const earned = unlocked.has(key); return <article key={key} className={cn("flex min-h-28 items-start gap-4 rounded-2xl border p-5 shadow-sm", earned ? "border-linen-500 bg-linen-50" : "border-linen-300 bg-linen-100")}><span aria-hidden="true" className={cn("grid h-11 w-11 shrink-0 place-items-center rounded-xl", earned ? "bg-ink-700 text-white" : "bg-linen-200 text-ink-400")}>{earned ? ICONS[meta.icon] : <Lock className="h-4 w-4" />}</span><div><div className="flex flex-wrap items-center gap-2"><h3 className="text-sm font-semibold text-ink-700">{meta.display_name}</h3><Badge variant={earned ? "success" : "neutral"}>{earned ? "Earned" : "Locked"}</Badge></div><p className="mt-2 text-xs leading-5 text-ink-500">{meta.description}</p></div></article>; })}</div>}</section>
+  </PageFrame>;
+}
+
+function ProfileSkeleton() { return <div className="mx-auto max-w-7xl space-y-6" aria-busy="true" aria-label="Loading profile"><div className="space-y-3 border-b border-linen-400 pb-6"><Skeleton className="h-3 w-36" /><Skeleton className="h-9 w-44" /><Skeleton className="h-4 w-80 max-w-full" /></div><Skeleton className="h-72" /><div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{Array.from({ length: 6 }, (_, index) => <Skeleton key={index} className="h-28" />)}</div></div>; }

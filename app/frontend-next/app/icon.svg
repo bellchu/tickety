@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">Tickety OPS Tower</title>
+  <desc id="desc">Tickety OPS Tower service operations app icon.</desc>
+  <defs>
+    <linearGradient id="accent" x1="8" y1="10" x2="56" y2="54" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2563EB"/>
+      <stop offset=".52" stop-color="#0EA5E9"/>
+      <stop offset="1" stop-color="#14B8A6"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#010D1B"/>
+  <path d="M18 14h28v10a8 8 0 0 0 0 16v10H18V40a8 8 0 0 0 0-16V14Z" fill="url(#accent)"/>
+  <path d="M27 26h10M27 34h10" stroke="#010D1B" stroke-width="3" stroke-linecap="round"/>
+</svg>

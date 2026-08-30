@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc">
+  <title id="title">Tickety OPS Tower — Resolve what matters.</title>
+  <desc id="desc">Tickety OPS Tower social card.</desc>
+  <defs>
+    <linearGradient id="accent" x1="72" y1="0" x2="1128" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2563EB"/>
+      <stop offset=".52" stop-color="#0EA5E9"/>
+      <stop offset="1" stop-color="#14B8A6"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="translate(990 105) rotate(132) scale(510 420)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2563EB" stop-opacity=".34"/>
+      <stop offset="1" stop-color="#010D1B" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1200" height="630" fill="#010D1B"/>
+  <rect width="1200" height="630" fill="url(#glow)"/>
+  <rect x="0" y="0" width="1200" height="7" fill="url(#accent)"/>
+  <rect x="60" y="45" width="242" height="70" rx="6" fill="#FFFFFF"/>
+  <text x="82" y="90" fill="#010D1B" font-family="DM Mono, monospace" font-size="28" font-weight="700" letter-spacing="4">TICKETY</text>
+  <rect x="326" y="63" width="1" height="34" fill="#FFFFFF" fill-opacity=".3"/>
+  <text x="350" y="88" fill="#FFFFFF" font-family="DM Mono, monospace" font-size="17" font-weight="500" letter-spacing="2.5">TICKETY OPS TOWER</text>
+  <text x="72" y="205" fill="#979DA5" font-family="DM Mono, monospace" font-size="15" font-weight="500" letter-spacing="2.5">INTELLIGENT SERVICE OPERATIONS</text>
+  <text x="72" y="330" fill="#FFFFFF" font-family="DM Sans, Arial, sans-serif" font-size="72" font-weight="500" letter-spacing="-2">Resolve what matters.</text>
+  <text x="74" y="390" fill="#C9CDD3" font-family="DM Sans, Arial, sans-serif" font-size="24">Clear triage. Shared context. Accountable ownership.</text>
+  <path d="M72 516H1128" stroke="#FFFFFF" stroke-opacity=".16"/>
+  <text x="72" y="557" fill="#979DA5" font-family="DM Mono, monospace" font-size="14" font-weight="500" letter-spacing="2">FOCUS / MOMENTUM / IMPACT</text>
+  <path d="M960 210h128v42a36 36 0 0 0 0 72v42H960v-42a36 36 0 0 0 0-72v-42Z" fill="url(#accent)"/>
+  <path d="M995 262h58M995 310h58" stroke="#010D1B" stroke-width="12" stroke-linecap="round"/>
+</svg>

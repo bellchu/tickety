@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Secrets & env
+.env
+backups/*.dump
+*.secret
+secrets.yaml
+k8s/secrets.yaml
+
+# Build artifacts
+.next/
+dist/
+build/
+*.egg-info/
+*.tsbuildinfo
+
+# Freshworks local simulator
+freshworks-app/.fdk/
+freshworks-app/.report.json
+freshworks-app/.usage.json
+freshworks-app/coverage/
+freshworks-app/log/
+
+# Docker
+*.tar
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+._*
+**/._*
+Thumbs.db
+
+# Database
+*.db
+*.sqlite
