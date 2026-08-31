@@ -31,7 +31,7 @@ USER 10001:10001
 CMD ["uvicorn", "app.backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
 # Stage 2: Build Next.js frontend
-FROM node:24.19.0-alpine AS frontend-builder
+FROM node:26.8.1-alpine AS frontend-builder
 ARG NPM_VERSION=12.0.2
 # Build-identifiable version metadata. Passed by deploy.sh from git HEAD +
 # the build timestamp, so the footer can show exactly which image is running.
@@ -52,7 +52,7 @@ RUN npm run verify:production-routes
 LABEL com.tickety.build-stage="frontend"
 
 # Stage 3: Frontend runtime (Node)
-FROM node:24.19.0-alpine AS frontend
+FROM node:26.8.1-alpine AS frontend
 ARG NPM_VERSION=12.0.2
 WORKDIR /app
 COPY --from=frontend-builder /frontend/package.json /frontend/package-lock.json* ./
