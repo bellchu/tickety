@@ -9,7 +9,7 @@
   "type": "module",
   "description": "Read-only Tickety OPS Tower attachment for Freshservice",
   "devDependencies": {
-    "@vitest/coverage-v8": "4.1.11",
+    "@vitest/coverage-v8": "5.0.0",
     "jsdom": "29.1.1",
     "vite": "8.2.2",
     "vitest": "4.1.11"
