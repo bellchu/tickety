@@ -12,7 +12,7 @@
     "@vitest/coverage-v8": "4.1.11",
     "jsdom": "29.1.1",
     "vite": "8.2.2",
-    "vitest": "4.1.11"
+    "vitest": "5.0.0"
   },
   "scripts": {
     "fdk-unit-test": "vitest run --coverage"
