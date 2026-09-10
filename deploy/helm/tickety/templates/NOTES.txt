@@ -1,0 +1,15 @@
+{{- if eq .Values.frontend.service.type "LoadBalancer" }}
+Wait for the external address:
+  kubectl get service -n {{ .Release.Namespace }} {{ include "tickety.fullname" . }}-frontend --watch
+{{- else if .Values.ingress.enabled }}
+Tickety will be available at {{ include "tickety.frontendUrl" . }} after DNS and the ingress controller are ready.
+{{- else }}
+Open a local tunnel:
+  kubectl port-forward -n {{ .Release.Namespace }} service/{{ include "tickety.fullname" . }}-frontend 3000:{{ .Values.frontend.service.port }}
+
+Then visit http://localhost:3000.
+{{- end }}
+
+Check the rollout:
+  kubectl get pods,jobs -n {{ .Release.Namespace }}
+  kubectl get --raw /api/v1/namespaces/{{ .Release.Namespace }}/services/http:{{ include "tickety.fullname" . }}-frontend:{{ .Values.frontend.service.port }}/proxy/api/health/ready

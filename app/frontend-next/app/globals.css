@@ -1,0 +1,244 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #F8FAFE;
+  --foreground: #010D1B;
+  --surface: #FFFFFF;
+  --surface-2: #F2F4FA;
+  --surface-3: #EAEFF7;
+  --border: #C9CDD3;
+  --border-subtle: #DDE2EA;
+  --brand-ink: #010D1B;
+  --brand-navy: #021123;
+  --brand-blue: #2563EB;
+  --brand-coral: #F97316;
+  --brand-teal: #14B8A6;
+  --brand-lime: #84CC16;
+  --brand-accent: linear-gradient(90deg, #2563EB 0%, #0EA5E9 52%, #14B8A6 100%);
+  --brand-accent-soft: linear-gradient(110deg, rgba(37, 99, 235, 0.10), rgba(14, 165, 233, 0.08) 50%, rgba(20, 184, 166, 0.09));
+  --accent: var(--brand-blue);
+  --accent-dark: #1D4ED8;
+  --fg: #010D1B;
+  --fg-2: #303037;
+  --fg-muted: #626B76;
+  --fg-inverse: #FFFFFF;
+
+  /* Semantic product tokens. Keep component meaning independent from the palette. */
+  --color-primary: #7032CC;
+  --color-primary-hover: #57229F;
+  --color-primary-soft: #F2EBFC;
+  --color-success: #187653;
+  --color-success-soft: #E9F8F1;
+  --color-warning: #985C00;
+  --color-warning-soft: #FFF5E1;
+  --color-danger: #B4233B;
+  --color-danger-hover: #8F1930;
+  --color-danger-soft: #FFF0F3;
+  --color-info: #0F4C81;
+  --color-info-soft: #EAF3FC;
+  --color-overlay: rgba(1, 13, 27, 0.68);
+  --focus-ring: #2563EB;
+  --focus-ring-offset: #FFFFFF;
+  --shadow-card: 0 1px 2px rgba(1, 13, 27, 0.04), 0 8px 24px rgba(1, 13, 27, 0.035);
+  --shadow-raised: 0 20px 55px rgba(1, 13, 27, 0.11), 0 2px 8px rgba(1, 13, 27, 0.06);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-width: 320px;
+  overflow-x: clip;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-dm-sans), "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+:where(img, video, canvas) {
+  max-width: 100%;
+  height: auto;
+}
+
+.tickety-ui :where(h1, h2, h3, h4, p, li, dt, dd, figcaption) {
+  overflow-wrap: anywhere;
+}
+
+@supports (text-wrap: balance) {
+  .tickety-ui :where(h1, h2, h3) {
+    text-wrap: balance;
+  }
+}
+
+::selection {
+  background: var(--color-primary-soft);
+  color: var(--fg);
+}
+
+/* A consistent keyboard affordance across native and custom controls. */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+:where(button, input, select, textarea):disabled {
+  cursor: not-allowed;
+}
+
+.font-serif {
+  font-family: var(--font-dm-sans), "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-weight: 500;
+}
+
+/* Tickety's accent is reserved for orientation and emphasis. */
+.tickety-accent {
+  background: var(--brand-accent);
+}
+
+.tickety-accent-text {
+  background: var(--brand-accent);
+  background-clip: text;
+  color: transparent;
+  -webkit-background-clip: text;
+}
+
+.tickety-accent-line {
+  height: 2px;
+  background: var(--brand-accent);
+}
+
+.tickety-ambient {
+  background:
+    radial-gradient(circle at 7% 8%, rgba(37, 99, 235, 0.08), transparent 24rem),
+    radial-gradient(circle at 94% 4%, rgba(20, 184, 166, 0.09), transparent 26rem),
+    var(--background);
+}
+
+/* Product surfaces */
+.card-surface {
+  @apply rounded-xl bg-linen-50;
+  border: 1px solid var(--border-subtle);
+  box-shadow: var(--shadow-card);
+}
+
+/* ═══ KPI display ═══ */
+.kpi-value {
+  @apply text-[1.75rem] leading-none tracking-tight text-ink-700;
+  font-family: var(--font-dm-sans), sans-serif;
+  font-weight: 500;
+}
+
+.kpi-label {
+  @apply text-[11px] font-medium text-ink-400;
+  letter-spacing: 0.03em;
+}
+
+/* ═══ Badge — soft pill ═══ */
+.badge {
+  @apply inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium leading-none border;
+}
+
+/* ═══ Buttons — refined ═══ */
+.btn-primary {
+  @apply inline-flex items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-all;
+  background: var(--brand-accent);
+  color: var(--fg-inverse);
+}
+.btn-primary:hover {
+  filter: saturate(1.12) brightness(0.92);
+}
+.btn-primary:active {
+  @apply scale-[0.98];
+}
+.btn-primary:disabled {
+  @apply opacity-40 cursor-not-allowed;
+  transform: none;
+}
+
+.btn-secondary {
+  @apply inline-flex items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-colors;
+  background: var(--surface);
+  color: var(--fg-2);
+  border: 1px solid var(--border);
+}
+.btn-secondary:hover {
+  background: var(--surface-3);
+  color: var(--fg);
+}
+
+/* ═══ Skeleton loader ═══ */
+.skeleton {
+  @apply bg-gradient-to-r from-linen-200 via-linen-300 to-linen-200 bg-[length:200%_100%] animate-shimmer rounded-lg;
+}
+
+/* ═══ Form inputs ═══ */
+.input-base {
+  @apply min-w-0 w-full rounded-md px-3 py-2 text-sm transition-colors;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--fg);
+}
+
+textarea.input-base {
+  max-width: 100%;
+  resize: vertical;
+}
+
+/* Search input — space on the left for the magnifying glass icon. */
+.input-search {
+  @apply !pl-9 pr-3;
+}
+.input-base::placeholder {
+  color: var(--fg-muted);
+}
+.input-base:focus {
+  @apply outline-none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ═══ Select ═══ */
+select.input-base {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='none'%3E%3Cpath d='M3 4.5l3 3 3-3' stroke='%238A8276' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 2rem;
+}
+
+/* ═══ Checkbox ═══ */
+input[type="checkbox"] {
+  @apply rounded;
+  accent-color: var(--accent);
+}
+
+/* ═══ Scrollbar ═══ */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #9CA4AF;
+  border-radius: 3px;
+}

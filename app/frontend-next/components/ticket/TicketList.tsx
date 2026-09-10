@@ -1,0 +1,712 @@
+"use client";
+
+import Link from "next/link";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { KeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  Bookmark,
+  CalendarDays,
+  ChevronLeft,
+  ChevronRight,
+  Clock3,
+  Download,
+  Filter,
+  Inbox,
+  Mail,
+  Plus,
+  Search,
+  Trash2,
+  X,
+} from "lucide-react";
+import { Alert, Badge, Button, DataListCard, Dialog, EmptyState, ErrorState, IconButton, ListText, Skeleton } from "@/components/ui";
+import { DataToolbar, PageFrame, PageHeader } from "@/components/layout/PageLayout";
+import { TicketPriorityIndicator } from "@/components/ticket/TicketPriorityIndicator";
+import { TicketSentimentSubtitle } from "@/components/ticket/TicketSentimentSubtitle";
+import { api } from "@/lib/api";
+import { queryKeys } from "@/lib/query-keys";
+import { canCreateTickets } from "@/lib/auth";
+import type { Ticket, TicketListSort } from "@/lib/types";
+import { analysisLifecycleLabel, routingLabel, sourceKindLabel, ticketSentimentPresentation, ticketSignalRatings } from "@/lib/ticket-intelligence";
+import { cn, formatTimeAgo } from "@/lib/utils";
+import { localDateKey } from "@/lib/date-time";
+import {
+  preserveTicketConfigValue,
+  ticketListStatusOptions,
+  ticketPriorityOptions,
+  visibleTicketStatusOptions,
+} from "@/lib/ticket-config-options";
+import {
+  formatOperationalTimestamp,
+  requesterEmail,
+  requesterName,
+  ticketCreatedAt,
+  ticketLastCommunicationAt,
+} from "@/lib/ticket-display";
+
+const SAVED_VIEWS_KEY = "tickety.ticket-queue.views.v1";
+const COLUMN_WIDTHS_KEY = "tickety.ticket-queue.column-widths.v3";
+const PAGE_SIZES = [10, 25, 50, 100];
+const EMPTY_TICKETS: Ticket[] = [];
+const TABLE_COLUMN_KEYS = ["ticket", "requester", "priority", "routing", "status", "created", "lastContact"] as const;
+type TableColumnKey = (typeof TABLE_COLUMN_KEYS)[number];
+type TableColumnWidths = Record<TableColumnKey, number>;
+const DEFAULT_COLUMN_WIDTHS: TableColumnWidths = {
+  ticket: 220,
+  requester: 170,
+  priority: 150,
+  routing: 190,
+  status: 100,
+  created: 110,
+  lastContact: 120,
+};
+const MIN_COLUMN_WIDTHS: TableColumnWidths = {
+  ticket: 220,
+  requester: 170,
+  priority: 136,
+  routing: 190,
+  status: 100,
+  created: 110,
+  lastContact: 120,
+};
+const MAX_COLUMN_WIDTH = 720;
+const SORT_OPTIONS: Array<{ value: TicketListSort; label: string }> = [
+  { value: "newest", label: "Newest created" },
+  { value: "updated", label: "Recently communicated" },
+  { value: "priority", label: "Highest reported priority" },
+  { value: "complexity", label: "Most complex" },
+  { value: "oldest", label: "Oldest created" },
+];
+
+interface SavedView {
+  id: string;
+  name: string;
+  status: string;
+  priority: string;
+  assigneeId: string;
+  category: string;
+  sort: TicketListSort;
+  limit: number;
+  builtIn?: boolean;
+}
+
+function ResizableColumnHeader({
+  column,
+  label,
+  onResizeStart,
+  onNudge,
+}: {
+  column: TableColumnKey;
+  label: string;
+  onResizeStart: (column: TableColumnKey, event: ReactPointerEvent<HTMLButtonElement>) => void;
+  onNudge: (column: TableColumnKey, delta: number) => void;
+}) {
+  const handleKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const step = event.shiftKey ? 50 : 10;
+    onNudge(column, event.key === "ArrowRight" ? step : -step);
+  };
+
+  return (
+    <th scope="col" className="group relative px-4 py-3">
+      <span>{label}</span>
+      <button
+        type="button"
+        aria-label={`Resize ${label} column`}
+        title={`Drag to resize ${label}; use arrow keys for precise control`}
+        onPointerDown={(event) => onResizeStart(column, event)}
+        onKeyDown={handleKeyDown}
+        className="absolute inset-y-0 right-0 z-10 w-3 cursor-col-resize touch-none outline-none after:absolute after:inset-y-2 after:left-1/2 after:w-px after:bg-linen-400 after:transition-colors hover:after:bg-semantic-primary focus-visible:after:w-0.5 focus-visible:after:bg-semantic-primary"
+      />
+    </th>
+  );
+}
+
+const BUILT_IN_VIEWS: SavedView[] = [
+  { id: "all", name: "All tickets", status: "", priority: "", assigneeId: "", category: "", sort: "newest", limit: 10, builtIn: true },
+  { id: "open", name: "Open queue", status: "Open", priority: "", assigneeId: "", category: "", sort: "priority", limit: 10, builtIn: true },
+  { id: "p1", name: "P1 incidents", status: "", priority: "P1", assigneeId: "", category: "", sort: "oldest", limit: 10, builtIn: true },
+  { id: "escalated", name: "Escalations", status: "Escalated", priority: "", assigneeId: "", category: "", sort: "updated", limit: 10, builtIn: true },
+];
+
+function badgeForStatus(status: string): "success" | "warning" | "info" | "neutral" {
+  const normalized = status.toLowerCase();
+  if (["closed", "resolved", "completed"].includes(normalized)) return "success";
+  if (["escalated", "awaiting review", "pending"].includes(normalized)) return "warning";
+  if (["open", "new", "in progress"].includes(normalized)) return "info";
+  return "neutral";
+}
+
+function csvCell(value: unknown) {
+  let text = value == null ? "" : String(value);
+  if (/^\s*[=+\-@]/.test(text)) text = `'${text}`;
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+function exportPage(tickets: Ticket[]) {
+  const columns: Array<[string, (ticket: Ticket) => unknown]> = [
+    ["Ticket ID", (ticket) => ticket.id],
+    ["Subject", (ticket) => ticket.subject],
+    ["Description", (ticket) => ticket.description],
+    ["Status", (ticket) => ticket.status],
+    ["Reported priority", (ticket) => ticket.priority],
+    ["AI content priority", (ticket) => ticketSignalRatings(ticket)[0].visualValue],
+    ["Customer sentiment", (ticket) => ticketSentimentPresentation(ticket)?.label],
+    ["Reporter", (ticket) => ticket.reporter],
+    ["Requester name", (ticket) => requesterName(ticket)],
+    ["Requester email", (ticket) => requesterEmail(ticket)],
+    ["Requester title", (ticket) => ticket.requester_title],
+    ["Assignee", (ticket) => ticket.assignee_name || ticket.external_assignee_name],
+    ["Category", (ticket) => ticket.category],
+    ["Created", (ticket) => ticketCreatedAt(ticket)],
+    ["Last communication", (ticket) => ticketLastCommunicationAt(ticket)],
+  ];
+  const rows = [
+    columns.map(([label]) => csvCell(label)).join(","),
+    ...tickets.map((ticket) => columns.map(([, getValue]) => csvCell(getValue(ticket))).join(",")),
+  ];
+  const blob = new Blob([`\uFEFF${rows.join("\r\n")}`], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `tickety-queue-page-${localDateKey()}.csv`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+function LoadingQueue() {
+  return (
+    <div aria-label="Loading tickets" aria-busy="true" className="rounded-2xl border border-linen-400 bg-linen-50 p-5">
+      <span className="sr-only">Loading tickets</span>
+      <div className="space-y-3">
+        {[0, 1, 2, 3, 4, 5].map((row) => <Skeleton key={row} className="h-14 w-full" />)}
+      </div>
+    </div>
+  );
+}
+
+function TimelineValue({ value, label }: { value: string | null; label: string }) {
+  return (
+    <time
+      dateTime={value || undefined}
+      title={`${label}: ${formatOperationalTimestamp(value)}`}
+      className="flex min-w-0 items-start gap-1.5 whitespace-normal text-xs leading-5 text-ink-400"
+    >
+      <Clock3 className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+      <span className="min-w-0 break-words [overflow-wrap:anywhere]">{formatTimeAgo(value)}</span>
+    </time>
+  );
+}
+
+export function TicketList({ onCreate }: { onCreate?: () => void }) {
+  const queryClient = useQueryClient();
+  const selectAllRef = useRef<HTMLInputElement>(null);
+  const [searchInput, setSearchInput] = useState("");
+  const [search, setSearch] = useState("");
+  const [status, setStatus] = useState("");
+  const [priority, setPriority] = useState("");
+  const [assigneeId, setAssigneeId] = useState("");
+  const [category, setCategory] = useState("");
+  const [sort, setSort] = useState<TicketListSort>("newest");
+  const [limit, setLimit] = useState(10);
+  const [offset, setOffset] = useState(0);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [activeViewId, setActiveViewId] = useState("all");
+  const [customViews, setCustomViews] = useState<SavedView[]>([]);
+  const [saveDialogOpen, setSaveDialogOpen] = useState(false);
+  const [viewName, setViewName] = useState("");
+  const [bulkAction, setBulkAction] = useState("");
+  const [bulkValue, setBulkValue] = useState("");
+  const [closeConfirmOpen, setCloseConfirmOpen] = useState(false);
+  const [moreFiltersOpen, setMoreFiltersOpen] = useState(false);
+  const [bulkNotice, setBulkNotice] = useState<{ variant: "success" | "danger"; message: string } | null>(null);
+  const [columnWidths, setColumnWidths] = useState<TableColumnWidths>(DEFAULT_COLUMN_WIDTHS);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setSearch(searchInput.trim());
+      setOffset(0);
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [searchInput]);
+
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(SAVED_VIEWS_KEY);
+      if (!stored) return;
+      const parsed = JSON.parse(stored);
+      if (Array.isArray(parsed)) {
+        const validSorts = new Set(SORT_OPTIONS.map((option) => option.value));
+        const normalized = parsed.flatMap((view, index): SavedView[] => {
+          if (!view || typeof view.id !== "string" || typeof view.name !== "string") return [];
+          const safeText = (value: unknown, maxLength: number) => typeof value === "string" ? value.slice(0, maxLength) : "";
+          return [{
+            id: safeText(view.id, 80) || `saved-import-${index}`,
+            name: safeText(view.name, 60) || "Saved view",
+            status: safeText(view.status, 100),
+            priority: safeText(view.priority, 100),
+            assigneeId: safeText(view.assigneeId, 255),
+            category: safeText(view.category, 100),
+            sort: validSorts.has(view.sort) ? view.sort : "newest",
+            limit: PAGE_SIZES.includes(view.limit) ? view.limit : 10,
+          }];
+        });
+        setCustomViews(normalized.slice(0, 20));
+      }
+    } catch {
+      // A corrupt or unavailable local store should not block the queue.
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(COLUMN_WIDTHS_KEY);
+      if (!stored) return;
+      const parsed = JSON.parse(stored) as Partial<Record<TableColumnKey, unknown>>;
+      const restored = { ...DEFAULT_COLUMN_WIDTHS };
+      for (const column of TABLE_COLUMN_KEYS) {
+        const value = parsed[column];
+        if (typeof value === "number" && Number.isFinite(value)) {
+          restored[column] = Math.max(
+            MIN_COLUMN_WIDTHS[column],
+            Math.min(MAX_COLUMN_WIDTH, Math.round(value)),
+          );
+        }
+      }
+      setColumnWidths(restored);
+    } catch {
+      // Invalid or unavailable browser storage should not block the queue.
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(COLUMN_WIDTHS_KEY, JSON.stringify(columnWidths));
+    } catch {
+      // Resizing still works for this session when storage is unavailable.
+    }
+  }, [columnWidths]);
+
+  const resizeColumn = (column: TableColumnKey, width: number) => {
+    setColumnWidths((current) => ({
+      ...current,
+      [column]: Math.max(
+        MIN_COLUMN_WIDTHS[column],
+        Math.min(MAX_COLUMN_WIDTH, Math.round(width)),
+      ),
+    }));
+  };
+
+  const beginColumnResize = (
+    column: TableColumnKey,
+    event: ReactPointerEvent<HTMLButtonElement>,
+  ) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = columnWidths[column];
+    const priorCursor = document.body.style.cursor;
+    const priorUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
+    const move = (pointerEvent: PointerEvent) => {
+      resizeColumn(column, startWidth + pointerEvent.clientX - startX);
+    };
+    const finish = () => {
+      document.body.style.cursor = priorCursor;
+      document.body.style.userSelect = priorUserSelect;
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+  };
+
+  const pageQuery = useQuery({
+    queryKey: ["ticket-page", { status, priority, assigneeId, category, search, sort, limit, offset }],
+    queryFn: () => api.getTicketsPage({ status, priority, assigneeId, category, search, sort, limit, offset }),
+    placeholderData: (previous) => previous,
+  });
+  const meQuery = useQuery({ queryKey: ["auth-me"], queryFn: api.getAuthMe, retry: false });
+  const canBulk = !meQuery.isError && canCreateTickets(meQuery.data);
+  const categoriesQuery = useQuery({ queryKey: queryKeys.ticketCategories, queryFn: api.getCategories, retry: false });
+  const usersQuery = useQuery({ queryKey: ["users", "ticket-options"], queryFn: () => api.getUsersPage({ limit: 200 }), enabled: canBulk, retry: false });
+  const statusConfigQuery = useQuery({ queryKey: ["status-config"], queryFn: api.getStatusConfig, retry: false });
+  const priorityConfigQuery = useQuery({ queryKey: ["priority-config"], queryFn: api.getPriorityConfig, retry: false });
+
+  const configuredStatusOptions = useMemo(
+    () => ticketListStatusOptions(statusConfigQuery.isError ? undefined : statusConfigQuery.data),
+    [statusConfigQuery.data, statusConfigQuery.isError],
+  );
+  const configuredPriorityOptions = useMemo(
+    () => ticketPriorityOptions(priorityConfigQuery.isError ? undefined : priorityConfigQuery.data),
+    [priorityConfigQuery.data, priorityConfigQuery.isError],
+  );
+  const statusOptions = useMemo(
+    () => preserveTicketConfigValue(configuredStatusOptions, status),
+    [configuredStatusOptions, status],
+  );
+  const priorityOptions = useMemo(
+    () => preserveTicketConfigValue(configuredPriorityOptions, priority),
+    [configuredPriorityOptions, priority],
+  );
+  const bulkPriorityOptions = useMemo(
+    () => preserveTicketConfigValue(configuredPriorityOptions, bulkAction === "set_priority" ? bulkValue : ""),
+    [bulkAction, bulkValue, configuredPriorityOptions],
+  );
+  const visibleStatusFilters = useMemo(
+    () => visibleTicketStatusOptions(configuredStatusOptions, status),
+    [configuredStatusOptions, status],
+  );
+
+  const tickets = pageQuery.data?.tickets ?? EMPTY_TICKETS;
+  const pageTransitioning = pageQuery.isPlaceholderData && pageQuery.isFetching;
+  const pageIds = useMemo(() => tickets.map((ticket) => ticket.id), [tickets]);
+  const selectedOnPage = pageIds.filter((id) => selected.has(id)).length;
+  const allOnPageSelected = pageIds.length > 0 && selectedOnPage === pageIds.length;
+  const someOnPageSelected = selectedOnPage > 0 && !allOnPageSelected;
+  const activeFilterCount = [status, priority, assigneeId, category].filter(Boolean).length;
+
+  useEffect(() => {
+    if (selectAllRef.current) selectAllRef.current.indeterminate = someOnPageSelected;
+  }, [someOnPageSelected]);
+
+  useEffect(() => {
+    setSelected(new Set());
+    setBulkNotice(null);
+  }, [status, priority, assigneeId, category, search, sort, limit, offset]);
+
+  const bulkMutation = useMutation({
+    mutationFn: ({ action, value }: { action: string; value?: string }) => api.bulkAction(Array.from(selected), action, value),
+    onSuccess: (result) => {
+      setBulkNotice({ variant: "success", message: `${result.updated} ${result.updated === 1 ? "ticket" : "tickets"} updated.` });
+      setSelected(new Set());
+      setBulkAction("");
+      setBulkValue("");
+      void queryClient.invalidateQueries({ queryKey: ["ticket-page"] });
+      void queryClient.invalidateQueries({ queryKey: ["tickets"] });
+    },
+    onError: (error) => setBulkNotice({ variant: "danger", message: error instanceof Error ? error.message : "The bulk update failed." }),
+  });
+
+  const markFiltersChanged = () => {
+    setActiveViewId("");
+    setOffset(0);
+  };
+
+  const applyView = (view: SavedView) => {
+    setStatus(view.status);
+    setPriority(view.priority);
+    setAssigneeId(view.assigneeId);
+    setCategory(view.category);
+    setSort(view.sort);
+    setLimit(view.limit);
+    setOffset(0);
+    setActiveViewId(view.id);
+  };
+
+  const saveView = () => {
+    const name = viewName.trim();
+    if (!name) return;
+    const view: SavedView = {
+      id: `saved-${Date.now()}`,
+      name: name.slice(0, 60),
+      status,
+      priority,
+      assigneeId,
+      category,
+      sort,
+      limit,
+    };
+    const next = [...customViews, view].slice(-20);
+    setCustomViews(next);
+    setActiveViewId(view.id);
+    setViewName("");
+    setSaveDialogOpen(false);
+    try { window.localStorage.setItem(SAVED_VIEWS_KEY, JSON.stringify(next)); } catch { /* non-blocking */ }
+  };
+
+  const deleteView = (id: string) => {
+    const next = customViews.filter((view) => view.id !== id);
+    setCustomViews(next);
+    if (activeViewId === id) setActiveViewId("");
+    try { window.localStorage.setItem(SAVED_VIEWS_KEY, JSON.stringify(next)); } catch { /* non-blocking */ }
+  };
+
+  const clearFilters = () => {
+    setSearchInput("");
+    setSearch("");
+    applyView(BUILT_IN_VIEWS[0]);
+  };
+
+  const toggleTicket = (id: string) => {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const togglePage = () => {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (allOnPageSelected) pageIds.forEach((id) => next.delete(id));
+      else pageIds.forEach((id) => next.add(id));
+      return next;
+    });
+  };
+
+  const runBulkAction = () => {
+    if (!bulkAction || selected.size === 0) return;
+    if (bulkAction === "close") {
+      setCloseConfirmOpen(true);
+      return;
+    }
+    if (!bulkValue) return;
+    bulkMutation.mutate({ action: bulkAction, value: bulkValue });
+  };
+
+  const start = pageQuery.data && tickets.length ? pageQuery.data.offset + 1 : 0;
+  const end = pageQuery.data ? pageQuery.data.offset + tickets.length : 0;
+  const tableWidth = TABLE_COLUMN_KEYS.reduce(
+    (total, column) => total + columnWidths[column],
+    canBulk ? 48 : 0,
+  );
+
+  return (
+    <PageFrame width="wide">
+      <PageHeader
+        eyebrow="Freshservice sidecar"
+        icon={<Inbox className="h-3.5 w-3.5" />}
+        title="All Tickets"
+        description="Search the complete synchronized Freshservice directory, including tickets outside your personal and team inboxes. Source workflow fields remain read-only."
+        actions={
+          <>
+          <Button variant="secondary" onClick={() => exportPage(tickets)} disabled={!tickets.length || pageQuery.isLoading || pageTransitioning} leadingIcon={<Download className="h-4 w-4" />}>Export page</Button>
+          {onCreate && <Button onClick={onCreate} leadingIcon={<Plus className="h-4 w-4" />}>New ticket</Button>}
+          </>
+        }
+      />
+
+      <DataToolbar label="Ticket queue controls" className="space-y-4">
+        <div className="flex flex-wrap items-center gap-2 border-b border-linen-300 pb-4">
+          <span id="saved-views-title" className="mr-1 inline-flex items-center gap-1.5 text-xs font-semibold text-ink-500"><Bookmark className="h-3.5 w-3.5" aria-hidden="true" />Saved views</span>
+          {[...BUILT_IN_VIEWS, ...customViews].map((view) => (
+            <div key={view.id} className="inline-flex items-center">
+              <button type="button" aria-pressed={activeViewId === view.id} onClick={() => applyView(view)} className={cn("min-h-8 rounded-lg border px-3 text-xs font-semibold transition-colors", activeViewId === view.id ? "border-clay-300 bg-[var(--color-primary-soft)] text-semantic-primary" : "border-linen-400 bg-linen-50 text-ink-500 hover:bg-linen-200", !view.builtIn && "rounded-r-none")}>{view.name}</button>
+              {!view.builtIn && <IconButton icon={<Trash2 className="h-3.5 w-3.5" />} aria-label={`Delete saved view ${view.name}`} size="sm" variant="secondary" onClick={() => deleteView(view.id)} className="rounded-l-none border-l-0" />}
+            </div>
+          ))}
+          <Button variant="ghost" size="sm" onClick={() => setSaveDialogOpen(true)} leadingIcon={<Plus className="h-3.5 w-3.5" />}>Save current</Button>
+        </div>
+
+        <div className="space-y-3">
+        <div className="flex flex-col gap-3 lg:flex-row">
+          <div className="relative min-w-0 flex-1">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-400" aria-hidden="true" />
+            <input type="search" value={searchInput} onChange={(event) => { setSearchInput(event.target.value); setActiveViewId(""); }} className="input-base input-search pr-10" placeholder="Search subject, description, requester, or external ID" aria-label="Search tickets" />
+            {searchInput && <button type="button" onClick={() => setSearchInput("")} aria-label="Clear search" className="absolute right-2 top-1/2 grid h-7 w-7 -translate-y-1/2 place-items-center rounded-md text-ink-400 hover:bg-linen-300 hover:text-ink-600"><X className="h-3.5 w-3.5" aria-hidden="true" /></button>}
+          </div>
+          <label className="min-w-44"><span className="sr-only">Sort tickets</span><select value={sort} onChange={(event) => { setSort(event.target.value as TicketListSort); markFiltersChanged(); }} className="input-base"><option disabled>Sort tickets</option>{SORT_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+        </div>
+        <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-ink-500"><Filter className="h-3.5 w-3.5" aria-hidden="true" />Status</span>
+            <button type="button" aria-pressed={!status} onClick={() => { setStatus(""); markFiltersChanged(); }} className={cn("min-h-11 rounded-full border px-3 text-xs font-semibold sm:min-h-8", !status ? "border-clay-300 bg-[var(--color-primary-soft)] text-semantic-primary" : "border-linen-400 text-ink-500 hover:bg-linen-200")}>All</button>
+            {visibleStatusFilters.map((item) => <button key={item.value} type="button" aria-pressed={status === item.value} title={item.label} onClick={() => { setStatus(item.value); markFiltersChanged(); }} className={cn("min-h-11 max-w-48 rounded-full border px-3 text-xs font-semibold sm:min-h-8", status === item.value ? "border-clay-300 bg-[var(--color-primary-soft)] text-semantic-primary" : "border-linen-400 text-ink-500 hover:bg-linen-200")}><span className="block truncate">{item.label}</span></button>)}
+          </div>
+          <Button
+            variant="secondary"
+            size="sm"
+            aria-expanded={moreFiltersOpen}
+            aria-controls="ticket-more-filters"
+            onClick={() => setMoreFiltersOpen((open) => !open)}
+            leadingIcon={<Filter className="h-3.5 w-3.5" />}
+          >
+            More filters{activeFilterCount > (status ? 1 : 0) ? ` (${activeFilterCount - (status ? 1 : 0)})` : ""}
+          </Button>
+        </div>
+        {moreFiltersOpen && <div id="ticket-more-filters" className="grid gap-3 border-t border-linen-300 pt-3 sm:grid-cols-2 xl:grid-cols-5">
+          <label><span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-ink-400">Status</span><select value={status} onChange={(event) => { setStatus(event.target.value); markFiltersChanged(); }} className="input-base"><option value="">Any status</option>{statusOptions.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
+          <label><span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-ink-400">Priority</span><select value={priority} onChange={(event) => { setPriority(event.target.value); markFiltersChanged(); }} className="input-base"><option value="">Any priority</option>{priorityOptions.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
+          <label><span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-ink-400">Category</span><select value={category} disabled={categoriesQuery.isError} onChange={(event) => { setCategory(event.target.value); markFiltersChanged(); }} className="input-base"><option value="">{categoriesQuery.isError ? "Categories unavailable" : "Any category"}</option>{(categoriesQuery.data ?? []).map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select></label>
+          <label><span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-ink-400">Assignee</span><select value={assigneeId} disabled={!canBulk || usersQuery.isError} onChange={(event) => { setAssigneeId(event.target.value); markFiltersChanged(); }} className="input-base"><option value="">{!canBulk ? "Demo administrator access required" : usersQuery.isError ? "Assignees unavailable" : "Any assignee"}</option>{(usersQuery.data?.users ?? []).map((user) => <option key={user.id} value={user.id}>{user.name}{user.is_active ? "" : " (deactivated)"}</option>)}</select></label>
+          <label><span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-ink-400">Rows per page</span><select value={limit} onChange={(event) => { setLimit(Number(event.target.value)); markFiltersChanged(); }} className="input-base">{PAGE_SIZES.map((size) => <option key={size} value={size}>{size} rows</option>)}</select></label>
+        </div>}
+        {(activeFilterCount > 0 || searchInput) && (
+          <div className="flex flex-col gap-3 border-t border-linen-300 pt-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-wrap gap-2" aria-label="Applied ticket filters">
+              {searchInput && <FilterChip label={`Search: ${searchInput}`} onRemove={() => setSearchInput("")} />}
+              {status && <FilterChip label={`Status: ${status}`} onRemove={() => { setStatus(""); markFiltersChanged(); }} />}
+              {priority && <FilterChip label={`Priority: ${priority}`} onRemove={() => { setPriority(""); markFiltersChanged(); }} />}
+              {category && <FilterChip label={`Category: ${category}`} onRemove={() => { setCategory(""); markFiltersChanged(); }} />}
+              {assigneeId && <FilterChip label={`Assignee: ${(usersQuery.data?.users ?? []).find((user) => user.id === assigneeId)?.name || "Selected"}`} onRemove={() => { setAssigneeId(""); markFiltersChanged(); }} />}
+            </div>
+            <Button variant="ghost" size="sm" onClick={clearFilters}>Clear all</Button>
+          </div>
+        )}
+        </div>
+      </DataToolbar>
+
+      {(statusConfigQuery.isError || priorityConfigQuery.isError) && (
+        <Alert
+          variant="warning"
+          title="Custom ticket choices are unavailable"
+          action={<Button variant="secondary" size="sm" onClick={() => { void statusConfigQuery.refetch(); void priorityConfigQuery.refetch(); }} pending={statusConfigQuery.isFetching || priorityConfigQuery.isFetching} pendingLabel="Retrying…">Retry</Button>}
+        >
+          The queue remains available with the built-in status and priority choices.
+        </Alert>
+      )}
+
+      {(categoriesQuery.isError || (canBulk && usersQuery.isError)) && (
+        <Alert
+          variant="warning"
+          title="Some filter options are unavailable"
+          action={<Button variant="secondary" size="sm" onClick={() => { void categoriesQuery.refetch(); if (canBulk) void usersQuery.refetch(); }} pending={categoriesQuery.isFetching || usersQuery.isFetching} pendingLabel="Retrying…">Retry</Button>}
+        >
+          The ticket queue is current, but category or assignee choices could not be loaded. Unavailable controls are disabled.
+        </Alert>
+      )}
+      {canBulk && usersQuery.data?.hasMore && <Alert variant="info" title="Assignee directory is truncated">The first 200 accounts are available in filters and assignment controls. Use a narrower ticket search when the intended historical assignee is not listed.</Alert>}
+
+      {canBulk && selected.size > 0 && (
+        <section aria-label="Bulk actions" className="sticky top-20 z-20 flex flex-col gap-3 rounded-2xl border border-clay-200 bg-[var(--color-primary-soft)] p-4 shadow-[var(--shadow-raised)] lg:flex-row lg:items-center">
+          <div className="min-w-32"><p className="text-sm font-semibold text-ink-700">{selected.size} selected</p><button type="button" onClick={() => setSelected(new Set())} className="mt-0.5 text-xs font-medium text-semantic-primary hover:underline">Clear selection</button></div>
+          <div className="grid flex-1 gap-2 sm:grid-cols-2">
+            <label><span className="sr-only">Bulk action</span><select value={bulkAction} onChange={(event) => { setBulkAction(event.target.value); setBulkValue(""); }} className="input-base bg-white"><option value="">Choose bulk action</option><option value="close">Close tickets</option><option value="set_priority">Set priority</option><option value="set_category">Set category</option><option value="assign">Assign owner</option></select></label>
+            {bulkAction === "set_priority" && <label><span className="sr-only">New priority</span><select value={bulkValue} onChange={(event) => setBulkValue(event.target.value)} className="input-base bg-white"><option value="">Choose priority</option>{bulkPriorityOptions.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>}
+            {bulkAction === "set_category" && <label><span className="sr-only">New category</span><select value={bulkValue} onChange={(event) => setBulkValue(event.target.value)} className="input-base bg-white"><option value="">Choose category</option>{(categoriesQuery.data ?? []).map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select></label>}
+            {bulkAction === "assign" && <label><span className="sr-only">New assignee</span><select value={bulkValue} onChange={(event) => setBulkValue(event.target.value)} className="input-base bg-white"><option value="">Choose assignee</option>{(usersQuery.data?.users ?? []).filter((user) => user.is_active).map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label>}
+          </div>
+          <Button onClick={runBulkAction} disabled={!bulkAction || (bulkAction !== "close" && !bulkValue)} pending={bulkMutation.isPending} pendingLabel="Applying…">Apply</Button>
+        </section>
+      )}
+
+      {bulkNotice && <Alert variant={bulkNotice.variant} title={bulkNotice.variant === "success" ? "Bulk update complete" : "Bulk update failed"}>{bulkNotice.message}</Alert>}
+
+      {pageQuery.isLoading || pageTransitioning ? <LoadingQueue /> : pageQuery.isError ? (
+        <ErrorState title="Tickets could not be loaded" description="The queue is unavailable, so no ticket data is being shown. Check the connection and retry." actionLabel="Retry queue" onRetry={() => void pageQuery.refetch()} retrying={pageQuery.isFetching} />
+      ) : tickets.length === 0 ? (
+        <EmptyState title={activeFilterCount || search ? "No tickets match this view" : "No tickets yet"} description={activeFilterCount || search ? "Try removing a filter or changing the search terms." : onCreate ? "Create a ticket to start the support queue." : "No tickets are available in this workspace."} icon={<Inbox className="h-5 w-5" />} action={activeFilterCount || search ? <Button variant="secondary" onClick={clearFilters}>Clear filters</Button> : onCreate ? <Button variant="secondary" onClick={onCreate}>Create ticket</Button> : undefined} />
+      ) : (
+        <>
+          <div className="hidden overflow-hidden rounded-2xl border border-linen-400 bg-linen-50 shadow-sm xl:block">
+            <div className="overflow-x-auto">
+	              <table className="table-fixed text-left [&_td]:align-top [&_td]:whitespace-normal [&_td]:[overflow-wrap:anywhere] [&_th]:whitespace-normal" style={{ width: tableWidth, minWidth: "100%" }}>
+                <caption className="sr-only">Tickets in the current server-filtered page. Drag a column divider or focus it and use the arrow keys to resize columns.</caption>
+                <colgroup>
+                  {canBulk && <col style={{ width: 48 }} />}
+                  <col style={{ width: columnWidths.ticket }} />
+                  <col style={{ width: columnWidths.requester }} />
+                  <col style={{ width: columnWidths.priority }} />
+                  <col style={{ width: columnWidths.routing }} />
+                  <col style={{ width: columnWidths.status }} />
+                  <col style={{ width: columnWidths.created }} />
+                  <col style={{ width: columnWidths.lastContact }} />
+                </colgroup>
+                <thead className="border-b border-linen-300 bg-linen-100 text-[11px] font-semibold uppercase tracking-[0.09em] text-ink-400">
+                  <tr>
+                    {canBulk && <th scope="col" className="w-12 px-4 py-3"><input ref={selectAllRef} type="checkbox" checked={allOnPageSelected} onChange={togglePage} aria-label="Select all tickets on this page" className="h-4 w-4" /></th>}
+                    <ResizableColumnHeader column="ticket" label="Ticket" onResizeStart={beginColumnResize} onNudge={(column, delta) => resizeColumn(column, columnWidths[column] + delta)} />
+                    <ResizableColumnHeader column="requester" label="Requester" onResizeStart={beginColumnResize} onNudge={(column, delta) => resizeColumn(column, columnWidths[column] + delta)} />
+                    <ResizableColumnHeader column="priority" label="Priority signal" onResizeStart={beginColumnResize} onNudge={(column, delta) => resizeColumn(column, columnWidths[column] + delta)} />
+                    <ResizableColumnHeader column="routing" label="Routing" onResizeStart={beginColumnResize} onNudge={(column, delta) => resizeColumn(column, columnWidths[column] + delta)} />
+                    <ResizableColumnHeader column="status" label="Status" onResizeStart={beginColumnResize} onNudge={(column, delta) => resizeColumn(column, columnWidths[column] + delta)} />
+                    <ResizableColumnHeader column="created" label="Created" onResizeStart={beginColumnResize} onNudge={(column, delta) => resizeColumn(column, columnWidths[column] + delta)} />
+                    <ResizableColumnHeader column="lastContact" label="Last contact" onResizeStart={beginColumnResize} onNudge={(column, delta) => resizeColumn(column, columnWidths[column] + delta)} />
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-linen-300">
+                  {tickets.map((ticket) => (
+                    <tr key={ticket.id} className={cn("transition-colors hover:bg-linen-100", selected.has(ticket.id) && "bg-[var(--color-primary-soft)]/60")}>
+                      {canBulk && <td className="px-4 py-4"><input type="checkbox" checked={selected.has(ticket.id)} onChange={() => toggleTicket(ticket.id)} aria-label={`Select ${ticket.subject}`} className="h-4 w-4" /></td>}
+	                      <td className="min-w-0 px-4 py-4"><Link href={`/tickets/${ticket.id}`} className="block min-w-0 text-ink-700 hover:text-semantic-primary hover:underline"><ListText text={ticket.subject} lines={2} className="text-sm font-semibold leading-5" /></Link><TicketSentimentSubtitle ticket={ticket} /><ListText text={`#${ticket.external_id || ticket.id}`} lines={1} className="mt-1 font-mono text-[11px] text-ink-400" /><div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px] text-ink-400"><span className="whitespace-nowrap">{sourceKindLabel(ticket)}</span>{ticket.ai_suggested_category && <ListText text={`AI issue: ${ticket.ai_suggested_category}`} lines={1} className="max-w-full" />}<span className="whitespace-nowrap">{analysisLifecycleLabel(ticket)}</span></div></td>
+	                      <td className="min-w-0 px-4 py-4"><ListText text={requesterName(ticket)} lines={2} className="text-xs font-semibold text-ink-700" />{requesterEmail(ticket) && <ListText text={requesterEmail(ticket) || ""} lines={2} className="mt-1 text-[11px] text-ink-500" />}<ListText text={ticket.requester_title || "Title not provided"} lines={2} className="mt-0.5 text-[10px] text-ink-400" /></td>
+	                      <td className="min-w-0 px-4 py-4"><TicketPriorityIndicator ticket={ticket} /></td>
+                      <td className="min-w-0 px-4 py-4"><ListText text={routingLabel(ticket)} lines={2} className="text-xs font-semibold leading-5 text-ink-600" /><ListText text={ticket.external_assignee_name || ticket.assignee_name || "Unassigned"} lines={2} className="mt-1 text-[11px] text-ink-400" /></td>
+                      <td className="px-4 py-4"><Badge variant={badgeForStatus(ticket.status)} dot>{ticket.status}</Badge></td>
+	                      <td className="px-4 py-4"><TimelineValue value={ticketCreatedAt(ticket)} label="Created" /></td>
+	                      <td className="px-4 py-4"><TimelineValue value={ticketLastCommunicationAt(ticket)} label="Last contact" /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="grid gap-3 xl:hidden">
+            {tickets.map((ticket) => (
+              <DataListCard key={ticket.id} className={cn("rounded-2xl border-linen-400", selected.has(ticket.id) && "border-clay-300 bg-[var(--color-primary-soft)]/50")}>
+                <div className="flex items-start gap-3">
+                  {canBulk && <input type="checkbox" checked={selected.has(ticket.id)} onChange={() => toggleTicket(ticket.id)} aria-label={`Select ${ticket.subject}`} className="mt-1 h-4 w-4 shrink-0" />}
+                  <div className="min-w-0 flex-1">
+                    <Link href={`/tickets/${ticket.id}`} className="block text-ink-700 hover:text-semantic-primary hover:underline"><ListText text={ticket.subject} lines={2} className="text-sm font-semibold leading-5" /></Link>
+                    <div className="mt-2 flex min-w-0 flex-wrap items-start gap-2">
+                      <TicketPriorityIndicator ticket={ticket} compact />
+                      <Badge variant={badgeForStatus(ticket.status)} dot>{ticket.status}</Badge>
+                    </div>
+                  </div>
+                </div>
+                <dl className="mt-3 grid grid-cols-2 gap-3 border-t border-linen-300 pt-3 text-xs">
+                  <div className="min-w-0"><dt className="text-ink-400">Assignee</dt><dd className="mt-1"><ListText text={ticket.external_assignee_name || ticket.assignee_name || "Unassigned"} lines={2} className="font-semibold text-ink-600" /></dd></div>
+                  <div className="min-w-0"><dt className="text-ink-400">Updated</dt><dd className="mt-1"><TimelineValue value={ticketLastCommunicationAt(ticket)} label="Updated" /></dd></div>
+                </dl>
+                <details className="mt-3 border-t border-linen-300 pt-3">
+                  <summary className="min-h-11 cursor-pointer rounded-lg px-2 py-2 text-xs font-semibold text-semantic-primary hover:bg-linen-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] sm:min-h-9">More ticket details</summary>
+                  <div className="mt-2 rounded-xl bg-linen-100 p-3">
+                    <TicketSentimentSubtitle ticket={ticket} />
+                    <div className="mt-2 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px] text-ink-400"><ListText text={`#${ticket.external_id || ticket.id}`} lines="wrap" className="w-full font-mono" /><span className="whitespace-nowrap">{sourceKindLabel(ticket)}</span>{ticket.ai_suggested_category && <ListText text={`AI issue: ${ticket.ai_suggested_category}`} lines={2} className="w-full xs:w-auto xs:max-w-[16rem]" />}<span className="whitespace-nowrap">{analysisLifecycleLabel(ticket)}</span></div>
+                    <dl className="mt-3 space-y-3 border-t border-linen-300 pt-3 text-xs"><div className="min-w-0"><dt className="text-ink-400">Requester</dt><dd className="mt-1"><ListText text={requesterName(ticket)} lines={2} className="font-semibold text-ink-600" /></dd>{requesterEmail(ticket) && <dd className="mt-0.5 flex min-w-0 items-start gap-1 text-ink-400"><Mail className="mt-0.5 h-3 w-3 shrink-0" aria-hidden="true" /><ListText text={requesterEmail(ticket) || ""} lines="wrap" className="min-w-0 flex-1" /></dd>}<dd className="mt-0.5"><ListText text={ticket.requester_title || "Title not provided"} lines={2} className="text-ink-400" /></dd></div><div className="min-w-0"><dt className="text-ink-400">Routing</dt><dd className="mt-1"><ListText text={routingLabel(ticket)} lines="wrap" className="font-semibold text-ink-600" /></dd></div></dl>
+                    <div className="mt-3 grid grid-cols-1 gap-3 rounded-xl border border-linen-300 bg-linen-50 p-3 text-[11px] text-ink-400 sm:grid-cols-2"><div className="min-w-0"><span className="mb-1 flex items-center gap-1"><CalendarDays className="h-3 w-3" aria-hidden="true" />Created</span><TimelineValue value={ticketCreatedAt(ticket)} label="Created" /></div><div className="min-w-0"><span className="mb-1 flex items-center gap-1"><Clock3 className="h-3 w-3" aria-hidden="true" />Last contact</span><TimelineValue value={ticketLastCommunicationAt(ticket)} label="Last contact" /></div></div>
+                  </div>
+                </details>
+              </DataListCard>
+            ))}
+          </div>
+        </>
+      )}
+
+      {!pageQuery.isError && !pageQuery.isLoading && !pageTransitioning && (
+        <nav aria-label="Ticket queue pagination" className="flex flex-col gap-3 rounded-2xl border border-linen-400 bg-linen-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-xs text-ink-500">Showing <span className="font-semibold text-ink-700">{start}–{end}</span>{pageQuery.data?.hasMore ? " · More results available" : " · End of results"}</p>
+          <div className="flex items-center gap-2">
+            <Button variant="secondary" size="sm" disabled={offset === 0 || pageQuery.isFetching} onClick={() => setOffset(Math.max(0, offset - limit))} leadingIcon={<ChevronLeft className="h-3.5 w-3.5" />}>Previous</Button>
+            <span className="min-w-16 text-center text-xs font-semibold text-ink-500">Page {Math.floor(offset / limit) + 1}</span>
+            <Button variant="secondary" size="sm" disabled={!pageQuery.data?.hasMore || pageQuery.isFetching} onClick={() => setOffset(offset + limit)} trailingIcon={<ChevronRight className="h-3.5 w-3.5" />}>Next</Button>
+          </div>
+        </nav>
+      )}
+
+      <Dialog open={saveDialogOpen} onOpenChange={setSaveDialogOpen} title="Save current view" description="Save the structured filters, sort, and page size. Search terms are not stored on this device." footer={<><Button variant="secondary" onClick={() => setSaveDialogOpen(false)}>Cancel</Button><Button onClick={saveView} disabled={!viewName.trim()}>Save view</Button></>}>
+        <label><span className="text-xs font-semibold text-ink-600">View name</span><input autoFocus value={viewName} maxLength={60} onChange={(event) => setViewName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); saveView(); } }} className="input-base mt-1.5" placeholder="e.g. Database escalations" /></label>
+      </Dialog>
+
+      <Dialog
+        open={closeConfirmOpen}
+        onOpenChange={(open) => { if (!bulkMutation.isPending) setCloseConfirmOpen(open); }}
+        title={`Close ${selected.size} ${selected.size === 1 ? "ticket" : "tickets"}?`}
+        description="This updates the selected tickets and their workflow status to Closed. The change is recorded in each ticket's audit log."
+        role="alertdialog"
+        dismissible={!bulkMutation.isPending}
+        closeOnBackdrop={!bulkMutation.isPending}
+        footer={<><Button variant="secondary" onClick={() => setCloseConfirmOpen(false)} disabled={bulkMutation.isPending}>Keep open</Button><Button variant="destructive" pending={bulkMutation.isPending} pendingLabel="Closing…" onClick={() => bulkMutation.mutate({ action: "close" }, { onSuccess: () => setCloseConfirmOpen(false) })}>Close tickets</Button></>}
+      />
+    </PageFrame>
+  );
+}
+
+function FilterChip({ label, onRemove }: { label: string; onRemove: () => void }) {
+  return (
+    <span className="inline-flex min-h-7 items-center gap-1 rounded-full border border-linen-400 bg-linen-100 pl-2.5 pr-1 text-[11px] font-semibold text-ink-500">
+      <span className="max-w-52 whitespace-normal break-words [overflow-wrap:anywhere]" title={label}>{label}</span>
+      <button type="button" onClick={onRemove} aria-label={`Remove ${label}`} className="grid h-8 w-8 place-items-center rounded-full hover:bg-linen-300 hover:text-ink-700 sm:h-6 sm:w-6">
+        <X className="h-3 w-3" aria-hidden="true" />
+      </button>
+    </span>
+  );
+}

@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Tickety OPS Tower</title>
+    <link rel="stylesheet" href="styles/styles.css" />
+  </head>
+  <body>
+    <main id="app" aria-live="polite">
+      <header class="brand">
+        <img src="styles/images/icon.svg" alt="" />
+        <div><strong>Tickety OPS Tower</strong><span>Freshservice POC</span></div>
+      </header>
+      <section id="loading" class="card">Connecting to the isolated Tickety OPS Tower POC…</section>
+      <section id="error" class="card error" hidden></section>
+      <section id="full-page" class="card" hidden>
+        <h1>Connected</h1>
+        <p>The embedded session is active. Open a Freshservice ticket and select Tickety OPS Tower in the ticket sidebar for read-only intelligence.</p>
+        <dl id="connection-details"></dl>
+      </section>
+      <section id="ticket-panel" hidden>
+        <article class="card">
+          <span id="environment" class="pill"></span>
+          <h1 id="subject"></h1>
+          <p id="summary" class="muted"></p>
+          <div class="grid" aria-label="Freshservice properties">
+            <p><strong>Status</strong><span id="status" class="property-value"></span></p>
+            <p><strong>Priority</strong><span id="priority" class="property-value"></span></p>
+          </div>
+          <p class="muted">Freshservice is authoritative. Tickety OPS Tower never changes tickets, replies, notes, or attachments in Freshservice.</p>
+        </article>
+        <article class="card">
+          <h2>Recommended resolution</h2>
+          <div id="resolution" class="resolution"></div>
+        </article>
+      </section>
+    </main>
+    <script async src="{{{appclient}}}"></script>
+    <script src="scripts/app.js"></script>
+  </body>
+</html>

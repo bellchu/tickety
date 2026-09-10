@@ -1,0 +1,35 @@
+{
+  "ticketyBootstrap": {
+    "schema": {
+      "method": "POST",
+      "host": "<%= iparam.tickety_host %>",
+      "path": "/integrations/freshworks/bootstrap",
+      "headers": {
+        "Content-Type": "application/json",
+        "X-Tickety-App-Secret": "<%= iparam.bootstrap_secret %>"
+      }
+    }
+  },
+  "ticketyRedeem": {
+    "schema": {
+      "method": "POST",
+      "host": "<%= iparam.tickety_host %>",
+      "path": "/integrations/freshworks/session",
+      "headers": {
+        "Content-Type": "application/json",
+        "X-Tickety-App-Secret": "<%= iparam.bootstrap_secret %>"
+      }
+    }
+  },
+  "ticketyTicketContext": {
+    "schema": {
+      "method": "GET",
+      "host": "<%= iparam.tickety_host %>",
+      "path": "/integrations/freshworks/tickets/<%= context.external_ticket_id %>",
+      "headers": {
+        "Authorization": "Bearer <%= context.session_token %>",
+        "Content-Type": "application/json"
+      }
+    }
+  }
+}

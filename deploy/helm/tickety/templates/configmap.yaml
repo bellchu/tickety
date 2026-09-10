@@ -1,0 +1,64 @@
+{{- $frontendUrl := include "tickety.frontendUrl" . }}
+{{- $corsAllowOrigins := default $frontendUrl .Values.config.corsAllowOrigins }}
+{{- if and (eq .Values.config.appMode "production") (not (hasPrefix "https://" $frontendUrl)) }}
+  {{- fail "production config requires an HTTPS config.frontendUrl or a TLS-enabled ingress" }}
+{{- end }}
+{{- if and (eq .Values.config.appMode "production") (eq (trim $corsAllowOrigins) "*") }}
+  {{- fail "production config.corsAllowOrigins cannot be '*'" }}
+{{- end }}
+{{- if and .Values.config.sso.enabled (not .Values.config.sso.clientId) }}
+  {{- fail "config.sso.clientId is required when SSO is enabled" }}
+{{- end }}
+{{- if and .Values.config.sso.enabled (eq .Values.config.sso.provider "entra") (not .Values.config.sso.entraTenantId) }}
+  {{- fail "config.sso.entraTenantId is required for the Entra preset" }}
+{{- end }}
+{{- if and .Values.config.sso.enabled (eq .Values.config.sso.provider "okta") (not .Values.config.sso.oktaDomain) }}
+  {{- fail "config.sso.oktaDomain is required for the Okta preset" }}
+{{- end }}
+{{- if and .Values.config.sso.enabled (eq .Values.config.sso.provider "oidc") (not .Values.config.sso.discoveryUrl) }}
+  {{- fail "config.sso.discoveryUrl is required for a generic OIDC provider" }}
+{{- end }}
+{{- if and .Values.config.sso.enabled (not .Values.existingSecret) (not (index .Values.secrets "SSO_CLIENT_SECRET")) }}
+  {{- fail "secrets.SSO_CLIENT_SECRET or existingSecret is required when SSO is enabled" }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "tickety.configName" . }}
+  labels:
+    {{- include "tickety.labels" . | nindent 4 }}
+data:
+  APP_MODE: {{ .Values.config.appMode | quote }}
+  TICKETY_DEPLOYMENT_CLASS: {{ .Values.config.deploymentClass | quote }}
+  LOGIN_REQUIRED: {{ .Values.config.loginRequired | quote }}
+  FRONTEND_URL: {{ $frontendUrl | quote }}
+  CORS_ALLOW_ORIGINS: {{ $corsAllowOrigins | quote }}
+  COOKIE_SECURE: {{ .Values.config.cookieSecure | quote }}
+  COOKIE_SAMESITE: {{ .Values.config.cookieSameSite | quote }}
+  SSO_ENABLED: {{ .Values.config.sso.enabled | quote }}
+  SSO_PROVIDER: {{ .Values.config.sso.provider | quote }}
+  SSO_CLIENT_ID: {{ .Values.config.sso.clientId | quote }}
+  SSO_ENTRA_TENANT_ID: {{ .Values.config.sso.entraTenantId | quote }}
+  SSO_OKTA_DOMAIN: {{ .Values.config.sso.oktaDomain | quote }}
+  SSO_OKTA_AUTH_SERVER_ID: {{ .Values.config.sso.oktaAuthServerId | quote }}
+  SSO_DISCOVERY_URL: {{ .Values.config.sso.discoveryUrl | quote }}
+  SSO_ALLOWED_DOMAINS: {{ .Values.config.sso.allowedDomains | quote }}
+  SSO_ALLOWED_GROUP_IDS: {{ .Values.config.sso.allowedGroupIds | quote }}
+  SSO_AUTO_PROVISION: {{ .Values.config.sso.autoProvision | quote }}
+  TICKET_RAG_SCOPE_KEY: {{ .Values.config.ragV2.scopeKey | quote }}
+  TICKET_RAG_V2_SCOPE_ALLOWLIST: {{ .Values.config.ragV2.scopeAllowlist | quote }}
+  TICKET_RAG_V2_WRITE_ENABLED: {{ .Values.config.ragV2.writeEnabled | quote }}
+  TICKET_RAG_V2_WORKER_ENABLED: {{ .Values.config.ragV2.workerEnabled | quote }}
+  TICKET_RAG_V2_READ_ENABLED: {{ .Values.config.ragV2.readEnabled | quote }}
+  TICKET_RAG_CHUNK_TARGET_TOKENS: {{ .Values.config.ragV2.chunkTargetTokens | quote }}
+  TICKET_RAG_CHUNK_MAX_TOKENS: {{ .Values.config.ragV2.chunkMaxTokens | quote }}
+  TICKET_RAG_CHUNK_OVERLAP_TOKENS: {{ .Values.config.ragV2.chunkOverlapTokens | quote }}
+  TICKET_RAG_EMBED_BATCH_SIZE: {{ .Values.config.ragV2.embedBatchSize | quote }}
+  TICKET_RAG_EMBED_LEASE_SECONDS: {{ .Values.config.ragV2.embedLeaseSeconds | quote }}
+  TICKET_RAG_WORKER_POLL_SECONDS: {{ .Values.config.ragV2.workerPollSeconds | quote }}
+  TICKET_RAG_QUERY_CACHE_TTL_SECONDS: {{ .Values.config.ragV2.queryCacheTtlSeconds | quote }}
+  TICKET_RAG_QUERY_CACHE_MAX_ROWS: {{ .Values.config.ragV2.queryCacheMaxRows | quote }}
+  TICKET_RAG_SNAPSHOT_TTL_SECONDS: {{ .Values.config.ragV2.snapshotTtlSeconds | quote }}
+  {{- range $key, $value := .Values.config.extra }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
