@@ -55,6 +55,7 @@ export class WSClient {
       const ws = new WebSocket(this.url);
       this.ws = ws;
       ws.onopen = () => {
+        if (this.ws !== ws) return;
         if (this.stableConnectionTimer) clearTimeout(this.stableConnectionTimer);
         this.stableConnectionTimer = setTimeout(() => {
           this.reconnectAttempts = 0;
@@ -62,6 +63,7 @@ export class WSClient {
         }, 60_000);
       };
       ws.onmessage = (ev) => {
+        if (this.ws !== ws) return;
         try {
           const data = JSON.parse(ev.data);
           this.handlers.forEach((h) => h(data));
@@ -70,7 +72,8 @@ export class WSClient {
         }
       };
       ws.onclose = (event) => {
-        if (this.ws === ws) this.ws = null;
+        if (this.ws !== ws) return;
+        this.ws = null;
         if (this.stableConnectionTimer) clearTimeout(this.stableConnectionTimer);
         this.stableConnectionTimer = null;
         this.closeHandlers.forEach((handler) => handler(event));
@@ -84,6 +87,7 @@ export class WSClient {
         this.scheduleReconnect();
       };
       ws.onerror = (event) => {
+        if (this.ws !== ws) return;
         this.errorHandlers.forEach((handler) => handler(event));
         ws.close();
       };
@@ -129,8 +133,9 @@ export class WSClient {
     this.reconnectTimer = null;
     if (this.stableConnectionTimer) clearTimeout(this.stableConnectionTimer);
     this.stableConnectionTimer = null;
-    this.ws?.close();
+    const ws = this.ws;
     this.ws = null;
+    ws?.close();
   }
 }
 

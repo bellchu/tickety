@@ -99,3 +99,67 @@ test("one-shot analysis fails promptly when its websocket cannot start", () => {
   assert.match(source, /ws\.onClose/);
   assert.match(source, /ws\.onError/);
 });
+
+test("events from a disconnected socket cannot affect its replacement", () => {
+  const originalWebSocket = global.WebSocket;
+  const originalSetTimeout = global.setTimeout;
+  const originalClearTimeout = global.clearTimeout;
+  const timers = [];
+  class FakeWebSocket {
+    static CLOSED = 3;
+    static instances = [];
+    constructor() {
+      this.readyState = 0;
+      FakeWebSocket.instances.push(this);
+    }
+    close() { this.readyState = FakeWebSocket.CLOSED; }
+  }
+  global.WebSocket = FakeWebSocket;
+  global.setTimeout = (callback, delay) => {
+    const timer = { callback, delay, cleared: false };
+    timers.push(timer);
+    return timer;
+  };
+  global.clearTimeout = (timer) => { if (timer) timer.cleared = true; };
+  try {
+    const { WSClient } = loadWs();
+    const client = new WSClient("/ws/notifications");
+    const messages = [];
+    const closes = [];
+    const errors = [];
+    client.onMessage((message) => messages.push(message));
+    client.onClose((event) => closes.push(event));
+    client.onError((event) => errors.push(event));
+    client.connect();
+    const oldSocket = FakeWebSocket.instances.at(-1);
+    client.disconnect();
+    client.connect();
+    const currentSocket = FakeWebSocket.instances.at(-1);
+    currentSocket.onopen();
+    const currentStableTimer = timers.at(-1);
+
+    // Browser events can already be queued when disconnect() closes a socket.
+    oldSocket.onopen();
+    oldSocket.onmessage({ data: '{"stale":true}' });
+    oldSocket.onerror({ type: "error" });
+    oldSocket.onclose({ code: 4401 });
+    assert.deepEqual(messages, []);
+    assert.deepEqual(closes, []);
+    assert.deepEqual(errors, []);
+    assert.equal(currentStableTimer.cleared, false);
+    assert.equal(timers.length, 1);
+
+    currentSocket.onmessage({ data: '{"fresh":true}' });
+    assert.deepEqual(messages, [{ fresh: true }]);
+    currentSocket.readyState = FakeWebSocket.CLOSED;
+    currentSocket.onclose({ code: 1006 });
+    assert.equal(closes.length, 1);
+    assert.equal(currentStableTimer.cleared, true);
+    assert.ok(timers.at(-1).delay >= 3_000 && timers.at(-1).delay <= 3_600);
+    client.disconnect();
+  } finally {
+    global.WebSocket = originalWebSocket;
+    global.setTimeout = originalSetTimeout;
+    global.clearTimeout = originalClearTimeout;
+  }
+});
