@@ -7,7 +7,7 @@ azure-storage-blob
 requests
 python-dotenv
 sqlalchemy
-alembic>=1.19.1,<2
+alembic>=1.20.0,<2
 psycopg2-binary
 apscheduler
 httpx
