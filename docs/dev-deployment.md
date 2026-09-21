@@ -27,7 +27,11 @@ custom-format PostgreSQL backup, runs `alembic upgrade head` as a bounded Job,
 records prior image tags, rolls out only Tickety's three deployments, and checks
 the public readiness, backend SHA, frontend build manifest, ingress hostname,
 and Cloudflared service. It explicitly restores one replica for each Tickety
-deployment after a maintenance scale-down. The release also keeps the shared CoreDNS forwarder in
+deployment after a maintenance scale-down. Verification requires the controller
+to have observed the current deployment generation, with all desired replicas
+updated, ready, and available and no remaining old replicas or controller failure.
+An available replica from an earlier rollout cannot prove the new release is ready.
+The release also keeps the shared CoreDNS forwarder in
 `prefer_udp` mode because the host-provided upstream resolver accepts UDP but
 not DNS over TCP. Verification sends a TCP query to CoreDNS and requires a
 public answer. The backend and worker pod specifications also advertise EDNS0,

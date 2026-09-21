@@ -57,9 +57,8 @@ frontend_live=$("${KUBECTL[@]}" -n "$NAMESPACE" get deployment frontend -o jsonp
 [[ $frontend_live == "$FRONTEND_IMAGE" ]] || die "frontend image does not match the expected dev build"
 
 for deployment in backend backend-worker frontend; do
-  desired=$("${KUBECTL[@]}" -n "$NAMESPACE" get deployment "$deployment" -o jsonpath='{.spec.replicas}')
-  available=$("${KUBECTL[@]}" -n "$NAMESPACE" get deployment "$deployment" -o jsonpath='{.status.availableReplicas}')
-  [[ -n $desired && $desired == "$available" ]] || die "$deployment is not fully available"
+  "${KUBECTL[@]}" -n "$NAMESPACE" get deployment "$deployment" -o json | \
+    python3 "$ROOT_DIR/deploy/dev-microk8s/verify-rollout.py"
 done
 
 backend_dns_verified=false

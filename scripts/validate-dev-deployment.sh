@@ -9,6 +9,8 @@ bash -n "$DEV_DIR/install-release.sh" "$DEV_DIR/remote-release.sh" "$DEV_DIR/ver
 python3 "$DEV_DIR/ensure-coredns-prefer-udp.py" --self-test
 python3 "$DEV_DIR/select-ready-container.py" --self-test
 python3 "$DEV_DIR/prune-registry.py" --self-test
+python3 -m unittest discover -s "$ROOT_DIR/tests" -p 'test_dev_rollout_verification.py' -v
+grep -Fq 'verify-rollout.py' "$DEV_DIR/verify.sh"
 "$ROOT_DIR/scripts/deploy-dev-microk8s.sh" --self-test
 
 grep -Fq 'TICKETY_DEV_PUBLIC_HOST' "$DEV_DIR/remote-release.sh"
