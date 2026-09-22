@@ -100,6 +100,8 @@ function Workspace({ id, canAI, onBack }: { id: string; canAI: boolean; onBack: 
   const [draftAssumptions, setDraftAssumptions] = useState<string[]>([]);
   const [sourceTitle, setSourceTitle] = useState("");
   const [sourceKind, setSourceKind] = useState<SourceKind>("document");
+  const [importWarnings, setImportWarnings] = useState<string[]>([]);
+  const [importing, setImporting] = useState(false);
   const [content, setContent] = useState("");
   const [draft, setDraft] = useState<RequirementDraft>({ ...blankDraft });
   const [criteria, setCriteria] = useState("");
@@ -134,16 +136,24 @@ function Workspace({ id, canAI, onBack }: { id: string; canAI: boolean; onBack: 
 
   async function importText(file?: File) {
     if (!file) return;
-    setError(null);
+    setError(null); setImportWarnings([]); setImporting(true);
     try {
-      if (!/\.(txt|md|eml|vtt|srt)$/i.test(file.name)) throw new Error("Choose a UTF-8 TXT, Markdown, EML, VTT or SRT file, or paste the text below.");
+      if (!/\.(txt|md|eml|vtt|srt)$/i.test(file.name)) throw new Error("Choose a TXT, Markdown, EML, VTT or SRT file. Text files must use UTF-8.");
       if (file.size > 400000) throw new Error("Choose a file smaller than 400 KB.");
-      const text = new TextDecoder("utf-8", { fatal: true }).decode(await file.arrayBuffer());
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      if (/\.eml$/i.test(file.name)) {
+        let binary = "";
+        for (let offset = 0; offset < bytes.length; offset += 8192) binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
+        const result = await api.previewRequirementEmail(id, btoa(binary));
+        setContent(result.content); setSourceTitle(result.title || file.name); setSourceKind("email"); setImportWarnings(result.warnings);
+        return;
+      }
+      const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
       if (text.length > 100000 || text.includes("\0")) throw new Error("Source text must contain at most 100,000 characters and no NUL characters.");
       setContent(text); setSourceTitle(file.name);
-      if (/\.eml$/i.test(file.name)) setSourceKind("email");
-      else if (/\.(vtt|srt)$/i.test(file.name)) setSourceKind("transcript");
+      if (/\.(vtt|srt)$/i.test(file.name)) setSourceKind("transcript");
     } catch (caught) { setError(caught); }
+    finally { setImporting(false); }
   }
 
   if (!detail) return <PageFrame><Button variant="ghost" onClick={onBack}>Back to initiatives</Button><ErrorMessage error={query.error} />{query.isPending ? <p role="status">Loading initiative…</p> : <Button onClick={() => query.refetch()}>Retry</Button>}</PageFrame>;
@@ -178,13 +188,15 @@ function Workspace({ id, canAI, onBack }: { id: string; canAI: boolean; onBack: 
       <aside className="min-w-0 space-y-4" aria-label="Business context">
         <div className="flex items-center justify-between"><div><h2 className="font-semibold text-ink-700">Context & evidence</h2><p className="mt-1 text-xs text-ink-400">{detail.sources.length} sources · Add context whenever it changes</p></div><Button className="shrink-0 whitespace-nowrap" variant="ghost" size="sm" leadingIcon={<Plus size={14} />} onClick={() => setSourceFormOpen(!sourceFormOpen)}>Add</Button></div>
         {(sourceFormOpen || detail.sources.length === 0) && <>
-      <form className={`${panelStyle} space-y-4`} onSubmit={event => { event.preventDefault(); void run("source", () => api.addRequirementSource(id, { title: sourceTitle, kind: sourceKind, content }), () => { setSourceTitle(""); setContent(""); setSourceFormOpen(false); }); }}>
+      <form className={`${panelStyle} space-y-4`} onSubmit={event => { event.preventDefault(); void run("source", () => api.addRequirementSource(id, { title: sourceTitle, kind: sourceKind, content }), () => { setSourceTitle(""); setContent(""); setImportWarnings([]); setSourceFormOpen(false); }); }}>
         <h2 className="text-lg font-semibold">Add supporting material</h2><p className="text-sm text-ink-500">Paste source material or import a text file. Sources are preserved so every requirement can point back to its evidence.</p>
-        <Field label="Import text file"><input type="file" accept=".txt,.md,.eml,.vtt,.srt" onChange={event => { void importText(event.target.files?.[0]); event.target.value = ""; }} className="mt-2 block w-full text-sm" /></Field>
+        <Field label="Import text file"><input type="file" disabled={importing || Boolean(pending)} accept=".txt,.md,.eml,.vtt,.srt" onChange={event => { void importText(event.target.files?.[0]); event.target.value = ""; }} className="mt-2 block w-full text-sm" /></Field>
+        {importing && <p role="status" className="text-xs">Preparing source preview…</p>}
+        {importWarnings.map(warning => <p key={warning} className="text-xs text-amber-800">{warning}</p>)}
         <Field label="Source title"><input required maxLength={200} className={inputStyle} value={sourceTitle} onChange={event => setSourceTitle(event.target.value)} /></Field>
         <Field label="Source type"><select className={inputStyle} value={sourceKind} onChange={event => setSourceKind(event.target.value as SourceKind)}>{Object.entries(kinds).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field>
         <Field label="Source text"><textarea required minLength={10} maxLength={100000} rows={7} className={inputStyle} value={content} onChange={event => setContent(event.target.value)} /></Field><p className="text-xs text-ink-400">{content.length.toLocaleString()} / 100,000 characters · Text formats only in this release.</p>
-        <Button type="submit" pending={pending === "source"} disabled={Boolean(pending) || detail.sources.length >= 50}>Save source</Button>
+        <Button type="submit" pending={pending === "source"} disabled={importing || Boolean(pending) || detail.sources.length >= 50}>Save source</Button>
       </form>
         </>}
         {detail.sources.map(item => <div key={item.id} className="space-y-3 rounded-xl border border-linen-400 bg-white p-4">

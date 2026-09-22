@@ -181,6 +181,18 @@ class RequirementGatheringTests(unittest.TestCase):
         response = self.client.post(base + "/items/" + row["id"] + "/validate", json={"revision": 1, "reviewer_role": "DTL", "validation_note": "Current scope is confirmed."})
         self.assertEqual(response.status_code, 200, response.text)
 
+    def test_email_preview_is_private_and_does_not_save_sources(self):
+        import base64
+        workspace = self.workspace()
+        payload = {"content_base64": base64.b64encode(b"Subject: Process review\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nAcknowledge each request within thirty seconds.").decode()}
+        response = self.client.post(f"{self.path}/{workspace}/email-preview", json=payload)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["title"], "Process review")
+        self.assertEqual(self.client.get(f"{self.path}/{workspace}").json()["sources"], [])
+        self.assertEqual(self.client.post(f"{self.path}/{workspace}/email-preview", json={"content_base64": "invalid!"}).status_code, 422)
+        self.user.id = "other"
+        self.assertEqual(self.client.post(f"{self.path}/{workspace}/email-preview", json=payload).status_code, 404)
+
     def ai_manager(self, result):
         return SimpleNamespace(is_mock=False, prompt_char_limit=4000, model_name="test/configured-provider", analyze=AsyncMock(return_value=result))
 

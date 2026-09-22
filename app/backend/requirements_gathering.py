@@ -45,6 +45,10 @@ class SourceCreate(InputModel):
     content: Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=100000)]
 
 
+class EmailPreviewInput(InputModel):
+    content_base64: Annotated[str, StringConstraints(min_length=1, max_length=533336)]
+
+
 class RequirementInput(InputModel):
     source_id: Annotated[str, StringConstraints(min_length=1, max_length=36)]
     title: Title
@@ -212,6 +216,15 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
         db.commit()
         db.refresh(row)
         return row
+
+    @router.post("/{workspace_id}/email-preview")
+    def email_preview(workspace_id: str, data: EmailPreviewInput, db: Session = Depends(get_db), user: UserRecord = Depends(require_user)):
+        from .requirement_email import preview_email
+        workspace(db, workspace_id, user)
+        try:
+            return preview_email(data.content_base64)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
 
     @router.post("/{workspace_id}/sources", status_code=201)
     def add_source(workspace_id: str, data: SourceCreate, db: Session = Depends(get_db), user: UserRecord = Depends(require_user)):

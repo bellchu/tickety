@@ -12,8 +12,8 @@ filters help focus attention without forcing everyone through numbered stages.
 Human sign-off and evidence requirements remain enforced by the backend.
 
 - Record the business objective and gather business documents, emails, SOPs,
-   and meeting transcripts. Paste text or import UTF-8 TXT, Markdown, EML, VTT,
-   or SRT files. The first release accepts text only; PDF and Word conversion
+   and meeting transcripts. Paste text or import UTF-8 TXT, Markdown, VTT, or SRT files. EML
+   import decodes MIME email headers and body into a reviewable text preview. The first release accepts text only; PDF and Word conversion
    are not yet available. Each source is immutable and retains a SHA-256 digest.
 - Create a requirement from an exact excerpt of a saved source. Give it a
    stakeholder, required capability, business outcome, priority, and observable
@@ -71,3 +71,12 @@ Changed circumstances require a new question. Resolving a blocker never restores
 sign-off automatically: revise the scope if needed, then obtain a fresh review.
 The BRD includes open questions and recorded decisions. Each workspace holds at
 most 200 decision records.
+
+EML previews are bounded to 400 KB and 100,000 extracted characters, with MIME
+nesting and part-count limits. They retain subject, sender, recipients and date,
+prefer plain text over duplicate HTML alternatives, and exclude attachments and
+attached messages. HTML is converted to inert text without fetching resources.
+Encoding failures reject the preview instead of silently replacing characters.
+Review conversion warnings and the text before saving. Previewing does not store
+an evidence source or call an AI provider; the saved evidence digest covers the
+confirmed text, not the original EML bytes.
