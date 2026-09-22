@@ -190,6 +190,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
   const visibleLimit = listWindow.key === listKey ? listWindow.limit : 20;
   const displayedItems = visibleItems.slice(0, visibleLimit);
   const sourceQuery = sourceSearch.trim().toLocaleLowerCase();
+  const unexploredSourceCount = useMemo(() => filterSources(detail?.sources || [], "", "", "unreviewed", sourceCounts).length, [detail?.sources, sourceCounts]);
   const visibleSources = useMemo(() => filterSources(detail?.sources || [], sourceQuery, sourceKindFilter, sourceReviewFilter, sourceCounts), [detail?.sources, sourceQuery, sourceKindFilter, sourceReviewFilter, sourceCounts]);
   function revealSource(sourceId: string) {
     setSourceSearch(""); setSourceKindFilter(""); setSourceReviewFilter("all"); setSourceViewing(sourceId);
@@ -324,12 +325,12 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
     <ErrorMessage error={error || query.error} />{notice && <p role="status" className="text-sm text-moss-700">{notice}</p>}
     <div className="grid items-start gap-6 xl:grid-cols-[300px_minmax(0,1fr)]">
       <aside className="min-w-0 space-y-4" aria-label="Business context">
-        <div className="flex items-center justify-between"><div><h2 className="font-semibold text-ink-700">Context & evidence</h2><p className="mt-1 text-xs text-ink-400">{detail.sources.length} sources · Add context whenever it changes</p></div><Button className="shrink-0 whitespace-nowrap" variant="ghost" size="sm" leadingIcon={<Plus size={14} />} onClick={() => setSourceFormOpen(!sourceFormOpen)}>Add</Button></div>
+        <div className="flex items-center justify-between"><div><h2 className="font-semibold text-ink-700">Context & evidence</h2><p className="mt-1 text-xs text-ink-400">{detail.sources.length} sources · {unexploredSourceCount} awaiting exploration</p></div><Button className="shrink-0 whitespace-nowrap" variant="ghost" size="sm" leadingIcon={<Plus size={14} />} onClick={() => setSourceFormOpen(!sourceFormOpen)}>Add</Button></div>
         <SourceIntakeForm workspaceId={id} userId={userId} open={sourceFormOpen || detail.sources.length === 0} pending={pending} onSave={saveSource} />
         {detail.sources.length > 0 && <div className="space-y-2">
           <Field label="Find evidence by title"><input type="search" className={inputStyle} value={sourceSearch} onChange={event => setSourceSearch(event.target.value)} /></Field>
           <Field label="Filter evidence by type"><select className={inputStyle} value={sourceKindFilter} onChange={event => setSourceKindFilter(event.target.value as SourceKind | "")}><option value="">All source types</option>{Object.entries(kinds).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field>
-          <Field label="Show evidence"><select className={inputStyle} value={sourceReviewFilter} onChange={event => setSourceReviewFilter(event.target.value as SourceReviewFilter)}><option value="all">All evidence</option><option value="unreviewed">Needs exploration</option><option value="background">Kept as background</option><option value="linked">Linked to requirements</option><option value="unlinked">Without linked requirements</option></select></Field>
+          <Field label="Show evidence"><select className={inputStyle} value={sourceReviewFilter} onChange={event => setSourceReviewFilter(event.target.value as SourceReviewFilter)}><option value="all">All evidence</option><option value="unreviewed">Needs exploration ({unexploredSourceCount})</option><option value="background">Kept as background</option><option value="linked">Linked to requirements</option><option value="unlinked">Without linked requirements</option></select></Field>
           {(sourceQuery || sourceKindFilter || sourceReviewFilter !== "all") && <p role="status" className="text-xs text-ink-400">{visibleSources.length} of {detail.sources.length} sources shown. Supporting context does not need a requirement.</p>}
           {visibleSources.length === 0 && <Button size="sm" variant="ghost" onClick={() => { setSourceSearch(""); setSourceKindFilter(""); setSourceReviewFilter("all"); }}>Show all evidence</Button>}
         </div>}
