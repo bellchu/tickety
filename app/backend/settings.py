@@ -511,11 +511,6 @@ def is_production_mode() -> bool:
     return app_mode() == "production"
 
 
-def admin_settings_portal_enabled() -> bool:
-    """Whether production admin-approved DB overrides are enabled."""
-    return get_bool("TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED", default=False)
-
-
 def automation_enabled(key: str, legacy_alias: Optional[str] = None) -> bool:
     """Return whether an automatic AI workflow is explicitly enabled.
 

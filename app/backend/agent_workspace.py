@@ -137,22 +137,6 @@ def accessible_groups_page(
     )
 
 
-def accessible_groups(
-    db: Session,
-    user_id: str,
-    *,
-    include_observer: bool = False,
-    limit: int = MAX_ACCESSIBLE_GROUPS,
-) -> list[AccessibleGroup]:
-    groups, _truncated = accessible_groups_page(
-        db,
-        user_id,
-        include_observer=include_observer,
-        limit=limit,
-    )
-    return groups
-
-
 def _linked_identity_ticket_exists(user_id: str):
     return select(1).select_from(
         UserExternalIdentityLinkRecord

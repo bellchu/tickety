@@ -35,7 +35,6 @@ from .database import (
     ExternalGroupRecord,
     IntelligenceStudyRecord,
     TicketRecord,
-    UserRecord,
 )
 from .llm_manager import LLMInvalidOutputError, LLMManager, LLMUnsafeOutputError
 from .ai_contracts import AI_RESOLVER_TEAMS, ResolutionAnalysis, TicketSummary
@@ -290,22 +289,6 @@ def prioritize_score(
 
 # ── 4. Routing Agent ──────────────────────────────────────────────────────
 
-# Tier = engineering SKILL level needed, driven by technical difficulty
-# (category) crossed with blast-radius urgency (priority). It is deliberately
-# NOT a function of `complexity`, because complexity mixes in customer
-# sentiment/urgency and would over-tier routine single-user issues
-# (e.g. an Outlook crash is Software + P1 -> tier 2, not tier 3). Only
-# infrastructure-grade, customer-facing outages (Network P1) reach tier 3.
-CATEGORY_DIFFICULTY = {
-    "access request": 1,
-    "software": 1,
-    "hardware": 1,
-    "other": 1,
-    "network": 2,  # infra / shared service -> needs higher skill
-}
-# Priority adds urgency that raises the required skill band.
-_PRIORITY_TIER_BUMP = {"P1": 1, "P2": 0, "P3": 0}
-
 UNROUTED_REVIEW_TEAM = "Unrouted / Review"
 NO_ACTIVE_ROUTING_TEAM = "No active routing"
 _TRUSTED_AI_ROUTING_STATUSES = {"completed", "partial", "triage_completed"}
@@ -414,81 +397,6 @@ def recommended_team(
         ai_evidence_current=ai_evidence_current,
     )
     return decision.recommended_team, decision.basis
-
-
-def tier_needed_for(ticket: TicketRecord) -> int:
-    cat = (ticket.category or "other").lower()
-    base = CATEGORY_DIFFICULTY.get(cat, 1)
-    bump = _PRIORITY_TIER_BUMP.get(ticket.priority, 0)
-    return max(1, min(3, base + bump))
-
-
-def recommend_assignee(
-    db: Session, ticket: TicketRecord
-) -> Dict[str, Any]:
-    """Recommend the best engineer for a ticket.
-
-    Tier requirement comes from technical difficulty (category x priority),
-    NOT from `complexity`/sentiment. Escalation risk only nudges a preference
-    toward a higher tier; it never forces one.
-    """
-    total_users = db.query(UserRecord).count()
-    users = db.query(UserRecord).order_by(
-        UserRecord.tier.desc(),
-        UserRecord.impact_points.desc(),
-        UserRecord.momentum.desc(),
-        UserRecord.id.asc(),
-    ).limit(_MAX_ANALYTICS_ROWS).all()
-    if not users:
-        return {
-            "recommended_user_id": None,
-            "candidates": [],
-            "total_users": total_users,
-            "analyzed_users": 0,
-            "candidate_pool_truncated": False,
-        }
-
-    risk = escalation_risk(ticket, terminal_statuses=terminal_status_names(db))
-    complexity = ticket.complexity or 1
-    tier_needed = tier_needed_for(ticket)
-
-    candidates = []
-    for u in users:
-        tier_ok = (u.tier or 1) >= tier_needed
-        score = (u.impact_points or 0) * 0.5
-        score += (u.momentum or 0) * 2
-        score += (u.tier or 1) * 10
-        if not tier_ok:
-            score -= 40  # penalize under-skilled assignment
-        # Slight preference for a higher tier when risk is high (soft nudge,
-        # not a hard gate).
-        if risk >= 70:
-            score += (u.tier or 1) * 5
-        candidates.append({
-            "user_id": u.id,
-            "name": u.name,
-            "tier": u.tier,
-            "impact_points": u.impact_points,
-            "momentum": u.momentum,
-            "score": _clamp(score),
-            "tier_ok": tier_ok,
-        })
-    candidates.sort(key=lambda c: c["score"], reverse=True)
-    cat_label = (ticket.category or "other").title()
-    return {
-        "recommended_user_id": candidates[0]["user_id"] if candidates else None,
-        "recommended_name": candidates[0]["name"] if candidates else None,
-        "tier_needed": tier_needed,
-        "reasoning": (
-            f"{ticket.priority or 'P3'} {cat_label} issue -> tier {tier_needed} "
-            f"engineer (risk {risk}, complexity {complexity} only nudges preference, "
-            f"does not raise the tier floor)."
-        ),
-        "candidates": candidates[:5],
-        "total_users": total_users,
-        "analyzed_users": len(users),
-        "candidate_pool_truncated": total_users > len(users),
-    }
 
 
 # ── 4b. Service-quality signal agents ────────────────────────────────────
