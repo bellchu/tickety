@@ -39,3 +39,13 @@ test('business blockers take precedence and affect only their scope in filtered 
   assert.equal(filterRequirements([{ ...item, id: 'r2' }], '', 'review', decisions).length, 1);
   assert.equal(workspaceFocus({ ...detail([item]), decisions: [{ ...decisions[0], status: 'resolved' }] }).action, 'review');
 });
+test('deferred requirements remain discoverable without demanding review or delivery', () => {
+  const deferred = { ...item, priority: 'wont', quality_issues: ['Clarify the future outcome'] };
+  assert.equal(workspaceFocus(detail([deferred])).action, 'deferred');
+  assert.equal(filterRequirements([deferred], '', 'all').length, 1);
+  assert.equal(filterRequirements([deferred], '', 'deferred').length, 1);
+  for (const filter of ['questions', 'review', 'delivery']) assert.equal(filterRequirements([{ ...deferred, story: {} }], '', filter).length, 0);
+  const current = { ...item, id: 'r2' };
+  const decisions = [{ requirement_id: 'r1', blocking: true, status: 'open', owner_role: 'Sponsor', question: 'Future question' }];
+  assert.equal(workspaceFocus({ ...detail([deferred, current]), decisions }).item.id, 'r2');
+});

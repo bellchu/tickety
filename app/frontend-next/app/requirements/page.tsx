@@ -175,13 +175,14 @@ function Workspace({ id, canAI, onBack }: { id: string; canAI: boolean; onBack: 
   if (!detail) return <PageFrame><Button variant="ghost" onClick={onBack}>Back to initiatives</Button><ErrorMessage error={query.error} />{query.isPending ? <p role="status">Loading initiative…</p> : <Button onClick={() => query.refetch()}>Retry</Button>}</PageFrame>;
   const focus = workspaceFocus(detail);
   const visibleItems = filterRequirements(detail.requirements, search, filter, detail.decisions);
-  const questions = detail.requirements.filter(item => item.quality_issues.length > 0).length;
-  const deliveryReady = detail.requirements.filter(item => item.story).length;
+  const questions = detail.requirements.filter(item => item.priority !== "wont" && item.quality_issues.length > 0).length;
+  const deliveryReady = detail.requirements.filter(item => item.priority !== "wont" && item.story).length;
   const sourceNames = new Map(detail.sources.map(item => [item.id, item.title]));
 
   function followFocus() {
     if (focus.action === "decisions") setDecisionsOpen(true);
     else if (focus.action === "source") setSourceFormOpen(true);
+    else if (focus.action === "deferred") { setFilter("deferred"); setSearch(""); }
     else if (focus.action === "questions") { setFilter("questions"); setSearch(""); }
     else if (focus.action === "review") { setReviewing(focus.item); setShowForm(false); setReviewNote(""); }
     else if (focus.action === "gather") setSourceViewing(focus.sourceId);
@@ -229,7 +230,7 @@ function Workspace({ id, canAI, onBack }: { id: string; canAI: boolean; onBack: 
       </aside>
       <section className="min-w-0 space-y-5" aria-label="Requirements and decisions">
         <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-lg font-semibold text-ink-700">Requirements & decisions</h2><p className="mt-1 text-xs text-ink-400">{questions ? `${questions} items need clarification` : "Keep the evidence, decision and delivery story together"}</p></div><Button leadingIcon={<Plus size={15} />} disabled={!detail.sources.length || Boolean(pending)} onClick={() => edit()}>New requirement</Button></div>
-        <div className="flex flex-col gap-3 sm:flex-row"><label className="flex-1"><span className="sr-only">Search requirements</span><input className={inputStyle} placeholder="Find a requirement, outcome or stakeholder…" value={search} onChange={event => setSearch(event.target.value)} /></label><label><span className="sr-only">Show requirements</span><select className={inputStyle} value={filter} onChange={event => setFilter(event.target.value as RequirementFilter)}><option value="all">All work</option><option value="questions">Open questions</option><option value="review">Ready for review</option><option value="delivery">Delivery ready</option></select></label></div>
+        <div className="flex flex-col gap-3 sm:flex-row"><label className="flex-1"><span className="sr-only">Search requirements</span><input className={inputStyle} placeholder="Find a requirement, outcome or stakeholder…" value={search} onChange={event => setSearch(event.target.value)} /></label><label><span className="sr-only">Show requirements</span><select className={inputStyle} value={filter} onChange={event => setFilter(event.target.value as RequirementFilter)}><option value="all">All work</option><option value="questions">Open questions</option><option value="review">Ready for review</option><option value="delivery">Delivery ready</option><option value="deferred">Not this time</option></select></label></div>
     {gathered && <section className={`${panelStyle} space-y-4`} aria-label="AI gathering suggestions">
       <div className="flex items-center justify-between gap-3"><h2 className="font-semibold">AI gathering suggestions</h2><Button variant="ghost" onClick={() => setGathered(null)}>Dismiss suggestions</Button></div>
       <p className="text-xs text-ink-400">{gathered.model} · {detail.sources.find(item => item.id === gathered.source_id)?.title}</p>

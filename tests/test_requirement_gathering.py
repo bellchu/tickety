@@ -206,6 +206,26 @@ class RequirementGatheringTests(unittest.TestCase):
         self.user.id = "other"
         self.assertEqual(self.client.post(url, json=payload).status_code, 404)
 
+    def test_deferred_requirement_preserves_evidence_but_cannot_enter_delivery(self):
+        workspace = self.workspace()
+        source = self.source(workspace)
+        base = f"{self.path}/{workspace}/items"
+        payload = {**self.payload(source), "priority": "wont"}
+        row = self.client.post(base, json=payload).json()
+        route = base + "/" + row["id"]
+        review = {"revision": 1, "reviewer_role": "Product Owner", "validation_note": "Reviewed the deferred business need."}
+        self.assertEqual(self.client.post(route + "/validate", json=review).status_code, 409)
+        self.assertEqual(self.client.post(route + "/story", json={"revision": 1}).status_code, 409)
+        self.user.role = "admin"
+        manager = self.ai_manager({})
+        with patch.object(main, "llm_mgr", manager):
+            response = self.client.post(route + "/assist", json={"revision": 1, "mode": "story"}, headers={"Origin": "http://testserver"})
+        self.assertEqual(response.status_code, 409)
+        manager.analyze.assert_not_awaited()
+        restored = self.client.put(route, json={**payload, "priority": "should", "revision": 1}).json()
+        self.assertEqual(restored["evidence_quote"], payload["evidence_quote"])
+        self.assertEqual(self.client.post(route + "/validate", json={**review, "revision": restored["revision"]}).status_code, 200)
+
     def ai_manager(self, result):
         return SimpleNamespace(is_mock=False, prompt_char_limit=4000, model_name="test/configured-provider", analyze=AsyncMock(return_value=result))
 

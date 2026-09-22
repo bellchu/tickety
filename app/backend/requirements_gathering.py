@@ -104,6 +104,11 @@ def quality_issues(row: BusinessRequirementRecord) -> list[str]:
     return issues
 
 
+def ensure_delivery_scope(row):
+    if row.priority == "wont":
+        raise HTTPException(409, "This requirement is outside the current scope. Change its priority before sign-off or story preparation.")
+
+
 def invalidate_agreement(row):
     row.status, row.validated_by, row.validated_at, row.story_json = "draft", None, None, None
     row.reviewer_role, row.validation_note = None, None
@@ -282,6 +287,7 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
     @router.post("/{workspace_id}/items/{requirement_id}/validate")
     def validate_requirement(workspace_id: str, requirement_id: str, data: ValidationInput, db: Session = Depends(get_db), user: UserRecord = Depends(require_user)):
         row = requirement(db, workspace_id, requirement_id, user, data.revision)
+        ensure_delivery_scope(row)
         if row.status != "draft":
             raise HTTPException(409, "This requirement is already signed off. Edit it to start a new review.")
         if unresolved_decisions(db, workspace_id, row.id):
@@ -299,6 +305,7 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
     @router.post("/{workspace_id}/items/{requirement_id}/story")
     def create_story(workspace_id: str, requirement_id: str, data: RevisionInput, db: Session = Depends(get_db), user: UserRecord = Depends(require_user)):
         row = requirement(db, workspace_id, requirement_id, user, data.revision)
+        ensure_delivery_scope(row)
         if row.status != "validated" or not row.validated_at:
             raise HTTPException(409, "Validate the requirement before creating its user story")
         if unresolved_decisions(db, workspace_id, row.id):
@@ -337,6 +344,8 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
         from .requirements_ai import prepare_prompt, suggest, ReviewSuggestions, StorySuggestions
 
         row = requirement(db, workspace_id, requirement_id, user, data.revision)
+        if data.mode == "story":
+            ensure_delivery_scope(row)
         if data.mode == "story" and row.status != "validated":
             raise HTTPException(409, "Sign off the requirement before requesting story refinement")
         llm = get_llm()

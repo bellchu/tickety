@@ -51,3 +51,14 @@ test("BRD carries business decisions and reports unresolved blockers honestly", 
   for (const value of ["Who owns delivery failures?", "Operations lead", "Whole initiative", "Within five minutes", "reviewer-1", "0 user stories prepared", "1 blocking business questions remain"]) assert.ok(brief.includes(value), value);
   assert.ok(!brief.includes("User stories are ready"));
 });
+
+test('deferred needs retain their evidence without exporting an old story as delivery work', () => {
+  const brief = loaded.exports.requirementBrief({
+    workspace: { id: 'w', title: 'Future need', objective: 'Consider later', request_type: 'enhancement' }, sources: [],
+    requirements: [{ reference: 'REQ-001', title: 'Later', status: 'validated', priority: 'wont', revision: 1, actor: 'Analyst', action: 'Review', benefit: 'Later', source_id: 's1', evidence_quote: 'Original business evidence.', acceptance_criteria: [], quality_issues: [], story: { reference: 'US-001', title: 'Old story', statement: 'Old delivery wording' } }],
+  });
+  assert.ok(brief.includes('Deferred — not this time'));
+  assert.ok(brief.includes('Original business evidence.'));
+  assert.ok(!brief.includes('Old delivery wording'));
+  assert.ok(brief.includes('0 user stories prepared'));
+});

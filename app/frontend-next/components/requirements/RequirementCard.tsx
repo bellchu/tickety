@@ -22,8 +22,9 @@ export function RequirementCard({
   onCopyStory: () => void;
   onRefine: () => void;
 }) {
+  const deferred = item.priority === "wont";
   const needsClarity = blocked || item.quality_issues.length > 0;
-  const status = item.story ? "Delivery ready" : item.status === "validated" ? "Agreed" : needsClarity ? "Needs clarity" : "Ready for review";
+  const status = deferred ? "Not this time" : item.story ? "Delivery ready" : item.status === "validated" ? "Agreed" : needsClarity ? "Needs clarity" : "Ready for review";
   return (
     <article className="overflow-hidden rounded-xl border border-linen-400 bg-white shadow-sm">
       <div className="space-y-4 p-5">
@@ -38,7 +39,8 @@ export function RequirementCard({
           <span>{({ must: "Must have", should: "Should have", could: "Could have", wont: "Not this time" })[item.priority]}</span>
           <span>{sourceTitle}</span>
         </div>
-        {needsClarity && <div className="rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
+        {deferred && <p className="text-sm text-ink-500">Preserved for future consideration. Change the priority to bring this requirement back into delivery scope.</p>}
+        {!deferred && needsClarity && <div className="rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
           <p className="font-medium">Questions to resolve</p>{blocked && <p className="mt-1">Resolve the linked blocking questions in the decision log before sign-off.</p>}
           <ul className="mt-1 list-disc space-y-1 pl-5">{item.quality_issues.map(issue => <li key={issue}>{issue}</li>)}</ul>
         </div>}
@@ -54,14 +56,14 @@ export function RequirementCard({
         <div className="flex flex-wrap gap-2">
           <Button size="sm" variant="secondary" disabled={busy} onClick={onEdit}>Edit</Button>
           {canAI && <Button size="sm" variant="ghost" leadingIcon={<Sparkles size={14} />} pending={pending === `review-${item.id}`} disabled={busy} onClick={onReview}>Get AI perspective</Button>}
-          {item.status === "draft" ? (
+          {!deferred && (item.status === "draft" ? (
             <Button size="sm" leadingIcon={<CheckCircle2 size={14} />} disabled={busy || needsClarity} onClick={onSignOff}>Sign off</Button>
           ) : !item.story && (
             <Button size="sm" pending={pending === item.id} disabled={busy} onClick={onCreateStory}>Create user story</Button>
-          )}
+          ))}
         </div>
       </div>
-      {item.story && <details className="border-t border-linen-400 bg-linen-50 px-5 py-4" open>
+      {!deferred && item.story && <details className="border-t border-linen-400 bg-linen-50 px-5 py-4" open>
         <summary className="cursor-pointer text-sm font-semibold text-ink-700">{item.story.reference} · User story</summary>
         <p className="mt-3 text-sm leading-6 text-ink-600">{item.story.statement}</p>
         <div className="mt-3 flex flex-wrap gap-2">

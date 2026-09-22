@@ -92,3 +92,15 @@ are separated with `|`; original layout and automatic numbering are not retained
 Headers, footers, images, notes and comments are excluded with a visible warning.
 Tracked insertions are included and deletions excluded; their presence produces
 a version-confirmation warning. No macros, embedded objects or links are run.
+
+## Delivery scope
+
+The **Not this time** priority preserves a requirement for future consideration.
+It stays searchable and has its own filter, but is excluded from current review
+and delivery suggestions. Questions tied only to deferred requirements do not
+supersede actionable work in the suggested focus; initiative-wide blockers remain
+relevant. Sign-off, story creation and AI story refinement reject deferred scope.
+Changing its priority back to Must/Should/Could reopens the normal review path.
+Changing any agreed requirement to Not this time withdraws its current agreement
+and story through the same revision mechanism. BRD exports retain deferred needs
+and evidence, clearly label their scope, and exclude their stories from handoff.

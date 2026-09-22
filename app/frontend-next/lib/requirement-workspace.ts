@@ -1,6 +1,6 @@
 import type { BusinessRequirement, RequirementDecision, RequirementWorkspaceDetail } from "./requirements-types";
 
-export type RequirementFilter = "all" | "questions" | "review" | "delivery";
+export type RequirementFilter = "all" | "questions" | "review" | "delivery" | "deferred";
 
 export function filterRequirements(items: BusinessRequirement[], search: string, filter: RequirementFilter, decisions: RequirementDecision[] = []) {
   const query = search.trim().toLocaleLowerCase();
@@ -9,16 +9,18 @@ export function filterRequirements(items: BusinessRequirement[], search: string,
       .some(value => value.toLocaleLowerCase().includes(query));
     const blocked = decisions.some(decision => decision.status === "open" && decision.blocking && (!decision.requirement_id || decision.requirement_id === item.id));
     const matchesFilter = filter === "all"
-      || (filter === "questions" && (blocked || item.quality_issues.length > 0))
-      || (filter === "review" && item.status === "draft" && !blocked && item.quality_issues.length === 0)
-      || (filter === "delivery" && item.story !== null);
+      || (filter === "deferred" && item.priority === "wont")
+      || (filter === "questions" && item.priority !== "wont" && (blocked || item.quality_issues.length > 0))
+      || (filter === "review" && item.priority !== "wont" && item.status === "draft" && !blocked && item.quality_issues.length === 0)
+      || (filter === "delivery" && item.priority !== "wont" && item.story !== null);
     return matchesText && matchesFilter;
   });
 }
 
 export function workspaceFocus(detail: RequirementWorkspaceDetail) {
-  const items = detail.requirements;
-  const blockers = (detail.decisions || []).filter(item => item.status === "open" && item.blocking);
+  const items = detail.requirements.filter(item => item.priority !== "wont");
+  const activeIds = new Set(items.map(item => item.id));
+  const blockers = (detail.decisions || []).filter(item => item.status === "open" && item.blocking && (!item.requirement_id || activeIds.has(item.requirement_id)));
   if (blockers.length) return {
     title: "A business answer is needed",
     reason: `${blockers.length} blocking questions need a recorded decision. Start with ${blockers[0].owner_role}: ${blockers[0].question}`,
@@ -41,11 +43,16 @@ export function workspaceFocus(detail: RequirementWorkspaceDetail) {
     reason: `${reviewable.reference} has the essential detail. Confirm it with the accountable stakeholder and record the decision.`,
     label: "Review the requirement", action: "review" as const, item: reviewable,
   };
-  const unstated = detail.sources.find(source => !items.some(item => item.source_id === source.id));
+  const unstated = detail.sources.find(source => !detail.requirements.some(item => item.source_id === source.id));
   if (unstated) return {
     title: "Explore the context you have collected",
     reason: `“${unstated.title}” has no linked requirements yet. Identify the business needs, or keep it as supporting context.`,
     label: "Explore this source", action: "gather" as const, sourceId: unstated.id,
+  };
+  if (!items.length) return {
+    title: "The captured needs are outside this delivery scope",
+    reason: "Keep their evidence for future planning. Bring a requirement back into scope when its business priority changes.",
+    label: "Review deferred needs", action: "deferred" as const,
   };
   const agreed = items.find(item => item.status === "validated" && !item.story);
   if (agreed) return {
