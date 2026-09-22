@@ -1,25 +1,16 @@
 import { cn } from "@/lib/utils";
 import { PRODUCT_LOCKUP_NAME, PRODUCT_NAME } from "@/lib/brand";
 
-type MarkTone = "gradient" | "solid" | "dark" | "reversed";
 type LogoSize = "sm" | "md" | "lg" | "xl";
 type LogoLayout = "inline" | "stacked";
 
 /** Compact product mark used where the full Tickety wordmark cannot fit. */
-export function TicketyMark({
-  className,
-  tone = "gradient",
-}: {
-  className?: string;
-  tone?: MarkTone;
-}) {
-  const monochrome = tone === "solid" || tone === "dark" || tone === "reversed";
-
+function TicketyMark({ className }: { className?: string }) {
   return (
     <span
       className={cn(
         "inline-grid aspect-square shrink-0 place-items-center overflow-hidden rounded-[22%]",
-        monochrome ? (tone === "reversed" ? "bg-white text-ink-700" : "bg-ink-700 text-white") : "tickety-accent text-white",
+        "tickety-accent text-white",
         className
       )}
       aria-hidden="true"
