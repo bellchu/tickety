@@ -80,6 +80,9 @@ old wording into a new edit still requires fresh sign-off; history itself is rea
 
 A question records an answer owner and either one affected requirement or the whole
 initiative. The owner is a follow-up label, not a notification or access grant.
+Submitting an identical open question with the same owner, scope and blocking status
+reuses the existing record without reopening requirements again. Resolved questions
+can be raised anew when circumstances change.
 
 A blocking question reopens affected requirements, withdraws their stories and
 prevents sign-off until answered. Initiative-wide blockers also apply to future

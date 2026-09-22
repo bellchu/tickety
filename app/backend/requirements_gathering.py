@@ -219,13 +219,19 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
         return db.query(matching.exists()).scalar()
 
     @router.post("/{workspace_id}/decisions", status_code=201)
-    def add_decision(workspace_id: str, data: DecisionInput, db: Session = Depends(get_db), user: UserRecord = Depends(require_user)):
+    def add_decision(workspace_id: str, data: DecisionInput, response: Response, db: Session = Depends(get_db), user: UserRecord = Depends(require_user)):
         workspace(db, workspace_id, user, lock=True)
         affected = db.query(BusinessRequirementRecord).filter_by(workspace_id=workspace_id)
         if data.requirement_id:
             affected = affected.filter_by(id=data.requirement_id)
             if affected.first() is None:
                 raise HTTPException(422, "Choose a requirement from this workspace")
+        existing = db.query(RequirementDecisionRecord).filter_by(
+            workspace_id=workspace_id, status="open", **data.model_dump(),
+        ).order_by(RequirementDecisionRecord.created_at, RequirementDecisionRecord.id).first()
+        if existing is not None:
+            response.status_code = 200
+            return existing
         if db.query(RequirementDecisionRecord).filter_by(workspace_id=workspace_id).count() >= 200:
             raise HTTPException(409, "This workspace already has 200 decision records")
         row = RequirementDecisionRecord(id=str(uuid4()), workspace_id=workspace_id, created_by=user.id, **data.model_dump())

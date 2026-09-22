@@ -234,6 +234,28 @@ class RequirementGatheringTests(unittest.TestCase):
         self.assertEqual(self.client.post(route + "/validate", json=review).status_code, 200)
         self.assertEqual(self.client.post(base + "/decisions/" + decision["id"] + "/resolve", json={"resolution": "Attempt to replace the signed decision."}).status_code, 409)
 
+    def test_repeated_open_question_reuses_record_without_reopening_requirements(self):
+        workspace = self.workspace()
+        source = self.source(workspace)
+        base = f"{self.path}/{workspace}"
+        row = self.client.post(base + "/items", json=self.payload(source)).json()
+        payload = {"requirement_id": row["id"], "question": "Who owns delivery failures?", "owner_role": "Operations", "blocking": True}
+        first = self.client.post(base + "/decisions", json=payload)
+        self.assertEqual(first.status_code, 201)
+        before = self.client.get(base).json()
+        history_before = self.client.get(base + "/items/" + row["id"] + "/history").json()
+        repeated = self.client.post(base + "/decisions", json=payload)
+        self.assertEqual(repeated.status_code, 200, repeated.text)
+        self.assertEqual(repeated.json()["id"], first.json()["id"])
+        self.assertEqual(self.client.get(base).json(), before)
+        self.assertEqual(self.client.get(base + "/items/" + row["id"] + "/history").json(), history_before)
+        for change in [{"blocking": False}, {"owner_role": "Sponsor"}, {"requirement_id": None}]:
+            self.assertEqual(self.client.post(base + "/decisions", json={**payload, **change}).status_code, 201)
+        self.assertEqual(self.client.post(base + "/decisions/" + first.json()["id"] + "/resolve", json={"resolution": "Operations will retry failed deliveries."}).status_code, 200)
+        reopened = self.client.post(base + "/decisions", json=payload)
+        self.assertEqual(reopened.status_code, 201)
+        self.assertNotEqual(reopened.json()["id"], first.json()["id"])
+
     def test_workspace_blocker_applies_to_future_requirements_and_private_decisions(self):
         workspace = self.workspace()
         source = self.source(workspace)
