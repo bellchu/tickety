@@ -81,6 +81,58 @@ class RequirementGatheringTests(unittest.TestCase):
         self.assertIsNone(response.json()["validated_at"])
         self.assertIsNone(response.json()["story"])
 
+    def test_repeated_requirement_capture_preserves_signed_story_and_history(self):
+        workspace = self.workspace()
+        source = self.source(workspace)
+        base = f"{self.path}/{workspace}"
+        payload = self.payload(source)
+        row = self.client.post(base + "/items", json=payload).json()
+        route = base + "/items/" + row["id"]
+        signed = self.client.post(route + "/validate", json={"revision": 1, "reviewer_role": "Product Owner", "validation_note": "Confirmed the agreed acknowledgement."}).json()
+        story = self.client.post(route + "/story", json={"revision": signed["revision"]}).json()
+        history = self.client.get(route + "/history").json()
+        duplicate = self.client.post(base + "/items", json={**payload, "title": "  " + payload["title"] + "  "})
+        self.assertEqual(duplicate.status_code, 200, duplicate.text)
+        self.assertTrue(duplicate.json()["reused"])
+        self.assertEqual({key: value for key, value in duplicate.json().items() if key != "reused"}, story)
+        self.assertEqual(self.client.get(route + "/history").json(), history)
+        self.assertEqual(len(self.client.get(base).json()["requirements"]), 1)
+
+    def test_requirement_reuse_requires_identical_business_fields_and_scope(self):
+        workspace = self.workspace()
+        source = self.source(workspace)
+        base = f"{self.path}/{workspace}/items"
+        payload = self.payload(source)
+        self.assertEqual(self.client.post(base, json=payload).status_code, 201)
+        changes = {"title": "Track intake", "actor": "Procurement analyst", "action": "receive a reference number",
+                   "benefit": "I can track intake", "priority": "could", "evidence_quote": "acknowledgement within 30 seconds.",
+                   "acceptance_criteria": ["Given an invoice, confirm receipt within twenty seconds."]}
+        for field, value in changes.items():
+            with self.subTest(field=field):
+                self.assertEqual(self.client.post(base, json={**payload, field: value}).status_code, 201)
+        other = self.workspace()
+        other_source = self.source(other)
+        self.assertEqual(self.client.post(f"{self.path}/{other}/items", json=self.payload(other_source)).status_code, 201)
+        self.user.id = "other"
+        self.assertEqual(self.client.post(base, json=payload).status_code, 404)
+
+    def test_requirement_reuse_at_capacity_does_not_consume_another_reference(self):
+        workspace = self.workspace()
+        source = self.source(workspace)
+        base = f"{self.path}/{workspace}/items"
+        payload = self.payload(source)
+        first = self.client.post(base, json=payload).json()
+        values = dict(payload)
+        criteria = values.pop("acceptance_criteria")
+        with self.sessions() as db:
+            db.add_all([BusinessRequirementRecord(id=f"capacity-{i}", workspace_id=workspace, number=i + 1,
+                        acceptance_json=json.dumps(criteria), **{**values, "title": f"Requirement {i}"}) for i in range(1, 200)])
+            db.commit()
+        duplicate = self.client.post(base, json=payload)
+        self.assertEqual(duplicate.status_code, 200, duplicate.text)
+        self.assertEqual(duplicate.json()["id"], first["id"])
+        self.assertEqual(self.client.post(base, json={**payload, "title": "Another requirement"}).status_code, 409)
+
     def test_source_and_workspace_boundaries(self):
         workspace = self.workspace()
         source = self.source(workspace)
@@ -136,7 +188,7 @@ class RequirementGatheringTests(unittest.TestCase):
         source = self.source(workspace)
         base = f"{self.path}/{workspace}"
         item = self.client.post(base + "/items", json=self.payload(source)).json()
-        other = self.client.post(base + "/items", json=self.payload(source)).json()
+        other = self.client.post(base + "/items", json={**self.payload(source), "title": "Track missing invoices"}).json()
         route = base + "/items/" + item["id"]
         signed = self.client.post(route + "/validate", json={"revision": 1, "reviewer_role": "Product Owner", "validation_note": "Confirmed the business need."}).json()
         self.client.post(route + "/story", json={"revision": signed["revision"]})
@@ -410,7 +462,7 @@ class RequirementGatheringTests(unittest.TestCase):
         source = self.source(workspace)
         base = f"{self.path}/{workspace}"
         first = self.client.post(base + "/items", json=self.payload(source)).json()
-        second = self.client.post(base + "/items", json=self.payload(source)).json()
+        second = self.client.post(base + "/items", json={**self.payload(source), "title": "Track exceptions"}).json()
         manager = self.ai_manager({"findings": [{"category": "dependency", "references": ["REQ-999"], "finding": "Unknown dependency.", "question": "Who owns this unknown dependency?"}]})
         with patch.object(main, "llm_mgr", manager):
             for ids in [[first["id"]], [first["id"], first["id"]], [first["id"], "unavailable"]]:

@@ -164,6 +164,20 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
     setShowForm(true); setReviewing(null); setDraftAssumptions([]); setError(null);
   }
 
+  async function saveDraft() {
+    let saved: Awaited<ReturnType<typeof api.saveBusinessRequirement>> | undefined;
+    await run("requirement", async () => {
+      saved = await api.saveBusinessRequirement(id, { ...draft, acceptance_criteria: criteria.split("\n").map(line => line.trim()).filter(Boolean) }, editing);
+    }, () => {
+      rememberRequirementEditor(editorClient, userId, id, null);
+      setShowForm(false); setEditing(undefined);
+      if (saved?.reused) {
+        setFilter("all"); setSearch("");
+        setNotice(`This requirement already exists as ${saved.reference}. Its saved agreement and history were preserved.`);
+      }
+    });
+  }
+
   async function saveSource(data: Parameters<typeof api.addRequirementSource>[1]) {
     let saved: Awaited<ReturnType<typeof api.addRequirementSource>> | undefined;
     await run("source", async () => { saved = await api.addRequirementSource(id, data); }, () => {
@@ -254,7 +268,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
         <Field label="Sign-off note"><textarea required minLength={10} maxLength={4000} className={inputStyle} value={reviewNote} onChange={event => setReviewNote(event.target.value)} placeholder="What was confirmed, and with whom?" /></Field>
         <div className="flex gap-2"><Button type="submit" pending={pending === reviewing.id} disabled={Boolean(pending)}>Sign off requirement</Button><Button variant="ghost" disabled={Boolean(pending)} onClick={() => switchEditor(() => setReviewing(null))}>Cancel</Button></div>
       </form>}
-      {showForm && <form className={`${panelStyle} space-y-4`} onSubmit={event => { event.preventDefault(); void run("requirement", () => api.saveBusinessRequirement(id, { ...draft, acceptance_criteria: criteria.split("\n").map(line => line.trim()).filter(Boolean) }, editing), () => { rememberRequirementEditor(editorClient, userId, id, null); setShowForm(false); setEditing(undefined); }); }}>
+      {showForm && <form className={`${panelStyle} space-y-4`} onSubmit={event => { event.preventDefault(); void saveDraft(); }}>
         <h2 className="text-lg font-semibold">{editing ? "Edit requirement" : "Gather a requirement"}</h2>
         {dirty && <p role="status" className="text-xs text-amber-800">Unsaved changes · Kept in this tab while you browse. Save before refreshing or closing.</p>}
         {draftAssumptions.length > 0 && <div className="rounded-lg bg-amber-50 p-3 text-sm text-amber-800"><strong>Resolve these assumptions while reviewing</strong><ul className="list-disc pl-5">{draftAssumptions.map((item, index) => <li key={index}>{item}<Button size="sm" variant="ghost" onClick={() => { setQuestionSeed({ question: item, requirementId: editing?.id || null }); setDecisionsOpen(true); }}>Track assumption</Button></li>)}</ul></div>}

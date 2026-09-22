@@ -306,14 +306,21 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
         return row
 
     @router.post("/{workspace_id}/items", status_code=201)
-    def add_requirement(workspace_id: str, data: RequirementInput, db: Session = Depends(get_db), user: UserRecord = Depends(require_user)):
+    def add_requirement(workspace_id: str, data: RequirementInput, response: Response, db: Session = Depends(get_db), user: UserRecord = Depends(require_user)):
         workspace(db, workspace_id, user, lock=True)
         check_source(db, workspace_id, data)
+        values = data.model_dump(exclude={"acceptance_criteria"})
+        acceptance_json = json.dumps(data.acceptance_criteria)
+        existing = db.query(BusinessRequirementRecord).filter_by(
+            workspace_id=workspace_id, acceptance_json=acceptance_json, **values,
+        ).order_by(BusinessRequirementRecord.number).first()
+        if existing is not None:
+            response.status_code = 200
+            return {**requirement_out(existing), "reused": True}
         count = db.query(BusinessRequirementRecord).filter_by(workspace_id=workspace_id).count()
         if count >= 200:
             raise HTTPException(409, "This workspace already has 200 requirements. Create another workspace.")
-        values = data.model_dump(exclude={"acceptance_criteria"})
-        row = BusinessRequirementRecord(id=str(uuid4()), workspace_id=workspace_id, number=count + 1, acceptance_json=json.dumps(data.acceptance_criteria), **values)
+        row = BusinessRequirementRecord(id=str(uuid4()), workspace_id=workspace_id, number=count + 1, acceptance_json=acceptance_json, **values)
         db.add(row)
         record_history(db, row, user, "created")
         db.commit()
