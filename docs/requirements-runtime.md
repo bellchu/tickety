@@ -369,3 +369,17 @@ frontend tests, including a signed-off must-have preceding an unclear could-have
 same-priority clarification, and preservation of recorded blocking gates. They were
 not separately exercised against new browser records in this check. Typecheck and
 lint also passed. This verifies the local preview, not a Dev deployment.
+
+### Full compatibility check after source-draft protection
+
+At `a4ae67c`, the complete backend unittest discovery finished successfully:
+861 tests run, 2 skipped. This covers the current source-summary and context-review
+implementation as well as the existing migration checks; it does not establish a
+successful Dev rollout or live AI-provider operation. The frontend suite passed
+289 tests with typecheck and lint in the implementation phase.
+
+The source form memoizes Unicode bounds by content, so title and type edits do not
+recount the full body. A local Node microbenchmark of 500 validations after warm-up
+measured about 0.22 ms for 100,000 ASCII characters and 0.46 ms for 100,000 emoji
+code points per validation. These are helper timings, not browser interaction or
+end-to-end import measurements. No optimization was justified by that result.
