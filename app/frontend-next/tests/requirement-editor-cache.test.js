@@ -75,3 +75,25 @@ test('decision question and answer drafts coexist with source and editor drafts'
   client.clear();
   assert.equal(readDecision(client, 'alice', 'one'), undefined);
 });
+
+
+test('late save completion cannot clear a newer draft after navigation', () => {
+  const cases = [
+    [undefined, library.rememberRequirementEditor, library.readRequirementEditor, draft, { ...draft, criteria: 'Newer acceptance wording' }],
+    ['source', library.rememberRequirementSourceDraft, library.readRequirementSourceDraft, { title: 'Original', content: 'Original material' }, { title: 'Newer', content: 'New material' }],
+    ['decision', library.rememberRequirementDecisionDraft, library.readRequirementDecisionDraft, { question: 'Original question' }, { question: 'Newer question' }],
+  ];
+  for (const [kind, save, readDraft, original, newer] of cases) {
+    const client = new QueryClient();
+    save(client, 'alice', 'one', original);
+    const isCurrent = library.captureRequirementDraftSave(client, 'alice', 'one', kind);
+    assert.equal(isCurrent(), true);
+    save(client, 'alice', 'one', newer);
+    if (isCurrent()) save(client, 'alice', 'one', null);
+    assert.deepEqual(readDraft(client, 'alice', 'one'), newer);
+    const nextSave = library.captureRequirementDraftSave(client, 'alice', 'one', kind);
+    assert.equal(nextSave(), true);
+    client.clear();
+    assert.equal(nextSave(), false);
+  }
+});

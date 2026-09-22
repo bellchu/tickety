@@ -89,3 +89,7 @@ not written to local storage or the server. Saving or discarding clears only the
 corresponding draft; sign-out clears the cache. An application-level unload warning
 also covers drafts left behind while browsing other pages. Browser warning support
 is browser-dependent; this is not durable autosave.
+
+Save completion clears only the in-memory draft version captured when that request
+started. A later edit restored after navigation survives an older request finishing;
+this does not cancel the earlier server write or bypass requirement revision checks.

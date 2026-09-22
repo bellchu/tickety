@@ -1,6 +1,6 @@
 "use client";
 
-import { readRequirementEditor, rememberRequirementEditor, readRequirementSourceDraft, readRequirementDecisionDraft } from "@/lib/requirement-editor-cache";
+import { captureRequirementDraftSave, readRequirementEditor, rememberRequirementEditor, readRequirementSourceDraft, readRequirementDecisionDraft } from "@/lib/requirement-editor-cache";
 import { parseRequirementCriteria } from "@/lib/requirement-criteria";
 import { requirementErrorMessage } from "@/lib/requirement-errors";
 
@@ -175,8 +175,9 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
 
   async function run(label: string, operation: () => Promise<unknown>, success?: () => void, refresh = true) {
     if (pending) return;
+    const isCurrent = captureRequirementDraftSave(editorClient, userId, id);
     setPending(label); setError(null); setNotice("");
-    try { await operation(); setNotice(refresh ? "Saved." : "Ready for review."); success?.(); if (refresh) await query.refetch(); }
+    try { await operation(); setNotice(refresh ? "Saved." : "Ready for review."); if (isCurrent()) success?.(); if (refresh) await query.refetch(); }
     catch (caught) { setError(caught); }
     finally { setPending(""); }
   }

@@ -4,7 +4,7 @@ import { prepareRequirementSource } from "@/lib/requirement-source-import";
 import { requirementErrorMessage } from "@/lib/requirement-errors";
 
 import { useQueryClient } from "@tanstack/react-query";
-import { readRequirementSourceDraft, rememberRequirementSourceDraft } from "@/lib/requirement-editor-cache";
+import { captureRequirementDraftSave, readRequirementSourceDraft, rememberRequirementSourceDraft } from "@/lib/requirement-editor-cache";
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import type { SourceKind } from "@/lib/requirements-types";
@@ -49,7 +49,7 @@ export function SourceIntakeForm({ workspaceId, userId, open, pending, onSave }:
   return <>
     <ConfirmDialog open={discarding} onOpenChange={setDiscarding} title="Discard source draft?" description="This removes the unsaved title, text and import preview. Saved sources are unchanged." confirmLabel="Discard draft" cancelLabel="Keep editing" destructive onConfirm={clearDraft} />
     {Boolean(error) && <p role="alert" className="rounded-lg bg-rust-400/10 p-3 text-sm text-rust-600">{requirementErrorMessage(error)}</p>}
-      <form className={`${panelStyle} space-y-4`} onSubmit={async event => { event.preventDefault(); setError(null); if (await onSave({ title: sourceTitle, kind: sourceKind, content })) { clearDraft(); } }}>
+      <form className={`${panelStyle} space-y-4`} onSubmit={async event => { event.preventDefault(); setError(null); const isCurrent = captureRequirementDraftSave(client, userId, workspaceId, "source"); if (await onSave({ title: sourceTitle, kind: sourceKind, content }) && isCurrent()) { clearDraft(); } }}>
         <h2 className="text-lg font-semibold">Add supporting material</h2><p className="text-sm text-ink-500">Paste source material or import a document or email. Sources are preserved so every requirement can point back to its evidence.</p>
         {hasDraft && <p role="status" className="text-xs text-amber-800">Unsaved material · Kept in this tab while you browse. Save before refreshing or closing.</p>}
         <Field label="Import source file"><input type="file" disabled={importing || Boolean(pending)} accept=".txt,.md,.eml,.docx,.pdf,.vtt,.srt" onChange={event => { void importText(event.target.files?.[0]); event.target.value = ""; }} className="mt-2 block w-full text-sm" /></Field>

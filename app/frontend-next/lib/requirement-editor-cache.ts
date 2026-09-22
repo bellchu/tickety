@@ -63,3 +63,10 @@ export function readRequirementDecisionDraft(client: QueryClient, userId: string
 export function rememberRequirementDecisionDraft(client: QueryClient, userId: string, workspaceId: string, draft: RequirementDecisionDraft | null) {
   rememberDraft(client, [...prefix, userId, workspaceId, "decision"], draft);
 }
+
+/** A completed request may only clear the draft version it submitted. */
+export function captureRequirementDraftSave(client: QueryClient, userId: string, workspaceId: string, kind?: "source" | "decision") {
+  const key = [...prefix, userId, workspaceId, ...(kind ? [kind] : [])];
+  const submitted = client.getQueryData(key);
+  return () => client.getQueryData(key) === submitted;
+}

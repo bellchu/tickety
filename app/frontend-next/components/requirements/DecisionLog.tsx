@@ -6,7 +6,7 @@ import { requirementErrorMessage } from "@/lib/requirement-errors";
 
 import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { readRequirementDecisionDraft, rememberRequirementDecisionDraft } from "@/lib/requirement-editor-cache";
+import { captureRequirementDraftSave, readRequirementDecisionDraft, rememberRequirementDecisionDraft } from "@/lib/requirement-editor-cache";
 import { Button, ConfirmDialog } from "@/components/ui";
 import { api } from "@/lib/api";
 import { formatLocalDateTime } from "@/lib/date-time";
@@ -58,8 +58,9 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
   }
   async function save(operation: () => Promise<unknown>, done: () => void) {
     if (pending) return;
+    const isCurrent = captureRequirementDraftSave(client, userId, workspaceId, "decision");
     setPending(true); setError("");
-    try { await operation(); done(); await onSaved(); }
+    try { await operation(); if (isCurrent()) done(); await onSaved(); }
     catch (caught) { setError(requirementErrorMessage(caught)); }
     finally { setPending(false); }
   }
