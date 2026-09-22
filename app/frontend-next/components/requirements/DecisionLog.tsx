@@ -14,12 +14,13 @@ import { api, APIError } from "@/lib/api";
 import { formatLocalDateTime } from "@/lib/date-time";
 import type { BusinessRequirement, RequirementDecision } from "@/lib/requirements-types";
 
-export function DecisionLog({ workspaceId, userId, requirements, decisions, open, onToggle, scope, onScopeChange, seed, onSeedUsed, onSaved, pending, onPendingChange, onFindRequirements }: {
+export function DecisionLog({ workspaceId, userId, requirements, decisions, open, onToggle, scope, onScopeChange, seed, onSeedUsed, onSaved, pending, onPendingChange, onFindRequirements, decisionRequest }: {
   workspaceId: string; userId: string; requirements: BusinessRequirement[]; decisions: RequirementDecision[];
   open: boolean; onToggle: () => void;
   pending: boolean; onPendingChange: (pending: boolean) => void;
   onFindRequirements: (requirementId: string | null) => void;
   scope: string; onScopeChange: (value: string) => void;
+  decisionRequest?: { id: string } | null;
   seed: { question: string; requirementId: string | null } | null;
   onSeedUsed: () => void; onSaved: () => Promise<unknown>;
 }) {
@@ -37,6 +38,9 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
   const [view, setView] = useState<DecisionFilter>("open");
   const [search, setSearch] = useState("");
   const [registerWindow, setRegisterWindow] = useState({ key: "", limit: 20 });
+  useEffect(() => {
+    if (decisionRequest) { setView("open"); setSearch(""); }
+  }, [decisionRequest]);
   const hasQuestion = Boolean(question || owner || requirementId || !blocking);
   const hasAnswer = Boolean(resolving && resolution);
   useEffect(() => {
@@ -76,7 +80,10 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
     finally { onPendingChange(false); }
   }
   const outstanding = useMemo(() => decisions.filter(item => item.status === "open"), [decisions]);
-  const visibleDecisions = useMemo(() => filterDecisions(decisions, view, search, resolving, scope), [decisions, view, search, resolving, scope]);
+  const visibleDecisions = useMemo(() => {
+    const matching = filterDecisions(decisions, view, search, resolving, scope);
+    return decisionRequest ? matching.sort((left, right) => Number(right.id === decisionRequest.id) - Number(left.id === decisionRequest.id)) : matching;
+  }, [decisions, view, search, resolving, scope, decisionRequest]);
   const requirementNames = useMemo(() => new Map(requirements.map(item => [item.id, `${item.reference}${item.priority === "wont" ? " · Not this time" : ""}`])), [requirements]);
   const blockers = useMemo(() => outstanding.filter(item => item.blocking).length, [outstanding]);
   const windowKey = JSON.stringify([view, search, scope]);
@@ -122,10 +129,11 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
         </select></label>
       </div>
       <label className="block space-y-1 text-sm">Decisions affecting<select className={inputStyle} value={scope} onChange={event => onScopeChange(event.target.value)}><option value="">All requirements</option>{requirements.map(item => <option key={item.id} value={item.id}>{item.reference} · {item.title}</option>)}</select></label>
-      {view === "open" && <p className="text-xs text-ink-500">Questions blocking sign-off appear first; each group keeps its recorded order.</p>}
+      {view === "open" && <p className="text-xs text-ink-500">{decisionRequest ? "The suggested question appears first when it matches this view. Other blocking questions follow in recorded order." : "Questions blocking sign-off appear first; each group keeps its recorded order."}</p>}
       {scope && <p className="text-xs text-ink-500">Includes whole-initiative questions and decisions, which also affect this requirement.</p>}
       {resolving && <p className="text-xs text-ink-500">The question you are answering stays visible while you filter.</p>}
       {displayedDecisions.map(item => <article key={item.id} className="space-y-3 rounded-lg border border-linen-400 p-4">
+        {item.id === decisionRequest?.id && <p className="text-xs font-semibold text-clay-700">Suggested business question</p>}
         <div className="flex flex-wrap justify-between gap-2 text-xs text-ink-500"><span>{item.requirement_id ? requirementNames.get(item.requirement_id) || "Requirement unavailable" : "Whole initiative"} · {item.owner_role}</span><span>{item.status === "resolved" ? "Decision recorded" : item.blocking ? "Blocks sign-off" : "Exploratory"}</span></div>
         <h4 className="text-sm font-semibold">{item.question}</h4>
         {affectedRequirementsLink(item.requirement_id)}

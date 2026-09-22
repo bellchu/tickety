@@ -32,14 +32,14 @@ const decisions = Array.from({ length: 200 }, (_, index) => ({
   id: `d${index}`, requirement_id: 'r1', question: `Business question ${index}`,
   owner_role: 'Sponsor', status: 'open', blocking: true,
 }));
-function render({ open = true, scope = '', draft, pending = false, records = decisions } = {}) {
+function render({ open = true, scope = '', draft, pending = false, records = decisions, decisionRequest } = {}) {
   const client = new query.QueryClient();
   if (draft) drafts.rememberRequirementDecisionDraft(client, 'owner', 'w1', draft);
   try {
     return renderToStaticMarkup(React.createElement(query.QueryClientProvider, { client },
       React.createElement(DecisionLog, {
         workspaceId: 'w1', userId: 'owner', requirements: [{ id: 'r1', reference: 'REQ-001', title: 'Receipt' }],
-        decisions: records, open, scope, pending, onFindRequirements() {}, onPendingChange() {}, seed: null, onToggle() {}, onScopeChange() {}, onSeedUsed() {}, async onSaved() {},
+        decisions: records, open, scope, pending, decisionRequest, onFindRequirements() {}, onPendingChange() {}, seed: null, onToggle() {}, onScopeChange() {}, onSeedUsed() {}, async onSaved() {},
       })));
   } finally { client.clear(); }
 }
@@ -65,6 +65,16 @@ test('closed register does not render hidden decision cards or answer forms', ()
   assert.equal((html.match(/<article/g) || []).length, 0);
   assert.ok(!html.includes('<textarea'));
   assert.ok(html.includes('200 open'));
+});
+
+test('suggested question beyond the first batch is placed first without losing another answer draft', () => {
+  const draft = { question: '', owner: '', requirementId: '', blocking: true, resolving: 'd198', resolution: 'Keep this unfinished answer' };
+  const html = render({ decisionRequest: { id: 'd199' }, draft });
+  assert.ok(html.includes('Suggested business question'));
+  assert.ok(html.indexOf('Business question 199') < html.indexOf('Business question 0'));
+  assert.ok(html.includes('Keep this unfinished answer</textarea>'));
+  assert.equal((html.match(/<article/g) || []).length, 21);
+  assert.equal(decisions[0].id, 'd0');
 });
 
 test('workspace save blocks question submission and answer actions', () => {
@@ -173,5 +183,43 @@ test('recording an answer retains an actionable follow-up after the open questio
     const link = descendants(tree, 'a').find(item => item.props.href === '#requirement-list');
     link.props.onClick();
     assert.deepEqual(targets, ['r1']);
+  } finally { client.clear(); }
+});
+
+test('opening a suggestion clears old register filters without changing an answer', () => {
+  const client = new query.QueryClient();
+  const draft = { question: '', owner: '', requirementId: '', blocking: true, resolving: 'd198', resolution: 'Preserved answer rationale' };
+  drafts.rememberRequirementDecisionDraft(client, 'owner', 'w1', draft);
+  const state = [], effects = [];
+  let cursor = 0;
+  const Component = loadDecisionLog({
+    react: { ...React, useMemo: compute => compute(), useEffect: effect => effects.push(effect), useState(initial) {
+      const index = cursor++;
+      if (!(index in state)) state[index] = typeof initial === 'function' ? initial() : initial;
+      return [state[index], value => { state[index] = typeof value === 'function' ? value(state[index]) : value; }];
+    } },
+    '@tanstack/react-query': { useQueryClient: () => client },
+  });
+  function tree(decisionRequest) {
+    cursor = 0; effects.length = 0;
+    return Component({ workspaceId: 'w1', userId: 'owner', requirements: [], decisions,
+      open: true, scope: '', seed: null, pending: false, decisionRequest, onFindRequirements() {} });
+  }
+  function descendants(node, type) {
+    if (!node || typeof node !== 'object') return [];
+    return [...(node.type === type ? [node] : []), ...React.Children.toArray(node.props?.children).flatMap(child => descendants(child, type))];
+  }
+  try {
+    const first = tree(null);
+    descendants(first, 'input').find(node => node.props.type === 'search').props.onChange({ target: { value: 'No matching question' } });
+    descendants(first, 'select').find(node => node.props.value === 'open').props.onChange({ target: { value: 'recorded' } });
+    assert.ok(!renderToStaticMarkup(tree(null)).includes('Business question 199'));
+    const request = { id: 'd199' };
+    tree(request);
+    effects.forEach(effect => effect());
+    const html = renderToStaticMarkup(tree(request));
+    assert.ok(html.includes('Business question 199'));
+    assert.ok(!html.includes('No matching question'));
+    assert.ok(html.includes('Preserved answer rationale</textarea>'));
   } finally { client.clear(); }
 });

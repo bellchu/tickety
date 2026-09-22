@@ -135,6 +135,8 @@ awaiting a story. Blocking questions and unclear requirements still take precede
 For blocking questions, the suggested focus starts with initiative-wide decisions,
 then follows the affected requirements' business priorities. Questions at the same
 priority retain their recorded order; deferred-only questions do not displace current work.
+Opening that suggestion resets the decision search and scope, selects open questions,
+and places the suggested question first. An unfinished answer remains available.
 
 The sign-off form displays the exact revision being reviewed, its priority, business
 outcome, acceptance criteria and evidence excerpt. Compare those commitments with

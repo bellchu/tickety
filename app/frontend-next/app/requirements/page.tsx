@@ -140,6 +140,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
   const [historyItem, setHistoryItem] = useState<string | null>(null);
   const [decisionsOpen, setDecisionsOpen] = useState(() => Boolean(readRequirementDecisionDraft(editorClient, userId, id)));
   const [decisionScope, setDecisionScope] = useState("");
+  const [decisionRequest, setDecisionRequest] = useState<{ id: string } | null>(null);
   const [questionSeed, setQuestionSeed] = useState<{ question: string; requirementId: string | null } | null>(null);
   const [sourceFormOpen, setSourceFormOpen] = useState(() => Boolean(readRequirementSourceDraft(editorClient, userId, id)));
   const [sourceFocus, setSourceFocus] = useState<{ sourceId: string; quote: string; reference: string }>();
@@ -293,7 +294,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
     if (canDeliverSnapshot) exportBrief(detail!);
   }
   function followFocus() {
-    if (focus.action === "decisions") { setDecisionScope(""); setDecisionsOpen(true); }
+    if (focus.action === "decisions") { setDecisionScope(""); setDecisionRequest({ id: focus.decisionId }); setDecisionsOpen(true); }
     else if (focus.action === "source") setSourceFormOpen(true);
     else if (focus.action === "deferred") { setFilter("deferred"); setSearch(""); setSourceFilter(""); }
     else if (focus.action === "questions") { setFilter("questions"); setSearch(""); setSourceFilter(""); }
@@ -313,7 +314,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
       <div className="max-w-2xl"><p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-cyan-200">Worth your attention</p><h2 className="mt-2 text-lg font-medium">{focus.title}</h2><p className="mt-2 text-sm leading-6 text-slate-200">{focus.reason}</p></div>
       <Button className="shrink-0" variant="secondary" trailingIcon={<ArrowUpRight size={15} />} disabled={Boolean(pending) || (focus.action === "export" && !canDeliverSnapshot)} onClick={followFocus}>{focus.label}</Button>
     </section>
-    <DecisionLog onFindRequirements={requirementId => { setFilter("all"); setSourceFilter(""); setSearch(detail.requirements.find(item => item.id === requirementId)?.reference || ""); }} pending={Boolean(pending)} onPendingChange={setDecisionPending} scope={decisionScope} onScopeChange={setDecisionScope} workspaceId={id} userId={userId} requirements={detail.requirements} decisions={detail.decisions || []} open={decisionsOpen} onToggle={() => setDecisionsOpen(!decisionsOpen)} seed={questionSeed} onSeedUsed={() => setQuestionSeed(null)} onSaved={refreshSavedWorkspace} />
+    <DecisionLog decisionRequest={decisionRequest} onFindRequirements={requirementId => { setFilter("all"); setSourceFilter(""); setSearch(detail.requirements.find(item => item.id === requirementId)?.reference || ""); }} pending={Boolean(pending)} onPendingChange={setDecisionPending} scope={decisionScope} onScopeChange={setDecisionScope} workspaceId={id} userId={userId} requirements={detail.requirements} decisions={detail.decisions || []} open={decisionsOpen} onToggle={() => setDecisionsOpen(!decisionsOpen)} seed={questionSeed} onSeedUsed={() => setQuestionSeed(null)} onSaved={refreshSavedWorkspace} />
     {query.isFetching && <p role="status" className="text-sm text-ink-500">Refreshing saved work… Your unsaved drafts are kept.</p>}
     {query.isError && <p role="status" className="text-sm text-amber-800">Showing previously loaded work. Refresh successfully before exporting the brief or copying stories.</p>}
     <ErrorMessage error={error || query.error} />{notice && <p role="status" className="text-sm text-moss-700">{notice}</p>}

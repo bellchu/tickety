@@ -72,7 +72,7 @@ export function workspaceFocus(detail: RequirementWorkspaceDetail) {
   if (blockers.length) return {
     title: "A business answer is needed",
     reason: `${blockers.length} blocking questions need a recorded decision. Start with ${blockers[0].owner_role}: ${blockers[0].question}`,
-    label: "Open the decision log", action: "decisions" as const,
+    label: "Review this business question", action: "decisions" as const, decisionId: blockers[0].id,
   };
   if (!detail.sources.length) return {
     title: "Ground the business need",
