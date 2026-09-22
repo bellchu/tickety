@@ -1,19 +1,23 @@
 "use client";
 
-import { requirementSnapshotsCurrent } from "@/lib/requirement-workspace";
+import { filterRequirements, requirementSnapshotsCurrent } from "@/lib/requirement-workspace";
 import { requirementErrorMessage } from "@/lib/requirement-errors";
 
 import { useState } from "react";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui";
+import { Field, inputStyle } from "./fields";
 import type { BusinessRequirement, RequirementCrossReview } from "@/lib/requirements-types";
 
 export function CrossReviewPanel({ workspaceId, items, onQuestion }: { workspaceId: string; items: BusinessRequirement[]; onQuestion: (question: string, requirementId: string | null) => void }) {
   const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [pending, setPending] = useState(false);
   const [result, setResult] = useState<RequirementCrossReview | null>(null);
   const [error, setError] = useState("");
+  const matching = filterRequirements(items, search, "all");
+  const chosen = items.filter(item => selected.includes(item.id));
   const stale = Boolean(result && !requirementSnapshotsCurrent(result.requirements, items));
   async function review() {
     if (pending) return;
@@ -26,7 +30,11 @@ export function CrossReviewPanel({ workspaceId, items, onQuestion }: { workspace
     <div className="flex flex-wrap items-center justify-between gap-2"><div><h3 className="text-sm font-semibold">Check how the requirements fit together</h3><p className="mt-1 text-xs text-ink-500">Explore possible conflicts, overlaps and dependencies.</p></div><Button size="sm" variant="secondary" onClick={() => setOpen(!open)}>{open ? "Close cross-check" : "Cross-check scope"}</Button></div>
     {open && <div className="space-y-3">
       <p className="text-xs text-ink-500">Choose 2–8 requirements. AI suggestions do not change scope or sign-off.</p>
-      <div className="max-h-48 space-y-2 overflow-y-auto">{items.map(item => <label key={item.id} className="flex items-start gap-2 text-sm"><input type="checkbox" className="mt-1" checked={selected.includes(item.id)} disabled={pending || (!selected.includes(item.id) && selected.length >= 8)} onChange={event => setSelected(event.target.checked ? [...selected, item.id] : selected.filter(id => id !== item.id))} /><span>{item.reference} · {item.title}{item.priority === "wont" ? " · Not this time" : ""}</span></label>)}</div>
+      <Field label="Find requirements for cross-check"><input type="search" className={inputStyle} value={search} onChange={event => setSearch(event.target.value)} placeholder="Search a reference, outcome or acceptance criterion…" /></Field>
+      <p role="status" className="text-xs text-ink-500">{selected.length} / 8 selected · {matching.length} matching requirements</p>
+      {chosen.length > 0 && <div className="space-y-1" aria-label="Selected requirements for cross-check">{chosen.map(item => <div key={item.id} className="flex items-center justify-between gap-2 rounded-lg bg-linen-100 px-2 py-1 text-xs"><span>{item.reference} · {item.title}{item.priority === "wont" ? " · Not this time" : ""}</span><Button size="sm" variant="ghost" disabled={pending} aria-label={`Remove ${item.reference} from cross-check`} onClick={() => setSelected(selected.filter(id => id !== item.id))}>Remove</Button></div>)}</div>}
+      {matching.length === 0 && <p className="text-xs text-ink-500">No matching requirements. Your selection is kept; change the search to find more.</p>}
+      <div className="max-h-48 space-y-2 overflow-y-auto">{matching.map(item => <label key={item.id} className="flex items-start gap-2 text-sm"><input type="checkbox" className="mt-1" checked={selected.includes(item.id)} disabled={pending || (!selected.includes(item.id) && selected.length >= 8)} onChange={event => setSelected(event.target.checked ? [...selected, item.id] : selected.filter(id => id !== item.id))} /><span>{item.reference} · {item.title}{item.priority === "wont" ? " · Not this time" : ""}</span></label>)}</div>
       <Button size="sm" pending={pending} disabled={pending || selected.length < 2} onClick={review}>Review selected requirements</Button>
       {error && <p role="alert" className="text-sm text-rust-600">{error}</p>}
       {result && <div className="space-y-3">

@@ -237,7 +237,10 @@ views retain their original order for historical review.
 - **Get AI perspective** checks ambiguity, testability, missing context, scope and
   traceability for one requirement.
 - **Cross-check scope** reviews 2–8 selected requirements for conflicts, overlap,
-  dependencies and gaps. Findings cite selected references and reviewed revisions.
+  dependencies and gaps. Search by reference, outcome or acceptance criterion to
+  assemble the discussion scope. Selected requirements stay visible above the
+  search results and can be removed there; changing the search does not alter
+  the selection. Findings cite selected references and reviewed revisions.
   After a refresh reveals changed revisions, rerun the cross-check before tracking
   findings. Multi-requirement findings initially suggest initiative-wide question
   scope; confirm whether that is appropriate.
