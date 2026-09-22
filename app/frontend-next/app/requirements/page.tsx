@@ -154,7 +154,9 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
   const [transition, setTransition] = useState<(() => void) | null>(null);
   const [editing, setEditing] = useState<BusinessRequirement | undefined>(restored?.editing);
   const [showForm, setShowForm] = useState(restored?.showForm || false);
-  const [pending, setPending] = useState("");
+  const [operationPending, setPending] = useState("");
+  const [decisionPending, setDecisionPending] = useState(false);
+  const pending = operationPending || (decisionPending ? "decision" : "");
   const [error, setError] = useState<unknown>(null);
   const [notice, setNotice] = useState(restored ? "Unsaved work restored in this tab. Review it before saving." : "");
   const [reviewing, setReviewing] = useState<BusinessRequirement | null>(restored?.reviewing || null);
@@ -300,7 +302,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
       <div className="max-w-2xl"><p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-cyan-200">Worth your attention</p><h2 className="mt-2 text-lg font-medium">{focus.title}</h2><p className="mt-2 text-sm leading-6 text-slate-200">{focus.reason}</p></div>
       <Button className="shrink-0" variant="secondary" trailingIcon={<ArrowUpRight size={15} />} disabled={Boolean(pending)} onClick={followFocus}>{focus.label}</Button>
     </section>
-    <DecisionLog scope={decisionScope} onScopeChange={setDecisionScope} workspaceId={id} userId={userId} requirements={detail.requirements} decisions={detail.decisions || []} open={decisionsOpen} onToggle={() => setDecisionsOpen(!decisionsOpen)} seed={questionSeed} onSeedUsed={() => setQuestionSeed(null)} onSaved={refreshSavedWorkspace} />
+    <DecisionLog pending={Boolean(pending)} onPendingChange={setDecisionPending} scope={decisionScope} onScopeChange={setDecisionScope} workspaceId={id} userId={userId} requirements={detail.requirements} decisions={detail.decisions || []} open={decisionsOpen} onToggle={() => setDecisionsOpen(!decisionsOpen)} seed={questionSeed} onSeedUsed={() => setQuestionSeed(null)} onSaved={refreshSavedWorkspace} />
     {query.isFetching && <p role="status" className="text-sm text-ink-500">Refreshing saved work… Your unsaved drafts are kept.</p>}
     <ErrorMessage error={error || query.error} />{notice && <p role="status" className="text-sm text-moss-700">{notice}</p>}
     <div className="grid items-start gap-6 xl:grid-cols-[300px_minmax(0,1fr)]">

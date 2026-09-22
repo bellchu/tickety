@@ -115,3 +115,20 @@ The same browser sequence passed after moving passage state into the shared,
 account/workspace/source-scoped tab draft cache. Cache tests additionally cover
 account and initiative isolation and logout clearing. Full reload persistence is
 intentionally unsupported; this check does not claim persistence across reloads.
+
+### Shared save boundary regression
+
+The workspace owns the decision-save flag as well as its main operation flag.
+Their combined pending state gates exports, requirement actions and decision
+forms. Decision saves release that flag only after the request and saved-work
+refresh finish (or error handling finishes). This closes the gap left by the
+initial export guard, which observed only operations started by the page.
+
+`requirement-decision-render.test.js` checks disabled question and restored-answer
+forms against the shared pending state; both checks failed before the state was
+lifted into the workspace. A controlled asynchronous request additionally checks
+that the decision form reports pending immediately and keeps it set until the
+refresh completes. These tests cover component rendering and the save lifecycle;
+they do not simulate another browser tab changing server data. Cross-requirement
+AI analysis remains independent because it produces suggestions without saving
+business records.

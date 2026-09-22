@@ -12,9 +12,10 @@ import { api, APIError } from "@/lib/api";
 import { formatLocalDateTime } from "@/lib/date-time";
 import type { BusinessRequirement, RequirementDecision } from "@/lib/requirements-types";
 
-export function DecisionLog({ workspaceId, userId, requirements, decisions, open, onToggle, scope, onScopeChange, seed, onSeedUsed, onSaved }: {
+export function DecisionLog({ workspaceId, userId, requirements, decisions, open, onToggle, scope, onScopeChange, seed, onSeedUsed, onSaved, pending, onPendingChange }: {
   workspaceId: string; userId: string; requirements: BusinessRequirement[]; decisions: RequirementDecision[];
   open: boolean; onToggle: () => void;
+  pending: boolean; onPendingChange: (pending: boolean) => void;
   scope: string; onScopeChange: (value: string) => void;
   seed: { question: string; requirementId: string | null } | null;
   onSeedUsed: () => void; onSaved: () => Promise<unknown>;
@@ -28,7 +29,6 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
   const [blocking, setBlocking] = useState(restored?.blocking ?? true);
   const [resolving, setResolving] = useState(restored?.resolving || "");
   const [resolution, setResolution] = useState(restored?.resolution || "");
-  const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const [view, setView] = useState<DecisionFilter>("open");
   const [search, setSearch] = useState("");
@@ -61,7 +61,7 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
   async function save(operation: () => Promise<unknown>, done: () => void) {
     if (pending) return;
     const isCurrent = captureRequirementDraftSave(client, userId, workspaceId, "decision");
-    setPending(true); setError("");
+    onPendingChange(true); setError("");
     try { await operation(); if (isCurrent()) done(); await onSaved(); }
     catch (caught) {
       setError(requirementErrorMessage(caught));
@@ -69,7 +69,7 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
         try { await onSaved(); } catch { /* Keep the original conflict and the draft available. */ }
       }
     }
-    finally { setPending(false); }
+    finally { onPendingChange(false); }
   }
   const outstanding = useMemo(() => decisions.filter(item => item.status === "open"), [decisions]);
   const visibleDecisions = useMemo(() => filterDecisions(decisions, view, search, resolving, scope), [decisions, view, search, resolving, scope]);
