@@ -2,7 +2,7 @@
 import json
 from typing import Annotated, Literal
 
-from pydantic import Field, StringConstraints
+from pydantic import Field, StringConstraints, field_validator
 
 from .ai_input import canonical_bounded_json, prompt_char_limit, validate_semantic_advice, UnsafeAIAdviceError
 from .llm_manager import LLMInvalidOutputError, LLMUnavailableError
@@ -39,6 +39,12 @@ class CrossFinding(InputModel):
     references: list[Annotated[str, StringConstraints(pattern=r"^REQ-[0-9]{3}$")]] = Field(min_length=1, max_length=8)
     finding: Suggestion
     question: Suggestion
+
+    @field_validator("references")
+    @classmethod
+    def distinct_references(cls, references: list[str]) -> list[str]:
+        # Repeated citations do not expand the affected business scope.
+        return list(dict.fromkeys(references))
 
 
 class CrossReviewSuggestions(InputModel):

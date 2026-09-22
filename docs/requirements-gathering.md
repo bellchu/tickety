@@ -240,7 +240,9 @@ views retain their original order for historical review.
   dependencies and gaps. Search by reference, outcome or acceptance criterion to
   assemble the discussion scope. Selected requirements stay visible above the
   search results and can be removed there; changing the search does not alter
-  the selection. Findings cite selected references and reviewed revisions.
+  the selection. Findings cite selected references and reviewed revisions. Repeated
+  citations are deduplicated in their original order so a single-requirement finding
+  keeps its specific question scope.
   After a refresh reveals changed revisions, rerun the cross-check before tracking
   findings. Multi-requirement findings initially suggest initiative-wide question
   scope; confirm whether that is appropriate.

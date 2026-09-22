@@ -752,6 +752,25 @@ class RequirementGatheringTests(unittest.TestCase):
         with self.sessions() as db:
             self.assertEqual(db.query(AIUsageEventRecord).count(), 1)
 
+    def test_cross_review_deduplicates_references_before_suggesting_decision_scope(self):
+        self.user.role = "admin"
+        workspace = self.workspace()
+        source = self.source(workspace)
+        base = f"{self.path}/{workspace}"
+        first = self.client.post(base + "/items", json=self.payload(source)).json()
+        second = self.client.post(base + "/items", json={**self.payload(source), "title": "Track exceptions"}).json()
+        findings = [
+            {"category": "scope_gap", "references": ["REQ-001", "REQ-001"], "finding": "An exception path needs clarification.", "question": "Who owns the exception path for this requirement?"},
+            {"category": "dependency", "references": ["REQ-002", "REQ-001", "REQ-002"], "finding": "The requirements may share a receipt.", "question": "Should these requirements share the same receipt?"},
+        ]
+        with patch.object(main, "llm_mgr", self.ai_manager({"findings": findings})):
+            response = self.client.post(base + "/cross-review", json={"requirement_ids": [first["id"], second["id"]]}, headers={"Origin": "http://testserver"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual([finding["references"] for finding in response.json()["findings"]], [["REQ-001"], ["REQ-002", "REQ-001"]])
+        detail = self.client.get(base).json()
+        self.assertEqual(detail["decisions"], [])
+        self.assertEqual([item["revision"] for item in detail["requirements"]], [1, 1])
+
     def test_cross_review_rejects_cross_workspace_selection_and_invented_references(self):
         self.user.role = "admin"
         workspace = self.workspace()
