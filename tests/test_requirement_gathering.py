@@ -193,6 +193,19 @@ class RequirementGatheringTests(unittest.TestCase):
         self.user.id = "other"
         self.assertEqual(self.client.post(f"{self.path}/{workspace}/email-preview", json=payload).status_code, 404)
 
+    def test_word_preview_is_private_and_needs_explicit_source_save(self):
+        from tests.test_requirement_docx import document
+        workspace = self.workspace()
+        payload = {"content_base64": document("<w:p><w:r><w:t>Confirm receipt within thirty seconds.</w:t></w:r></w:p>")}
+        url = f"{self.path}/{workspace}/docx-preview"
+        response = self.client.post(url, json=payload)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn("Confirm receipt", response.json()["content"])
+        self.assertEqual(self.client.get(f"{self.path}/{workspace}").json()["sources"], [])
+        self.assertEqual(self.client.post(url, json={"content_base64": "invalid"}).status_code, 422)
+        self.user.id = "other"
+        self.assertEqual(self.client.post(url, json=payload).status_code, 404)
+
     def ai_manager(self, result):
         return SimpleNamespace(is_mock=False, prompt_char_limit=4000, model_name="test/configured-provider", analyze=AsyncMock(return_value=result))
 

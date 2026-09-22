@@ -45,7 +45,7 @@ class SourceCreate(InputModel):
     content: Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=100000)]
 
 
-class EmailPreviewInput(InputModel):
+class FilePreviewInput(InputModel):
     content_base64: Annotated[str, StringConstraints(min_length=1, max_length=533336)]
 
 
@@ -217,8 +217,17 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
         db.refresh(row)
         return row
 
+    @router.post("/{workspace_id}/docx-preview")
+    def docx_preview(workspace_id: str, data: FilePreviewInput, db: Session = Depends(get_db), user: UserRecord = Depends(require_user)):
+        from .requirement_docx import preview_docx
+        workspace(db, workspace_id, user)
+        try:
+            return preview_docx(data.content_base64)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
     @router.post("/{workspace_id}/email-preview")
-    def email_preview(workspace_id: str, data: EmailPreviewInput, db: Session = Depends(get_db), user: UserRecord = Depends(require_user)):
+    def email_preview(workspace_id: str, data: FilePreviewInput, db: Session = Depends(get_db), user: UserRecord = Depends(require_user)):
         from .requirement_email import preview_email
         workspace(db, workspace_id, user)
         try:

@@ -13,8 +13,8 @@ Human sign-off and evidence requirements remain enforced by the backend.
 
 - Record the business objective and gather business documents, emails, SOPs,
    and meeting transcripts. Paste text or import UTF-8 TXT, Markdown, VTT, or SRT files. EML
-   import decodes MIME email headers and body into a reviewable text preview. The first release accepts text only; PDF and Word conversion
-   are not yet available. Each source is immutable and retains a SHA-256 digest.
+   import decodes MIME email headers and body into a reviewable text preview. DOCX import extracts document body text and table rows. PDF
+   extraction, scanned documents and older DOC files are not yet supported. Each source is immutable and retains a SHA-256 digest.
 - Create a requirement from an exact excerpt of a saved source. Give it a
    stakeholder, required capability, business outcome, priority, and observable
    acceptance criteria. Requirements receive stable initiative-local `REQ-001`
@@ -80,3 +80,12 @@ Encoding failures reject the preview instead of silently replacing characters.
 Review conversion warnings and the text before saving. Previewing does not store
 an evidence source or call an AI provider; the saved evidence digest covers the
 confirmed text, not the original EML bytes.
+
+DOCX preview uses the same explicit review-and-save flow. It reads only the Word
+body part in memory, with a 400 KB package limit, a 2 MB decompressed body limit,
+100,000 extracted characters, and bounded XML depth and element count. It rejects
+entity declarations, encrypted packages and duplicate ZIP entries. Table cells
+are separated with `|`; original layout and automatic numbering are not retained.
+Headers, footers, images, notes and comments are excluded with a visible warning.
+Tracked insertions are included and deletions excluded; their presence produces
+a version-confirmation warning. No macros, embedded objects or links are run.
