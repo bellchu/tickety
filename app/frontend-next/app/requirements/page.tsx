@@ -25,7 +25,7 @@ import { DecisionLog } from "@/components/requirements/DecisionLog";
 import { AIRequirementReview } from "@/components/requirements/AIRequirementReview";
 import { AcceptanceCriteriaEditor } from "@/components/requirements/AcceptanceCriteriaEditor";
 import { RequirementCard } from "@/components/requirements/RequirementCard";
-import { filterSources, orderRequirements, type RequirementOrder, reviewUnavailableReason, sourceRequirementCounts, blockedRequirementIds, filterRequirements, workspaceFocus, type RequirementFilter } from "@/lib/requirement-workspace";
+import { type SourceReviewFilter, filterSources, orderRequirements, type RequirementOrder, reviewUnavailableReason, sourceRequirementCounts, blockedRequirementIds, filterRequirements, workspaceFocus, type RequirementFilter } from "@/lib/requirement-workspace";
 import { api, APIError } from "@/lib/api";
 import type { SourceKind, BusinessRequirement, GatherSuggestions, RequirementAssistance, RequirementDraft, RequirementPriority, RequirementWorkspaceDetail } from "@/lib/requirements-types";
 import { Button, ConfirmDialog } from "@/components/ui";
@@ -147,7 +147,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
   const [sourceFocus, setSourceFocus] = useState<{ sourceId: string; quote: string; reference: string }>();
   const [sourceSearch, setSourceSearch] = useState("");
   const [sourceKindFilter, setSourceKindFilter] = useState<SourceKind | "">("");
-  const [unlinkedOnly, setUnlinkedOnly] = useState(false);
+  const [sourceReviewFilter, setSourceReviewFilter] = useState<SourceReviewFilter>("all");
   const [sourceViewing, setSourceViewing] = useState("");
   const [listWindow, setListWindow] = useState({ key: "", limit: 20 });
   const [order, setOrder] = useState<RequirementOrder>("recorded");
@@ -190,9 +190,9 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
   const visibleLimit = listWindow.key === listKey ? listWindow.limit : 20;
   const displayedItems = visibleItems.slice(0, visibleLimit);
   const sourceQuery = sourceSearch.trim().toLocaleLowerCase();
-  const visibleSources = useMemo(() => filterSources(detail?.sources || [], sourceQuery, sourceKindFilter, unlinkedOnly, sourceCounts), [detail?.sources, sourceQuery, sourceKindFilter, unlinkedOnly, sourceCounts]);
+  const visibleSources = useMemo(() => filterSources(detail?.sources || [], sourceQuery, sourceKindFilter, sourceReviewFilter, sourceCounts), [detail?.sources, sourceQuery, sourceKindFilter, sourceReviewFilter, sourceCounts]);
   function revealSource(sourceId: string) {
-    setSourceSearch(""); setSourceKindFilter(""); setUnlinkedOnly(false); setSourceViewing(sourceId);
+    setSourceSearch(""); setSourceKindFilter(""); setSourceReviewFilter("all"); setSourceViewing(sourceId);
   }
   const dirty = showForm && JSON.stringify([draft, criteria]) !== draftBaseline;
   const unsaved = dirty || Boolean(reviewing && reviewNote.trim());
@@ -329,9 +329,9 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
         {detail.sources.length > 0 && <div className="space-y-2">
           <Field label="Find evidence by title"><input type="search" className={inputStyle} value={sourceSearch} onChange={event => setSourceSearch(event.target.value)} /></Field>
           <Field label="Filter evidence by type"><select className={inputStyle} value={sourceKindFilter} onChange={event => setSourceKindFilter(event.target.value as SourceKind | "")}><option value="">All source types</option>{Object.entries(kinds).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field>
-          <label className="flex items-center gap-2 text-xs text-ink-500"><input type="checkbox" checked={unlinkedOnly} onChange={event => setUnlinkedOnly(event.target.checked)} />Without linked requirements</label>
-          {(sourceQuery || sourceKindFilter || unlinkedOnly) && <p role="status" className="text-xs text-ink-400">{visibleSources.length} of {detail.sources.length} sources shown. Supporting context does not need a requirement.</p>}
-          {visibleSources.length === 0 && <Button size="sm" variant="ghost" onClick={() => { setSourceSearch(""); setSourceKindFilter(""); setUnlinkedOnly(false); }}>Show all evidence</Button>}
+          <Field label="Show evidence"><select className={inputStyle} value={sourceReviewFilter} onChange={event => setSourceReviewFilter(event.target.value as SourceReviewFilter)}><option value="all">All evidence</option><option value="unreviewed">Needs exploration</option><option value="background">Kept as background</option><option value="linked">Linked to requirements</option><option value="unlinked">Without linked requirements</option></select></Field>
+          {(sourceQuery || sourceKindFilter || sourceReviewFilter !== "all") && <p role="status" className="text-xs text-ink-400">{visibleSources.length} of {detail.sources.length} sources shown. Supporting context does not need a requirement.</p>}
+          {visibleSources.length === 0 && <Button size="sm" variant="ghost" onClick={() => { setSourceSearch(""); setSourceKindFilter(""); setSourceReviewFilter("all"); }}>Show all evidence</Button>}
         </div>}
         {visibleSources.map(item => <div key={item.id} className="space-y-3 rounded-xl border border-linen-400 bg-white p-4">
           <button className="w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-clay-400" onClick={() => setSourceViewing(sourceViewing === item.id ? "" : item.id)}>

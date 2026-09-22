@@ -8,11 +8,20 @@ function searchableText(value: string) {
   return value.trim().replace(/\s+/g, " ").toLocaleLowerCase();
 }
 
-export function filterSources(items: RequirementSource[], search: string, kind: SourceKind | "", unlinkedOnly: boolean, linkedCounts: ReadonlyMap<string, number>) {
+export type SourceReviewFilter = "all" | "unreviewed" | "background" | "linked" | "unlinked";
+
+export function filterSources(items: RequirementSource[], search: string, kind: SourceKind | "", review: SourceReviewFilter, linkedCounts: ReadonlyMap<string, number>) {
   const query = searchableText(search);
-  return items.filter(item => (!kind || item.kind === kind)
-    && (!query || searchableText(item.title).includes(query))
-    && (!unlinkedOnly || !linkedCounts.get(item.id)));
+  return items.filter(item => {
+    if (kind && item.kind !== kind) return false;
+    const linked = Boolean(linkedCounts.get(item.id));
+    const reviewed = Boolean(item.context_reviewed_at);
+    if (review === "unreviewed" && (linked || reviewed)) return false;
+    if (review === "background" && !reviewed) return false;
+    if (review === "linked" && !linked) return false;
+    if (review === "unlinked" && linked) return false;
+    return !query || searchableText(item.title).includes(query);
+  });
 }
 
 /** Put unresolved approval gates first, retaining recorded order within both groups. */

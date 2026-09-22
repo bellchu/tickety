@@ -278,7 +278,7 @@ test('source filters combine origin, title and missing links while preserving re
     { id: 's4', kind: 'transcript', title: 'Interview notes' },
   ];
   const links = new Map([['s1', 2], ['s2', 1]]);
-  const select = (search, kind, unlinked) => library.filterSources(sources, search, kind, unlinked, links).map(source => source.id);
+  const select = (search, kind, unlinked) => library.filterSources(sources, search, kind, unlinked ? "unlinked" : "all", links).map(source => source.id);
   assert.deepEqual(select(' SUPPLIER intake ', 'email', false), ['s2', 's3']);
   assert.deepEqual(select('supplier intake', 'email', true), ['s3']);
   assert.deepEqual(select('', 'transcript', true), ['s4']);
@@ -322,4 +322,23 @@ test('reviewed supporting context stops repeated exploration prompts without bec
   assert.equal(workspaceFocus(detail([], [reviewed, { id: 's2', title: 'New evidence' }])).sourceId, 's2');
   assert.equal(workspaceFocus(detail([{ ...item, source_id: 's1', priority: 'must' }], [reviewed])).action, 'review');
   assert.equal(workspaceFocus(detail([{ ...item, priority: 'wont' }], [reviewed])).action, 'deferred');
+});
+
+
+test('evidence review views distinguish unexamined context, background and linked needs', () => {
+  const sources = [
+    { id: 'new', title: 'Intake conversation', kind: 'transcript' },
+    { id: 'background', title: 'Intake background', kind: 'email', context_reviewed_at: '2026-09-22' },
+    { id: 'linked', title: 'Operations SOP', kind: 'sop' },
+    { id: 'both', title: 'Intake history', kind: 'email', context_reviewed_at: '2026-09-22' },
+  ];
+  const counts = new Map([['linked', 2], ['both', 1]]);
+  const ids = (view, search = '', kind = '') => library.filterSources(sources, search, kind, view, counts).map(source => source.id);
+  assert.deepEqual(ids('unreviewed'), ['new']);
+  assert.deepEqual(ids('background'), ['background', 'both']);
+  assert.deepEqual(ids('linked'), ['linked', 'both']);
+  assert.deepEqual(ids('unlinked'), ['new', 'background']);
+  assert.deepEqual(ids('background', 'history', 'email'), ['both']);
+  assert.deepEqual(ids('unreviewed', '', 'email'), []);
+  assert.deepEqual(ids('all'), ['new', 'background', 'linked', 'both']);
 });

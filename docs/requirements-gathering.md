@@ -73,8 +73,11 @@ wording is not merged; another initiative has its own private sources.
 
 Use **Filter evidence by type** to review documents, emails, SOPs or transcripts
 separately. Combine it with title search and **Without linked requirements** to
-find material that still needs attention. Unlinked context is not automatically
-missing work. Opening original evidence from a requirement clears these evidence
+find material that still needs attention. **Show evidence** also provides **Needs
+exploration** (no linked needs and no background review), **Kept as background**
+and **Linked to requirements**. These views combine with type and title search.
+A background source can later support a requirement and appear in both relevant
+views. Unlinked context is not automatically missing work. Opening original evidence from a requirement clears these evidence
 filters so the cited source remains visible; **Show all evidence** also resets them.
 
 After reviewing material that supplies background rather than a new requirement,
