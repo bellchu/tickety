@@ -1,172 +1,148 @@
 # Requirements gathering for business operations
 
-Open **Work → Requirements** to start an approved project/request or an
-enhancement initiative. Initiatives are visible to their creator and active
-administrators. A real operations session is required, including in demo mode.
+Open **Work → Requirements** and create an approved project/request or enhancement
+initiative with a concrete business objective. A real, active operations session
+is required, including in demo mode. An initiative is visible to its creator and
+active administrators. Its bookmarkable `?initiative=` address does not grant access.
 
-The workspace keeps evidence, business decisions, and delivery stories together.
-Its suggested focus responds to missing evidence, unresolved quality findings,
-reviewable drafts, new sources, and agreed work awaiting a story. These are
-contextual recommendations; users can revisit any material. Search and readiness
-filters help focus attention without forcing everyone through numbered stages.
-Human sign-off and evidence requirements remain enforced by the backend.
-Opening an initiative gives it a bookmarkable `?initiative=` address. Refresh and
-browser history preserve the selected initiative; the address does not grant
-access to users who cannot already view it.
+## Choose the next useful action
 
-- Record the business objective and gather business documents, emails, SOPs,
-   and meeting transcripts. Paste text or import UTF-8 TXT, Markdown, VTT, or SRT files. EML
-   import decodes MIME email headers and body into a reviewable text preview. DOCX import extracts document body text and table rows. PDF import extracts selectable text with page markers. Scanned documents
-   need OCR or transcription first; older DOC files are not supported. Each source is immutable and retains a SHA-256 digest.
-- Create a requirement from an exact excerpt of a saved source. Give it a
-   stakeholder, required capability, business outcome, priority, and observable
-   acceptance criteria. Requirements receive stable initiative-local `REQ-001`
-   identifiers. Incomplete requirements can be saved as drafts.
-- Resolve the quality-check findings, then sign off in a business capacity:
-   Product Owner, Business Stakeholder, Technical Business Analyst, or DTL.
-   This capacity describes the review; it does not grant application permissions.
-   The signed-in reviewer, note, time, and requirement revision are recorded.
-   Automated checks never replace a person's decision.
-- Create a `US-001` user story from the validated requirement. The source,
-   requirement reference, validated revision, and acceptance criteria remain
-   linked. Editing a requirement invalidates its sign-off and removes its
-   generated story until reviewed again.
-- Export the BRD as Markdown for development handoff. It contains the business
-   objective, evidence register, documented requirements, functional capability
-   and acceptance criteria, outstanding clarifications, sign-off, and stories.
-   No Jira tickets or external communications are created by this workflow.
+The workspace connects evidence, business questions, agreed requirements and
+stories. **Worth your attention** recommends work from the current state, including
+missing material, blocking questions, incomplete drafts, reviewable requirements
+and agreed work awaiting a story. It is guidance, not a sequence of mandatory screens.
+Search and the readiness filters let you return to any part of the work.
 
-Each initiative is bounded to 50 sources (100,000 characters each) and 200
-requirements. Concurrent edits use revision checks; a stale editor receives a
-conflict instead of silently overwriting someone else's changes.
+| What you know now | Useful action | What must remain explicit |
+| --- | --- | --- |
+| The outcome is unclear | State the business objective and raise a stakeholder question | Who should answer and which scope is affected |
+| A document describes the need | Save the relevant material, then capture a requirement from an exact excerpt | The source and the observable business outcome |
+| Requirements may conflict | Cross-check selected requirements and track a finding for discussion | AI findings are suggestions, not decisions |
+| A decision is still needed | Record a blocking or exploratory question | Whether agreement must wait for the answer |
+| The scope is understood | Review quality findings and obtain human sign-off | Reviewer, review capacity, rationale and revision |
+| Agreed work is ready for delivery | Prepare a story, copy it or export the BRD | Traceability and any remaining exploratory questions |
+| A need belongs to a later phase | Set priority to **Not this time** | Keep its evidence without presenting it as delivery ready |
 
-## AI assistance
+For example, a supplier SOP might require acknowledgement within thirty seconds,
+while an interview leaves failure ownership unclear. Capture the acknowledgement
+requirement and track the ownership question. If the answer is necessary to agree
+that requirement, make it blocking and link it to that requirement. Record the
+answer, revise the acceptance criteria if needed, and obtain sign-off. A later
+email can add evidence and reopen discussion without restarting the whole initiative.
+If it changes agreed scope, edit the requirement and review the new revision.
 
-AI gather analyzes one selected source and proposes up to eight requirements with
-exact source excerpts. Candidates with unverifiable excerpts are excluded. The
-interface discloses truncated sources, discarded candidates, assumptions, and
-stakeholder questions. Review a candidate in the editable requirement form
-before saving it; nothing is automatically added or signed off.
+## Bring evidence into the workspace
 
-AI review checks ambiguity, testability, missing context, scope, and traceability.
-AI story refinement proposes clearer wording and acceptance criteria after sign-off.
-Accepting a refinement opens a revised draft, so changes require human review again.
+Paste text or import UTF-8 TXT, Markdown, VTT or SRT; EML emails; DOCX documents;
+or PDFs with selectable text. Preview and review the conversion before choosing
+**Save source**. Previewing neither saves an evidence source nor calls AI.
+Scanned PDFs need OCR or transcription first; older DOC files are not supported.
+Review warnings about missing images, formatting, tables or tracked changes.
 
-All three actions use the configured provider, existing secret redaction,
-structured-output validation, and durable per-user AI budgets. No synthetic
-responses are presented when a provider is unavailable. Real sessions and explicit
-request origins are required; local demo AI additionally requires an administrator.
-Source bodies are loaded only when reading or analyzing that source, not with every
-workspace overview refresh.
+Saved sources are immutable. Their SHA-256 digest identifies the confirmed text,
+not the original uploaded file. Changed text becomes a separate source. Reimporting
+identical confirmed text into the same initiative reuses the original source,
+including its title, type and requirement links, even at the source limit. Similar
+wording is not merged; another initiative has its own private sources.
 
-## Questions and decisions
+## Shape and review a requirement
 
-Track stakeholder questions and assumptions in the decision log, including an
-answer owner and either one affected requirement or the whole initiative.
-AI gathering and review questions can be copied into this log for human review.
-The owner is a follow-up label, not an access grant or automated notification.
+Each requirement links to one exact excerpt from a saved source. Add a stakeholder,
+capability, business outcome, priority and observable acceptance criteria. Incomplete
+work can be saved as a draft with a stable initiative-local reference such as
+`REQ-001`. Quality checks flag missing detail, vague wording and duplicate criteria.
 
-Blocking questions reopen affected requirements, withdraw their generated stories,
-and prevent sign-off until answered. Initiative-wide blockers also apply to future
-requirements. Exploratory questions do not block agreement. An answer records the
-signed-in author, time, and rationale; it cannot overwrite a prior resolution.
-Changed circumstances require a new question. Resolving a blocker never restores
-sign-off automatically: revise the scope if needed, then obtain a fresh review.
-The BRD includes open questions and recorded decisions. Each workspace holds at
-most 200 decision records.
+Saving a new requirement whose source and all business fields exactly match an
+existing one reuses that record. The interface names it; its sign-off, story and
+history remain intact. This works at the 200-requirement limit. Different fields,
+criteria, priorities or initiative scope remain separate requirements. This reuse
+applies to new capture, not to edits of an existing record.
 
-EML previews are bounded to 400 KB and 100,000 extracted characters, with MIME
-nesting and part-count limits. They retain subject, sender, recipients and date,
-prefer plain text over duplicate HTML alternatives, and exclude attachments and
-attached messages. HTML is converted to inert text without fetching resources.
-Encoding failures reject the preview instead of silently replacing characters.
-Review conversion warnings and the text before saving. Previewing does not store
-an evidence source or call an AI provider; the saved evidence digest covers the
-confirmed text, not the original EML bytes.
+Sign-off requires complete quality checks, no applicable open blocking questions,
+and active delivery scope. Review capacity can be Product Owner, Business Stakeholder,
+Technical Business Analyst or DTL; this label does not grant application permissions.
+The signed-in reviewer, note, time and revision are recorded. Automated checks and
+AI never replace that person's decision.
 
-DOCX preview uses the same explicit review-and-save flow. It reads only the Word
-body part in memory, with a 400 KB package limit, a 2 MB decompressed body limit,
-100,000 extracted characters, and bounded XML depth and element count. It rejects
-entity declarations, encrypted packages and duplicate ZIP entries. Table cells
-are separated with `|`; original layout and automatic numbering are not retained.
-Headers, footers, images, notes and comments are excluded with a visible warning.
-Tracked insertions are included and deletions excluded; their presence produces
-a version-confirmation warning. No macros, embedded objects or links are run.
+Editing a requirement withdraws its current sign-off and story. Concurrent edits
+use revision checks: stale work receives a conflict instead of overwriting newer
+changes. Use **History** to compare earlier wording, agreement and stories. Copying
+old wording into a new edit still requires fresh sign-off; history itself is read-only.
 
-## Delivery scope
+## Resolve business questions
 
-The **Not this time** priority preserves a requirement for future consideration.
-It stays searchable and has its own filter, but is excluded from current review
-and delivery suggestions. Questions tied only to deferred requirements do not
-supersede actionable work in the suggested focus; initiative-wide blockers remain
-relevant. Sign-off, story creation and AI story refinement reject deferred scope.
-Changing its priority back to Must/Should/Could reopens the normal review path.
-Changing any agreed requirement to Not this time withdraws its current agreement
-and story through the same revision mechanism. BRD exports retain deferred needs
-and evidence, clearly label their scope, and exclude their stories from handoff.
+A question records an answer owner and either one affected requirement or the whole
+initiative. The owner is a follow-up label, not a notification or access grant.
 
-PDF preview runs in a separate process: at most two concurrent parsers per API
-process, 50 pages, 400 KB input, 2 MB decoded content per page and 100,000 output
-characters. A parent watchdog terminates workers after ten seconds or above
-256 MiB resident memory; Linux additionally enforces a 256 MiB address-space
-limit, and both Linux/macOS apply a five-second CPU limit. macOS memory checking
-is sampled, so transient peaks can exceed the threshold before termination.
-Encrypted files are rejected. Pages without extractable text are listed explicitly,
-and all-empty PDFs are rejected rather than silently creating empty evidence.
-This is text extraction, not OCR; reading order, tables and symbols need review.
+A blocking question reopens affected requirements, withdraws their stories and
+prevents sign-off until answered. Initiative-wide blockers also apply to future
+requirements. Exploratory questions do not block agreement. Recording an answer
+retains its author, time and rationale; an earlier resolution cannot be overwritten.
+Changed circumstances require a new question. Answering a blocker does not restore
+sign-off automatically: update the requirement if needed and obtain a fresh review.
 
-## Requirement history
+AI questions can prefill the log for human review. Choose the owner, affected scope
+and blocking status before saving. Replacing an unfinished question, or switching
+away from an unfinished answer, asks whether to keep or discard the draft.
 
-Each requirement has a read-only History view with before/after values, action,
-revision, actor and time. Creation, editing, sign-off, story preparation and
-reopening by a blocking question are recorded in the same database transaction
-as the business change. A failed history write prevents the change from committing.
-Older sign-offs and stories therefore remain inspectable after current agreement
-is withdrawn. History is private to the same workspace access boundary and loaded
-only on request in pages of ten events. There is no history-edit or delete API.
-For requirements created before this feature, the first later change captures
-its previous state; earlier actions are not invented or backfilled. Earlier wording
-can be copied into a new edit, which still requires fresh sign-off.
+## Use AI where it helps
 
-Reimporting identical confirmed text into the same initiative reuses the existing
-source, including its original title, type and evidence links. The interface names
-the reused source and opens it for inspection. This also works at the 50-source
-limit. Changed text creates a separate immutable version; matching text in another
-initiative remains a separate private source. Matching uses a digest followed by
-an exact text comparison after normal input trimming; it does not merge similar
-wording or silently replace earlier evidence.
+- **Explore with AI** proposes up to eight requirements from one source. Unverifiable
+  excerpts are excluded. Review assumptions, questions and truncation notices before
+  adopting a candidate. No requirement is saved automatically.
+- **Focus on a passage** analyzes a continuous exact passage from a long source.
+  Select or paste it from the saved text. Invalid passages never reach the provider;
+  passage suggestions keep the original source link. Explore other sections separately.
+- **Get AI perspective** checks ambiguity, testability, missing context, scope and
+  traceability for one requirement.
+- **Cross-check scope** reviews 2–8 selected requirements for conflicts, overlap,
+  dependencies and gaps. Findings cite selected references and reviewed revisions.
+  After a refresh reveals changed revisions, rerun the cross-check before tracking
+  findings. Multi-requirement findings initially suggest initiative-wide question
+  scope; confirm whether that is appropriate.
+- Story refinement proposes alternate wording after sign-off. Adopting it opens a
+  revised draft, so saving it requires another human sign-off before delivery.
 
-History is ordered by the requirement's monotonically increasing revision rather
-than wall-clock timestamps. A unique `(requirement_id, revision)` index both serves
-this ordering and rejects duplicate revision events. Existing history is preserved
-by the index migration; inconsistent duplicate data makes the migration fail
-rather than silently discarding audit evidence.
+AI suggestions are not proof of completeness or consistency. All assistance uses
+the configured provider, redaction and per-user budgets. Provider failures or budget
+limits leave manual work available; the product does not substitute synthetic answers.
 
-For long sources, expand the saved text and select or paste a continuous passage
-into **Focus on a passage**. The server verifies it matches the immutable source
-before reserving AI budget. Only that passage (plus initiative objective and source
-title) is sent through the existing redaction and prompt limits. Suggestions are
-labelled as passage-scoped and retain the original source link. Invalid passages
-never reach the provider. Explore later sections separately when a full-source
-analysis was truncated; neither mode claims complete document coverage.
+## Move between tasks without losing drafts
 
-## Cross-requirement review
+Unsaved requirement edits, sign-off notes, material text and decision drafts are kept
+in the current tab's memory, separately by account and initiative. Side navigation,
+**All initiatives** and browser history can leave the workspace; returning restores
+that work. Saving or explicitly discarding clears the corresponding draft. Replacing
+an active requirement editor asks before discarding changes.
 
-Choose 2–8 requirements in **Cross-check scope** to ask the configured AI provider
-about contradictions, overlap, dependencies and scope gaps. Each selected item
-has its own bounded, redacted input field so long items do not replace the other
-selected references. Findings may cite only selected references and include the
-reviewed revision numbers. The interface warns about partial input and disables
-tracking findings if locally refreshed requirement revisions have changed.
-A finding can prefill a question in the decision log; the user still confirms its
-answer owner, affected scope and whether it blocks sign-off. Multi-requirement
-findings default to initiative scope for that confirmation. No findings are saved,
-merged, signed off or treated as proof of consistency automatically.
+This is not a server save or persistent browser storage. Refreshing or closing the
+page loses these drafts if you proceed past the browser warning. Signing out clears
+them. Save important work before leaving the session. File selection and an extraction
+still in progress are not recovered; completed preview text is retained.
 
-**Copy story** prepares a self-contained Markdown handoff: story and acceptance
-criteria, business objective, initiative and requirement references, signed-off
-revision, evidence excerpt and text digest, reviewer details, and relevant open
-questions. It includes initiative-wide questions plus questions linked to that
-requirement, while excluding resolved or unrelated questions. Deferred and unsigned
-requirements cannot produce this handoff. Copying writes only to the clipboard;
-it does not create a ticket or send a message to a delivery system.
+If a save's outcome is uncertain after a network error, use the workspace **Refresh**
+button to check saved records before retrying. That refresh retains the editor; a
+full browser reload does not. Restored edits retain their original revision checks.
+If another person has already resolved a question, unsubmitted answer notes remain
+available to copy or discard rather than overwriting the recorded decision.
+
+## Keep delivery scope and traceability clear
+
+**Not this time** preserves future needs and their evidence. They remain searchable
+and appear in BRD exports, but cannot be signed off or produce delivery stories.
+Changing an agreed requirement to this priority withdraws its agreement and story;
+changing back to Must/Should/Could reopens review. Questions linked only to deferred
+needs do not displace actionable work in the suggested focus; initiative-wide
+blockers remain relevant.
+
+Prepare a `US-001` story from a signed-off requirement. **Copy story** provides Markdown
+with acceptance criteria, objective, initiative and requirement references, signed
+revision, source excerpt and digest, reviewer details and relevant open questions.
+Resolved or unrelated questions and deferred or unsigned stories are excluded.
+
+**Export BRD** includes the objective, evidence register, requirements, capabilities,
+acceptance criteria, clarifications, decisions, sign-offs and eligible stories. Copy
+and export do not create Jira tickets or send messages to a delivery system.
+
+See [runtime boundaries](requirements-runtime.md) for import limits, audit behavior,
+AI admission and capacity constraints.
