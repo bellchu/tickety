@@ -346,7 +346,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
         {filter === "agreed" && <p className="text-xs text-ink-500">These requirements are signed off and have no blocking business questions. Prepare their user stories for delivery-team review.</p>}
         {sourceFilter && <div role="status" className="flex flex-wrap items-center gap-2 text-xs text-ink-500"><span>{visibleItems.length} matching requirements from {sourceNames.get(sourceFilter) || "the selected source"}.</span><Button size="sm" variant="ghost" onClick={() => setSourceFilter("")}>Show all sources</Button></div>}
     {canAI && detail.requirements.length >= 2 && <CrossReviewPanel workspaceId={id} items={detail.requirements} onQuestion={trackQuestion} />}
-    {historyItem && <RequirementHistoryPanel key={historyItem} workspaceId={id} itemId={historyItem} revision={detail.requirements.find(item => item.id === historyItem)?.revision || 0} onClose={() => setHistoryItem(null)} />}
+    {historyItem && <RequirementHistoryPanel sourceNames={sourceNames} key={historyItem} workspaceId={id} itemId={historyItem} revision={detail.requirements.find(item => item.id === historyItem)?.revision || 0} onClose={() => setHistoryItem(null)} />}
     {gathered && <section className={`${panelStyle} space-y-4`} aria-label="AI gathering suggestions">
       <div className="flex items-center justify-between gap-3"><h2 className="font-semibold">AI gathering suggestions</h2><Button variant="ghost" onClick={() => setGathered(null)}>Dismiss suggestions</Button></div>
       <p className="text-xs text-ink-400">{gathered.model} · {detail.sources.find(item => item.id === gathered.source_id)?.title}</p>

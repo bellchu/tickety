@@ -12,8 +12,9 @@ import { Button } from "@/components/ui";
 import type { BusinessRequirement } from "@/lib/requirements-types";
 
 const labels: Record<string, string> = { created: "Requirement captured", edited: "Requirement revised", signed_off: "Business sign-off", story_created: "Story prepared", blocked: "Reopened by a blocking question" };
-function value(item: unknown, field: keyof BusinessRequirement): string {
+function value(item: unknown, field: keyof BusinessRequirement, sourceNames: Map<string, string>): string {
   if (item === null || item === undefined || item === "") return "—";
+  if (field === "source_id") return `${sourceNames.get(String(item)) || "Source unavailable"} (${String(item)})`;
   if (field === "priority") return (priorities as Record<string, string>)[String(item)] || String(item);
   if (field === "status") return item === "validated" ? "Signed off" : "Draft";
   if (field === "validated_at") return formatLocalDateTime(String(item));
@@ -25,7 +26,7 @@ function value(item: unknown, field: keyof BusinessRequirement): string {
   return String(item);
 }
 
-export function RequirementHistoryPanel({ workspaceId, itemId, revision, onClose }: { workspaceId: string; itemId: string; revision: number; onClose: () => void }) {
+export function RequirementHistoryPanel({ workspaceId, itemId, revision, sourceNames, onClose }: { sourceNames: Map<string, string>; workspaceId: string; itemId: string; revision: number; onClose: () => void }) {
   const [page, setPage] = useState({ revision, offset: 0 });
   const offset = page.revision === revision ? page.offset : 0;
   function setOffset(next: number) { setPage({ revision, offset: next }); }
@@ -41,7 +42,7 @@ export function RequirementHistoryPanel({ workspaceId, itemId, revision, onClose
       <p className="my-3 text-xs text-ink-500">{formatLocalDateTime(event.created_at)} · {event.actor_id || "Former member"}</p>
       <div className="space-y-4">{requirementChanges(event.before, event.after).map(([key, label]) => <div key={key}>
         <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-500">{label}</h3>
-        <div className="mt-1 grid gap-2 sm:grid-cols-2">{event.before && <div className="min-w-0 rounded bg-linen-100 p-3"><p className="text-[10px] text-ink-400">Before</p><pre className="whitespace-pre-wrap break-words font-sans text-xs leading-5">{value(event.before[key], key)}</pre></div>}<div className="min-w-0 rounded bg-moss-500/5 p-3"><p className="text-[10px] text-ink-400">After</p><pre className="whitespace-pre-wrap break-words font-sans text-xs leading-5">{value(event.after[key], key)}</pre></div></div>
+        <div className="mt-1 grid gap-2 sm:grid-cols-2">{event.before && <div className="min-w-0 rounded bg-linen-100 p-3"><p className="text-[10px] text-ink-400">Before</p><pre className="whitespace-pre-wrap break-words font-sans text-xs leading-5">{value(event.before[key], key, sourceNames)}</pre></div>}<div className="min-w-0 rounded bg-moss-500/5 p-3"><p className="text-[10px] text-ink-400">After</p><pre className="whitespace-pre-wrap break-words font-sans text-xs leading-5">{value(event.after[key], key, sourceNames)}</pre></div></div>
       </div>)}</div>
     </details>)}
     {offset > 0 && <Button size="sm" variant="ghost" onClick={() => setOffset(0)}>Latest changes</Button>}
