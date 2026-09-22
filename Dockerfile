@@ -11,6 +11,9 @@ ENV TICKETY_BUILD_SHA=$BUILD_SHA
 ENV TICKETY_BUILD_TIME=$BUILD_TIME
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+# Maintenance utilities execute as filenames from /app/scripts.  Keep the
+# packaged application root importable for those direct Python entry points.
+ENV PYTHONPATH=/app
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

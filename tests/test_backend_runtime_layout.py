@@ -1,4 +1,6 @@
 """Exercise the actual backend COPY manifest without requiring a container daemon."""
+import base64
+import json
 import os
 from pathlib import Path
 import shlex
@@ -19,15 +21,24 @@ class BackendRuntimeLayoutTests(unittest.TestCase):
                 if not line.startswith("COPY "):
                     continue
                 arguments = [part for part in shlex.split(line)[1:] if not part.startswith("--")]
-                destination = runtime / arguments[-1]
+                destination_name = arguments[-1]
+                destination = runtime / destination_name
                 for source_name in arguments[:-1]:
                     source = root / source_name
                     self.assertNotEqual(source.resolve(), root, "Backend must not copy the entire repository")
                     if source.is_dir():
                         shutil.copytree(source, destination, dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
                     else:
-                        destination.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(source, destination / source.name)
+                        # Docker copies a file to an explicitly named target
+                        # as that target, not into a directory bearing its
+                        # filename.  The latter masked direct script execution.
+                        target = (
+                            destination / source.name
+                            if destination_name.endswith("/")
+                            else destination
+                        )
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(source, target)
             self.assertFalse((runtime / "app/frontend-next").exists())
             self.assertFalse((runtime / "tests").exists())
             self.assertFalse((runtime / "deploy").exists())
@@ -35,6 +46,42 @@ class BackendRuntimeLayoutTests(unittest.TestCase):
                            "DATABASE_URL": f"sqlite:///{runtime / 'runtime.db'}",
                            "TICKETY_PROCESS_ROLE": "api", "TICKETY_SCHEDULER_ENABLED": "false"}
             environment.pop("PYTHONPATH", None)
+            # The image executes maintenance scripts by filename.  Python then
+            # starts at /app/scripts rather than /app, so the image-level path
+            # contract must make the copied application package importable.
+            self.assertIn("ENV PYTHONPATH=/app", backend_stage)
+            script_environment = {
+                **environment,
+                "DATABASE_URL": f"sqlite:///{runtime / 'preflight.db'}",
+                "PYTHONPATH": str(runtime),
+                "TICKETY_SETTINGS_ENCRYPTION_ACTIVE_KID": "test",
+                "TICKETY_SETTINGS_ENCRYPTION_KEYS_JSON": json.dumps(
+                    {"test": base64.b64encode(b"x" * 32).decode("ascii")}
+                ),
+            }
+            preflight = subprocess.run(
+                [sys.executable, "scripts/verify-settings-secret-encryption.py"],
+                cwd=runtime,
+                env=script_environment,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(preflight.returncode, 0, preflight.stdout + preflight.stderr)
+            self.assertIn("settings encryption preflight passed", preflight.stdout)
+            reencrypt_help = subprocess.run(
+                [sys.executable, "scripts/reencrypt-settings-secrets.py", "--help"],
+                cwd=runtime,
+                env=script_environment,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(
+                reencrypt_help.returncode,
+                0,
+                reencrypt_help.stdout + reencrypt_help.stderr,
+            )
             script = '''
 import os, sys
 sys.path.insert(0, os.getcwd())
