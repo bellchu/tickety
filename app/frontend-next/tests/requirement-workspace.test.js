@@ -62,3 +62,12 @@ test('blocker indexing distinguishes global, scoped, resolved and exploratory de
   assert.deepEqual([...library.blockedRequirementIds(items, decisions)], ['r1', 'r2', 'r3']);
   assert.deepEqual(filterRequirements(items, '', 'questions', decisions).map(row => row.id), ['r1', 'r2']);
 });
+
+
+test('source coverage includes deferred evidence and counts multiple linked requirements', () => {
+  const counts = library.sourceRequirementCounts([item, { ...item, id: 'r2', priority: 'wont' }, { ...item, id: 'r3', source_id: 's2' }]);
+  assert.equal(counts.get('s1'), 2);
+  assert.equal(counts.get('s2'), 1);
+  assert.equal(counts.has('unlinked'), false);
+  assert.equal(library.sourceRequirementCounts([]).size, 0);
+});

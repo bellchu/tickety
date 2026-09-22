@@ -2,6 +2,12 @@ import type { BusinessRequirement, RequirementDecision, RequirementWorkspaceDeta
 
 export type RequirementFilter = "all" | "questions" | "review" | "delivery" | "deferred";
 
+export function sourceRequirementCounts(items: BusinessRequirement[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const item of items) counts.set(item.source_id, (counts.get(item.source_id) || 0) + 1);
+  return counts;
+}
+
 export function blockedRequirementIds(items: BusinessRequirement[], decisions: RequirementDecision[] = []): Set<string> {
   const blocked = new Set<string>();
   for (const decision of decisions) {
@@ -54,7 +60,8 @@ export function workspaceFocus(detail: RequirementWorkspaceDetail) {
     reason: `${reviewable.reference} has the essential detail. Confirm it with the accountable stakeholder and record the decision.`,
     label: "Review the requirement", action: "review" as const, item: reviewable,
   };
-  const unstated = detail.sources.find(source => !detail.requirements.some(item => item.source_id === source.id));
+  const linkedSources = sourceRequirementCounts(detail.requirements);
+  const unstated = detail.sources.find(source => !linkedSources.has(source.id));
   if (unstated) return {
     title: "Explore the context you have collected",
     reason: `“${unstated.title}” has no linked requirements yet. Identify the business needs, or keep it as supporting context.`,

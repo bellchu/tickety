@@ -17,7 +17,7 @@ import { SourceIntakeForm } from "@/components/requirements/SourceIntakeForm";
 import { Field, inputStyle, panelStyle, kinds } from "@/components/requirements/fields";
 import { DecisionLog } from "@/components/requirements/DecisionLog";
 import { RequirementCard } from "@/components/requirements/RequirementCard";
-import { blockedRequirementIds, filterRequirements, workspaceFocus, type RequirementFilter } from "@/lib/requirement-workspace";
+import { sourceRequirementCounts, blockedRequirementIds, filterRequirements, workspaceFocus, type RequirementFilter } from "@/lib/requirement-workspace";
 import { api } from "@/lib/api";
 import type { BusinessRequirement, GatherSuggestions, RequirementAssistance, RequirementDraft, RequirementPriority, RequirementWorkspaceDetail } from "@/lib/requirements-types";
 import { Button, ConfirmDialog } from "@/components/ui";
@@ -113,6 +113,8 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
   const [questionSeed, setQuestionSeed] = useState<{ question: string; requirementId: string | null } | null>(null);
   const [sourceFormOpen, setSourceFormOpen] = useState(() => Boolean(readRequirementSourceDraft(editorClient, userId, id)));
   const [sourceFocus, setSourceFocus] = useState<{ sourceId: string; quote: string; reference: string }>();
+  const [sourceSearch, setSourceSearch] = useState("");
+  const [unlinkedOnly, setUnlinkedOnly] = useState(false);
   const [sourceViewing, setSourceViewing] = useState("");
   const [filter, setFilter] = useState<RequirementFilter>("all");
   const [search, setSearch] = useState("");
@@ -135,6 +137,10 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
   const source = useQuery({ queryKey: ["requirement-source", id, draft.source_id], queryFn: () => api.getRequirementSource(id, draft.source_id), enabled: Boolean(draft.source_id) });
   const evidence = useQuery({ queryKey: ["requirement-source", id, sourceViewing], queryFn: () => api.getRequirementSource(id, sourceViewing), enabled: Boolean(sourceViewing) });
   const detail = query.data;
+  const sourceCounts = useMemo(() => sourceRequirementCounts(detail?.requirements || []), [detail?.requirements]);
+  function revealSource(sourceId: string) {
+    setSourceSearch(""); setUnlinkedOnly(false); setSourceViewing(sourceId);
+  }
   const dirty = showForm && JSON.stringify([draft, criteria]) !== draftBaseline;
   const unsaved = dirty || Boolean(reviewing && reviewNote.trim());
   useEffect(() => {
@@ -191,7 +197,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
     await run("source", async () => { saved = await api.addRequirementSource(id, data); }, () => {
       setSourceFormOpen(false);
       if (saved) {
-        setSourceViewing(saved.id);
+        revealSource(saved.id);
         setNotice(saved.reused ? `This content is already saved as “${saved.title}”. The existing evidence was reused.` : "Source saved.");
       }
     });
@@ -205,6 +211,8 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
   const blockedIds = blockedRequirementIds(detail.requirements, detail.decisions);
   const questions = filterRequirements(detail.requirements, "", "questions", detail.decisions).length;
   const deliveryReady = detail.requirements.filter(item => item.priority !== "wont" && item.story).length;
+  const sourceQuery = sourceSearch.trim().toLocaleLowerCase();
+  const visibleSources = detail.sources.filter(item => (!sourceQuery || item.title.toLocaleLowerCase().includes(sourceQuery)) && (!unlinkedOnly || !sourceCounts.has(item.id)));
   const sourceNames = new Map(detail.sources.map(item => [item.id, item.title]));
 
   function followFocus() {
@@ -213,7 +221,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
     else if (focus.action === "deferred") { setFilter("deferred"); setSearch(""); }
     else if (focus.action === "questions") { setFilter("questions"); setSearch(""); }
     else if (focus.action === "review") signOff(focus.item);
-    else if (focus.action === "gather") setSourceViewing(focus.sourceId);
+    else if (focus.action === "gather") revealSource(focus.sourceId);
     else if (focus.action === "story") void run(focus.item.id, () => api.createRequirementStory(id, focus.item));
     else exportBrief(detail!);
   }
@@ -234,10 +242,16 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
       <aside className="min-w-0 space-y-4" aria-label="Business context">
         <div className="flex items-center justify-between"><div><h2 className="font-semibold text-ink-700">Context & evidence</h2><p className="mt-1 text-xs text-ink-400">{detail.sources.length} sources · Add context whenever it changes</p></div><Button className="shrink-0 whitespace-nowrap" variant="ghost" size="sm" leadingIcon={<Plus size={14} />} onClick={() => setSourceFormOpen(!sourceFormOpen)}>Add</Button></div>
         <SourceIntakeForm workspaceId={id} userId={userId} open={sourceFormOpen || detail.sources.length === 0} pending={pending} onSave={saveSource} />
-        {detail.sources.map(item => <div key={item.id} className="space-y-3 rounded-xl border border-linen-400 bg-white p-4">
+        {detail.sources.length > 0 && <div className="space-y-2">
+          <Field label="Find evidence by title"><input type="search" className={inputStyle} value={sourceSearch} onChange={event => setSourceSearch(event.target.value)} /></Field>
+          <label className="flex items-center gap-2 text-xs text-ink-500"><input type="checkbox" checked={unlinkedOnly} onChange={event => setUnlinkedOnly(event.target.checked)} />Without linked requirements</label>
+          {(sourceQuery || unlinkedOnly) && <p role="status" className="text-xs text-ink-400">{visibleSources.length} of {detail.sources.length} sources shown. Supporting context does not need a requirement.</p>}
+          {visibleSources.length === 0 && <Button size="sm" variant="ghost" onClick={() => { setSourceSearch(""); setUnlinkedOnly(false); }}>Show all evidence</Button>}
+        </div>}
+        {visibleSources.map(item => <div key={item.id} className="space-y-3 rounded-xl border border-linen-400 bg-white p-4">
           <button className="w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-clay-400" onClick={() => setSourceViewing(sourceViewing === item.id ? "" : item.id)}>
             <span className="text-[10px] font-semibold uppercase tracking-wide text-clay-700">{kinds[item.kind]}</span><h3 className="mt-1 text-sm font-semibold text-ink-700">{item.title}</h3>
-            <p className="mt-1 text-xs text-ink-400">{detail.requirements.filter(row => row.source_id === item.id).length} linked requirements</p>
+            <p className="mt-1 text-xs text-ink-400">{sourceCounts.get(item.id) || 0} linked requirements</p>
           </button>
           {sourceViewing === item.id && <div><ErrorMessage error={evidence.error} />{evidence.isPending ? <p role="status" className="text-xs">Loading source…</p> : evidence.data?.content && <SourceExplorer key={item.id} content={evidence.data.content} focus={sourceFocus?.sourceId === item.id ? sourceFocus : undefined} canAI={canAI} busy={Boolean(pending)} onExplore={excerpt => run(`gather-${item.id}`, async () => { setGathered(null); setGathered(await api.gatherRequirements(id, item.id, excerpt)); }, undefined, false)} />}</div>}
           <div className="flex flex-wrap gap-1"><Button size="sm" variant="ghost" disabled={Boolean(pending)} onClick={() => switchEditor(() => { edit(); const nextDraft = { ...blankDraft, source_id: item.id }; setDraft(nextDraft); setDraftBaseline(JSON.stringify([nextDraft, ""])); })}>Link a requirement</Button>
@@ -301,7 +315,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
 
         {visibleItems.length === 0 && <div className={`${panelStyle} py-10 text-center`}><FileText className="mx-auto text-ink-300" /><h3 className="mt-3 font-semibold">{detail.requirements.length ? "No requirements match this view" : "Give the business need a clear shape"}</h3><p className="mx-auto mt-2 max-w-md text-sm leading-6 text-ink-500">{detail.requirements.length ? "Try a different search or show all work." : "Explore your material, capture an outcome, or start with a question. Your evidence and decisions will stay connected here."}</p></div>}
         {visibleItems.map(row => <RequirementCard key={row.id} item={row} blocked={blockedIds.has(row.id)} sourceTitle={sourceNames.get(row.source_id) || "Source unavailable"} canAI={canAI} busy={Boolean(pending)} pending={pending}
-          onEvidence={() => { setSourceViewing(row.source_id); setSourceFocus({ sourceId: row.source_id, quote: row.evidence_quote, reference: row.reference }); }}
+          onEvidence={() => { revealSource(row.source_id); setSourceFocus({ sourceId: row.source_id, quote: row.evidence_quote, reference: row.reference }); }}
           onEdit={() => switchEditor(() => edit(row))}
           onHistory={() => setHistoryItem(row.id)}
           onReview={() => run(`review-${row.id}`, async () => { setAssistance(null); setAssistance({ item: row, result: await api.assistRequirement(id, row, "review") }); }, undefined, false)}
