@@ -97,7 +97,6 @@ class TicketSyncFailureIsolationTests(unittest.TestCase):
 
         with (
             patch.object(sync, "SessionLocal", self.session_factory),
-            patch.object(sync, "refresh_ticket_documents_background"),
         ):
             result = sync.sync_tickets_from_external(adapter)
 

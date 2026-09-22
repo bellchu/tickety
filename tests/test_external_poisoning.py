@@ -157,7 +157,7 @@ class ExternalPersistenceBoundaryTests(unittest.TestCase):
 
         with (
             patch.object(sync, "SessionLocal", self.session_factory),
-            patch.object(sync, "refresh_ticket_documents_background") as refresh,
+            patch.object(ticket_vectors, "refresh_ticket_documents_background") as refresh,
         ):
             result = sync.sync_tickets_from_external(Adapter())
 

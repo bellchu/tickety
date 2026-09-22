@@ -34,14 +34,8 @@ from ..attachment_storage import (
     attachment_storage_configured,
     safe_blob_name,
 )
-# Kept as a module attribute for compatibility with integrations/tests that
-# patch it. External persistence never promotes un-indexed provider text into
-# shared RAG: only tickets that already have evidence documents are refreshed
-# when their provider content changes (see refresh_ticket_documents_if_indexed).
-from ..ticket_vectors import (
-    refresh_ticket_documents_background,
-    refresh_ticket_documents_if_indexed,
-)
+# Refresh existing evidence documents without promoting un-indexed provider text.
+from ..ticket_vectors import refresh_ticket_documents_if_indexed
 from ..ai_state import (
     automatic_ai_policy_eligible_filter,
     has_terminal_ai_policy_outcome,
