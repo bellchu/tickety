@@ -256,6 +256,36 @@ class RequirementGatheringTests(unittest.TestCase):
         self.assertEqual(reopened.status_code, 201)
         self.assertNotEqual(reopened.json()["id"], first.json()["id"])
 
+    def test_question_reuse_at_capacity_stays_private_and_does_not_bypass_limit(self):
+        from app.backend.database import RequirementDecisionRecord
+        workspace = self.workspace()
+        base = f"{self.path}/{workspace}"
+        payload = {"question": "Who owns delivery failures?", "owner_role": "Operations", "blocking": False}
+        first = self.client.post(base + "/decisions", json=payload)
+        self.assertEqual(first.status_code, 201)
+        with self.sessions() as db:
+            db.add_all([RequirementDecisionRecord(id=f"capacity-{index}", workspace_id=workspace,
+                        question=f"What is the decision for scenario {index}?", owner_role="Operations", blocking=False)
+                        for index in range(199)])
+            db.commit()
+        repeated = self.client.post(base + "/decisions", json={**payload, "question": "  " + payload["question"] + "  "})
+        self.assertEqual(repeated.status_code, 200, repeated.text)
+        self.assertEqual(repeated.json()["id"], first.json()["id"])
+        self.assertEqual(self.client.post(base + "/decisions", json={**payload, "question": "Which deadline applies to delivery?"}).status_code, 409)
+        self.user.id = "other"
+        try:
+            self.assertEqual(self.client.post(base + "/decisions", json=payload).status_code, 404)
+        finally:
+            self.user.id = "owner"
+        self.assertEqual(self.client.post(base + "/decisions/" + first.json()["id"] + "/resolve",
+                         json={"resolution": "Operations owns the delivery failure queue."}).status_code, 200)
+        self.assertEqual(self.client.post(base + "/decisions", json=payload).status_code, 409)
+        records = self.client.get(base).json()["decisions"]
+        self.assertEqual(len(records), 200)
+        resolved = next(item for item in records if item["id"] == first.json()["id"])
+        self.assertEqual(resolved["status"], "resolved")
+        self.assertEqual(resolved["resolution"], "Operations owns the delivery failure queue.")
+
     def test_workspace_blocker_applies_to_future_requirements_and_private_decisions(self):
         workspace = self.workspace()
         source = self.source(workspace)
