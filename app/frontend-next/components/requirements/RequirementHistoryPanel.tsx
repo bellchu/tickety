@@ -4,7 +4,7 @@ import { priorities } from "./fields";
 import { requirementChanges, requirementChangeSummary } from "@/lib/requirement-history";
 import { requirementErrorMessage } from "@/lib/requirement-errors";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { formatLocalDateTime } from "@/lib/date-time";
@@ -27,11 +27,16 @@ function value(item: unknown, field: keyof BusinessRequirement, sourceNames: Map
 }
 
 export function RequirementHistoryPanel({ workspaceId, itemId, revision, sourceNames, onClose }: { sourceNames: Map<string, string>; workspaceId: string; itemId: string; revision: number; onClose: () => void }) {
+  const panel = useRef<HTMLElement>(null);
+  useEffect(() => {
+    panel.current?.scrollIntoView({ block: "start" });
+    panel.current?.focus({ preventScroll: true });
+  }, [workspaceId, itemId]);
   const [page, setPage] = useState({ revision, offset: 0 });
   const offset = page.revision === revision ? page.offset : 0;
   function setOffset(next: number) { setPage({ revision, offset: next }); }
   const query = useQuery({ queryKey: ["requirement-history", workspaceId, itemId, revision, offset], queryFn: () => api.getRequirementHistory(workspaceId, itemId, offset) });
-  return <section className="space-y-4 rounded-xl border border-linen-400 bg-white p-5" aria-label="Requirement history">
+  return <section ref={panel} tabIndex={-1} className="space-y-4 rounded-xl border border-linen-400 bg-white p-5" aria-label="Requirement history">
     <div className="flex items-center justify-between"><h2 className="font-semibold">Requirement history</h2><Button variant="ghost" onClick={onClose}>Close history</Button></div>
     <p className="text-xs text-ink-500">Historical evidence is read-only. To restore earlier wording, edit the current requirement and obtain a new sign-off.</p>
     <p className="text-xs text-ink-500">Revision shown in the workspace: {revision}</p>
