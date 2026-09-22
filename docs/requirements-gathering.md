@@ -88,6 +88,11 @@ that material, including deferred needs. The source selector combines with searc
 and readiness filters. **Show all sources** removes only the source restriction;
 exports and initiative-wide readiness still cover the complete saved workspace.
 
+If original source text fails to load, use **Retry loading source** beside the
+error in the evidence panel or requirement editor. This reloads that source while
+keeping your draft text. The initiative's **Refresh** action reloads the saved
+workspace summary and does not replace this source retry.
+
 Selected evidence passages remain in tab memory when you close a material or
 browse another initiative. Each material has its own passage; **Clear passage**
 removes it. These selections are not saved to the server or browser storage and
