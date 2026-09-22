@@ -220,6 +220,21 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
             ).filter(BusinessRequirementRecord.workspace_id.in_([row.id for row in rows])).group_by(BusinessRequirementRecord.workspace_id).all()
             summaries = {workspace_id: {"requirements": count, "drafts": drafts, "stories": stories, "agreed": agreed, "deferred": deferred}
                          for workspace_id, count, drafts, stories, agreed, deferred in counts}
+            blockers = db.query(
+                RequirementDecisionRecord.workspace_id, func.count(RequirementDecisionRecord.id),
+            ).outerjoin(BusinessRequirementRecord,
+                (BusinessRequirementRecord.id == RequirementDecisionRecord.requirement_id)
+                & (BusinessRequirementRecord.workspace_id == RequirementDecisionRecord.workspace_id),
+            ).filter(
+                RequirementDecisionRecord.workspace_id.in_([row.id for row in rows]),
+                RequirementDecisionRecord.status == "open",
+                RequirementDecisionRecord.blocking.is_(True),
+                BusinessRequirementRecord.id.is_(None) | (BusinessRequirementRecord.priority != "wont"),
+            ).group_by(RequirementDecisionRecord.workspace_id).all()
+            blocker_counts = dict(blockers)
+            for row in rows:
+                summary = summaries.setdefault(row.id, {"requirements": 0, "drafts": 0, "stories": 0, "agreed": 0, "deferred": 0})
+                summary["blocking_questions"] = blocker_counts.get(row.id, 0)
         return {"items": rows, "total": total, "offset": offset, "limit": limit, "summaries": summaries}
 
     @router.post("", status_code=201)

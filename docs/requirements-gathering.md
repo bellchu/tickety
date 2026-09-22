@@ -18,7 +18,10 @@ the current page. Search text is treated literally; clearing it restores the ful
 list and returns to the first page.
 The overview also identifies signed-off requirements still awaiting story
 preparation and deferred needs, so these do not disappear between the draft and
-prepared-story counts. All counts come from one grouped query per overview page.
+prepared-story counts. Blocking-question counts highlight unresolved decisions affecting current scope,
+including whole-initiative questions even before requirements are captured. Questions
+linked only to deferred requirements are excluded. Requirement and blocker counts
+use two grouped queries per overview page without loading evidence or decision text.
 
 ## Choose the next useful action
 

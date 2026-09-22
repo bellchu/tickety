@@ -117,6 +117,7 @@ function RequirementsContent() {
         <h2 className="text-lg font-semibold text-ink-700">{workspace.title}</h2>
         <p className="mt-2 line-clamp-3 text-sm text-ink-500">{workspace.objective}</p>
         {list.data.summaries && <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-500">
+          {Boolean(summary?.blocking_questions) && <span className="font-semibold text-amber-800">Blocking questions: {summary?.blocking_questions}</span>}
           <span>Requirements: {summary?.requirements || 0}</span>
           <span>Awaiting agreement: {summary?.drafts || 0}</span>
           {summary?.agreed !== undefined && <span>Agreed, needs a story: {summary.agreed}</span>}

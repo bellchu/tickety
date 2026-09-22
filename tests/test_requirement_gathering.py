@@ -89,10 +89,33 @@ class RequirementGatheringTests(unittest.TestCase):
             response = self.client.get(self.path + "?limit=1").json()
         finally:
             event.remove(self.engine, "before_cursor_execute", capture)
-        self.assertEqual(response["summaries"][workspace], {"requirements": 4, "drafts": 1, "stories": 1, "agreed": 1, "deferred": 1})
-        self.assertEqual(len([s for s in statements if s.lstrip().upper().startswith("SELECT")]), 3)
+        self.assertEqual(response["summaries"][workspace], {"requirements": 4, "drafts": 1, "stories": 1, "agreed": 1, "deferred": 1, "blocking_questions": 0})
+        self.assertEqual(len([s for s in statements if s.lstrip().upper().startswith("SELECT")]), 4)
         self.assertFalse(any("evidence_quote" in s or "acceptance_json" in s for s in statements))
         self.assertEqual(self.client.get(self.path + "?offset=1").json()["summaries"], {})
+        self.user = UserRecord(id="other", name="Other", role="agent", is_active=True)
+        self.assertEqual(self.client.get(self.path).json()["summaries"], {})
+
+    def test_overview_blockers_respect_scope_and_include_empty_initiatives(self):
+        workspace = self.workspace()
+        source = self.source(workspace)
+        base = f"{self.path}/{workspace}"
+        active = self.client.post(base + "/items", json=self.payload(source)).json()
+        deferred = self.client.post(base + "/items", json={**self.payload(source), "title": "Later scope", "priority": "wont"}).json()
+        for scope, blocking, question in [(active["id"], True, "Who owns active scope?"),
+                                         (deferred["id"], True, "Who owns deferred scope?"),
+                                         (None, False, "Which future channels?")]:
+            response = self.client.post(base + "/decisions", json={"question": question, "requirement_id": scope, "blocking": blocking, "owner_role": "Sponsor"})
+            self.assertEqual(response.status_code, 201, response.text)
+        empty = self.workspace()
+        question = self.client.post(f"{self.path}/{empty}/decisions", json={"question": "What is the agreed outcome?", "blocking": True, "owner_role": "Sponsor"}).json()
+        summaries = self.client.get(self.path).json()["summaries"]
+        self.assertEqual(summaries[workspace]["blocking_questions"], 1)
+        self.assertEqual(summaries[empty]["blocking_questions"], 1)
+        self.assertEqual(summaries[empty]["requirements"], 0)
+        self.assertEqual(self.client.post(f"{self.path}/{empty}/decisions/{question['id']}/resolve", json={"resolution": "The sponsor confirmed the business outcome."}).status_code, 200)
+        self.assertEqual(self.client.get(self.path).json()["summaries"][empty]["blocking_questions"], 0)
+        self.assertEqual(len(self.client.get(self.path + "?limit=1").json()["summaries"]), 1)
         self.user = UserRecord(id="other", name="Other", role="agent", is_active=True)
         self.assertEqual(self.client.get(self.path).json()["summaries"], {})
 
@@ -103,9 +126,9 @@ class RequirementGatheringTests(unittest.TestCase):
         row = self.client.post(base + "/items", json=self.payload(source)).json()
         route = base + "/items/" + row["id"]
 
-        def summary(drafts=0, agreed=0, stories=0, deferred=0):
+        def summary(drafts=0, agreed=0, stories=0, deferred=0, blocking=0):
             actual = self.client.get(self.path).json()["summaries"][workspace]
-            self.assertEqual(actual, {"requirements": 1, "drafts": drafts, "agreed": agreed, "stories": stories, "deferred": deferred})
+            self.assertEqual(actual, {"requirements": 1, "drafts": drafts, "agreed": agreed, "stories": stories, "deferred": deferred, "blocking_questions": blocking})
             self.assertEqual(sum(actual[key] for key in ("drafts", "agreed", "stories", "deferred")), actual["requirements"])
 
         def sign(revision):
@@ -119,7 +142,7 @@ class RequirementGatheringTests(unittest.TestCase):
         row = self.client.post(route + "/story", json={"revision": row["revision"]}).json()
         summary(stories=1)
         question = self.client.post(base + "/decisions", json={"question": "Who handles acknowledgement failures?", "owner_role": "Operations lead", "blocking": True}).json()
-        summary(drafts=1)
+        summary(drafts=1, blocking=1)
         row = self.client.get(base).json()["requirements"][0]
         self.assertEqual(self.client.post(route + "/story", json={"revision": row["revision"]}).status_code, 409)
         self.assertEqual(self.client.post(base + f"/decisions/{question['id']}/resolve", json={"resolution": "Operations handles failures through the existing queue."}).status_code, 200)
