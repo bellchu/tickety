@@ -126,6 +126,11 @@ changes. Use **History** to compare earlier wording, agreement and stories. Each
 summarizes changed business fields, scope changes and withdrawn agreement or stories
 before you expand the detailed comparison. Copying
 old wording into a new edit still requires fresh sign-off; history itself is read-only.
+Opening history brings the panel into view. Each entry shows its time and recorder;
+the panel identifies the revision currently shown in the workspace. Expand a blocking
+event and choose **Review related questions and decisions** to inspect both open and
+recorded decisions for that requirement, including initiative-wide decisions. This
+opens the current register, rather than reconstructing its state at the event's time.
 
 Requirement search includes the stakeholder, outcome, evidence excerpt, acceptance
 criteria and prepared story, including its reference. Wrapped text is searchable as
