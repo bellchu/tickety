@@ -2,6 +2,8 @@ import type { BusinessRequirement, RequirementSource, SourceKind, RequirementDec
 
 export const requirementPriorityLabels: Record<RequirementPriority, string> = { must: "Must have", should: "Should have", could: "Could have", wont: "Not this time" };
 
+export const requirementSourceKindLabels: Record<SourceKind, string> = { document: "Business document", email: "Email", sop: "SOP", transcript: "Meeting transcript" };
+
 export type DecisionFilter = "open" | "blocking" | "current" | "exploratory" | "recorded" | "all";
 
 function searchableText(value: string) {

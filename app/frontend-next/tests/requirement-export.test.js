@@ -228,3 +228,12 @@ test('brief puts current business priorities before deferred scope without chang
   assert.ok(brief.includes('Included in this initiative: 4 requirements'));
   assert.ok(brief.includes('Deferred — not this time: 1'));
 });
+
+
+test('evidence register uses business source names instead of internal type codes', () => {
+  const brief = library.requirementBrief({ workspace: { id: 'w', title: 'Evidence review', objective: 'Review the context', request_type: 'enhancement' }, requirements: [],
+    sources: ['document', 'email', 'sop', 'transcript'].map(kind => ({ id: kind, title: `Material ${kind}`, kind, content_sha256: 'digest' })),
+  });
+  for (const label of ['Business document', 'Email', 'SOP', 'Meeting transcript']) assert.ok(brief.includes(`(${label})`));
+  assert.ok(!brief.includes('(transcript)'));
+});

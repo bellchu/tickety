@@ -1,4 +1,4 @@
-import { currentScopeBlockers, filterDecisions, orderRequirements, requirementPriorityLabels } from "./requirement-workspace";
+import { currentScopeBlockers, filterDecisions, orderRequirements, requirementPriorityLabels, requirementSourceKindLabels } from "./requirement-workspace";
 import type { BusinessRequirement, RequirementWorkspaceDetail } from "./requirements-types";
 
 export function requirementBriefFilename(workspace: { title: string; id: string }): string {
@@ -56,7 +56,7 @@ export function requirementBrief(detail: RequirementWorkspaceDetail): string {
     "", "This brief is a snapshot of recorded work. Inclusion is not sign-off; prepared stories still need delivery-team review and planning.", "",
     "## Evidence register",
     ...sources.flatMap(source => [
-      `- ${inline(source.title)} (${source.kind}) — ${source.id}; SHA-256: ${source.content_sha256}`,
+      `- ${inline(source.title)} (${requirementSourceKindLabels[source.kind]}) — ${source.id}; SHA-256: ${source.content_sha256}`,
       ...(source.context_reviewed_at ? [`  Kept as background by ${inline(source.context_reviewed_by || "Former member")} at ${inline(source.context_reviewed_at)}; still available for exploration.`] : []),
       `  ${sourceLinks.has(source.id) ? `Supports: ${sourceLinks.get(source.id)!.join(", ")}` : "Supporting context — no linked requirements recorded."}`,
     ]), "",
