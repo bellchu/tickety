@@ -4,7 +4,7 @@ const path = require("node:path");
 const test = require("node:test");
 const React = require("react");
 const { renderToStaticMarkup } = require("react-dom/server");
-const ts = require("typescript");
+const { loadComponentTs } = require("./helpers/load-pure-ts");
 
 const componentPath = path.join(
   __dirname,
@@ -16,44 +16,27 @@ const componentPath = path.join(
 
 function loadConversationModule() {
   const source = fs.readFileSync(componentPath, "utf8");
-  const output = ts.transpileModule(source, {
-    compilerOptions: {
-      esModuleInterop: true,
-      jsx: ts.JsxEmit.ReactJSX,
-      module: ts.ModuleKind.CommonJS,
-      target: ts.ScriptTarget.ES2020,
-    },
-    fileName: componentPath,
-  }).outputText;
-  const loaded = { exports: {} };
   const icon = (props) => React.createElement("span", props);
-  const compile = new Function("require", "exports", "module", output);
+  const loaded = loadComponentTs("ticket/FreshserviceConversationThread.tsx", {
+    "react/jsx-runtime": require("react/jsx-runtime"),
+    "@tanstack/react-query": { useInfiniteQuery() { throw new Error("query wrapper was rendered unexpectedly"); } },
+    "lucide-react": { LockKeyhole: icon, MessageSquareText: icon },
+    "@/lib/api": { api: {} },
+    "@/lib/utils": { formatTimeAgo: () => "recently" },
+    "@/lib/ticket-display": {
+      formatOperationalTimestamp: () => "local timestamp",
+      requesterName: (ticket) => ticket.requester_name || ticket.requester_email || "Requester profile pending",
+      requesterEmail: (ticket) => ticket.requester_email || null,
+      safeMailto: (email) => email ? `mailto:${email}` : null,
+    },
+    "@/components/ui": {
+      Alert: ({ title, children }) => React.createElement("div", null, title, children),
+      Button: ({ children }) => React.createElement("button", null, children),
+      Skeleton: () => React.createElement("div", { "data-skeleton": true }),
+    },
+  });
 
-  compile((specifier) => {
-    if (specifier === "react/jsx-runtime") return require("react/jsx-runtime");
-    if (specifier === "@tanstack/react-query") return { useInfiniteQuery() { throw new Error("query wrapper was rendered unexpectedly"); } };
-    if (specifier === "lucide-react") return { LockKeyhole: icon, MessageSquareText: icon };
-    if (specifier === "@/lib/api") return { api: {} };
-    if (specifier === "@/lib/utils") return { formatTimeAgo: () => "recently" };
-    if (specifier === "@/lib/ticket-display") {
-      return {
-        formatOperationalTimestamp: () => "local timestamp",
-        requesterName: (ticket) => ticket.requester_name || ticket.requester_email || "Requester profile pending",
-        requesterEmail: (ticket) => ticket.requester_email || null,
-        safeMailto: (email) => email ? `mailto:${email}` : null,
-      };
-    }
-    if (specifier === "@/components/ui") {
-      return {
-        Alert: ({ title, children }) => React.createElement("div", null, title, children),
-        Button: ({ children }) => React.createElement("button", null, children),
-        Skeleton: () => React.createElement("div", { "data-skeleton": true }),
-      };
-    }
-    throw new Error(`Unexpected module: ${specifier}`);
-  }, loaded.exports, loaded);
-
-  return { ...loaded.exports, source };
+  return { ...loaded, source };
 }
 
 function ticket(overrides = {}) {
