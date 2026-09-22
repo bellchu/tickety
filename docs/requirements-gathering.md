@@ -204,3 +204,8 @@ Single-requirement AI reviews and story refinements retain their analyzed revisi
 When refreshed data reveals a newer version, suggestions remain readable but cannot
 be tracked or applied. Use **Analyze current version** to replace them; story
 refinement requires the current requirement to be in scope and signed off.
+
+Use **View linked requirements** on a source to inspect the needs captured from
+that material, including deferred needs. The source selector combines with search
+and readiness filters. **Show all sources** removes only the source restriction;
+exports and initiative-wide readiness still cover the complete saved workspace.

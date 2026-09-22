@@ -30,10 +30,11 @@ export function blockedRequirementIds(items: BusinessRequirement[], decisions: R
   return blocked;
 }
 
-export function filterRequirements(items: BusinessRequirement[], search: string, filter: RequirementFilter, decisions: RequirementDecision[] = []) {
+export function filterRequirements(items: BusinessRequirement[], search: string, filter: RequirementFilter, decisions: RequirementDecision[] = [], sourceId = "") {
   const query = search.trim().replace(/\s+/g, " ").toLocaleLowerCase();
   const blockedIds = blockedRequirementIds(items, decisions);
   return items.filter(item => {
+    if (sourceId && item.source_id !== sourceId) return false;
     const matchesText = !query || [item.reference, item.title, item.actor, item.action, item.benefit, item.evidence_quote,
       ...(item.acceptance_criteria || []), item.story?.reference, item.story?.title, item.story?.statement]
       .some(value => value?.replace(/\s+/g, " ").toLocaleLowerCase().includes(query));

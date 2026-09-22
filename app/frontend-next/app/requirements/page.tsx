@@ -120,6 +120,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
   const [order, setOrder] = useState<RequirementOrder>("recorded");
   const [filter, setFilter] = useState<RequirementFilter>("all");
   const [search, setSearch] = useState("");
+  const [sourceFilter, setSourceFilter] = useState("");
   const [draftAssumptions, setDraftAssumptions] = useState<string[]>(restored?.assumptions || []);
   const [draft, setDraft] = useState<RequirementDraft>(restored?.draft || { ...blankDraft });
   const [criteria, setCriteria] = useState(restored?.criteria || "");
@@ -151,8 +152,8 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
     deliveryReady: detail.requirements.filter(item => item.priority !== "wont" && item.story).length,
     sourceNames: new Map(detail.sources.map(item => [item.id, item.title])),
   } : null, [detail]);
-  const visibleItems = useMemo(() => detail ? orderRequirements(filterRequirements(detail.requirements, search, filter, detail.decisions), order) : [], [detail, search, filter, order]);
-  const listKey = JSON.stringify([search, filter, order]);
+  const visibleItems = useMemo(() => detail ? orderRequirements(filterRequirements(detail.requirements, search, filter, detail.decisions, sourceFilter), order) : [], [detail, search, filter, order, sourceFilter]);
+  const listKey = JSON.stringify([search, filter, order, sourceFilter]);
   const visibleLimit = listWindow.key === listKey ? listWindow.limit : 20;
   const displayedItems = visibleItems.slice(0, visibleLimit);
   const sourceQuery = sourceSearch.trim().toLocaleLowerCase();
@@ -225,7 +226,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
       setShowForm(false); setEditing(undefined);
       if (saved?.unchanged) setNotice("No business content changed. The existing agreement, story and revision were preserved.");
       else if (saved?.reused) {
-        setFilter("all"); setSearch("");
+        setFilter("all"); setSearch(""); setSourceFilter("");
         setNotice(`This requirement already exists as ${saved.reference}. Its saved agreement and history were preserved.`);
       }
     });
@@ -254,8 +255,8 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
   function followFocus() {
     if (focus.action === "decisions") setDecisionsOpen(true);
     else if (focus.action === "source") setSourceFormOpen(true);
-    else if (focus.action === "deferred") { setFilter("deferred"); setSearch(""); }
-    else if (focus.action === "questions") { setFilter("questions"); setSearch(""); }
+    else if (focus.action === "deferred") { setFilter("deferred"); setSearch(""); setSourceFilter(""); }
+    else if (focus.action === "questions") { setFilter("questions"); setSearch(""); setSourceFilter(""); }
     else if (focus.action === "review") signOff(focus.item);
     else if (focus.action === "gather") revealSource(focus.sourceId);
     else if (focus.action === "story") void run(focus.item.id, () => api.createRequirementStory(id, focus.item));
@@ -289,6 +290,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
             <span className="text-[10px] font-semibold uppercase tracking-wide text-clay-700">{kinds[item.kind]}</span><h3 className="mt-1 text-sm font-semibold text-ink-700">{item.title}</h3>
             <p className="mt-1 text-xs text-ink-400">{sourceCounts.get(item.id) || 0} linked requirements</p>
           </button>
+          {Boolean(sourceCounts.get(item.id)) && <a href="#requirement-list" className="inline-block text-xs font-medium text-clay-700 underline underline-offset-2" onClick={() => { setSourceFilter(item.id); setFilter("all"); setSearch(""); }}>View linked requirements</a>}
           {sourceViewing === item.id && <div><ErrorMessage error={evidence.error} />{evidence.isPending ? <p role="status" className="text-xs">Loading source…</p> : evidence.data?.content && <SourceExplorer key={item.id} content={evidence.data.content} focus={sourceFocus?.sourceId === item.id ? sourceFocus : undefined} canAI={canAI} busy={Boolean(pending)} onCapture={excerpt => captureFromSource(item.id, excerpt)} onExplore={excerpt => run(`gather-${item.id}`, async () => { setGathered(null); setGathered(await api.gatherRequirements(id, item.id, excerpt)); }, undefined, false)} />}</div>}
           <div className="flex flex-wrap gap-1"><Button size="sm" variant="ghost" disabled={Boolean(pending)} onClick={() => captureFromSource(item.id)}>Link a requirement</Button>
             {canAI && <Button size="sm" variant="secondary" leadingIcon={<Sparkles size={13} />} pending={pending === `gather-${item.id}`} disabled={Boolean(pending)} onClick={() => run(`gather-${item.id}`, async () => { setGathered(null); setGathered(await api.gatherRequirements(id, item.id)); }, undefined, false)}>Explore with AI</Button>}
@@ -296,9 +298,10 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
         </div>)}
         {canAI && <p className="text-xs leading-5 text-ink-400">AI uses your configured provider and the material you select. Suggestions need your review; they never sign off requirements.</p>}
       </aside>
-      <section className="min-w-0 space-y-5" aria-label="Requirements and decisions">
+      <section id="requirement-list" tabIndex={-1} className="min-w-0 space-y-5 scroll-mt-6" aria-label="Requirements and decisions">
         <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-lg font-semibold text-ink-700">Requirements & decisions</h2><p className="mt-1 text-xs text-ink-400">{questions ? `${questions} items need clarification` : "Keep the evidence, decision and delivery story together"}</p></div><Button leadingIcon={<Plus size={15} />} disabled={!detail.sources.length || Boolean(pending)} onClick={() => switchEditor(() => edit())}>New requirement</Button></div>
-        <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap"><label className="min-w-48 flex-1"><span className="sr-only">Search requirements</span><input className={inputStyle} type="search" placeholder="Find a requirement, evidence or acceptance criterion…" value={search} onChange={event => setSearch(event.target.value)} /></label><label><span className="sr-only">Show requirements</span><select className={inputStyle} value={filter} onChange={event => setFilter(event.target.value as RequirementFilter)}><option value="all">All work</option><option value="questions">Open questions</option><option value="review">Ready for review</option><option value="delivery">Delivery ready</option><option value="deferred">Not this time</option></select></label><label><span className="sr-only">Order requirements</span><select className={inputStyle} value={order} onChange={event => setOrder(event.target.value as RequirementOrder)}><option value="recorded">Recorded order</option><option value="priority">Business priority</option></select></label></div>
+        <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap"><label className="min-w-48 flex-1"><span className="sr-only">Search requirements</span><input className={inputStyle} type="search" placeholder="Find a requirement, evidence or acceptance criterion…" value={search} onChange={event => setSearch(event.target.value)} /></label><label><span className="sr-only">Show requirements</span><select className={inputStyle} value={filter} onChange={event => setFilter(event.target.value as RequirementFilter)}><option value="all">All work</option><option value="questions">Open questions</option><option value="review">Ready for review</option><option value="delivery">Delivery ready</option><option value="deferred">Not this time</option></select></label><label><span className="sr-only">Filter requirements by source</span><select className={inputStyle} value={sourceFilter} onChange={event => setSourceFilter(event.target.value)}><option value="">All sources</option>{detail.sources.map(item => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label><label><span className="sr-only">Order requirements</span><select className={inputStyle} value={order} onChange={event => setOrder(event.target.value as RequirementOrder)}><option value="recorded">Recorded order</option><option value="priority">Business priority</option></select></label></div>
+        {sourceFilter && <div role="status" className="flex flex-wrap items-center gap-2 text-xs text-ink-500"><span>{visibleItems.length} matching requirements from {sourceNames.get(sourceFilter) || "the selected source"}.</span><Button size="sm" variant="ghost" onClick={() => setSourceFilter("")}>Show all sources</Button></div>}
     {canAI && detail.requirements.length >= 2 && <CrossReviewPanel workspaceId={id} items={detail.requirements} onQuestion={trackQuestion} />}
     {historyItem && <RequirementHistoryPanel key={historyItem} workspaceId={id} itemId={historyItem} revision={detail.requirements.find(item => item.id === historyItem)?.revision || 0} onClose={() => setHistoryItem(null)} />}
     {gathered && <section className={`${panelStyle} space-y-4`} aria-label="AI gathering suggestions">

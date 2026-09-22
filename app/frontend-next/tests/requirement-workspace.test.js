@@ -147,3 +147,15 @@ test('AI snapshots expire on revision changes or removal, but not unrelated upda
   assert.equal(current([{ id: 'r1', revision: 2 }], [{ id: 'r1', revision: 3 }]), false);
   assert.equal(current([{ id: 'r1', revision: 3 }], [{ id: 'r1', revision: 3 }]), true);
 });
+
+test('source traceability composes with search and readiness without changing saved work', () => {
+  const rows = [{ ...item, source_id: 's1', priority: 'should' },
+    { ...item, id: 'r2', source_id: 's2', priority: 'should' },
+    { ...item, id: 'r3', source_id: 's1', priority: 'wont' }];
+  assert.deepEqual(filterRequirements(rows, '', 'all', [], 's1').map(x => x.id), ['r1', 'r3']);
+  assert.deepEqual(filterRequirements(rows, 'receipt', 'review', [], 's1').map(x => x.id), ['r1']);
+  assert.equal(filterRequirements(rows, 'missing', 'all', [], 's1').length, 0);
+  assert.equal(filterRequirements(rows, '', 'all', [], 'unknown').length, 0);
+  assert.equal(filterRequirements(rows, '', 'all', [], '').length, 3);
+  assert.equal(rows.length, 3);
+});
