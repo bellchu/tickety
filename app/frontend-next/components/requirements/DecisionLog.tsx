@@ -3,7 +3,7 @@
 import { RequirementTextarea, RequirementInput } from "./BoundedText";
 
 import { inputStyle } from "./fields";
-import { decisionWindow, filterDecisions, type DecisionFilter } from "@/lib/requirement-workspace";
+import { currentScopeBlockers, decisionWindow, filterDecisions, type DecisionFilter } from "@/lib/requirement-workspace";
 import { requirementErrorMessage } from "@/lib/requirement-errors";
 
 import { useEffect, useMemo, useState } from "react";
@@ -86,6 +86,7 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
   }, [decisions, view, search, resolving, scope, decisionRequest]);
   const requirementNames = useMemo(() => new Map(requirements.map(item => [item.id, `${item.reference}${item.priority === "wont" ? " · Not this time" : ""}`])), [requirements]);
   const blockers = useMemo(() => outstanding.filter(item => item.blocking).length, [outstanding]);
+  const currentBlockers = useMemo(() => currentScopeBlockers(requirements, decisions).length, [requirements, decisions]);
   const windowKey = JSON.stringify([view, search, scope]);
   const limit = registerWindow.key === windowKey ? registerWindow.limit : 20;
   const displayedDecisions = useMemo(() => decisionWindow(visibleDecisions, limit, resolving), [visibleDecisions, limit, resolving]);
@@ -96,6 +97,7 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
   return <section id="business-decisions" tabIndex={-1} className="rounded-xl border border-linen-400 bg-white p-5" aria-label="Business decision log">
     <ConfirmDialog open={Boolean(transition)} onOpenChange={open => { if (!open) setTransition(null); }} title="Replace unsaved decision work?" description="The current question or answer will be discarded. Saved decisions are unchanged." cancelLabel="Keep editing" confirmLabel="Discard and continue" destructive onConfirm={() => { const action = transition; setTransition(null); action?.(); }} />
     <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-semibold text-ink-700">Questions & decisions</h2><p className="mt-1 text-xs text-ink-500">{outstanding.length} open · {blockers} blocking · {decisions.length - outstanding.length} decisions recorded</p></div><Button variant="secondary" onClick={onToggle}>{open ? "Close decision log" : "Open decision log"}</Button></div>
+    {blockers > 0 && <p className="mt-2 text-xs text-amber-800">{currentBlockers} affect current scope or need scope confirmation · {blockers - currentBlockers} relate only to deferred requirements</p>}
     {open && <div className="mt-5 space-y-5">
       <form className="grid gap-3 rounded-lg bg-linen-100 p-4" onSubmit={event => { event.preventDefault(); void save(() => api.addRequirementDecision(workspaceId, { question, owner_role: owner, requirement_id: requirementId || null, blocking }), clearQuestion); }}>
         <h3 className="text-sm font-semibold">Raise a business question</h3>

@@ -32,13 +32,13 @@ const decisions = Array.from({ length: 200 }, (_, index) => ({
   id: `d${index}`, requirement_id: 'r1', question: `Business question ${index}`,
   owner_role: 'Sponsor', status: 'open', blocking: true,
 }));
-function render({ open = true, scope = '', draft, pending = false, records = decisions, decisionRequest } = {}) {
+function render({ open = true, scope = '', draft, pending = false, records = decisions, decisionRequest, requirements = [{ id: 'r1', reference: 'REQ-001', title: 'Receipt' }] } = {}) {
   const client = new query.QueryClient();
   if (draft) drafts.rememberRequirementDecisionDraft(client, 'owner', 'w1', draft);
   try {
     return renderToStaticMarkup(React.createElement(query.QueryClientProvider, { client },
       React.createElement(DecisionLog, {
-        workspaceId: 'w1', userId: 'owner', requirements: [{ id: 'r1', reference: 'REQ-001', title: 'Receipt' }],
+        workspaceId: 'w1', userId: 'owner', requirements,
         decisions: records, open, scope, pending, decisionRequest, onFindRequirements() {}, onPendingChange() {}, seed: null, onToggle() {}, onScopeChange() {}, onSeedUsed() {}, async onSaved() {},
       })));
   } finally { client.clear(); }
@@ -222,4 +222,20 @@ test('opening a suggestion clears old register filters without changing an answe
     assert.ok(!html.includes('No matching question'));
     assert.ok(html.includes('Preserved answer rationale</textarea>'));
   } finally { client.clear(); }
+});
+
+
+test('collapsed decision summary separates deferred blockers from current or unknown scope', () => {
+  const records = [
+    { ...decisions[0], id: 'deferred', requirement_id: 'later' },
+    { ...decisions[0], id: 'global', requirement_id: null },
+    { ...decisions[0], id: 'unknown', requirement_id: 'missing' },
+    { ...decisions[0], id: 'resolved', status: 'resolved' },
+    { ...decisions[0], id: 'exploratory', blocking: false },
+  ];
+  const html = render({ open: false, records, requirements: [{ id: 'later', reference: 'REQ-002', title: 'Later', priority: 'wont' }] });
+  assert.ok(html.includes('2 affect current scope or need scope confirmation'));
+  assert.ok(html.includes('1 relate only to deferred requirements'));
+  assert.ok(!html.includes('<article'));
+  assert.ok(!render({ records: [] }).includes('affect current scope'));
 });
