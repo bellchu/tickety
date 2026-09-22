@@ -62,15 +62,6 @@ from .sla_policy import ticket_is_sla_exempt
 SLA_HOURS = {"P1": 4, "P2": 24, "P3": 72}
 DEFAULT_SLA_HOURS = 72
 
-def _load_sla_hours():
-    """Reload SLA targets from env (may be overridden by settings UI)."""
-    import os as _os
-    global SLA_HOURS
-    for p in ("P1", "P2", "P3"):
-        v = _os.getenv(f"SLA_{p}_HOURS")
-        if v and v.isdigit():
-            SLA_HOURS[p] = int(v)
-
 # Fraction of SLA window remaining below which a case is "at risk".
 SLA_AT_RISK_THRESHOLD = 0.20
 
