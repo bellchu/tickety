@@ -402,3 +402,13 @@ with its filename and text, leaving **Save source** as a separate action. The
 synthetic fields were then cleared and the form closed; no source was saved and
 no existing business record was changed. Failure retention, late completion and
 sign-out behavior remain covered by the component lifecycle tests.
+
+### Shared-label integration build
+
+The production build at `326cee4` passed build and route verification after the
+sign-off provenance and evidence-export changes. The refreshed local supplier
+workspace loaded with its Enhancement label, two requirements, one prepared story
+and the existing blocking question still first in suggested focus. No business
+records were written. Export disposition and shared source names are covered by
+the 291-test frontend suite; this browser check only establishes page integration.
+The build has not been pushed or deployed to Dev.
