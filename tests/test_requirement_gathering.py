@@ -311,6 +311,42 @@ class RequirementGatheringTests(unittest.TestCase):
         self.assertEqual(reused.json()["id"], source)
         self.assertEqual(self.client.post(route, json={"title": "Over limit", "kind": "document", "content": "An additional new source over the limit."}).status_code, 409)
 
+    def test_history_uses_unique_revision_order_without_temporary_sort(self):
+        from datetime import datetime, timedelta
+        from sqlalchemy.exc import IntegrityError
+        from app.backend.database import RequirementHistoryRecord
+        workspace = self.workspace()
+        source = self.source(workspace)
+        base = f"{self.path}/{workspace}/items"
+        row = self.client.post(base, json=self.payload(source)).json()
+        route = base + "/" + row["id"]
+        for index in range(11):
+            row = self.client.put(route, json={**self.payload(source), "revision": row["revision"], "title": f"Change {index}"}).json()
+        with self.sessions() as db:
+            events = db.query(RequirementHistoryRecord).filter_by(requirement_id=row["id"]).all()
+            for entry in events:
+                entry.created_at = datetime(2026, 1, 1) - timedelta(seconds=entry.revision)
+            db.commit()
+        statements = []
+        def capture(connection, cursor, statement, parameters, context, executemany):
+            if "FROM requirement_history" in statement and "ORDER BY" in statement:
+                statements.append((statement, parameters))
+        event.listen(self.engine, "before_cursor_execute", capture)
+        try:
+            first = self.client.get(route + "/history").json()
+        finally:
+            event.remove(self.engine, "before_cursor_execute", capture)
+        self.assertEqual([item["revision"] for item in first["items"]], list(range(12, 2, -1)))
+        second = self.client.get(route + "/history?offset=10").json()
+        self.assertEqual([item["revision"] for item in second["items"]], [2, 1])
+        with self.engine.connect() as connection:
+            plan = connection.exec_driver_sql("EXPLAIN QUERY PLAN " + statements[0][0], statements[0][1]).all()
+        self.assertNotIn("TEMP B-TREE", str(plan))
+        with self.sessions() as db:
+            db.add(RequirementHistoryRecord(id="duplicate", requirement_id=row["id"], actor_id="owner", action="edited", revision=12, after_json="{}"))
+            with self.assertRaises(IntegrityError):
+                db.commit()
+
     def ai_manager(self, result):
         return SimpleNamespace(is_mock=False, prompt_char_limit=4000, model_name="test/configured-provider", analyze=AsyncMock(return_value=result))
 

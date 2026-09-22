@@ -135,3 +135,9 @@ limit. Changed text creates a separate immutable version; matching text in anoth
 initiative remains a separate private source. Matching uses a digest followed by
 an exact text comparison after normal input trimming; it does not merge similar
 wording or silently replace earlier evidence.
+
+History is ordered by the requirement's monotonically increasing revision rather
+than wall-clock timestamps. A unique `(requirement_id, revision)` index both serves
+this ordering and rejects duplicate revision events. Existing history is preserved
+by the index migration; inconsistent duplicate data makes the migration fail
+rather than silently discarding audit evidence.

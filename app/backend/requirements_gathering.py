@@ -366,7 +366,7 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
             raise HTTPException(404, "Requirement not found")
         query = db.query(RequirementHistoryRecord).filter_by(requirement_id=requirement_id)
         total = query.count()
-        rows = query.order_by(RequirementHistoryRecord.created_at.desc(), RequirementHistoryRecord.id).offset(offset).limit(10).all()
+        rows = query.order_by(RequirementHistoryRecord.revision.desc()).offset(offset).limit(10).all()
         return {"total": total, "items": [{
             "id": row.id, "actor_id": row.actor_id, "action": row.action,
             "revision": row.revision, "created_at": row.created_at,

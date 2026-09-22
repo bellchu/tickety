@@ -1602,9 +1602,10 @@ class RequirementDecisionRecord(Base):
 
 class RequirementHistoryRecord(Base):
     __tablename__ = "requirement_history"
+    __table_args__ = (Index("uq_requirement_history_revision", "requirement_id", "revision", unique=True),)
 
     id = Column(String(36), primary_key=True)
-    requirement_id = Column(String(36), ForeignKey("business_requirements.id"), nullable=False, index=True)
+    requirement_id = Column(String(36), ForeignKey("business_requirements.id"), nullable=False)
     actor_id = Column(String, ForeignKey("users.id", ondelete="SET NULL"))
     action = Column(String(30), nullable=False)
     revision = Column(Integer, nullable=False)
