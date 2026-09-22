@@ -5,6 +5,7 @@ const { renderToStaticMarkup } = require('react-dom/server');
 const { loadPureTs, loadComponentTs } = require('./helpers/load-pure-ts');
 const { SignOffDecisions } = loadComponentTs('requirements/SignOffDecisions.tsx', {
   react: React, 'react/jsx-runtime': require('react/jsx-runtime'),
+  '@/lib/date-time': { formatLocalDateTime: value => `Local time: ${value}` },
   '@/lib/requirement-workspace': loadPureTs('requirement-workspace.ts'),
 });
 const render = decisions => renderToStaticMarkup(React.createElement(SignOffDecisions, { requirementId: 'r1', decisions }));
@@ -42,4 +43,16 @@ test('sign-off puts late blockers ahead of historical answers without changing s
   assert.ok(html.indexOf('Global blocking question') < html.indexOf('Earlier answer'));
   assert.ok(html.indexOf('Earlier answer') < html.indexOf('Future exploration'));
   assert.deepEqual(records.map(item => item.id), ['old', 'explore', 'block', 'global']);
+});
+
+
+test('recorded decisions expose provenance during sign-off without inventing missing details', () => {
+  const base = { id: 'd1', requirement_id: 'r1', question: 'Who owns recovery?', status: 'resolved', blocking: true, resolution: 'Operations owns recovery.' };
+  const html = render([{ ...base, resolved_by: 'reviewer-1', resolved_at: '2026-09-22T10:00:00Z' }]);
+  assert.ok(html.includes('Recorded by reviewer-1'));
+  assert.ok(html.includes('Local time: 2026-09-22T10:00:00Z'));
+  const missing = render([base]);
+  assert.ok(missing.includes('Former member'));
+  assert.ok(missing.includes('Time not recorded'));
+  assert.ok(!render([{ ...base, status: 'open', resolution: null }]).includes('Recorded by'));
 });

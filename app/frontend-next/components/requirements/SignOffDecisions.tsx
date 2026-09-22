@@ -1,4 +1,5 @@
 import { memo } from "react";
+import { formatLocalDateTime } from "@/lib/date-time";
 import { filterDecisions, prioritizeBlockingDecisions } from "@/lib/requirement-workspace";
 import type { RequirementDecision } from "@/lib/requirements-types";
 
@@ -18,6 +19,7 @@ export const SignOffDecisions = memo(function SignOffDecisions({ requirementId, 
           <summary className="cursor-pointer font-medium text-ink-700">{item.question}<span className="ml-2 text-xs font-normal text-ink-500">{item.status === "resolved" ? "Decision recorded" : item.blocking ? "Blocks sign-off" : "Exploratory"}</span></summary>
           <p className="mt-2 text-xs text-ink-500">{item.requirement_id ? "This requirement" : "Whole initiative"} · Answer owner: {item.owner_role}</p>
           <p className="mt-2 whitespace-pre-wrap break-words text-ink-600">{item.status === "resolved" ? item.resolution : "An answer has not been recorded yet."}</p>
+          {item.status === "resolved" && <p className="mt-2 text-xs text-ink-400">Recorded by {item.resolved_by || "Former member"} · {item.resolved_at ? formatLocalDateTime(item.resolved_at) : "Time not recorded"}</p>}
         </details>)}
       </div>
     </> : <p className="text-sm text-ink-500">No business questions or decisions are recorded for this requirement or the whole initiative. Confirm any unresolved assumptions with the stakeholder.</p>}
