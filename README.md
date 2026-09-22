@@ -6,14 +6,53 @@
 
 <p align="center">Self-hosted intelligence for IT service operations.</p>
 
-Tickety brings ticket queues, SLA monitoring, reports, knowledge, and optional
-AI analysis into one workspace. In production, it reads Freshservice records
+Tickety brings ticket queues, SLA monitoring, reports, knowledge, business
+requirements, and optional AI analysis into one workspace. In production, it reads Freshservice records
 into a local store without writing ticket changes back to Freshservice.
 
 Built with FastAPI, Next.js, and PostgreSQL. Runs with Docker Compose or
 Kubernetes/Helm.
 
+## Requirements workspace
+
+Open **Work → Requirements** (`/requirements`) to capture an approved project,
+request, or enhancement around a business objective. Evidence, questions,
+requirements, and user stories stay connected in one workspace. **Worth your
+attention** suggests the next useful action from current blockers and business
+priorities; users can revisit any part of the work without following a fixed wizard.
+
+- **Bring business context:** paste material or preview TXT, Markdown, EML, DOCX,
+  selectable-text PDF, VTT, and SRT files. Classify sources as documents, emails,
+  SOPs, or meeting transcripts. Saved evidence is immutable and traceable.
+- **Clarify scope:** capture exact evidence excerpts, outcomes, priorities, and
+  observable acceptance criteria. Assign business questions to an answer-owner
+  role and distinguish blocking decisions from exploratory questions. Keep
+  background material and deferred needs without treating them as current delivery.
+- **Review with accountability:** compare selected requirements for possible
+  conflicts using optional AI assistance. Humans record decisions and sign off
+  a specific revision with their review capacity and rationale. Changes to agreed
+  scope withdraw its sign-off and story until reviewed again.
+- **Prepare the handoff:** create user stories from signed-off requirements,
+  copy their acceptance criteria and provenance, or export a Markdown BRD with
+  priorities, evidence, decisions, and outstanding exploration. These actions do
+  not create external development tickets or constitute deployment approval.
+
+An active session is required, including in demo mode. Initiatives are accessible
+to their creator and active administrators. AI requires a configured, available
+provider; manual work remains available without it. Suggestions never sign off
+requirements or automatically record business decisions.
+
+Uploads are limited to 400 KB and confirmed source text to 100,000 characters.
+Scanned PDFs require OCR or transcription beforehand. Unsaved drafts stay only in
+the current tab's memory while navigating: save before refreshing or signing out.
+See the [business guide](docs/requirements-gathering.md) and
+[runtime boundaries](docs/requirements-runtime.md) for details.
+
 ## Quick start
+
+For the maintained `dev` branch on MicroK8s, use the
+[Dev deployment guide](docs/dev-deployment.md). The isolated Compose evaluation
+path below is a separate deployment option.
 
 Requires Docker and Docker Compose 2.24 or later. Run these commands from the
 repository root.
@@ -96,14 +135,22 @@ npm test
 npm run lint
 npm run typecheck
 npm run build
+npm run verify:production-routes
 ```
+
+The production-route check runs against the completed build. Test and browser
+verification history for the requirements workspace is recorded
+[separately](docs/requirements-verification.md); local checks do not establish that
+a commit has been deployed to Dev or production.
 
 ## Documentation
 
 - [Deployment](docs/deployment.md) — Docker Compose and production Kubernetes
 - [Development deployment](docs/dev-deployment.md) — MicroK8s
 - [Database migrations](docs/database-migrations.md)
-- [Requirements gathering](docs/requirements-gathering.md) — source evidence, sign-off, BRD and user stories
+- [Requirements gathering](docs/requirements-gathering.md) — business workflow and user guide
+- [Requirements runtime](docs/requirements-runtime.md) — access, capacity, extraction, AI, and audit boundaries
+- [Requirements verification](docs/requirements-verification.md) — regression scenarios and recorded validation limits
 - [Freshworks app](freshworks-app/README.md)
 - [RAG operations](docs/rag-v2.md) — indexing, rollout, and rollback
 
