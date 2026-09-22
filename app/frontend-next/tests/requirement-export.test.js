@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const { loadPureTs } = require('./helpers/load-pure-ts');
-const library = loadPureTs('requirement-export.ts');
+const library = loadPureTs('requirement-export.ts', { './requirement-workspace': loadPureTs('requirement-workspace.ts') });
 
 test("BRD export retains evidence, human sign-off and story traceability", () => {
   const brief = library.requirementBrief({

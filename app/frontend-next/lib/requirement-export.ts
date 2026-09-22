@@ -1,3 +1,4 @@
+import { filterDecisions } from "./requirement-workspace";
 import type { BusinessRequirement, RequirementWorkspaceDetail } from "./requirements-types";
 
 export function requirementBriefFilename(workspace: { title: string; id: string }): string {
@@ -89,7 +90,7 @@ export function requirementStoryText(detail: RequirementWorkspaceDetail, row: Bu
     throw new Error("Prepare an in-scope, signed-off user story before copying it.");
   }
   const source = detail.sources.find(item => item.id === row.source_id);
-  const relevantDecisions = (detail.decisions || []).filter(item => !item.requirement_id || item.requirement_id === row.id);
+  const relevantDecisions = filterDecisions(detail.decisions || [], "all", "", "", row.id);
   const questions = relevantDecisions.filter(item => item.status === "open");
   const decisions = relevantDecisions.filter(item => item.status === "resolved");
   const lines = [
