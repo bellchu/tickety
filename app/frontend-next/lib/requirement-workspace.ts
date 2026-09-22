@@ -1,4 +1,4 @@
-import type { BusinessRequirement, RequirementDecision, RequirementPriority, RequirementWorkspaceDetail } from "./requirements-types";
+import type { BusinessRequirement, RequirementSource, SourceKind, RequirementDecision, RequirementPriority, RequirementWorkspaceDetail } from "./requirements-types";
 
 export const requirementPriorityLabels: Record<RequirementPriority, string> = { must: "Must have", should: "Should have", could: "Could have", wont: "Not this time" };
 
@@ -6,6 +6,13 @@ export type DecisionFilter = "open" | "blocking" | "current" | "exploratory" | "
 
 function searchableText(value: string) {
   return value.trim().replace(/\s+/g, " ").toLocaleLowerCase();
+}
+
+export function filterSources(items: RequirementSource[], search: string, kind: SourceKind | "", unlinkedOnly: boolean, linkedCounts: ReadonlyMap<string, number>) {
+  const query = searchableText(search);
+  return items.filter(item => (!kind || item.kind === kind)
+    && (!query || searchableText(item.title).includes(query))
+    && (!unlinkedOnly || !linkedCounts.get(item.id)));
 }
 
 /** Put unresolved approval gates first, retaining recorded order within both groups. */

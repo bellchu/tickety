@@ -71,6 +71,12 @@ identical confirmed text into the same initiative reuses the original source,
 including its title, type and requirement links, even at the source limit. Similar
 wording is not merged; another initiative has its own private sources.
 
+Use **Filter evidence by type** to review documents, emails, SOPs or transcripts
+separately. Combine it with title search and **Without linked requirements** to
+find material that still needs attention. Unlinked context is not automatically
+missing work. Opening original evidence from a requirement clears these evidence
+filters so the cited source remains visible; **Show all evidence** also resets them.
+
 While reading a saved source, select or paste an exact 10–4,000-character passage
 and choose **Draft a requirement from this passage**. The draft carries the source
 and excerpt; describe the stakeholder, business outcome and acceptance criteria

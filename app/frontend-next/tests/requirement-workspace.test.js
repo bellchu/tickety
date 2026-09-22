@@ -268,3 +268,21 @@ test('decision search treats wrapped questions, owners and answers as continuous
   }
   assert.equal(rows[1].resolution, 'Retry within\r\nfive minutes.');
 });
+
+
+test('source filters combine origin, title and missing links while preserving recorded order', () => {
+  const sources = [
+    { id: 's1', kind: 'sop', title: 'Supplier intake' },
+    { id: 's2', kind: 'email', title: 'Supplier   intake clarification' },
+    { id: 's3', kind: 'email', title: 'Supplier intake follow-up' },
+    { id: 's4', kind: 'transcript', title: 'Interview notes' },
+  ];
+  const links = new Map([['s1', 2], ['s2', 1]]);
+  const select = (search, kind, unlinked) => library.filterSources(sources, search, kind, unlinked, links).map(source => source.id);
+  assert.deepEqual(select(' SUPPLIER intake ', 'email', false), ['s2', 's3']);
+  assert.deepEqual(select('supplier intake', 'email', true), ['s3']);
+  assert.deepEqual(select('', 'transcript', true), ['s4']);
+  assert.deepEqual(select('interview', 'email', false), []);
+  assert.deepEqual(select('', '', false), ['s1', 's2', 's3', 's4']);
+  assert.equal(sources.length, 4);
+});
