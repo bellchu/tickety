@@ -159,3 +159,17 @@ test('source traceability composes with search and readiness without changing sa
   assert.equal(filterRequirements(rows, '', 'all', [], '').length, 3);
   assert.equal(rows.length, 3);
 });
+
+test('requirement decision view includes global decisions and preserves an active answer', () => {
+  const rows = [
+    { id: 'global', requirement_id: null, status: 'open', blocking: true, question: 'Global?', owner_role: 'Sponsor' },
+    { id: 'local', requirement_id: 'r1', status: 'resolved', blocking: true, question: 'Local?', owner_role: 'Owner', resolution: 'Agreed' },
+    { id: 'other', requirement_id: 'r2', status: 'open', blocking: false, question: 'Other?', owner_role: 'Owner' },
+  ];
+  const filter = library.filterDecisions;
+  assert.deepEqual(filter(rows, 'all', '', '', 'r1').map(x => x.id), ['global', 'local']);
+  assert.deepEqual(filter(rows, 'blocking', '', '', 'r1').map(x => x.id), ['global']);
+  assert.deepEqual(filter(rows, 'recorded', 'agreed', '', 'r1').map(x => x.id), ['local']);
+  assert.deepEqual(filter(rows, 'all', '', 'other', 'r1').map(x => x.id), ['global', 'local', 'other']);
+  assert.equal(filter(rows, 'all', '', '', '').length, 3);
+});

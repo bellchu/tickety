@@ -12,9 +12,10 @@ import { api, APIError } from "@/lib/api";
 import { formatLocalDateTime } from "@/lib/date-time";
 import type { BusinessRequirement, RequirementDecision } from "@/lib/requirements-types";
 
-export function DecisionLog({ workspaceId, userId, requirements, decisions, open, onToggle, seed, onSeedUsed, onSaved }: {
+export function DecisionLog({ workspaceId, userId, requirements, decisions, open, onToggle, scope, onScopeChange, seed, onSeedUsed, onSaved }: {
   workspaceId: string; userId: string; requirements: BusinessRequirement[]; decisions: RequirementDecision[];
   open: boolean; onToggle: () => void;
+  scope: string; onScopeChange: (value: string) => void;
   seed: { question: string; requirementId: string | null } | null;
   onSeedUsed: () => void; onSaved: () => Promise<unknown>;
 }) {
@@ -70,10 +71,10 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
     finally { setPending(false); }
   }
   const outstanding = decisions.filter(item => item.status === "open");
-  const visibleDecisions = filterDecisions(decisions, view, search, resolving);
+  const visibleDecisions = filterDecisions(decisions, view, search, resolving, scope);
   const requirementNames = new Map(requirements.map(item => [item.id, `${item.reference}${item.priority === "wont" ? " · Not this time" : ""}`]));
   const blockers = outstanding.filter(item => item.blocking).length;
-  return <section className="rounded-xl border border-linen-400 bg-white p-5" aria-label="Business decision log">
+  return <section id="business-decisions" tabIndex={-1} className="rounded-xl border border-linen-400 bg-white p-5" aria-label="Business decision log">
     <ConfirmDialog open={Boolean(transition)} onOpenChange={open => { if (!open) setTransition(null); }} title="Replace unsaved decision work?" description="The current question or answer will be discarded. Saved decisions are unchanged." cancelLabel="Keep editing" confirmLabel="Discard and continue" destructive onConfirm={() => { const action = transition; setTransition(null); action?.(); }} />
     <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-semibold text-ink-700">Questions & decisions</h2><p className="mt-1 text-xs text-ink-500">{outstanding.length} open · {blockers} blocking · {decisions.length - outstanding.length} decisions recorded</p></div><Button variant="secondary" onClick={onToggle}>{open ? "Close decision log" : "Open decision log"}</Button></div>
     {open && <div className="mt-5 space-y-5">
@@ -104,6 +105,8 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
           <option value="open">Open questions</option><option value="blocking">Blocks sign-off</option><option value="exploratory">Exploratory questions</option><option value="recorded">Recorded decisions</option><option value="all">All questions & decisions</option>
         </select></label>
       </div>
+      <label className="block space-y-1 text-sm">Decisions affecting<select className={inputStyle} value={scope} onChange={event => onScopeChange(event.target.value)}><option value="">All requirements</option>{requirements.map(item => <option key={item.id} value={item.id}>{item.reference} · {item.title}</option>)}</select></label>
+      {scope && <p className="text-xs text-ink-500">Includes whole-initiative questions and decisions, which also affect this requirement.</p>}
       {resolving && <p className="text-xs text-ink-500">The question you are answering stays visible while you filter.</p>}
       {visibleDecisions.map(item => <article key={item.id} className="space-y-3 rounded-lg border border-linen-400 p-4">
         <div className="flex flex-wrap justify-between gap-2 text-xs text-ink-500"><span>{item.requirement_id ? requirementNames.get(item.requirement_id) || "Requirement unavailable" : "Whole initiative"} · {item.owner_role}</span><span>{item.status === "resolved" ? "Decision recorded" : item.blocking ? "Blocks sign-off" : "Exploratory"}</span></div>

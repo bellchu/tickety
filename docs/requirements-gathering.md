@@ -209,3 +209,8 @@ Use **View linked requirements** on a source to inspect the needs captured from
 that material, including deferred needs. The source selector combines with search
 and readiness filters. **Show all sources** removes only the source restriction;
 exports and initiative-wide readiness still cover the complete saved workspace.
+
+**Related decisions** on a requirement opens its decision register scope. This
+includes whole-initiative decisions as well as those linked to that requirement.
+Use the status filter to inspect recorded answers or outstanding questions; an
+answer currently being edited remains visible when the scope changes.

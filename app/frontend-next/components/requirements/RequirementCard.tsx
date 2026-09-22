@@ -8,7 +8,7 @@ import type { BusinessRequirement } from "@/lib/requirements-types";
 
 export function RequirementCard({
   item, sourceTitle, canAI, busy, pending, blocked,
-  onEvidence, onEdit, onReview, onHistory, onSignOff, onCreateStory, onCopyStory, onRefine,
+  onDecisions, onEvidence, onEdit, onReview, onHistory, onSignOff, onCreateStory, onCopyStory, onRefine,
 }: {
   item: BusinessRequirement;
   blocked: boolean;
@@ -16,6 +16,7 @@ export function RequirementCard({
   canAI: boolean;
   busy: boolean;
   pending: string;
+  onDecisions: () => void;
   onEvidence: () => void;
   onEdit: () => void;
   onHistory: () => void;
@@ -60,6 +61,7 @@ export function RequirementCard({
         <div className="flex flex-wrap gap-2">
           <Button size="sm" variant="secondary" disabled={busy} onClick={onEdit}>Edit</Button>
           <Button size="sm" variant="ghost" onClick={onHistory}>History</Button>
+          <a href="#business-decisions" onClick={onDecisions} className="inline-flex items-center px-3 text-sm font-medium text-clay-700 underline underline-offset-2">Related decisions</a>
           {canAI && <Button size="sm" variant="ghost" leadingIcon={<Sparkles size={14} />} pending={pending === `review-${item.id}`} disabled={busy} onClick={onReview}>Get AI perspective</Button>}
           {!deferred && (item.status === "draft" ? (
             <Button size="sm" leadingIcon={<CheckCircle2 size={14} />} disabled={busy || needsClarity} onClick={onSignOff}>Sign off</Button>

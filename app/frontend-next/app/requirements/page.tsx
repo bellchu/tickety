@@ -110,6 +110,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
   const query = useQuery({ queryKey: ["requirement-workspace", id], queryFn: () => api.getRequirementWorkspace(id) });
   const [historyItem, setHistoryItem] = useState<string | null>(null);
   const [decisionsOpen, setDecisionsOpen] = useState(() => Boolean(readRequirementDecisionDraft(editorClient, userId, id)));
+  const [decisionScope, setDecisionScope] = useState("");
   const [questionSeed, setQuestionSeed] = useState<{ question: string; requirementId: string | null } | null>(null);
   const [sourceFormOpen, setSourceFormOpen] = useState(() => Boolean(readRequirementSourceDraft(editorClient, userId, id)));
   const [sourceFocus, setSourceFocus] = useState<{ sourceId: string; quote: string; reference: string }>();
@@ -253,7 +254,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
   const reviewIssue = reviewing ? reviewUnavailableReason(reviewing, currentReview, blockedIds.has(reviewing.id)) : null;
 
   function followFocus() {
-    if (focus.action === "decisions") setDecisionsOpen(true);
+    if (focus.action === "decisions") { setDecisionScope(""); setDecisionsOpen(true); }
     else if (focus.action === "source") setSourceFormOpen(true);
     else if (focus.action === "deferred") { setFilter("deferred"); setSearch(""); setSourceFilter(""); }
     else if (focus.action === "questions") { setFilter("questions"); setSearch(""); setSourceFilter(""); }
@@ -273,7 +274,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
       <div className="max-w-2xl"><p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-cyan-200">Worth your attention</p><h2 className="mt-2 text-lg font-medium">{focus.title}</h2><p className="mt-2 text-sm leading-6 text-slate-200">{focus.reason}</p></div>
       <Button className="shrink-0" variant="secondary" trailingIcon={<ArrowUpRight size={15} />} disabled={Boolean(pending)} onClick={followFocus}>{focus.label}</Button>
     </section>
-    <DecisionLog workspaceId={id} userId={userId} requirements={detail.requirements} decisions={detail.decisions || []} open={decisionsOpen} onToggle={() => setDecisionsOpen(!decisionsOpen)} seed={questionSeed} onSeedUsed={() => setQuestionSeed(null)} onSaved={() => query.refetch()} />
+    <DecisionLog scope={decisionScope} onScopeChange={setDecisionScope} workspaceId={id} userId={userId} requirements={detail.requirements} decisions={detail.decisions || []} open={decisionsOpen} onToggle={() => setDecisionsOpen(!decisionsOpen)} seed={questionSeed} onSeedUsed={() => setQuestionSeed(null)} onSaved={() => query.refetch()} />
     <ErrorMessage error={error || query.error} />{notice && <p role="status" className="text-sm text-moss-700">{notice}</p>}
     <div className="grid items-start gap-6 xl:grid-cols-[300px_minmax(0,1fr)]">
       <aside className="min-w-0 space-y-4" aria-label="Business context">
@@ -369,6 +370,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
         {visibleItems.length === 0 && <div className={`${panelStyle} py-10 text-center`}><FileText className="mx-auto text-ink-300" /><h3 className="mt-3 font-semibold">{detail.requirements.length ? "No requirements match this view" : "Give the business need a clear shape"}</h3><p className="mx-auto mt-2 max-w-md text-sm leading-6 text-ink-500">{detail.requirements.length ? "Try a different search or show all work." : "Explore your material, capture an outcome, or start with a question. Your evidence and decisions will stay connected here."}</p></div>}
         {search.trim() && <p role="status" className="text-xs text-ink-500">{visibleItems.length} matching requirements · Searches include evidence, acceptance criteria and user stories.</p>}
         {displayedItems.map(row => <RequirementCard key={row.id} item={row} blocked={blockedIds.has(row.id)} sourceTitle={sourceNames.get(row.source_id) || "Source unavailable"} canAI={canAI} busy={Boolean(pending)} pending={pending}
+          onDecisions={() => { setDecisionScope(row.id); setDecisionsOpen(true); }}
           onEvidence={() => { revealSource(row.source_id); setSourceFocus({ sourceId: row.source_id, quote: row.evidence_quote, reference: row.reference }); }}
           onEdit={() => switchEditor(() => edit(row))}
           onHistory={() => setHistoryItem(row.id)}
