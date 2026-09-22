@@ -278,3 +278,20 @@ This browser check passed; both temporary selections and the search were cleared
 before closing the panel. No AI call or business write was made. Automated coverage
 also verifies the submitted identifiers stay exactly equal to the retained selection.
 The production build and route verification passed for this version.
+
+### Review findings handed to decision drafts
+
+Both single-requirement and cross-requirement findings prefill the full question,
+reviewed references/revisions and AI background marked **Context to confirm**.
+Component interaction tests exercise the actual tracking callbacks and verify the
+scoped requirement ID. Maximum-output tests retain a 2,000-character question and
+all eight reviewed references within the 4,000-character decision limit, shortening
+only context with an explicit marker and preserving Unicode characters.
+
+The production build and route checks passed. A local browser attempt using the
+two synthetic supplier requirements returned **AI is unavailable**. The selected
+scope remained visible and editable, and the panel allowed retry after provider
+configuration. Both temporary selections were removed before closing the panel.
+No generated finding or decision draft was produced by this attempt, so live
+provider-to-form handoff remains unverified; component tests do not replace that
+check. No business decision was saved.
