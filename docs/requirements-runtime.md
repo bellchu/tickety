@@ -244,3 +244,14 @@ and saving becomes available if the other fields are valid. Remove the temporary
 entry and cancel. These checks passed locally without saving or changing the
 original requirement. Component regressions cover editing/removing a middle entry,
 retaining neighboring multiline values, the 20-entry limit and correction of errors.
+
+Keyboard continuity and recovery check: adding an entry must focus its textarea;
+removing it must focus the next entry, or the previous one when removing the last.
+When no entries remain, focus returns to **Add acceptance criterion**. Ordinary
+text edits must not reset focus. The component regression covers these transitions.
+In the production-mode local preview, adding a second entry focused **Criterion 2**.
+After entering three lines, navigating through **All initiatives** and reopening
+the same initiative restored both entries with their original line boundaries.
+Removing the temporary second entry focused **Criterion 1**. The editor was then
+cancelled without saving; no requirement, sign-off or business decision was changed.
+The production build and route verification also passed for this check.
