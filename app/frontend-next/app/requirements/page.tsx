@@ -1,6 +1,8 @@
 "use client";
 
-import { useState, type FormEvent, type ReactNode } from "react";
+import { Suspense, useState, type FormEvent, type ReactNode } from "react";
+import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ClipboardList, Download, FileText, Plus, Sparkles, ArrowUpRight } from "lucide-react";
 import { requirementBrief } from "@/lib/requirement-export";
@@ -42,7 +44,20 @@ function exportBrief(detail: RequirementWorkspaceDetail) {
 }
 
 export default function RequirementsPage() {
-  const [selected, setSelected] = useState<string | null>(null);
+  return <Suspense fallback={<p role="status">Loading requirements…</p>}><RequirementsContent /></Suspense>;
+}
+
+function RequirementsContent() {
+  const router = useRouter();
+  const params = useSearchParams();
+  const selected = params.get("initiative") || null;
+  function initiativeURL(id: string | null) {
+    const query = new URLSearchParams(params.toString());
+    if (id) query.set("initiative", id);
+    else query.delete("initiative");
+    return `/requirements${query.size ? `?${query.toString()}` : ""}`;
+  }
+  function setSelected(id: string | null) { router.push(initiativeURL(id)); }
   const [offset, setOffset] = useState(0);
   const [creating, setCreating] = useState(false);
   const [pending, setPending] = useState(false);
@@ -53,7 +68,7 @@ export default function RequirementsPage() {
   const queryClient = useQueryClient();
   const auth = useQuery({ queryKey: ["auth-me"], queryFn: api.getAuthMe, retry: false });
   const allowed = !auth.isError && auth.data?.auth_kind === "session" && auth.data?.is_active && ["agent", "supervisor", "admin"].includes(auth.data.role.toLowerCase());
-  const list = useQuery({ queryKey: ["requirement-workspaces", offset], queryFn: () => api.getRequirementWorkspaces(offset), enabled: Boolean(allowed) });
+  const list = useQuery({ queryKey: ["requirement-workspaces", offset], queryFn: () => api.getRequirementWorkspaces(offset), enabled: Boolean(allowed) && !selected });
 
   async function create(event: FormEvent) {
     event.preventDefault();
@@ -84,7 +99,7 @@ export default function RequirementsPage() {
     {list.isError && <Button variant="secondary" onClick={() => list.refetch()}>Retry loading initiatives</Button>}
     {list.isPending && <p role="status">Loading initiatives…</p>}
     {list.data?.items.length === 0 && <div className={`${panelStyle} text-center`}><FileText className="mx-auto mb-3 text-ink-400" /><h2 className="font-semibold">Start with a business question</h2><p className="mt-2 text-sm text-ink-500">Create your first initiative, then add the material that explains the problem.</p></div>}
-    <div className="grid gap-4 md:grid-cols-2">{list.data?.items.map(workspace => <button key={workspace.id} onClick={() => setSelected(workspace.id)} className={`${panelStyle} text-left transition hover:border-clay-400 focus-visible:ring-2 focus-visible:ring-clay-400`}><h2 className="text-lg font-semibold text-ink-700">{workspace.title}</h2><p className="mt-2 line-clamp-3 text-sm text-ink-500">{workspace.objective}</p><p className="mt-4 text-xs text-ink-400">Created {formatLocalDateTime(workspace.created_at)}</p></button>)}</div>
+    <div className="grid gap-4 md:grid-cols-2">{list.data?.items.map(workspace => <Link key={workspace.id} href={initiativeURL(workspace.id)} prefetch={false} className={`${panelStyle} text-left transition hover:border-clay-400 focus-visible:ring-2 focus-visible:ring-clay-400`}><h2 className="text-lg font-semibold text-ink-700">{workspace.title}</h2><p className="mt-2 line-clamp-3 text-sm text-ink-500">{workspace.objective}</p><p className="mt-4 text-xs text-ink-400">Created {formatLocalDateTime(workspace.created_at)}</p></Link>)}</div>
     {list.data && <div className="flex items-center justify-between"><Button variant="secondary" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 25))}>Previous</Button><span className="text-xs text-ink-500">{list.data.total} initiatives</span><Button variant="secondary" disabled={offset + 25 >= list.data.total} onClick={() => setOffset(offset + 25)}>Next</Button></div>}
   </PageFrame>;
 }

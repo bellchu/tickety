@@ -10,6 +10,9 @@ reviewable drafts, new sources, and agreed work awaiting a story. These are
 contextual recommendations; users can revisit any material. Search and readiness
 filters help focus attention without forcing everyone through numbered stages.
 Human sign-off and evidence requirements remain enforced by the backend.
+Opening an initiative gives it a bookmarkable `?initiative=` address. Refresh and
+browser history preserve the selected initiative; the address does not grant
+access to users who cannot already view it.
 
 - Record the business objective and gather business documents, emails, SOPs,
    and meeting transcripts. Paste text or import UTF-8 TXT, Markdown, VTT, or SRT files. EML
