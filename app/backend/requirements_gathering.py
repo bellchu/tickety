@@ -215,9 +215,11 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
                 func.count(BusinessRequirementRecord.id),
                 func.sum(case(((BusinessRequirementRecord.priority != "wont") & (BusinessRequirementRecord.status == "draft"), 1), else_=0)),
                 func.sum(case(((BusinessRequirementRecord.priority != "wont") & BusinessRequirementRecord.story_json.isnot(None), 1), else_=0)),
+                func.sum(case(((BusinessRequirementRecord.priority != "wont") & (BusinessRequirementRecord.status == "validated") & BusinessRequirementRecord.story_json.is_(None), 1), else_=0)),
+                func.sum(case((BusinessRequirementRecord.priority == "wont", 1), else_=0)),
             ).filter(BusinessRequirementRecord.workspace_id.in_([row.id for row in rows])).group_by(BusinessRequirementRecord.workspace_id).all()
-            summaries = {workspace_id: {"requirements": count, "drafts": drafts, "stories": stories}
-                         for workspace_id, count, drafts, stories in counts}
+            summaries = {workspace_id: {"requirements": count, "drafts": drafts, "stories": stories, "agreed": agreed, "deferred": deferred}
+                         for workspace_id, count, drafts, stories, agreed, deferred in counts}
         return {"items": rows, "total": total, "offset": offset, "limit": limit, "summaries": summaries}
 
     @router.post("", status_code=201)

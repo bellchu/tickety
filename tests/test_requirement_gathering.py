@@ -79,6 +79,8 @@ class RequirementGatheringTests(unittest.TestCase):
         route = f"{self.path}/{workspace}/items/{prepared['id']}"
         signed = self.client.post(route + "/validate", json={"revision": prepared["revision"], "reviewer_role": "Product Owner", "validation_note": "Confirmed with the business owner."}).json()
         self.assertEqual(self.client.post(route + "/story", json={"revision": signed["revision"]}).status_code, 200)
+        agreed = self.client.post(f"{self.path}/{workspace}/items", json={**self.payload(source), "title": "Agreed without story"}).json()
+        self.assertEqual(self.client.post(f"{self.path}/{workspace}/items/{agreed['id']}/validate", json={"revision": agreed["revision"], "reviewer_role": "Product Owner", "validation_note": "Confirmed with the business owner."}).status_code, 200)
         statements = []
         def capture(connection, cursor, statement, parameters, context, executemany):
             statements.append(statement)
@@ -87,7 +89,7 @@ class RequirementGatheringTests(unittest.TestCase):
             response = self.client.get(self.path + "?limit=1").json()
         finally:
             event.remove(self.engine, "before_cursor_execute", capture)
-        self.assertEqual(response["summaries"][workspace], {"requirements": 3, "drafts": 1, "stories": 1})
+        self.assertEqual(response["summaries"][workspace], {"requirements": 4, "drafts": 1, "stories": 1, "agreed": 1, "deferred": 1})
         self.assertEqual(len([s for s in statements if s.lstrip().upper().startswith("SELECT")]), 3)
         self.assertFalse(any("evidence_quote" in s or "acceptance_json" in s for s in statements))
         self.assertEqual(self.client.get(self.path + "?offset=1").json()["summaries"], {})

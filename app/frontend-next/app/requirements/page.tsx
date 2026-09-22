@@ -108,7 +108,21 @@ function RequirementsContent() {
     {list.isError && <Button variant="secondary" onClick={() => list.refetch()}>Retry loading initiatives</Button>}
     {list.isPending && <p role="status">Loading initiatives…</p>}
     {list.data?.items.length === 0 && <div className={`${panelStyle} text-center`}><FileText className="mx-auto mb-3 text-ink-400" /><h2 className="font-semibold">{initiativeSearch ? "No initiatives match this search" : "Start with a business question"}</h2><p className="mt-2 text-sm text-ink-500">{initiativeSearch ? "Try another name or business objective, or clear the search." : "Create your first initiative, then add the material that explains the problem."}</p></div>}
-    <div className="grid gap-4 md:grid-cols-2">{list.data?.items.map(workspace => <Link key={workspace.id} href={initiativeURL(workspace.id)} prefetch={false} className={`${panelStyle} text-left transition hover:border-clay-400 focus-visible:ring-2 focus-visible:ring-clay-400`}><h2 className="text-lg font-semibold text-ink-700">{workspace.title}</h2><p className="mt-2 line-clamp-3 text-sm text-ink-500">{workspace.objective}</p>{list.data?.summaries && <p className="mt-3 text-xs text-ink-500">{list.data.summaries[workspace.id]?.requirements || 0} requirements · {list.data.summaries[workspace.id]?.drafts || 0} awaiting agreement · {list.data.summaries[workspace.id]?.stories || 0} stories prepared</p>}<p className="mt-4 text-xs text-ink-400">Created {formatLocalDateTime(workspace.created_at)}</p></Link>)}</div>
+    <div className="grid gap-4 md:grid-cols-2">{list.data?.items.map(workspace => {
+      const summary = list.data.summaries?.[workspace.id];
+      return <Link key={workspace.id} href={initiativeURL(workspace.id)} prefetch={false} className={`${panelStyle} text-left transition hover:border-clay-400 focus-visible:ring-2 focus-visible:ring-clay-400`}>
+        <h2 className="text-lg font-semibold text-ink-700">{workspace.title}</h2>
+        <p className="mt-2 line-clamp-3 text-sm text-ink-500">{workspace.objective}</p>
+        {list.data.summaries && <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-500">
+          <span>Requirements: {summary?.requirements || 0}</span>
+          <span>Awaiting agreement: {summary?.drafts || 0}</span>
+          {summary?.agreed !== undefined && <span>Agreed, needs a story: {summary.agreed}</span>}
+          <span>Stories prepared: {summary?.stories || 0}</span>
+          {summary?.deferred !== undefined && <span>Deferred: {summary.deferred}</span>}
+        </div>}
+        <p className="mt-4 text-xs text-ink-400">Created {formatLocalDateTime(workspace.created_at)}</p>
+      </Link>;
+    })}</div>
     {list.data && <div className="flex items-center justify-between"><Button variant="secondary" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 25))}>Previous</Button><span className="text-xs text-ink-500">{list.data.total} initiatives</span><Button variant="secondary" disabled={offset + 25 >= list.data.total} onClick={() => setOffset(offset + 25)}>Next</Button></div>}
   </PageFrame>;
 }

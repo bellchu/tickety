@@ -247,3 +247,6 @@ Search initiatives by name or business objective from the overview. Submit the
 search to inspect all matching initiatives you can access, including those beyond
 the current page. Search text is treated literally; clearing it restores the full
 list and returns to the first page.
+The overview also identifies signed-off requirements still awaiting story
+preparation and deferred needs, so these do not disappear between the draft and
+prepared-story counts. All counts come from one grouped query per overview page.
