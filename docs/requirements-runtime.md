@@ -343,3 +343,16 @@ Combining **Needs exploration**, source type **SOP** and title search `supplier`
 produced zero results as expected. **Show all evidence** then cleared the title,
 type and review filters together. No source classification or business record was
 changed during these checks. Build and production-route verification also passed.
+
+### Repeated quotation navigation
+
+A separate local SQLite fixture contained two exact copies of REQ-001's quotation,
+one below a current-procedure heading and one below an earlier-correspondence
+heading. The production-mode browser showed the duplicate warning and disabled
+**Previous occurrence** at the first match. **Next occurrence** moved the highlight
+to the second context, focused **Evidence for REQ-001**, kept it visible, and disabled
+further forward navigation. Moving back restored the first location with the whole
+source text intact. Enter-key activation also moved to the second match correctly.
+The isolated tab and both temporary services were closed afterward. The main preview
+was updated and retained its original source texts/digests and requirement statuses.
+No business records in the main preview were changed. Build and route checks passed.
