@@ -24,7 +24,10 @@ RUN python -m pip install --no-cache-dir --upgrade \
     && python -m pip install --no-cache-dir -r requirements.lock \
     && python -m pip check
 
-COPY --chown=tickety:tickety . .
+# Runtime code and schema tools only; frontend/tests/deployment files stay out.
+COPY --chown=tickety:tickety app/backend/ ./app/backend/
+COPY --chown=tickety:tickety migrations/ ./migrations/
+COPY --chown=tickety:tickety alembic.ini ./
 
 EXPOSE 8000
 USER 10001:10001
