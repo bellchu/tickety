@@ -62,8 +62,11 @@ or PDFs with selectable text. Preview and review the conversion before choosing
 **Save source**. Previewing neither saves an evidence source nor calls AI.
 Scanned PDFs need OCR or transcription first; older DOC files are not supported.
 Review warnings about missing images, formatting, tables or tracked changes.
-A failed import leaves the existing material draft and its conversion warnings
-intact. Successful imports replace the preview and set the type for the new file.
+When a title or source text is already unsaved, importing another file asks whether
+to replace that draft. **Keep editing** cancels before extraction or upload, so the
+current material can be saved first. An empty form imports directly. A failed import
+leaves the existing material draft and its conversion warnings intact. Successful
+imports replace the preview and set the type for the new file.
 
 Saved sources are immutable. Their SHA-256 digest identifies the confirmed text,
 not the original uploaded file. Changed text becomes a separate source. Reimporting

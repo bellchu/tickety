@@ -25,6 +25,7 @@ export function SourceIntakeForm({ workspaceId, userId, open, pending, onSave }:
   const client = useQueryClient();
   const [restored] = useState(() => readRequirementSourceDraft(client, userId, workspaceId));
   const [discarding, setDiscarding] = useState(false);
+  const [replacement, setReplacement] = useState<File | null>(null);
   const [sourceTitle, setSourceTitle] = useState(restored?.title || "");
   const [sourceKind, setSourceKind] = useState<SourceKind>(restored?.kind || "document");
   const [importWarnings, setImportWarnings] = useState<string[]>(restored?.warnings || []);
@@ -61,12 +62,13 @@ export function SourceIntakeForm({ workspaceId, userId, open, pending, onSave }:
 
   if (!open) return null;
   return <>
+    <ConfirmDialog open={Boolean(replacement)} onOpenChange={open => { if (!open) setReplacement(null); }} title="Replace unsaved source material?" description={`Importing “${replacement?.name || "this file"}” replaces your unsaved title, text and preview notes. Keep editing to save the current material first. If extraction fails, the current draft is retained.`} confirmLabel="Import replacement" cancelLabel="Keep editing" onConfirm={() => { const file = replacement; setReplacement(null); if (file) void importText(file); }} />
     <ConfirmDialog open={discarding} onOpenChange={setDiscarding} title="Discard source draft?" description="This removes the unsaved title, text and import preview. Saved sources are unchanged." confirmLabel="Discard draft" cancelLabel="Keep editing" destructive onConfirm={clearDraft} />
     {Boolean(error) && <p role="alert" className="rounded-lg bg-rust-400/10 p-3 text-sm text-rust-600">{requirementErrorMessage(error)}</p>}
       <form className={`${panelStyle} space-y-4`} onSubmit={async event => { event.preventDefault(); if (importing || pending || !bounds.valid) return; setError(null); const isCurrent = captureRequirementDraftSave(client, userId, workspaceId, "source"); if (await onSave({ title: sourceTitle, kind: sourceKind, content }) && isCurrent()) { clearDraft(); } }}>
         <h2 className="text-lg font-semibold">Add supporting material</h2><p className="text-sm text-ink-500">Paste business material or import a document, email or meeting transcript. Sources are preserved so every requirement can point back to its evidence.</p>
         {hasDraft && <p role="status" className="text-xs text-amber-800">Unsaved material · Kept in this tab while you browse. Save before refreshing or closing.</p>}
-        <Field label="Import source file"><input type="file" disabled={importing || Boolean(pending)} accept=".txt,.md,.eml,.docx,.pdf,.vtt,.srt" onChange={event => { void importText(event.target.files?.[0]); event.target.value = ""; }} className="mt-2 block w-full text-sm" /></Field>
+        <Field label="Import source file"><input type="file" disabled={importing || Boolean(pending)} accept=".txt,.md,.eml,.docx,.pdf,.vtt,.srt" onChange={event => { const file = event.target.files?.[0]; event.target.value = ""; if (!file || importing || pending) return; if (hasDraft) setReplacement(file); else void importText(file); }} className="mt-2 block w-full text-sm" /></Field>
         {importing && <p role="status" className="text-xs">Preparing source preview…</p>}
         {importWarnings.map(warning => <p key={warning} className="text-xs text-amber-800">{warning}</p>)}
         <Field label="Source title"><RequirementInput disabled={importing || Boolean(pending)} required maxLength={200} className={inputStyle} value={sourceTitle} onChange={event => setSourceTitle(event.target.value)} /></Field>
