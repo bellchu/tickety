@@ -1,8 +1,9 @@
+import { memo } from "react";
 import { filterDecisions, prioritizeBlockingDecisions } from "@/lib/requirement-workspace";
 import type { RequirementDecision } from "@/lib/requirements-types";
 
 /** Read-only context; recording an answer never substitutes for human sign-off. */
-export function SignOffDecisions({ requirementId, decisions }: { requirementId: string; decisions: RequirementDecision[] }) {
+export const SignOffDecisions = memo(function SignOffDecisions({ requirementId, decisions }: { requirementId: string; decisions: RequirementDecision[] }) {
   const related = prioritizeBlockingDecisions(filterDecisions(decisions, "all", "", "", requirementId));
   const blockers = related.filter(item => item.status === "open" && item.blocking).length;
   const exploratory = related.filter(item => item.status === "open" && !item.blocking).length;
@@ -21,4 +22,4 @@ export function SignOffDecisions({ requirementId, decisions }: { requirementId: 
       </div>
     </> : <p className="text-sm text-ink-500">No business questions or decisions are recorded for this requirement or the whole initiative. Confirm any unresolved assumptions with the stakeholder.</p>}
   </section>;
-}
+});

@@ -4,7 +4,7 @@ const React = require('react');
 const { renderToStaticMarkup } = require('react-dom/server');
 const { loadPureTs, loadComponentTs } = require('./helpers/load-pure-ts');
 const { SignOffDecisions } = loadComponentTs('requirements/SignOffDecisions.tsx', {
-  'react/jsx-runtime': require('react/jsx-runtime'),
+  react: React, 'react/jsx-runtime': require('react/jsx-runtime'),
   '@/lib/requirement-workspace': loadPureTs('requirement-workspace.ts'),
 });
 const render = decisions => renderToStaticMarkup(React.createElement(SignOffDecisions, { requirementId: 'r1', decisions }));
