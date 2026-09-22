@@ -23,7 +23,10 @@ def upgrade():
     if present:
         # Adopt only the complete forward schema made by historical demo bootstrap.
         if present != set(expected) or any(
-            {column["name"] for column in inspector.get_columns(table)} != columns
+            {column["name"] for column in inspector.get_columns(table)} not in (
+                columns,
+                columns | {"context_reviewed_at", "context_reviewed_by"} if table == "requirement_sources" else columns,
+            )
             for table, columns in expected.items()
         ):
             raise RuntimeError("Requirement schema is partially bootstrapped; apply a forward repair")

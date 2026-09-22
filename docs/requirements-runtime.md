@@ -295,3 +295,33 @@ configuration. Both temporary selections were removed before closing the panel.
 No generated finding or decision draft was produced by this attempt, so live
 provider-to-form handoff remains unverified; component tests do not replace that
 check. No business decision was saved.
+
+### Human review of background context
+
+**Keep as background** records an explicit actor and timestamp on source metadata.
+**Revisit source** clears that marker. Both actions preserve the immutable content,
+digest, requirement revisions, signed-off stories and existing questions. Repeating
+the same mark retains its original attribution; exact source reimports retain it.
+The suggested next action skips reviewed unlinked context, while a workspace with
+only reviewed context invites capture of a business need rather than claiming it
+is ready for delivery. The BRD records the context review attribution.
+
+Migration `0045` adds nullable fields, leaving existing sources unreviewed. Adding
+these fields initially broke the existing `0021` demo-bootstrap upgrade tests:
+`0041` rejected the known forward columns as a partial schema. The causal invariant
+is that a complete compatible bootstrap remains adoptable, while unknown or
+incompatible schemas remain rejected. `0041` now accepts only the exact additional
+context-field pair; `0045` validates any existing field types and nullability before
+adoption. Adjacent decision/history migrations add no changed fields and remain
+strict. Both original failing bootstrap tests pass, along with fresh-schema drift,
+existing-evidence preservation and incompatible-context-column rejection tests.
+
+The full backend suite passed 860 tests (two skips); the final requirement/migration
+suite passed 88 tests after the recorder field was aligned with unrestricted user
+ID storage. Frontend tests passed 282 cases, including contextual focus and export.
+The local preview was backed up and upgraded to `0045`; all three original source
+texts and digests matched the backup and all review markers remained empty. Browser
+inspection confirmed the background action on the unlinked email and preserved
+REQ-001's delivery-ready state. No source was marked through the browser; write,
+undo, privacy and idempotency behavior is covered by isolated API tests. This is
+local SQLite evidence, not a PostgreSQL Dev rollout or live marking acceptance.

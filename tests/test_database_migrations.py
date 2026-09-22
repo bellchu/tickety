@@ -40,6 +40,31 @@ class DatabaseMigrationTests(unittest.TestCase):
         with engine.connect() as connection:
             return MigrationContext.configure(connection).get_current_revision()
 
+    def test_source_context_upgrade_rejects_incompatible_existing_columns(self):
+        command.upgrade(self.config, "0044")
+        engine = create_engine(self.url)
+        try:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE requirement_sources ADD COLUMN context_reviewed_at TEXT"))
+            with self.assertRaisesRegex(RuntimeError, "context review column is incompatible"):
+                command.upgrade(self.config, "head")
+        finally:
+            engine.dispose()
+
+    def test_source_context_upgrade_keeps_existing_evidence_unreviewed(self):
+        command.upgrade(self.config, "0044")
+        engine = create_engine(self.url)
+        try:
+            with engine.begin() as connection:
+                connection.execute(text("INSERT INTO requirement_workspaces (id, title, objective, request_type, created_at) VALUES ('w', 'Context', 'Retain existing evidence', 'enhancement', CURRENT_TIMESTAMP)"))
+                connection.execute(text("INSERT INTO requirement_sources (id, workspace_id, title, kind, content, content_sha256, created_at) VALUES ('s', 'w', 'SOP', 'sop', 'Original evidence text.', 'original-digest', CURRENT_TIMESTAMP)"))
+            command.upgrade(self.config, "head")
+            with engine.connect() as connection:
+                row = connection.execute(text("SELECT content, content_sha256, context_reviewed_at, context_reviewed_by FROM requirement_sources WHERE id='s'")).one()
+                self.assertEqual(tuple(row), ("Original evidence text.", "original-digest", None, None))
+        finally:
+            engine.dispose()
+
     def test_fresh_database_upgrades_to_head_without_metadata_drift(self):
         command.upgrade(self.config, "head")
         engine = create_engine(self.url)

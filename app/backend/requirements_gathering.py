@@ -46,6 +46,10 @@ class SourceCreate(InputModel):
     content: Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=100000)]
 
 
+class SourceContextReview(InputModel):
+    reviewed: bool = Field(strict=True)
+
+
 class CrossReviewInput(InputModel):
     requirement_ids: list[Annotated[str, StringConstraints(min_length=1, max_length=36)]] = Field(min_length=2, max_length=8)
 
@@ -257,7 +261,7 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
         row = workspace(db, workspace_id, user)
         sources = db.query(RequirementSourceRecord).options(defer(RequirementSourceRecord.content)).filter_by(workspace_id=row.id).order_by(RequirementSourceRecord.created_at, RequirementSourceRecord.id).all()
         requirements = db.query(BusinessRequirementRecord).filter_by(workspace_id=row.id).order_by(BusinessRequirementRecord.created_at, BusinessRequirementRecord.id).all()
-        return {"workspace": row, "sources": [{field: getattr(source, field) for field in ("id", "title", "kind", "content_sha256", "created_at")} for source in sources], "requirements": [requirement_out(item) for item in requirements], "decisions": db.query(RequirementDecisionRecord).filter_by(workspace_id=row.id).order_by(RequirementDecisionRecord.created_at, RequirementDecisionRecord.id).all()}
+        return {"workspace": row, "sources": [{field: getattr(source, field) for field in ("id", "title", "kind", "content_sha256", "created_at", "context_reviewed_at", "context_reviewed_by")} for source in sources], "requirements": [requirement_out(item) for item in requirements], "decisions": db.query(RequirementDecisionRecord).filter_by(workspace_id=row.id).order_by(RequirementDecisionRecord.created_at, RequirementDecisionRecord.id).all()}
 
     def has_blocking_decision(db, workspace_id, requirement_id):
         matching = db.query(RequirementDecisionRecord.id).filter(
@@ -339,7 +343,7 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
         for source in existing:
             if source.content == data.content:
                 response.status_code = 200
-                return {**{field: getattr(source, field) for field in ("id", "workspace_id", "title", "kind", "content", "content_sha256", "created_at")}, "reused": True}
+                return {**{field: getattr(source, field) for field in ("id", "workspace_id", "title", "kind", "content", "content_sha256", "created_at", "context_reviewed_at", "context_reviewed_by")}, "reused": True}
         if db.query(RequirementSourceRecord).filter_by(workspace_id=workspace_id).count() >= 50:
             raise HTTPException(409, "This workspace already has 50 sources. Create another workspace.")
         row = RequirementSourceRecord(id=str(uuid4()), workspace_id=workspace_id, content_sha256=digest, **data.model_dump())
@@ -354,6 +358,22 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
         row = db.query(RequirementSourceRecord).filter_by(id=source_id, workspace_id=workspace_id).first()
         if row is None:
             raise HTTPException(404, "Source not found")
+        return row
+
+    @router.put("/{workspace_id}/sources/{source_id}/context-review")
+    def review_source_context(workspace_id: str, source_id: str, data: SourceContextReview, db: Session = Depends(get_db), user: UserRecord = Depends(require_user)):
+        workspace(db, workspace_id, user, lock=True)
+        row = db.query(RequirementSourceRecord).filter_by(id=source_id, workspace_id=workspace_id).first()
+        if row is None:
+            raise HTTPException(404, "Source not found")
+        if data.reviewed and row.context_reviewed_at is None:
+            row.context_reviewed_at = datetime.utcnow()
+            row.context_reviewed_by = user.id
+        elif not data.reviewed:
+            row.context_reviewed_at = None
+            row.context_reviewed_by = None
+        db.commit()
+        db.refresh(row)
         return row
 
     @router.post("/{workspace_id}/items", status_code=201)

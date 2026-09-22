@@ -57,6 +57,7 @@ export function requirementBrief(detail: RequirementWorkspaceDetail): string {
     "## Evidence register",
     ...sources.flatMap(source => [
       `- ${inline(source.title)} (${source.kind}) — ${source.id}; SHA-256: ${source.content_sha256}`,
+      ...(source.context_reviewed_at ? [`  Kept as background by ${inline(source.context_reviewed_by || "Former member")} at ${inline(source.context_reviewed_at)}; still available for exploration.`] : []),
       `  ${sourceLinks.has(source.id) ? `Supports: ${sourceLinks.get(source.id)!.join(", ")}` : "Supporting context — no linked requirements recorded."}`,
     ]), "",
     "## Documented requirements and functional specification",

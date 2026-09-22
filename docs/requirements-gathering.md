@@ -77,6 +77,15 @@ find material that still needs attention. Unlinked context is not automatically
 missing work. Opening original evidence from a requirement clears these evidence
 filters so the cited source remains visible; **Show all evidence** also resets them.
 
+After reviewing material that supplies background rather than a new requirement,
+choose **Keep as background**. The workspace records who made that judgement and
+when, and prioritizes other unreviewed sources in its suggested next action.
+The material remains searchable, exportable and available for requirement evidence.
+Choose **Revisit source** to return it to exploration. This is a context review;
+individual requirements still need their own human sign-off. If all collected
+material is background and no requirements exist, the workspace invites you to
+capture a business need instead of treating the initiative as delivery-ready.
+
 While reading a saved source, select or paste an exact 10–4,000-character passage
 and choose **Draft a requirement from this passage**. The draft carries the source
 and excerpt; describe the stakeholder, business outcome and acceptance criteria

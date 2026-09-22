@@ -314,3 +314,12 @@ test('decision search follows linked requirement references and titles without w
   assert.deepEqual(select('REQ-001', 'all', 'r2'), []);
   assert.deepEqual(select('REQ-002', 'all', '', 'd1'), ['d1', 'd2']);
 });
+
+test('reviewed supporting context stops repeated exploration prompts without becoming sign-off', () => {
+  const reviewed = { id: 's1', title: 'Background', context_reviewed_at: '2026-09-22T00:00:00Z' };
+  assert.equal(workspaceFocus(detail([], [reviewed])).action, 'capture');
+  assert.equal(workspaceFocus(detail([], [{ ...reviewed, context_reviewed_at: null }])).action, 'gather');
+  assert.equal(workspaceFocus(detail([], [reviewed, { id: 's2', title: 'New evidence' }])).sourceId, 's2');
+  assert.equal(workspaceFocus(detail([{ ...item, source_id: 's1', priority: 'must' }], [reviewed])).action, 'review');
+  assert.equal(workspaceFocus(detail([{ ...item, priority: 'wont' }], [reviewed])).action, 'deferred');
+});

@@ -1554,6 +1554,8 @@ class RequirementSourceRecord(Base):
     content = Column(Text, nullable=False)
     content_sha256 = Column(String(64), nullable=False)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    context_reviewed_at = Column(DateTime, nullable=True)
+    context_reviewed_by = Column(String, nullable=True)
 
 
 class BusinessRequirementRecord(Base):

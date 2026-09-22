@@ -124,11 +124,16 @@ export function workspaceFocus(detail: RequirementWorkspaceDetail) {
     label: "Prepare its user story", action: "story" as const, item: agreed,
   };
   const linkedSources = sourceRequirementCounts(detail.requirements);
-  const unstated = detail.sources.find(source => !linkedSources.has(source.id));
+  const unstated = detail.sources.find(source => !linkedSources.has(source.id) && !source.context_reviewed_at);
   if (unstated) return {
     title: "Explore the context you have collected",
     reason: `“${unstated.title}” has no linked requirements yet. Identify the business needs, or keep it as supporting context.`,
     label: "Explore this source", action: "gather" as const, sourceId: unstated.id,
+  };
+  if (!detail.requirements.length) return {
+    title: "The collected context has been reviewed",
+    reason: "No requirements have been captured. Add a business need when one emerges, or revisit a source as the scope changes.",
+    label: "Capture a business need", action: "capture" as const,
   };
   if (!items.length) return {
     title: "The captured needs are outside this delivery scope",

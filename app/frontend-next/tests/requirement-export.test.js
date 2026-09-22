@@ -207,3 +207,9 @@ test('brief surfaces current-scope blockers before deferred and recorded decisio
   assert.equal(decisions[0].question, 'Recorded answer');
   assert.equal(decisions[1].question, 'Future scope blocker');
 });
+
+test('evidence register retains explicit background review attribution', () => {
+  const brief = library.requirementBrief({ workspace: { id: 'w', title: 'Context', objective: 'Review evidence', request_type: 'enhancement' }, requirements: [], decisions: [], sources: [{ id: 's', title: 'Background', kind: 'document', content_sha256: 'digest', context_reviewed_at: '2026-09-22T00:00:00Z', context_reviewed_by: 'reviewer' }] });
+  assert.ok(brief.includes('Kept as background by reviewer at 2026-09-22T00:00:00Z; still available for exploration.'));
+  assert.ok(brief.includes('Supporting context — no linked requirements recorded.'));
+});

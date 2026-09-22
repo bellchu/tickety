@@ -302,6 +302,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
     else if (focus.action === "deferred") { setFilter("deferred"); setSearch(""); setSourceFilter(""); }
     else if (focus.action === "questions") { setFilter("questions"); setSearch(""); setSourceFilter(""); }
     else if (focus.action === "review") signOff(focus.item);
+    else if (focus.action === "capture") switchEditor(() => edit());
     else if (focus.action === "gather") revealSource(focus.sourceId);
     else if (focus.action === "story") void run(focus.item.id, () => api.createRequirementStory(id, focus.item));
     else exportCurrentBrief();
@@ -337,6 +338,8 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
             <span className="text-[10px] font-semibold uppercase tracking-wide text-clay-700">{kinds[item.kind]}</span><h3 className="mt-1 text-sm font-semibold text-ink-700">{item.title}</h3>
             <p className="mt-1 text-xs text-ink-400">{sourceCounts.get(item.id) || 0} linked requirements</p>
           </button>
+          {item.context_reviewed_at && <p className="text-xs text-moss-700">Kept as background · {formatLocalDateTime(item.context_reviewed_at)} · {item.context_reviewed_by || "Former member"}</p>}
+          {(!sourceCounts.has(item.id) || item.context_reviewed_at) && <div className="space-y-1"><Button size="sm" variant="ghost" pending={pending === `context-${item.id}`} disabled={Boolean(pending)} onClick={() => run(`context-${item.id}`, async () => { await api.reviewRequirementSourceContext(id, item.id, !item.context_reviewed_at); })}>{item.context_reviewed_at ? "Revisit source" : "Keep as background"}</Button><p className="text-xs text-ink-400">Background material stays available for future exploration and evidence.</p></div>}
           {Boolean(sourceCounts.get(item.id)) && <a href="#requirement-list" className="inline-block text-xs font-medium text-clay-700 underline underline-offset-2" onClick={() => { setSourceFilter(item.id); setFilter("all"); setSearch(""); }}>View linked requirements</a>}
           {sourceViewing === item.id && <div><ErrorMessage error={evidence.error} />{evidence.isError && <Button type="button" size="sm" variant="secondary" pending={evidence.isFetching} disabled={Boolean(pending) || evidence.isFetching} onClick={() => evidence.refetch()}>Retry loading source</Button>}{evidence.isPending ? <p role="status" className="text-xs">Loading source…</p> : evidence.data?.content && <SourceExplorer userId={userId} workspaceId={id} sourceId={item.id} key={item.id} content={evidence.data.content} focus={sourceFocus?.sourceId === item.id ? sourceFocus : undefined} canAI={canAI} busy={Boolean(pending)} onCapture={excerpt => captureFromSource(item.id, excerpt)} onExplore={excerpt => run(`gather-${item.id}`, async () => { setGathered(null); setGathered(await api.gatherRequirements(id, item.id, excerpt)); }, undefined, false)} />}</div>}
           <div className="flex flex-wrap gap-1"><Button size="sm" variant="ghost" disabled={Boolean(pending)} onClick={() => captureFromSource(item.id)}>Link a requirement</Button>

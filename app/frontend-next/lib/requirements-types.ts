@@ -15,6 +15,8 @@ export interface RequirementSource {
   title: string;
   kind: SourceKind;
   content_sha256: string;
+  context_reviewed_at?: string | null;
+  context_reviewed_by?: string | null;
   content?: string;
   created_at: string;
 }

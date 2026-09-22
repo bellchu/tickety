@@ -313,6 +313,43 @@ class RequirementGatheringTests(unittest.TestCase):
         self.assertEqual(changed["status"], "draft")
         self.assertIsNone(changed["story"])
 
+    def test_source_context_review_is_reversible_private_and_preserves_delivery(self):
+        workspace = self.workspace()
+        source = self.source(workspace)
+        base = f"{self.path}/{workspace}"
+        source_route = f"{base}/sources/{source}"
+        original = self.client.get(source_route).json()
+        item = self.client.post(base + "/items", json=self.payload(source)).json()
+        route = f"{base}/items/{item['id']}"
+        signed = self.client.post(route + "/validate", json={"revision": 1, "reviewer_role": "Product Owner", "validation_note": "Confirmed the expected outcome."}).json()
+        prepared = self.client.post(route + "/story", json={"revision": signed["revision"]}).json()
+        review_route = source_route + "/context-review"
+        self.assertEqual(self.client.put(review_route, json={"reviewed": "true"}).status_code, 422)
+        reviewed = self.client.put(review_route, json={"reviewed": True})
+        self.assertEqual(reviewed.status_code, 200, reviewed.text)
+        marked = reviewed.json()
+        self.assertEqual(marked["context_reviewed_by"], "owner")
+        self.assertIsNotNone(marked["context_reviewed_at"])
+        self.assertEqual(marked["content"], original["content"])
+        self.assertEqual(marked["content_sha256"], original["content_sha256"])
+        repeated = self.client.put(review_route, json={"reviewed": True}).json()
+        self.assertEqual(repeated["context_reviewed_at"], marked["context_reviewed_at"])
+        reused = self.client.post(base + "/sources", json={"title": "Duplicate", "kind": "sop", "content": original["content"]}).json()
+        self.assertEqual(reused["context_reviewed_at"], marked["context_reviewed_at"])
+        detail = self.client.get(base).json()
+        self.assertEqual(detail["sources"][0]["context_reviewed_at"], marked["context_reviewed_at"])
+        self.assertEqual(detail["requirements"][0]["story"], prepared["story"])
+        self.assertEqual(detail["requirements"][0]["revision"], prepared["revision"])
+        other = self.workspace()
+        self.assertEqual(self.client.put(f"{self.path}/{other}/sources/{source}/context-review", json={"reviewed": True}).status_code, 404)
+        self.user.id = "other"
+        self.assertEqual(self.client.put(review_route, json={"reviewed": False}).status_code, 404)
+        self.user.id = "owner"
+        reopened = self.client.put(review_route, json={"reviewed": False}).json()
+        self.assertIsNone(reopened["context_reviewed_at"])
+        self.assertIsNone(reopened["context_reviewed_by"])
+        self.assertEqual(self.client.get(base).json()["requirements"][0]["story"], prepared["story"])
+
     def test_source_and_workspace_boundaries(self):
         workspace = self.workspace()
         source = self.source(workspace)
