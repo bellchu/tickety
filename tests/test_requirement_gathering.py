@@ -96,6 +96,43 @@ class RequirementGatheringTests(unittest.TestCase):
         self.user = UserRecord(id="other", name="Other", role="agent", is_active=True)
         self.assertEqual(self.client.get(self.path).json()["summaries"], {})
 
+    def test_overview_counts_follow_business_reassessment_and_scope_changes(self):
+        workspace = self.workspace()
+        source = self.source(workspace)
+        base = f"{self.path}/{workspace}"
+        row = self.client.post(base + "/items", json=self.payload(source)).json()
+        route = base + "/items/" + row["id"]
+
+        def summary(drafts=0, agreed=0, stories=0, deferred=0):
+            actual = self.client.get(self.path).json()["summaries"][workspace]
+            self.assertEqual(actual, {"requirements": 1, "drafts": drafts, "agreed": agreed, "stories": stories, "deferred": deferred})
+            self.assertEqual(sum(actual[key] for key in ("drafts", "agreed", "stories", "deferred")), actual["requirements"])
+
+        def sign(revision):
+            response = self.client.post(route + "/validate", json={"revision": revision, "reviewer_role": "Product Owner", "validation_note": "Confirmed scope with the business owner."})
+            self.assertEqual(response.status_code, 200, response.text)
+            return response.json()
+
+        summary(drafts=1)
+        row = sign(row["revision"])
+        summary(agreed=1)
+        row = self.client.post(route + "/story", json={"revision": row["revision"]}).json()
+        summary(stories=1)
+        question = self.client.post(base + "/decisions", json={"question": "Who handles acknowledgement failures?", "owner_role": "Operations lead", "blocking": True}).json()
+        summary(drafts=1)
+        row = self.client.get(base).json()["requirements"][0]
+        self.assertEqual(self.client.post(route + "/story", json={"revision": row["revision"]}).status_code, 409)
+        self.assertEqual(self.client.post(base + f"/decisions/{question['id']}/resolve", json={"resolution": "Operations handles failures through the existing queue."}).status_code, 200)
+        summary(drafts=1)  # An answer never substitutes for a fresh sign-off.
+        row = sign(row["revision"])
+        summary(agreed=1)
+        row = self.client.post(route + "/story", json={"revision": row["revision"]}).json()
+        summary(stories=1)
+        row = self.client.put(route, json={**self.payload(source), "revision": row["revision"], "priority": "wont"}).json()
+        summary(deferred=1)
+        self.assertEqual(self.client.put(route, json={**self.payload(source), "revision": row["revision"]}).status_code, 200)
+        summary(drafts=1)
+
     def test_complete_workflow_and_edit_invalidates_validation_and_story(self):
         workspace = self.workspace()
         source = self.source(workspace)
