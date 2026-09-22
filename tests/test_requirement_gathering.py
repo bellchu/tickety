@@ -380,6 +380,45 @@ class RequirementGatheringTests(unittest.TestCase):
         with self.sessions() as db:
             self.assertEqual(db.query(AIUsageEventRecord).count(), 0)
 
+    def test_cross_review_is_scoped_versioned_and_never_mutates_requirements(self):
+        self.user.role = "admin"
+        workspace = self.workspace()
+        source = self.source(workspace)
+        base = f"{self.path}/{workspace}"
+        first = self.client.post(base + "/items", json=self.payload(source)).json()
+        second = self.client.post(base + "/items", json={**self.payload(source), "title": "Exception handling"}).json()
+        finding = {"category": "overlap", "references": ["REQ-001", "REQ-002"], "finding": "Both requirements describe acknowledgement behavior.", "question": "Should the normal and exception paths share the same acceptance criteria?"}
+        manager = self.ai_manager({"findings": [finding]})
+        with patch.object(main, "llm_mgr", manager):
+            self.assertEqual(self.client.post(base + "/cross-review", json={"requirement_ids": [first["id"], second["id"]]}).status_code, 403)
+            response = self.client.post(base + "/cross-review", json={"requirement_ids": [first["id"], second["id"]]}, headers={"Origin": "http://testserver"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["findings"], [finding])
+        self.assertEqual([item["revision"] for item in response.json()["requirements"]], [1, 1])
+        prompt = json.loads(manager.analyze.call_args.args[0])
+        self.assertIn("REQ-001", prompt)
+        self.assertIn("REQ-002", prompt)
+        detail = self.client.get(base).json()
+        self.assertEqual([item["status"] for item in detail["requirements"]], ["draft", "draft"])
+        self.assertEqual(detail["decisions"], [])
+        with self.sessions() as db:
+            self.assertEqual(db.query(AIUsageEventRecord).count(), 1)
+
+    def test_cross_review_rejects_cross_workspace_selection_and_invented_references(self):
+        self.user.role = "admin"
+        workspace = self.workspace()
+        source = self.source(workspace)
+        base = f"{self.path}/{workspace}"
+        first = self.client.post(base + "/items", json=self.payload(source)).json()
+        second = self.client.post(base + "/items", json=self.payload(source)).json()
+        manager = self.ai_manager({"findings": [{"category": "dependency", "references": ["REQ-999"], "finding": "Unknown dependency.", "question": "Who owns this unknown dependency?"}]})
+        with patch.object(main, "llm_mgr", manager):
+            for ids in [[first["id"]], [first["id"], first["id"]], [first["id"], "unavailable"]]:
+                self.assertEqual(self.client.post(base + "/cross-review", json={"requirement_ids": ids}, headers={"Origin": "http://testserver"}).status_code, 422)
+            manager.analyze.assert_not_awaited()
+            response = self.client.post(base + "/cross-review", json={"requirement_ids": [first["id"], second["id"]]}, headers={"Origin": "http://testserver"})
+        self.assertEqual(response.status_code, 502, response.text)
+
     def ai_manager(self, result):
         return SimpleNamespace(is_mock=False, prompt_char_limit=4000, model_name="test/configured-provider", analyze=AsyncMock(return_value=result))
 

@@ -110,3 +110,10 @@ export interface RequirementHistory {
   total: number;
   items: { id: string; actor_id: string | null; action: string; revision: number; created_at: string; before: BusinessRequirement | null; after: BusinessRequirement }[];
 }
+
+export interface RequirementCrossReview {
+  model: string;
+  input_truncated: boolean;
+  requirements: { id: string; reference: string; revision: number }[];
+  findings: { category: string; references: string[]; finding: string; question: string }[];
+}

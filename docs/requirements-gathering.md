@@ -149,3 +149,16 @@ title) is sent through the existing redaction and prompt limits. Suggestions are
 labelled as passage-scoped and retain the original source link. Invalid passages
 never reach the provider. Explore later sections separately when a full-source
 analysis was truncated; neither mode claims complete document coverage.
+
+## Cross-requirement review
+
+Choose 2–8 requirements in **Cross-check scope** to ask the configured AI provider
+about contradictions, overlap, dependencies and scope gaps. Each selected item
+has its own bounded, redacted input field so long items do not replace the other
+selected references. Findings may cite only selected references and include the
+reviewed revision numbers. The interface warns about partial input and disables
+tracking findings if locally refreshed requirement revisions have changed.
+A finding can prefill a question in the decision log; the user still confirms its
+answer owner, affected scope and whether it blocks sign-off. Multi-requirement
+findings default to initiative scope for that confirmation. No findings are saved,
+merged, signed off or treated as proof of consistency automatically.

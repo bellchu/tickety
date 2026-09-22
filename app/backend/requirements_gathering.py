@@ -45,6 +45,17 @@ class SourceCreate(InputModel):
     content: Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=100000)]
 
 
+class CrossReviewInput(InputModel):
+    requirement_ids: list[Annotated[str, StringConstraints(min_length=1, max_length=36)]] = Field(min_length=2, max_length=8)
+
+    @field_validator("requirement_ids")
+    @classmethod
+    def unique_ids(cls, value):
+        if len(set(value)) != len(value):
+            raise ValueError("Choose distinct requirements")
+        return value
+
+
 class GatherInput(InputModel):
     excerpt: Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=12000)]
 
@@ -377,6 +388,36 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
             "before": json.loads(row.before_json) if row.before_json else None,
             "after": json.loads(row.after_json),
         } for row in rows]}
+
+    @router.post("/{workspace_id}/cross-review")
+    async def cross_review(workspace_id: str, data: CrossReviewInput, db: Session = Depends(get_db), user: UserRecord = Depends(require_ai_user)):
+        from .requirements_ai import prepare_prompt, suggest, CrossReviewSuggestions
+        from .llm_manager import LLMInvalidOutputError
+
+        initiative = workspace(db, workspace_id, user)
+        rows = db.query(BusinessRequirementRecord).filter(
+            BusinessRequirementRecord.workspace_id == workspace_id,
+            BusinessRequirementRecord.id.in_(data.requirement_ids),
+        ).order_by(BusinessRequirementRecord.number).all()
+        if len(rows) != len(data.requirement_ids):
+            raise HTTPException(422, "Choose requirements from this workspace")
+        snapshots = [{"id": row.id, "reference": f"REQ-{row.number:03d}", "revision": row.revision} for row in rows]
+        fields = {f"REQ-{row.number:03d}": json.dumps({
+            "title": row.title, "priority": row.priority, "actor": row.actor,
+            "action": row.action, "benefit": row.benefit, "evidence_quote": row.evidence_quote,
+            "acceptance_criteria": json.loads(row.acceptance_json),
+        }, ensure_ascii=False) for row in rows}
+        llm = get_llm()
+        prompt = prepare_prompt(llm, objective=initiative.objective, **fields)
+        db.rollback()
+        reserve_ai(db, user.id, "requirements_cross_review")
+        result = await suggest(llm, prompt, CrossReviewSuggestions,
+            "Compare the selected requirements for contradictions, overlaps, dependencies and scope gaps. Cite only supplied REQ references in each finding. Distinguish definite conflicts from questions requiring stakeholder context. Respect deferred priorities. A truncated field is partial evidence. Do not approve, merge, change or rank requirements; return review questions only.")
+        allowed = {item["reference"] for item in snapshots}
+        if any(not set(finding["references"]).issubset(allowed) for finding in result["findings"]):
+            raise LLMInvalidOutputError("AI referenced a requirement outside the review")
+        return {"findings": result["findings"], "requirements": snapshots, "model": llm.model_name,
+                "input_truncated": any(value for key, value in json.loads(prompt).items() if key.endswith("_truncated"))}
 
     @router.post("/{workspace_id}/sources/{source_id}/gather")
     async def gather_requirements(workspace_id: str, source_id: str, data: GatherInput | None = None, db: Session = Depends(get_db), user: UserRecord = Depends(require_ai_user)):

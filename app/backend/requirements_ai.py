@@ -34,6 +34,17 @@ class Finding(InputModel):
     question: Suggestion
 
 
+class CrossFinding(InputModel):
+    category: Literal["contradiction", "overlap", "dependency", "scope_gap"]
+    references: list[Annotated[str, StringConstraints(pattern=r"^REQ-[0-9]{3}$")]] = Field(min_length=1, max_length=8)
+    finding: Suggestion
+    question: Suggestion
+
+
+class CrossReviewSuggestions(InputModel):
+    findings: list[CrossFinding] = Field(max_length=8)
+
+
 class ReviewSuggestions(InputModel):
     findings: list[Finding] = Field(max_length=10)
     questions: list[Suggestion] = Field(max_length=10)
