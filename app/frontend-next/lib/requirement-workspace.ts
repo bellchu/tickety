@@ -124,3 +124,7 @@ export function requirementSnapshotsCurrent(
   const revisions = new Map(items.map(item => [item.id, item.revision]));
   return snapshots.every(snapshot => revisions.get(snapshot.id) === snapshot.revision);
 }
+
+export function decisionWindow(items: RequirementDecision[], limit: number, editingId = "") {
+  return items.filter((item, index) => index < limit || item.id === editingId);
+}

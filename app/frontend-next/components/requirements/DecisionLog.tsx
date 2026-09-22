@@ -1,10 +1,10 @@
 "use client";
 
 import { inputStyle } from "./fields";
-import { filterDecisions, type DecisionFilter } from "@/lib/requirement-workspace";
+import { decisionWindow, filterDecisions, type DecisionFilter } from "@/lib/requirement-workspace";
 import { requirementErrorMessage } from "@/lib/requirement-errors";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { captureRequirementDraftSave, readRequirementDecisionDraft, rememberRequirementDecisionDraft } from "@/lib/requirement-editor-cache";
 import { Button, ConfirmDialog } from "@/components/ui";
@@ -32,6 +32,7 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
   const [error, setError] = useState("");
   const [view, setView] = useState<DecisionFilter>("open");
   const [search, setSearch] = useState("");
+  const [registerWindow, setRegisterWindow] = useState({ key: "", limit: 20 });
   const hasQuestion = Boolean(question || owner || requirementId || !blocking);
   const hasAnswer = Boolean(resolving && resolution);
   useEffect(() => {
@@ -70,10 +71,13 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
     }
     finally { setPending(false); }
   }
-  const outstanding = decisions.filter(item => item.status === "open");
-  const visibleDecisions = filterDecisions(decisions, view, search, resolving, scope);
-  const requirementNames = new Map(requirements.map(item => [item.id, `${item.reference}${item.priority === "wont" ? " · Not this time" : ""}`]));
-  const blockers = outstanding.filter(item => item.blocking).length;
+  const outstanding = useMemo(() => decisions.filter(item => item.status === "open"), [decisions]);
+  const visibleDecisions = useMemo(() => filterDecisions(decisions, view, search, resolving, scope), [decisions, view, search, resolving, scope]);
+  const requirementNames = useMemo(() => new Map(requirements.map(item => [item.id, `${item.reference}${item.priority === "wont" ? " · Not this time" : ""}`])), [requirements]);
+  const blockers = useMemo(() => outstanding.filter(item => item.blocking).length, [outstanding]);
+  const windowKey = JSON.stringify([view, search, scope]);
+  const limit = registerWindow.key === windowKey ? registerWindow.limit : 20;
+  const displayedDecisions = useMemo(() => decisionWindow(visibleDecisions, limit, resolving), [visibleDecisions, limit, resolving]);
   return <section id="business-decisions" tabIndex={-1} className="rounded-xl border border-linen-400 bg-white p-5" aria-label="Business decision log">
     <ConfirmDialog open={Boolean(transition)} onOpenChange={open => { if (!open) setTransition(null); }} title="Replace unsaved decision work?" description="The current question or answer will be discarded. Saved decisions are unchanged." cancelLabel="Keep editing" confirmLabel="Discard and continue" destructive onConfirm={() => { const action = transition; setTransition(null); action?.(); }} />
     <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-semibold text-ink-700">Questions & decisions</h2><p className="mt-1 text-xs text-ink-500">{outstanding.length} open · {blockers} blocking · {decisions.length - outstanding.length} decisions recorded</p></div><Button variant="secondary" onClick={onToggle}>{open ? "Close decision log" : "Open decision log"}</Button></div>
@@ -108,7 +112,7 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
       <label className="block space-y-1 text-sm">Decisions affecting<select className={inputStyle} value={scope} onChange={event => onScopeChange(event.target.value)}><option value="">All requirements</option>{requirements.map(item => <option key={item.id} value={item.id}>{item.reference} · {item.title}</option>)}</select></label>
       {scope && <p className="text-xs text-ink-500">Includes whole-initiative questions and decisions, which also affect this requirement.</p>}
       {resolving && <p className="text-xs text-ink-500">The question you are answering stays visible while you filter.</p>}
-      {visibleDecisions.map(item => <article key={item.id} className="space-y-3 rounded-lg border border-linen-400 p-4">
+      {displayedDecisions.map(item => <article key={item.id} className="space-y-3 rounded-lg border border-linen-400 p-4">
         <div className="flex flex-wrap justify-between gap-2 text-xs text-ink-500"><span>{item.requirement_id ? requirementNames.get(item.requirement_id) || "Requirement unavailable" : "Whole initiative"} · {item.owner_role}</span><span>{item.status === "resolved" ? "Decision recorded" : item.blocking ? "Blocks sign-off" : "Exploratory"}</span></div>
         <h4 className="text-sm font-semibold">{item.question}</h4>
         {item.status === "resolved" ? <><p className="whitespace-pre-wrap text-sm text-ink-600">{item.resolution}</p><p className="text-xs text-ink-400">Recorded by {item.resolved_by || "Former member"} · {formatLocalDateTime(item.resolved_at!)}</p></> : resolving === item.id ? <form className="space-y-3" onSubmit={event => { event.preventDefault(); void save(() => api.resolveRequirementDecision(workspaceId, item.id, resolution), clearAnswer); }}>
@@ -117,6 +121,7 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
           <div className="flex gap-2"><Button type="submit" pending={pending} disabled={pending}>Record decision</Button><Button variant="ghost" disabled={pending} onClick={() => changeAnswer("")}>Cancel</Button></div>
         </form> : <Button variant="secondary" size="sm" disabled={pending} onClick={() => changeAnswer(item.id)}>Record an answer</Button>}
       </article>)}
+      {visibleDecisions.length > 20 && <div className="flex flex-wrap items-center justify-between gap-3"><p role="status" className="text-xs text-ink-500">Showing {displayedDecisions.length} of {visibleDecisions.length} matching records. Search covers the complete decision register.</p>{displayedDecisions.length < visibleDecisions.length && <Button variant="secondary" onClick={() => setRegisterWindow({ key: windowKey, limit: limit + 20 })}>Show more records</Button>}</div>}
       {!visibleDecisions.length && <p role="status" className="text-sm text-ink-500">{decisions.length ? "No questions or decisions match this view. Change the filter or search to see more." : "No business questions are tracked yet."}</p>}
     </div>}
   </section>;

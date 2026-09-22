@@ -214,3 +214,7 @@ exports and initiative-wide readiness still cover the complete saved workspace.
 includes whole-initiative decisions as well as those linked to that requirement.
 Use the status filter to inspect recorded answers or outstanding questions; an
 answer currently being edited remains visible when the scope changes.
+
+Long decision registers initially display 20 matching records. **Show more records**
+expands the list; searches always cover the full register. An answer being edited
+remains visible even outside the displayed batch, and filtering never clears its draft.

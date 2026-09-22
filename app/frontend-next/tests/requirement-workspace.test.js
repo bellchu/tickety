@@ -173,3 +173,16 @@ test('requirement decision view includes global decisions and preserves an activ
   assert.deepEqual(filter(rows, 'all', '', 'other', 'r1').map(x => x.id), ['global', 'local', 'other']);
   assert.equal(filter(rows, 'all', '', '', '').length, 3);
 });
+
+test('decision window bounds long registers while keeping a distant active answer visible', () => {
+  const rows = Array.from({ length: 200 }, (_, i) => ({ id: `d${i}`, question: `Question ${i}`, owner_role: 'Owner', status: 'open', blocking: true }));
+  const window = library.decisionWindow;
+  assert.equal(window(rows, 20).length, 20);
+  assert.deepEqual(window(rows, 20, 'd199').map(x => x.id), [...rows.slice(0, 20).map(x => x.id), 'd199']);
+  assert.equal(window(rows, 40, 'd199').length, 41);
+  assert.equal(window(rows, 200, 'd199').length, 200);
+  assert.equal(window(rows, 20, 'd5').length, 20);
+  const matches = library.filterDecisions(rows, 'all', 'Question 199');
+  assert.deepEqual(window(matches, 20).map(x => x.id), ['d199']);
+  assert.equal(rows.length, 200);
+});
