@@ -107,6 +107,7 @@ function RequirementsContent() {
     <ErrorMessage error={list.error} />
     {list.isError && <Button variant="secondary" onClick={() => list.refetch()}>Retry loading initiatives</Button>}
     {list.isPending && <p role="status">Loading initiatives…</p>}
+    {list.isFetching && !list.isPending && <p role="status" className="text-sm text-ink-500">Updating initiative progress…</p>}
     {list.data?.items.length === 0 && <div className={`${panelStyle} text-center`}><FileText className="mx-auto mb-3 text-ink-400" /><h2 className="font-semibold">{initiativeSearch ? "No initiatives match this search" : "Start with a business question"}</h2><p className="mt-2 text-sm text-ink-500">{initiativeSearch ? "Try another name or business objective, or clear the search." : "Create your first initiative, then add the material that explains the problem."}</p></div>}
     <div className="grid gap-4 md:grid-cols-2">{list.data?.items.map(workspace => {
       const summary = list.data.summaries?.[workspace.id];
@@ -294,12 +295,13 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
     <Button variant="ghost" leadingIcon={<ArrowLeft size={16} />} onClick={onBack}>All initiatives</Button>
     <PageHeader eyebrow="Business workspace" title={detail.workspace.title} description={detail.workspace.objective}
       meta={`${detail.workspace.request_type === "enhancement" ? "Enhancement" : "Approved project / request"} · ${detail.requirements.length} requirements · ${deliveryReady} delivery ready`}
-      actions={<><Button variant="ghost" disabled={Boolean(pending)} onClick={() => query.refetch()}>Refresh</Button><Button variant="secondary" leadingIcon={<Download size={16} />} onClick={() => exportBrief(detail)}>Export BRD</Button></>} />
+      actions={<><Button variant="ghost" pending={query.isFetching} disabled={Boolean(pending) || query.isFetching} onClick={() => query.refetch()}>Refresh</Button><Button variant="secondary" disabled={Boolean(pending) || query.isFetching} leadingIcon={<Download size={16} />} onClick={() => exportBrief(detail)}>Export BRD</Button></>} />
     <section className="flex flex-col gap-5 rounded-xl border border-clay-300/40 bg-gradient-to-r from-[#06243A] to-[#103E50] p-5 text-white sm:flex-row sm:items-center sm:justify-between" aria-label="Suggested focus">
       <div className="max-w-2xl"><p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-cyan-200">Worth your attention</p><h2 className="mt-2 text-lg font-medium">{focus.title}</h2><p className="mt-2 text-sm leading-6 text-slate-200">{focus.reason}</p></div>
       <Button className="shrink-0" variant="secondary" trailingIcon={<ArrowUpRight size={15} />} disabled={Boolean(pending)} onClick={followFocus}>{focus.label}</Button>
     </section>
     <DecisionLog scope={decisionScope} onScopeChange={setDecisionScope} workspaceId={id} userId={userId} requirements={detail.requirements} decisions={detail.decisions || []} open={decisionsOpen} onToggle={() => setDecisionsOpen(!decisionsOpen)} seed={questionSeed} onSeedUsed={() => setQuestionSeed(null)} onSaved={refreshSavedWorkspace} />
+    {query.isFetching && <p role="status" className="text-sm text-ink-500">Refreshing saved work… Your unsaved drafts are kept.</p>}
     <ErrorMessage error={error || query.error} />{notice && <p role="status" className="text-sm text-moss-700">{notice}</p>}
     <div className="grid items-start gap-6 xl:grid-cols-[300px_minmax(0,1fr)]">
       <aside className="min-w-0 space-y-4" aria-label="Business context">
