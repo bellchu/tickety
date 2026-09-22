@@ -38,6 +38,7 @@ export function RequirementCard({
         </div>
         <h3 className="text-lg font-semibold leading-6 text-ink-700">{item.title}</h3>
         <p className="text-sm leading-6 text-ink-500">{item.action || "The required capability still needs to be clarified."}</p>
+        <p className="whitespace-pre-wrap break-words text-sm leading-6 text-ink-600"><strong className="font-medium">Business outcome:</strong> {item.benefit || "The expected business outcome still needs to be agreed."}</p>
         <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-ink-400">
           <span>{item.actor || "Stakeholder to confirm"}</span>
           <span>{priorities[item.priority]}</span>
@@ -53,7 +54,6 @@ export function RequirementCard({
           <div className="mt-3 space-y-3 text-ink-500">
             <blockquote className="border-l-2 border-clay-300 pl-3 italic">“{item.evidence_quote}”</blockquote>
             <Button size="sm" variant="ghost" onClick={onEvidence}>Read in original source</Button>
-            <p><strong className="font-medium">Business outcome:</strong> {item.benefit || "To agree"}</p>
             <ul className="list-disc space-y-1 pl-5">{item.acceptance_criteria.map((criterion, index) => <li key={index}>{criterion}</li>)}</ul>
             {item.validated_at && <p className="text-xs text-moss-700">Signed off as {item.reviewer_role} · {formatLocalDateTime(item.validated_at)}<br />{item.validation_note}</p>}
           </div>
