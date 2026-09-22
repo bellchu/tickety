@@ -61,7 +61,7 @@ export function requirementBrief(detail: RequirementWorkspaceDetail): string {
     "## Documented requirements and functional specification",
   ];
   for (const row of requirements) {
-    lines.push("", `### ${row.reference}: ${inline(row.title)}`, `Status: ${row.status} | Priority: ${row.priority} | Revision: ${row.revision}`,
+    lines.push("", `### ${row.reference}: ${inline(row.title)}`, `Status: ${row.status === "validated" ? "Signed off" : "Draft — awaiting agreement"} | Priority: ${requirementPriorityLabels[row.priority]} | Revision: ${row.revision}`,
       `Delivery scope: ${row.priority === "wont" ? "Deferred — not this time" : "Included"}`,
       `Stakeholder: ${inline(row.actor || "To confirm")}`, `Required capability: ${prose(row.action || "To clarify")}`,
       `Business outcome: ${prose(row.benefit || "To agree")}`, `Source: ${row.source_id}`,
@@ -75,8 +75,14 @@ export function requirementBrief(detail: RequirementWorkspaceDetail): string {
   lines.push("", "## Questions and business decisions");
   for (const item of detail.decisions || []) {
     const scope = item.requirement_id ? requirementsById.get(item.requirement_id)?.reference || item.requirement_id : "Whole initiative";
+    const deferred = item.requirement_id && requirementsById.get(item.requirement_id)?.priority === "wont";
+    const effect = item.status === "resolved" ? "Answer recorded; this does not sign off or update requirements."
+      : !item.blocking ? "Exploratory; does not block sign-off."
+      : deferred ? "Blocks future sign-off if the requirement returns to delivery scope."
+      : "Blocks sign-off for the affected scope.";
     lines.push("", `### ${inline(item.question)}`, `Scope: ${scope} | Answer owner: ${inline(item.owner_role || "Unassigned")}`,
-      `Status: ${item.status} | Blocks sign-off: ${item.blocking ? "Yes" : "No"}`);
+      `Status: ${item.status === "resolved" ? "Decision recorded" : "Open question"} | Decision type: ${item.blocking ? "Required before sign-off" : "Exploratory"}`,
+      `Current effect: ${effect}`);
     if (item.resolution) lines.push(`Decision: ${prose(item.resolution)}`, `Recorded by ${inline(item.resolved_by || "Former member")} at ${inline(item.resolved_at || "Unrecorded")}`);
   }
   lines.push("", "## Development handoff", `${stories} user stories prepared for delivery-team review; ${blockers} blocking business questions remain. ${currentBlockers} affect current scope or need scope confirmation; ${deferredBlockers} relate only to deferred requirements. No external development tickets have been created.`, "");

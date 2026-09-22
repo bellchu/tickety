@@ -44,6 +44,9 @@ test("BRD carries business decisions and reports unresolved blockers honestly", 
   });
   for (const value of ["Who owns delivery failures?", "Operations lead", "Whole initiative", "Within five minutes", "reviewer-1", "0 user stories prepared", "1 blocking business questions remain"]) assert.ok(brief.includes(value), value);
   assert.ok(!brief.includes("User stories are ready"));
+  assert.ok(brief.includes('Status: Decision recorded | Decision type: Required before sign-off'));
+  assert.ok(brief.includes('Current effect: Answer recorded; this does not sign off or update requirements.'));
+  assert.ok(brief.includes('Current effect: Blocks sign-off for the affected scope.'));
 });
 
 test('deferred needs retain their evidence without exporting an old story as delivery work', () => {
@@ -154,6 +157,10 @@ test('brief distinguishes deferred blockers without losing global or unknown-sco
   assert.ok(output.includes('Scope: REQ-009'));
   assert.ok(output.includes('Scope: missing'));
   assert.ok(output.includes('3 blocking business questions remain'));
+  assert.ok(output.includes('Priority: Not this time'));
+  assert.ok(output.includes('Status: Draft — awaiting agreement'));
+  assert.ok(output.includes('Current effect: Blocks future sign-off if the requirement returns to delivery scope.'));
+  assert.ok(output.includes('Current effect: Exploratory; does not block sign-off.'));
 });
 
 test('brief filenames identify initiatives and remain safe across filesystem conventions', () => {
