@@ -27,57 +27,6 @@ export function statusColor(status: string): string {
   }
 }
 
-export function sentimentColor(sentiment: string | null): string {
-  if (!sentiment) return "text-ink-400";
-  switch (sentiment) {
-    case "Business-Critical": return "text-rust-600 bg-rust-400/10 border-rust-400/30";
-    case "High-Impact": return "text-amber-600 bg-amber-400/10 border-amber-400/30";
-    case "Moderate": return "text-clay-600 bg-clay-400/10 border-clay-400/30";
-    case "Neutral": return "text-ink-500 bg-linen-300 border-linen-400";
-    case "Positive": return "text-moss-600 bg-moss-500/10 border-moss-500/30";
-    case "Very Negative": return "text-rust-600 bg-rust-400/10 border-rust-400/30";
-    case "Negative": return "text-amber-600 bg-amber-400/10 border-amber-400/30";
-    default: return "text-ink-400";
-  }
-}
-
-export function moodEmoji(mood: string | null): string {
-  if (!mood) return "😐";
-  const map: Record<string, string> = {
-    critical: "😡",
-    urgent: "😤",
-    concerned: "😟",
-    neutral: "😐",
-    satisfied: "🙂",
-    // Legacy moods (older tickets):
-    frustrated: "😤",
-    anxious: "😟",
-    angry: "😡",
-  };
-  return map[mood] || "😐";
-}
-
-// Urgency-driven badge styling for the mood tag, companion to sentimentColor.
-export function moodUrgencyColor(mood: string | null): string {
-  if (!mood) return "text-ink-500 bg-linen-300 border-linen-400";
-  switch (mood) {
-    case "critical": return "text-rust-600 bg-rust-400/10 border-rust-400/30";
-    case "urgent": return "text-amber-600 bg-amber-400/10 border-amber-400/30";
-    case "concerned": return "text-clay-600 bg-clay-400/10 border-clay-400/30";
-    case "neutral": return "text-ink-500 bg-linen-300 border-linen-400";
-    case "satisfied": return "text-moss-600 bg-moss-500/10 border-moss-500/30";
-    case "angry": return "text-rust-600 bg-rust-400/10 border-rust-400/30";
-    case "frustrated": return "text-amber-600 bg-amber-400/10 border-amber-400/30";
-    case "anxious": return "text-clay-600 bg-clay-400/10 border-clay-400/30";
-    default: return "text-ink-500 bg-linen-300 border-linen-400";
-  }
-}
-
-export function moodLabel(mood: string | null): string {
-  if (!mood) return "Unknown";
-  return mood.charAt(0).toUpperCase() + mood.slice(1);
-}
-
 export function tierName(tier: number): string {
   return `Tier ${tier}`;
 }
