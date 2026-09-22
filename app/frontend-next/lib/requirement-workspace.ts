@@ -97,3 +97,13 @@ export function workspaceFocus(detail: RequirementWorkspaceDetail) {
     label: "Export the business brief", action: "export" as const,
   };
 }
+
+export function reviewUnavailableReason(reviewed: BusinessRequirement, current: BusinessRequirement | undefined, blocked: boolean): string | null {
+  if (!current) return "This requirement is no longer available. Your review note has been kept.";
+  if (current.revision !== reviewed.revision) return `The requirement has changed to revision ${current.revision}. Your note is kept; review the current version before signing off.`;
+  if (current.priority === "wont") return "This requirement is outside the current delivery scope.";
+  if (current.status !== "draft") return "This requirement has already been signed off.";
+  if (blocked) return "Resolve the blocking business questions before signing off.";
+  if (current.quality_issues.length) return "Clarify the requirement's open quality issues before signing off.";
+  return null;
+}

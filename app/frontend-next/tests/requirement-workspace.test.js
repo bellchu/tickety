@@ -99,3 +99,16 @@ test('requirements can be found by evidence, acceptance criteria and story refer
   assert.equal(filterRequirements([{ ...row, priority: 'wont' }], 'outage', 'delivery').length, 0);
   assert.equal(filterRequirements([{ ...row, priority: 'wont' }], 'outage', 'deferred').length, 1);
 });
+
+
+test('review availability rejects stale snapshots and changed business gates', () => {
+  const reviewed = { ...item, revision: 2, priority: 'must' };
+  const check = (current, blocked = false) => library.reviewUnavailableReason(reviewed, current, blocked);
+  assert.equal(check(reviewed), null);
+  assert.match(check({ ...reviewed, revision: 3 }), /changed to revision 3/);
+  assert.match(check(undefined), /no longer available/);
+  assert.match(check({ ...reviewed, priority: 'wont' }), /outside/);
+  assert.match(check({ ...reviewed, status: 'validated' }), /already been signed off/);
+  assert.match(check(reviewed, true), /blocking business questions/);
+  assert.match(check({ ...reviewed, quality_issues: ['Missing outcome'] }), /quality issues/);
+});

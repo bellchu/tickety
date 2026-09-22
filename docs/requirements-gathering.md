@@ -114,7 +114,11 @@ edits before replacing them.
 
 The sign-off form displays the exact revision being reviewed, its priority, business
 outcome, acceptance criteria and evidence excerpt. Compare those commitments with
-the source before recording your review capacity and confirmation note.
+the source before recording your review capacity and confirmation note. When a
+refresh reveals a changed revision, signing is disabled until you choose **Review
+current version**; your note is retained for you to reassess. Newly blocked, deferred
+or already signed requirements remain unavailable for sign-off. The server also
+checks the revision and business gates when the request arrives.
 
 ## Use AI where it helps
 

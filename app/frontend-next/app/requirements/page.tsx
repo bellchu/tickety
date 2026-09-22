@@ -18,7 +18,7 @@ import { SourceIntakeForm } from "@/components/requirements/SourceIntakeForm";
 import { Field, inputStyle, panelStyle, kinds, priorities } from "@/components/requirements/fields";
 import { DecisionLog } from "@/components/requirements/DecisionLog";
 import { RequirementCard } from "@/components/requirements/RequirementCard";
-import { sourceRequirementCounts, blockedRequirementIds, filterRequirements, workspaceFocus, type RequirementFilter } from "@/lib/requirement-workspace";
+import { reviewUnavailableReason, sourceRequirementCounts, blockedRequirementIds, filterRequirements, workspaceFocus, type RequirementFilter } from "@/lib/requirement-workspace";
 import { api } from "@/lib/api";
 import type { BusinessRequirement, GatherSuggestions, RequirementAssistance, RequirementDraft, RequirementPriority, RequirementWorkspaceDetail } from "@/lib/requirements-types";
 import { Button, ConfirmDialog } from "@/components/ui";
@@ -233,6 +233,8 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
 
   if (!detail || !overview) return <PageFrame><Button variant="ghost" onClick={onBack}>Back to initiatives</Button><ErrorMessage error={query.error} />{query.isPending ? <p role="status">Loading initiative…</p> : <Button onClick={() => query.refetch()}>Retry</Button>}</PageFrame>;
   const { focus, blockedIds, questions, deliveryReady, sourceNames } = overview;
+  const currentReview = reviewing ? detail.requirements.find(item => item.id === reviewing.id) : undefined;
+  const reviewIssue = reviewing ? reviewUnavailableReason(reviewing, currentReview, blockedIds.has(reviewing.id)) : null;
 
   function followFocus() {
     if (focus.action === "decisions") setDecisionsOpen(true);
@@ -303,7 +305,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
       {assistance.result.suggestions.questions?.map((question, index) => <div key={index} className="text-sm"><p>{question}</p><Button size="sm" variant="ghost" onClick={() => trackQuestion(question, assistance.item.id)}>Track question</Button></div>)}
       {assistance.result.mode === "story" && <><p className="text-sm">As a {assistance.result.suggestions.actor}, I want to {assistance.result.suggestions.action}, so that {assistance.result.suggestions.benefit}.</p><ul className="list-disc pl-5 text-sm">{assistance.result.suggestions.acceptance_criteria?.map((criterion, index) => <li key={index}>{criterion}</li>)}</ul>{Boolean(assistance.result.suggestions.assumptions?.length) && <div className="text-sm text-amber-800"><strong>Assumptions to confirm</strong><ul className="list-disc pl-5">{assistance.result.suggestions.assumptions?.map((assumption, index) => <li key={index}>{assumption}<Button size="sm" variant="ghost" onClick={() => trackQuestion(assumption, assistance.item.id)}>Track assumption</Button></li>)}</ul></div>}<p className="text-xs text-ink-500">Saving this refinement creates a revised draft and requires a new sign-off.</p><Button variant="secondary" disabled={Boolean(pending)} onClick={() => switchEditor(() => { const { item, result } = assistance; edit(item); setDraft({ source_id: item.source_id, title: item.title, evidence_quote: item.evidence_quote, priority: item.priority, actor: result.suggestions.actor || item.actor, action: result.suggestions.action || item.action, benefit: result.suggestions.benefit || item.benefit, acceptance_criteria: result.suggestions.acceptance_criteria || item.acceptance_criteria }); setCriteria((result.suggestions.acceptance_criteria || item.acceptance_criteria).join("\n")); setDraftAssumptions(result.suggestions.assumptions || []); setAssistance(null); })}>Review as a new revision</Button></>}
     </section>}
-      {reviewing && <form className={panelStyle} aria-busy={pending === reviewing.id} onSubmit={event => { event.preventDefault(); void run(reviewing.id, () => api.validateBusinessRequirement(id, reviewing, { reviewer_role: reviewerRole, validation_note: reviewNote }), () => { rememberRequirementEditor(editorClient, userId, id, null); setReviewing(null); }); }}>
+      {reviewing && <form className={panelStyle} aria-busy={pending === reviewing.id} onSubmit={event => { event.preventDefault(); if (reviewIssue) return; void run(reviewing.id, () => api.validateBusinessRequirement(id, reviewing, { reviewer_role: reviewerRole, validation_note: reviewNote }), () => { rememberRequirementEditor(editorClient, userId, id, null); setReviewing(null); }); }}>
         <fieldset disabled={pending === reviewing.id} className="space-y-4">
         <h2 className="font-semibold">Sign off {reviewing.reference}: {reviewing.title}</h2>
         <p className="text-sm text-ink-500">Confirm that the requirement reflects the source, the expected outcome is agreed, and the acceptance criteria can be tested. Your signed-in account is recorded.</p>
@@ -315,9 +317,10 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
           <h3 className="text-sm font-semibold">Evidence · {sourceNames.get(reviewing.source_id) || "Source unavailable"}</h3>
           <blockquote className="whitespace-pre-wrap border-l-2 border-clay-300 pl-3 text-sm leading-6 text-ink-500">{reviewing.evidence_quote}</blockquote>
         </section>
+        {reviewIssue && <div role="alert" className="space-y-2 rounded-lg bg-amber-50 p-3 text-sm text-amber-800"><p>{reviewIssue}</p>{currentReview && currentReview.revision !== reviewing.revision && <Button variant="secondary" size="sm" disabled={Boolean(pending)} onClick={() => setReviewing(currentReview)}>Review current version</Button>}</div>}
         <Field label="Review capacity"><select className={inputStyle} value={reviewerRole} onChange={event => setReviewerRole(event.target.value)}>{["Product Owner", "Business Stakeholder", "Technical Business Analyst", "DTL"].map(role => <option key={role}>{role}</option>)}</select></Field>
         <Field label="Sign-off note"><textarea required minLength={10} maxLength={4000} className={inputStyle} value={reviewNote} onChange={event => setReviewNote(event.target.value)} placeholder="What was confirmed, and with whom?" /></Field>
-        <div className="flex gap-2"><Button type="submit" pending={pending === reviewing.id} disabled={Boolean(pending)}>Sign off requirement</Button><Button variant="ghost" disabled={Boolean(pending)} onClick={() => switchEditor(() => setReviewing(null))}>Cancel</Button></div>
+        <div className="flex gap-2"><Button type="submit" pending={pending === reviewing.id} disabled={Boolean(pending) || Boolean(reviewIssue)}>Sign off requirement</Button><Button variant="ghost" disabled={Boolean(pending)} onClick={() => switchEditor(() => setReviewing(null))}>Cancel</Button></div>
         </fieldset>
       </form>}
       {showForm && <form className={panelStyle} aria-busy={pending === "requirement"} onSubmit={event => { event.preventDefault(); void saveDraft(); }}>
