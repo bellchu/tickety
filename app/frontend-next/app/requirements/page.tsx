@@ -1,6 +1,7 @@
 "use client";
 
 import { captureRequirementDraftSave, readRequirementEditor, rememberRequirementEditor, readRequirementSourceDraft, readRequirementDecisionDraft } from "@/lib/requirement-editor-cache";
+import { invalidateRequirementOverviews } from "@/lib/requirement-workspace-query";
 import { requirementSourceQuery } from "@/lib/requirement-source-query";
 import { parseRequirementCriteria } from "@/lib/requirement-criteria";
 import { requirementErrorMessage } from "@/lib/requirement-errors";
@@ -190,11 +191,16 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
     switchEditor(() => { setReviewing(row); setShowForm(false); setReviewNote(""); });
   }
 
+  async function refreshSavedWorkspace() {
+    await invalidateRequirementOverviews(editorClient);
+    return query.refetch();
+  }
+
   async function run(label: string, operation: () => Promise<unknown>, success?: () => void, refresh = true) {
     if (pending) return;
     const isCurrent = captureRequirementDraftSave(editorClient, userId, id);
     setPending(label); setError(null); setNotice("");
-    try { await operation(); setNotice(refresh ? "Saved." : "Ready for review."); if (isCurrent()) success?.(); if (refresh) await query.refetch(); }
+    try { await operation(); setNotice(refresh ? "Saved." : "Ready for review."); if (isCurrent()) success?.(); if (refresh) await refreshSavedWorkspace(); }
     catch (caught) {
       setError(caught);
       if (caught instanceof APIError && caught.status === 409) await query.refetch({ throwOnError: false });
@@ -279,7 +285,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
       <div className="max-w-2xl"><p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-cyan-200">Worth your attention</p><h2 className="mt-2 text-lg font-medium">{focus.title}</h2><p className="mt-2 text-sm leading-6 text-slate-200">{focus.reason}</p></div>
       <Button className="shrink-0" variant="secondary" trailingIcon={<ArrowUpRight size={15} />} disabled={Boolean(pending)} onClick={followFocus}>{focus.label}</Button>
     </section>
-    <DecisionLog scope={decisionScope} onScopeChange={setDecisionScope} workspaceId={id} userId={userId} requirements={detail.requirements} decisions={detail.decisions || []} open={decisionsOpen} onToggle={() => setDecisionsOpen(!decisionsOpen)} seed={questionSeed} onSeedUsed={() => setQuestionSeed(null)} onSaved={() => query.refetch()} />
+    <DecisionLog scope={decisionScope} onScopeChange={setDecisionScope} workspaceId={id} userId={userId} requirements={detail.requirements} decisions={detail.decisions || []} open={decisionsOpen} onToggle={() => setDecisionsOpen(!decisionsOpen)} seed={questionSeed} onSeedUsed={() => setQuestionSeed(null)} onSaved={refreshSavedWorkspace} />
     <ErrorMessage error={error || query.error} />{notice && <p role="status" className="text-sm text-moss-700">{notice}</p>}
     <div className="grid items-start gap-6 xl:grid-cols-[300px_minmax(0,1fr)]">
       <aside className="min-w-0 space-y-4" aria-label="Business context">
