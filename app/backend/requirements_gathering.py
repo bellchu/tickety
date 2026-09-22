@@ -6,7 +6,7 @@ import re
 from typing import Annotated, Literal
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 from sqlalchemy.orm import Session, defer
 
@@ -263,11 +263,17 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
             raise HTTPException(422, str(exc)) from exc
 
     @router.post("/{workspace_id}/sources", status_code=201)
-    def add_source(workspace_id: str, data: SourceCreate, db: Session = Depends(get_db), user: UserRecord = Depends(require_user)):
+    def add_source(workspace_id: str, data: SourceCreate, response: Response, db: Session = Depends(get_db), user: UserRecord = Depends(require_user)):
         workspace(db, workspace_id, user, lock=True)
+        digest = hashlib.sha256(data.content.encode()).hexdigest()
+        existing = db.query(RequirementSourceRecord).filter_by(workspace_id=workspace_id, content_sha256=digest).order_by(RequirementSourceRecord.created_at, RequirementSourceRecord.id).all()
+        for source in existing:
+            if source.content == data.content:
+                response.status_code = 200
+                return {**{field: getattr(source, field) for field in ("id", "workspace_id", "title", "kind", "content", "content_sha256", "created_at")}, "reused": True}
         if db.query(RequirementSourceRecord).filter_by(workspace_id=workspace_id).count() >= 50:
             raise HTTPException(409, "This workspace already has 50 sources. Create another workspace.")
-        row = RequirementSourceRecord(id=str(uuid4()), workspace_id=workspace_id, content_sha256=hashlib.sha256(data.content.encode()).hexdigest(), **data.model_dump())
+        row = RequirementSourceRecord(id=str(uuid4()), workspace_id=workspace_id, content_sha256=digest, **data.model_dump())
         db.add(row)
         db.commit()
         db.refresh(row)

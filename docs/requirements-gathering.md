@@ -127,3 +127,11 @@ only on request in pages of ten events. There is no history-edit or delete API.
 For requirements created before this feature, the first later change captures
 its previous state; earlier actions are not invented or backfilled. Earlier wording
 can be copied into a new edit, which still requires fresh sign-off.
+
+Reimporting identical confirmed text into the same initiative reuses the existing
+source, including its original title, type and evidence links. The interface names
+the reused source and opens it for inspection. This also works at the 50-source
+limit. Changed text creates a separate immutable version; matching text in another
+initiative remains a separate private source. Matching uses a digest followed by
+an exact text comparison after normal input trimming; it does not merge similar
+wording or silently replace earlier evidence.

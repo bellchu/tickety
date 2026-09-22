@@ -151,6 +151,18 @@ function Workspace({ id, canAI, onBack }: { id: string; canAI: boolean; onBack: 
     setShowForm(true); setReviewing(null); setDraftAssumptions([]); setError(null);
   }
 
+  async function saveSource(event: FormEvent) {
+    event.preventDefault();
+    let saved: Awaited<ReturnType<typeof api.addRequirementSource>> | undefined;
+    await run("source", async () => { saved = await api.addRequirementSource(id, { title: sourceTitle, kind: sourceKind, content }); }, () => {
+      setSourceTitle(""); setContent(""); setImportWarnings([]); setSourceFormOpen(false);
+      if (saved) {
+        setSourceViewing(saved.id);
+        setNotice(saved.reused ? `This content is already saved as “${saved.title}”. The existing evidence was reused.` : "Source saved.");
+      }
+    });
+  }
+
   async function importText(file?: File) {
     if (!file) return;
     setError(null); setImportWarnings([]); setImporting(true);
@@ -208,7 +220,7 @@ function Workspace({ id, canAI, onBack }: { id: string; canAI: boolean; onBack: 
       <aside className="min-w-0 space-y-4" aria-label="Business context">
         <div className="flex items-center justify-between"><div><h2 className="font-semibold text-ink-700">Context & evidence</h2><p className="mt-1 text-xs text-ink-400">{detail.sources.length} sources · Add context whenever it changes</p></div><Button className="shrink-0 whitespace-nowrap" variant="ghost" size="sm" leadingIcon={<Plus size={14} />} onClick={() => setSourceFormOpen(!sourceFormOpen)}>Add</Button></div>
         {(sourceFormOpen || detail.sources.length === 0) && <>
-      <form className={`${panelStyle} space-y-4`} onSubmit={event => { event.preventDefault(); void run("source", () => api.addRequirementSource(id, { title: sourceTitle, kind: sourceKind, content }), () => { setSourceTitle(""); setContent(""); setImportWarnings([]); setSourceFormOpen(false); }); }}>
+      <form className={`${panelStyle} space-y-4`} onSubmit={saveSource}>
         <h2 className="text-lg font-semibold">Add supporting material</h2><p className="text-sm text-ink-500">Paste source material or import a document or email. Sources are preserved so every requirement can point back to its evidence.</p>
         <Field label="Import source file"><input type="file" disabled={importing || Boolean(pending)} accept=".txt,.md,.eml,.docx,.pdf,.vtt,.srt" onChange={event => { void importText(event.target.files?.[0]); event.target.value = ""; }} className="mt-2 block w-full text-sm" /></Field>
         {importing && <p role="status" className="text-xs">Preparing source preview…</p>}
@@ -216,7 +228,7 @@ function Workspace({ id, canAI, onBack }: { id: string; canAI: boolean; onBack: 
         <Field label="Source title"><input required maxLength={200} className={inputStyle} value={sourceTitle} onChange={event => setSourceTitle(event.target.value)} /></Field>
         <Field label="Source type"><select className={inputStyle} value={sourceKind} onChange={event => setSourceKind(event.target.value as SourceKind)}>{Object.entries(kinds).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field>
         <Field label="Source text"><textarea required minLength={10} maxLength={100000} rows={7} className={inputStyle} value={content} onChange={event => setContent(event.target.value)} /></Field><p className="text-xs text-ink-400">{content.length.toLocaleString()} / 100,000 characters · Text, EML, DOCX and PDF · 400 KB file limit.</p>
-        <Button type="submit" pending={pending === "source"} disabled={importing || Boolean(pending) || detail.sources.length >= 50}>Save source</Button>
+        <Button type="submit" pending={pending === "source"} disabled={importing || Boolean(pending)}>Save source</Button>
       </form>
         </>}
         {detail.sources.map(item => <div key={item.id} className="space-y-3 rounded-xl border border-linen-400 bg-white p-4">

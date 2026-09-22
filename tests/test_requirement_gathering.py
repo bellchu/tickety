@@ -279,6 +279,38 @@ class RequirementGatheringTests(unittest.TestCase):
         self.assertEqual(saved["title"], row["title"])
         self.assertEqual(saved["revision"], 1)
 
+    def test_exact_source_reimport_reuses_evidence_without_overwriting_metadata(self):
+        workspace = self.workspace()
+        source = self.source(workspace)
+        route = f"{self.path}/{workspace}/sources"
+        content = "Every invoice must receive an acknowledgement within 30 seconds."
+        response = self.client.post(route, json={"title": "Renamed copy", "kind": "document", "content": "  " + content + "  "})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["reused"])
+        self.assertEqual(response.json()["id"], source)
+        self.assertEqual(response.json()["title"], "Operations SOP")
+        self.assertEqual(response.json()["kind"], "sop")
+        self.assertEqual(len(self.client.get(f"{self.path}/{workspace}").json()["sources"]), 1)
+        changed = self.client.post(route, json={"title": "Revised SOP", "kind": "sop", "content": content.replace("30", "45")})
+        self.assertEqual(changed.status_code, 201)
+        self.assertNotEqual(changed.json()["id"], source)
+        other = self.workspace()
+        copy = self.client.post(f"{self.path}/{other}/sources", json={"title": "Same text, separate initiative", "kind": "sop", "content": content})
+        self.assertEqual(copy.status_code, 201)
+        self.assertNotEqual(copy.json()["id"], source)
+
+    def test_source_reuse_remains_possible_at_source_limit(self):
+        workspace = self.workspace()
+        source = self.source(workspace)
+        route = f"{self.path}/{workspace}/sources"
+        for index in range(49):
+            response = self.client.post(route, json={"title": f"Material {index}", "kind": "document", "content": f"Distinct supporting material number {index}."})
+            self.assertEqual(response.status_code, 201)
+        reused = self.client.post(route, json={"title": "Copy", "kind": "sop", "content": "Every invoice must receive an acknowledgement within 30 seconds."})
+        self.assertEqual(reused.status_code, 200)
+        self.assertEqual(reused.json()["id"], source)
+        self.assertEqual(self.client.post(route, json={"title": "Over limit", "kind": "document", "content": "An additional new source over the limit."}).status_code, 409)
+
     def ai_manager(self, result):
         return SimpleNamespace(is_mock=False, prompt_char_limit=4000, model_name="test/configured-provider", analyze=AsyncMock(return_value=result))
 
