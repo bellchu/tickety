@@ -20,3 +20,15 @@ test('history distinguishes scope changes, sign-off and story preparation', () =
   assert.match(requirementChangeSummary(null, original), /Initial evidence/);
   assert.equal(requirementChangeSummary(original, { ...original, revision: 9 }), 'No tracked field changes.');
 });
+
+test('blocking events explain a draft revision even when business fields are unchanged', () => {
+  const draft = { ...original, status: 'draft', story: null };
+  const summary = requirementChangeSummary(draft, { ...draft, revision: 2 }, 'blocked');
+  assert.match(summary, /blocking business question was raised/);
+  assert.ok(!summary.includes('No tracked field changes'));
+  assert.ok(!summary.includes('agreement withdrawn'));
+  const reopened = requirementChangeSummary(original, draft, 'blocked');
+  assert.match(reopened, /blocking business question was raised/);
+  assert.match(reopened, /Previous agreement withdrawn/);
+  assert.match(reopened, /Previous user story withdrawn/);
+});

@@ -6,11 +6,12 @@ export function requirementChanges(before: BusinessRequirement | null, after: Bu
   return requirementHistoryFields.filter(([key]) => !before || JSON.stringify(before[key]) !== JSON.stringify(after[key]));
 }
 
-export function requirementChangeSummary(before: BusinessRequirement | null, after: BusinessRequirement): string {
+export function requirementChangeSummary(before: BusinessRequirement | null, after: BusinessRequirement, action?: string): string {
   if (!before) return "Initial evidence and business need recorded.";
   const changed = requirementChanges(before, after);
   const business = changed.filter(([key]) => ["title", "actor", "action", "benefit", "priority", "source_id", "evidence_quote", "acceptance_criteria"].includes(key)).map(([, label]) => label);
   const notes: string[] = [];
+  if (action === "blocked") notes.push("A blocking business question was raised for this requirement or its initiative.");
   if (business.length) notes.push(`Changed: ${business.join(", ")}.`);
   if (before.priority !== "wont" && after.priority === "wont") notes.push("Removed from current delivery scope.");
   if (before.priority === "wont" && after.priority !== "wont") notes.push("Returned to current delivery scope.");
