@@ -92,7 +92,9 @@ Filter the register to open, blocking, exploratory or recorded decisions, and se
 by question, answer owner or resolution. An answer being edited stays visible across
 filters. Questions linked to deferred requirements display **Not this time**.
 
-AI questions can prefill the log for human review. Choose the owner, affected scope
+AI questions, review findings and story-refinement assumptions can prefill the log
+for human review. Questions from an existing requirement retain that scope; source
+exploration starts at initiative scope. Choose the owner, affected scope
 and blocking status before saving. Replacing an unfinished question, or switching
 away from an unfinished answer, asks whether to keep or discard the draft.
 
