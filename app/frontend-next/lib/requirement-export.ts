@@ -72,8 +72,12 @@ export function requirementBrief(detail: RequirementWorkspaceDetail): string {
     if (row.story && row.priority !== "wont") lines.push("", `#### ${row.story.reference}: ${inline(row.story.title)}`, prose(row.story.statement),
       `Traces to ${row.story.requirement_reference}, validated revision ${row.story.validated_revision}.`);
   }
-  lines.push("", "## Questions and business decisions");
-  for (const item of detail.decisions || []) {
+  lines.push("", "## Questions and business decisions",
+    "Open blockers affecting current scope or needing scope confirmation appear first. Other records retain their recorded order.");
+  const currentBlocking = (item: RequirementWorkspaceDetail["decisions"][number]) => item.status === "open" && item.blocking
+    && (!item.requirement_id || requirementsById.get(item.requirement_id)?.priority !== "wont");
+  const orderedDecisions = [...(detail.decisions || [])].sort((left, right) => Number(currentBlocking(right)) - Number(currentBlocking(left)));
+  for (const item of orderedDecisions) {
     const scope = item.requirement_id ? requirementsById.get(item.requirement_id)?.reference || item.requirement_id : "Whole initiative";
     const deferred = item.requirement_id && requirementsById.get(item.requirement_id)?.priority === "wont";
     const effect = item.status === "resolved" ? "Answer recorded; this does not sign off or update requirements."

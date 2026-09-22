@@ -189,3 +189,21 @@ test('sign-off identity remains inline literal text in both delivery exports', (
     assert.ok(!output.includes('\n## Another section'));
   }
 });
+
+test('brief surfaces current-scope blockers before deferred and recorded decisions without mutating order', () => {
+  const row = { id: 'later', reference: 'REQ-001', title: 'Later', status: 'draft', priority: 'wont', revision: 1,
+    source_id: 's1', evidence_quote: 'Confirm receipt.', acceptance_criteria: [], quality_issues: [], story: null };
+  const base = { owner_role: 'Sponsor', status: 'open', blocking: true };
+  const decisions = [
+    { ...base, question: 'Recorded answer', status: 'resolved', requirement_id: null },
+    { ...base, question: 'Future scope blocker', requirement_id: 'later' },
+    { ...base, question: 'Whole initiative blocker', requirement_id: null },
+    { ...base, question: 'Unknown scope blocker', requirement_id: 'unavailable' },
+    { ...base, question: 'Exploratory question', blocking: false, requirement_id: null },
+  ];
+  const output = library.requirementBrief({ workspace: { id: 'w', title: 'Scope', objective: 'Agree delivery', request_type: 'enhancement' }, sources: [], requirements: [row], decisions });
+  const headings = output.split('\n').filter(line => line.startsWith('### ')).slice(1);
+  assert.deepEqual(headings, ['### Whole initiative blocker', '### Unknown scope blocker', '### Recorded answer', '### Future scope blocker', '### Exploratory question']);
+  assert.equal(decisions[0].question, 'Recorded answer');
+  assert.equal(decisions[1].question, 'Future scope blocker');
+});
