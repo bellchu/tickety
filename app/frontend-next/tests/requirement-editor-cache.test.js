@@ -1,15 +1,9 @@
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
 const test = require('node:test');
-const ts = require('typescript');
 const { QueryClient } = require('@tanstack/react-query');
-const output = ts.transpileModule(fs.readFileSync(path.join(__dirname, '../lib/requirement-editor-cache.ts'), 'utf8'), {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-}).outputText;
-const loaded = { exports: {} };
-new Function('exports', 'module', output)(loaded.exports, loaded);
-const { readRequirementEditor: read, rememberRequirementEditor: remember, hasRequirementEditorDrafts: hasDrafts } = loaded.exports;
+const { loadPureTs } = require('./helpers/load-pure-ts');
+const library = loadPureTs('requirement-editor-cache.ts');
+const { readRequirementEditor: read, rememberRequirementEditor: remember, hasRequirementEditorDrafts: hasDrafts } = library;
 const draft = { draft: { title: 'Unsaved outcome' }, criteria: 'Confirm receipt', baseline: 'original', assumptions: ['Check deadline'], editing: { id: 'r1', revision: 7 }, showForm: true, reviewing: null, reviewerRole: 'Product Owner', reviewNote: '' };
 
 test('navigation restores edits and original revision without crossing users or initiatives', () => {
@@ -47,7 +41,7 @@ test('logout cache clearing removes drafts and the unload warning condition', ()
 
 test('source previews retain warnings independently of the requirement editor', () => {
   const client = new QueryClient();
-  const { readRequirementSourceDraft: readSource, rememberRequirementSourceDraft: rememberSource } = loaded.exports;
+  const { readRequirementSourceDraft: readSource, rememberRequirementSourceDraft: rememberSource } = library;
   const source = { title: 'Interview notes', kind: 'transcript', content: 'Confirm receipt within thirty seconds.', warnings: ['Images were omitted.'] };
   remember(client, 'alice', 'one', draft);
   rememberSource(client, 'alice', 'one', source);
@@ -66,7 +60,7 @@ test('source previews retain warnings independently of the requirement editor', 
 
 test('decision question and answer drafts coexist with source and editor drafts', () => {
   const client = new QueryClient();
-  const { readRequirementDecisionDraft: readDecision, rememberRequirementDecisionDraft: rememberDecision } = loaded.exports;
+  const { readRequirementDecisionDraft: readDecision, rememberRequirementDecisionDraft: rememberDecision } = library;
   const decision = { question: 'Who handles failures?', owner: 'Operations lead', requirementId: 'r1', blocking: false, resolving: 'q2', resolution: 'Keep failed submissions in the queue.' };
   remember(client, 'alice', 'one', draft);
   rememberDecision(client, 'alice', 'one', decision);

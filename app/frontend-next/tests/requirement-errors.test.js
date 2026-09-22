@@ -1,14 +1,8 @@
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
 const test = require('node:test');
-const ts = require('typescript');
-const output = ts.transpileModule(fs.readFileSync(path.join(__dirname, '../lib/requirement-errors.ts'), 'utf8'), {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-}).outputText;
-const loaded = { exports: {} };
-new Function('exports', 'module', output)(loaded.exports, loaded);
-const format = loaded.exports.requirementErrorMessage;
+const { loadPureTs } = require('./helpers/load-pure-ts');
+const library = loadPureTs('requirement-errors.ts');
+const format = library.requirementErrorMessage;
 const apiError = (message, status) => Object.assign(new Error(message), { status });
 
 test('AI failures explain recovery and preserve the manual workflow', () => {

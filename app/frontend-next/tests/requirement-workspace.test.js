@@ -1,12 +1,8 @@
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
 const test = require('node:test');
-const ts = require('typescript');
-const output = ts.transpileModule(fs.readFileSync(path.join(__dirname, '../lib/requirement-workspace.ts'), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText;
-const loaded = { exports: {} };
-new Function('exports', 'module', output)(loaded.exports, loaded);
-const { workspaceFocus, filterRequirements } = loaded.exports;
+const { loadPureTs } = require('./helpers/load-pure-ts');
+const library = loadPureTs('requirement-workspace.ts');
+const { workspaceFocus, filterRequirements } = library;
 const item = { id: 'r1', reference: 'REQ-001', title: 'Receipt', actor: 'Analyst', action: 'Track intake', benefit: 'Avoid delays', source_id: 's1', status: 'draft', quality_issues: [], story: null };
 const detail = (items = [], sources = [{ id: 's1', title: 'SOP' }]) => ({ requirements: items, sources });
 test('focus follows evidence and unresolved business questions before sign-off', () => {

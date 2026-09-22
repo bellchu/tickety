@@ -1,14 +1,8 @@
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
 const test = require('node:test');
-const ts = require('typescript');
-const output = ts.transpileModule(fs.readFileSync(path.join(__dirname, '../lib/requirement-criteria.ts'), 'utf8'), {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-}).outputText;
-const loaded = { exports: {} };
-new Function('exports', 'module', output)(loaded.exports, loaded);
-const parse = loaded.exports.parseRequirementCriteria;
+const { loadPureTs } = require('./helpers/load-pure-ts');
+const library = loadPureTs('requirement-criteria.ts');
+const parse = library.parseRequirementCriteria;
 test('incomplete drafts may omit criteria; blank lines are not entries', () => {
   assert.deepEqual(parse(' \n\r\n '), { criteria: [], issue: null });
   assert.deepEqual(parse('  Confirm receipt  \r\n\n  Record time  '), { criteria: ['Confirm receipt', 'Record time'], issue: null });

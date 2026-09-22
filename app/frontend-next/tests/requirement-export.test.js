@@ -1,17 +1,11 @@
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const path = require("node:path");
 const test = require("node:test");
-const ts = require("typescript");
 
-const output = ts.transpileModule(fs.readFileSync(path.join(__dirname, "../lib/requirement-export.ts"), "utf8"), {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
-}).outputText;
-const loaded = { exports: {} };
-new Function("exports", "module", output)(loaded.exports, loaded);
+const { loadPureTs } = require('./helpers/load-pure-ts');
+const library = loadPureTs('requirement-export.ts');
 
 test("BRD export retains evidence, human sign-off and story traceability", () => {
-  const brief = loaded.exports.requirementBrief({
+  const brief = library.requirementBrief({
     workspace: { id: "initiative-1", title: "Invoice intake", objective: "Reduce delays", request_type: "enhancement" },
     sources: [{ id: "source-1", title: "Finance SOP", kind: "sop", content_sha256: "abc123" }],
     requirements: [{
@@ -28,7 +22,7 @@ test("BRD export retains evidence, human sign-off and story traceability", () =>
 });
 
 test("draft exports retain open questions without fabricating sign-off", () => {
-  const brief = loaded.exports.requirementBrief({
+  const brief = library.requirementBrief({
     workspace: { id: "initiative-2", title: "Draft", objective: "Discover the outcome", request_type: "approved_project" },
     sources: [],
     requirements: [{ reference: "REQ-001", title: "Open question", status: "draft", priority: "should", revision: 1,
@@ -41,7 +35,7 @@ test("draft exports retain open questions without fabricating sign-off", () => {
 });
 
 test("BRD carries business decisions and reports unresolved blockers honestly", () => {
-  const brief = loaded.exports.requirementBrief({
+  const brief = library.requirementBrief({
     workspace: { id: "w", title: "Supplier intake", objective: "Reduce delays", request_type: "enhancement" },
     sources: [], requirements: [], decisions: [
       { question: "Who owns delivery failures?", owner_role: "Operations lead", requirement_id: null, status: "open", blocking: true, resolution: null },
@@ -53,7 +47,7 @@ test("BRD carries business decisions and reports unresolved blockers honestly", 
 });
 
 test('deferred needs retain their evidence without exporting an old story as delivery work', () => {
-  const brief = loaded.exports.requirementBrief({
+  const brief = library.requirementBrief({
     workspace: { id: 'w', title: 'Future need', objective: 'Consider later', request_type: 'enhancement' }, sources: [],
     requirements: [{ reference: 'REQ-001', title: 'Later', status: 'validated', priority: 'wont', revision: 1, actor: 'Analyst', action: 'Review', benefit: 'Later', source_id: 's1', evidence_quote: 'Original business evidence.', acceptance_criteria: [], quality_issues: [], story: { reference: 'US-001', title: 'Old story', statement: 'Old delivery wording' } }],
   });
@@ -71,10 +65,10 @@ test('copied stories include signed criteria, provenance and only relevant open 
     { requirement_id: 'r2', status: 'open', question: 'Unrelated requirement question' },
     { requirement_id: 'r1', status: 'resolved', question: 'Already answered question' },
   ] };
-  const output = loaded.exports.requirementStoryText(detail, row);
+  const output = library.requirementStoryText(detail, row);
   for (const required of ['US-001', 'REQ-001', 'signed-off revision 2', '30 seconds', 'Operations SOP', 'digest', 'Confirm the submission', 'Product Owner', 'Confirmed with operations.', 'Which languages', 'Could receipt text', 'Reduce manual follow-up.']) assert.ok(output.includes(required), required);
   assert.ok(!output.includes('Unrelated requirement question'));
   assert.ok(!output.includes('Already answered question'));
-  assert.throws(() => loaded.exports.requirementStoryText(detail, { ...row, priority: 'wont' }), /in-scope/);
-  assert.throws(() => loaded.exports.requirementStoryText(detail, { ...row, status: 'draft' }), /signed-off/);
+  assert.throws(() => library.requirementStoryText(detail, { ...row, priority: 'wont' }), /in-scope/);
+  assert.throws(() => library.requirementStoryText(detail, { ...row, status: 'draft' }), /signed-off/);
 });
