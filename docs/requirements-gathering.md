@@ -199,3 +199,8 @@ data without discarding your draft. An outdated requirement editor shows both
 revision numbers and offers change history plus **Load latest saved version**. Copy
 useful wording before loading; replacing unsaved edits requires confirmation.
 Review the updated version or decision before trying again; the application does not automatically replay the failed write.
+
+Single-requirement AI reviews and story refinements retain their analyzed revision.
+When refreshed data reveals a newer version, suggestions remain readable but cannot
+be tracked or applied. Use **Analyze current version** to replace them; story
+refinement requires the current requirement to be in scope and signed off.

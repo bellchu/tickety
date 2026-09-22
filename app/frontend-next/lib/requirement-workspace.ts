@@ -113,3 +113,12 @@ const priorityOrder = { must: 0, should: 1, could: 2, wont: 3 };
 export function orderRequirements(items: BusinessRequirement[], order: RequirementOrder) {
   return order === "priority" ? [...items].sort((left, right) => priorityOrder[left.priority] - priorityOrder[right.priority]) : items;
 }
+
+/** AI findings remain actionable only for the exact saved snapshots reviewed. */
+export function requirementSnapshotsCurrent(
+  snapshots: { id: string; revision: number }[],
+  items: { id: string; revision: number }[],
+): boolean {
+  const revisions = new Map(items.map(item => [item.id, item.revision]));
+  return snapshots.every(snapshot => revisions.get(snapshot.id) === snapshot.revision);
+}

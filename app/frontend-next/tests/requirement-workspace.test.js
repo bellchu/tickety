@@ -137,3 +137,13 @@ test('suggested focus respects business priority without bypassing blocking ques
   assert.equal(workspaceFocus({ ...workspace, decisions: [{ requirement_id: 'optional', status: 'open', blocking: true, owner_role: 'Sponsor', question: 'Confirm ownership' }] }).action, 'decisions');
   assert.equal(workspaceFocus(detail([{ ...essential, quality_issues: ['Confirm outcome'] }, optional])).action, 'questions');
 });
+
+test('AI snapshots expire on revision changes or removal, but not unrelated updates', () => {
+  const { requirementSnapshotsCurrent: current } = library;
+  const snapshots = [{ id: 'r1', revision: 2 }, { id: 'r2', revision: 4 }];
+  assert.equal(current(snapshots, [...snapshots, { id: 'other', revision: 8 }]), true);
+  assert.equal(current(snapshots, [{ id: 'r1', revision: 3 }, snapshots[1]]), false);
+  assert.equal(current(snapshots, [snapshots[0]]), false);
+  assert.equal(current([{ id: 'r1', revision: 2 }], [{ id: 'r1', revision: 3 }]), false);
+  assert.equal(current([{ id: 'r1', revision: 3 }], [{ id: 'r1', revision: 3 }]), true);
+});

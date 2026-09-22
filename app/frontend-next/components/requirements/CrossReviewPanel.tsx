@@ -1,5 +1,6 @@
 "use client";
 
+import { requirementSnapshotsCurrent } from "@/lib/requirement-workspace";
 import { requirementErrorMessage } from "@/lib/requirement-errors";
 
 import { useState } from "react";
@@ -13,7 +14,7 @@ export function CrossReviewPanel({ workspaceId, items, onQuestion }: { workspace
   const [pending, setPending] = useState(false);
   const [result, setResult] = useState<RequirementCrossReview | null>(null);
   const [error, setError] = useState("");
-  const stale = result?.requirements.some(previous => items.find(item => item.id === previous.id)?.revision !== previous.revision);
+  const stale = Boolean(result && !requirementSnapshotsCurrent(result.requirements, items));
   async function review() {
     if (pending) return;
     setPending(true); setError(""); setResult(null);
