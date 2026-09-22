@@ -1,6 +1,6 @@
 "use client";
 
-import { readRequirementEditor, rememberRequirementEditor } from "@/lib/requirement-editor-cache";
+import { readRequirementEditor, rememberRequirementEditor, readRequirementSourceDraft } from "@/lib/requirement-editor-cache";
 import { requirementErrorMessage } from "@/lib/requirement-errors";
 
 import { Suspense, useEffect, useState, type FormEvent } from "react";
@@ -107,7 +107,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
   const [historyItem, setHistoryItem] = useState<string | null>(null);
   const [decisionsOpen, setDecisionsOpen] = useState(false);
   const [questionSeed, setQuestionSeed] = useState<{ question: string; requirementId: string | null } | null>(null);
-  const [sourceFormOpen, setSourceFormOpen] = useState(false);
+  const [sourceFormOpen, setSourceFormOpen] = useState(() => Boolean(readRequirementSourceDraft(editorClient, userId, id)));
   const [sourceViewing, setSourceViewing] = useState("");
   const [filter, setFilter] = useState<RequirementFilter>("all");
   const [search, setSearch] = useState("");
@@ -210,7 +210,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
     <div className="grid items-start gap-6 xl:grid-cols-[300px_minmax(0,1fr)]">
       <aside className="min-w-0 space-y-4" aria-label="Business context">
         <div className="flex items-center justify-between"><div><h2 className="font-semibold text-ink-700">Context & evidence</h2><p className="mt-1 text-xs text-ink-400">{detail.sources.length} sources · Add context whenever it changes</p></div><Button className="shrink-0 whitespace-nowrap" variant="ghost" size="sm" leadingIcon={<Plus size={14} />} onClick={() => setSourceFormOpen(!sourceFormOpen)}>Add</Button></div>
-        <SourceIntakeForm workspaceId={id} open={sourceFormOpen || detail.sources.length === 0} pending={pending} onSave={saveSource} />
+        <SourceIntakeForm workspaceId={id} userId={userId} open={sourceFormOpen || detail.sources.length === 0} pending={pending} onSave={saveSource} />
         {detail.sources.map(item => <div key={item.id} className="space-y-3 rounded-xl border border-linen-400 bg-white p-4">
           <button className="w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-clay-400" onClick={() => setSourceViewing(sourceViewing === item.id ? "" : item.id)}>
             <span className="text-[10px] font-semibold uppercase tracking-wide text-clay-700">{kinds[item.kind]}</span><h3 className="mt-1 text-sm font-semibold text-ink-700">{item.title}</h3>

@@ -44,3 +44,22 @@ test('logout cache clearing removes drafts and the unload warning condition', ()
   assert.equal(hasDrafts(client), false);
   client.clear();
 });
+
+test('source previews retain warnings independently of the requirement editor', () => {
+  const client = new QueryClient();
+  const { readRequirementSourceDraft: readSource, rememberRequirementSourceDraft: rememberSource } = loaded.exports;
+  const source = { title: 'Interview notes', kind: 'transcript', content: 'Confirm receipt within thirty seconds.', warnings: ['Images were omitted.'] };
+  remember(client, 'alice', 'one', draft);
+  rememberSource(client, 'alice', 'one', source);
+  assert.deepEqual(readSource(client, 'alice', 'one'), source);
+  assert.equal(readSource(client, 'bob', 'one'), undefined);
+  assert.equal(readSource(client, 'alice', 'two'), undefined);
+  remember(client, 'alice', 'one', null);
+  assert.deepEqual(readSource(client, 'alice', 'one'), source);
+  assert.equal(hasDrafts(client), true);
+  rememberSource(client, 'alice', 'one', null);
+  assert.equal(hasDrafts(client), false);
+  rememberSource(client, 'alice', 'one', source);
+  client.clear();
+  assert.equal(readSource(client, 'alice', 'one'), undefined);
+});
