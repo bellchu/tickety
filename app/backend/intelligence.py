@@ -19,7 +19,6 @@ reasoning can be shown in the UI alongside the number.
 
 from __future__ import annotations
 
-import math
 import json
 import re
 import secrets
