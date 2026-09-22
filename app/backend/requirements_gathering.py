@@ -222,6 +222,16 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
         db.refresh(row)
         return row
 
+    @router.post("/{workspace_id}/pdf-preview")
+    def pdf_preview(workspace_id: str, data: FilePreviewInput, db: Session = Depends(get_db), user: UserRecord = Depends(require_user)):
+        from .requirement_pdf import preview_pdf
+        workspace(db, workspace_id, user)
+        db.rollback()  # Do not hold a database transaction while the parser runs.
+        try:
+            return preview_pdf(data.content_base64)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
     @router.post("/{workspace_id}/docx-preview")
     def docx_preview(workspace_id: str, data: FilePreviewInput, db: Session = Depends(get_db), user: UserRecord = Depends(require_user)):
         from .requirement_docx import preview_docx

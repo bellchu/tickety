@@ -226,6 +226,17 @@ class RequirementGatheringTests(unittest.TestCase):
         self.assertEqual(restored["evidence_quote"], payload["evidence_quote"])
         self.assertEqual(self.client.post(route + "/validate", json={**review, "revision": restored["revision"]}).status_code, 200)
 
+    def test_pdf_preview_is_private_and_never_creates_evidence_implicitly(self):
+        from tests.test_requirement_pdf import pdf_source
+        workspace = self.workspace()
+        url = f"{self.path}/{workspace}/pdf-preview"
+        response = self.client.post(url, json={"content_base64": pdf_source()})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn("[Page 1]", response.json()["content"])
+        self.assertEqual(self.client.get(f"{self.path}/{workspace}").json()["sources"], [])
+        self.user.id = "other"
+        self.assertEqual(self.client.post(url, json={"content_base64": pdf_source()}).status_code, 404)
+
     def ai_manager(self, result):
         return SimpleNamespace(is_mock=False, prompt_char_limit=4000, model_name="test/configured-provider", analyze=AsyncMock(return_value=result))
 

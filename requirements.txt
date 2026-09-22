@@ -14,3 +14,6 @@ httpx
 pyjwt[crypto]>=2.13,<3
 websockets
 tiktoken>=0.14.0,<1
+
+pypdf>=6.18.1,<7
+psutil>=7,<8

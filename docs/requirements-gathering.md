@@ -16,8 +16,8 @@ access to users who cannot already view it.
 
 - Record the business objective and gather business documents, emails, SOPs,
    and meeting transcripts. Paste text or import UTF-8 TXT, Markdown, VTT, or SRT files. EML
-   import decodes MIME email headers and body into a reviewable text preview. DOCX import extracts document body text and table rows. PDF
-   extraction, scanned documents and older DOC files are not yet supported. Each source is immutable and retains a SHA-256 digest.
+   import decodes MIME email headers and body into a reviewable text preview. DOCX import extracts document body text and table rows. PDF import extracts selectable text with page markers. Scanned documents
+   need OCR or transcription first; older DOC files are not supported. Each source is immutable and retains a SHA-256 digest.
 - Create a requirement from an exact excerpt of a saved source. Give it a
    stakeholder, required capability, business outcome, priority, and observable
    acceptance criteria. Requirements receive stable initiative-local `REQ-001`
@@ -104,3 +104,13 @@ Changing its priority back to Must/Should/Could reopens the normal review path.
 Changing any agreed requirement to Not this time withdraws its current agreement
 and story through the same revision mechanism. BRD exports retain deferred needs
 and evidence, clearly label their scope, and exclude their stories from handoff.
+
+PDF preview runs in a separate process: at most two concurrent parsers per API
+process, 50 pages, 400 KB input, 2 MB decoded content per page and 100,000 output
+characters. A parent watchdog terminates workers after ten seconds or above
+256 MiB resident memory; Linux additionally enforces a 256 MiB address-space
+limit, and both Linux/macOS apply a five-second CPU limit. macOS memory checking
+is sampled, so transient peaks can exceed the threshold before termination.
+Encrypted files are rejected. Pages without extractable text are listed explicitly,
+and all-empty PDFs are rejected rather than silently creating empty evidence.
+This is text extraction, not OCR; reading order, tables and symbols need review.
