@@ -391,3 +391,14 @@ and the unlinked supplier email. **Show all requirements** reset search, readine
 and source together, restoring REQ-001 and REQ-002. The action only changes view
 state; it does not invoke editor transitions or write business records. Build,
 production-route verification, typecheck and lint passed for this change.
+
+### Source replacement browser check
+
+On the production preview containing `a4ae67c`, an unsaved synthetic title and body
+were entered in the source form. Selecting a local TXT file opened **Replace unsaved
+source material?** with **Keep editing** initially focused. Cancelling preserved
+both fields. Selecting the same file again and confirming replaced the preview
+with its filename and text, leaving **Save source** as a separate action. The
+synthetic fields were then cleared and the form closed; no source was saved and
+no existing business record was changed. Failure retention, late completion and
+sign-out behavior remain covered by the component lifecycle tests.
