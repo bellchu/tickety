@@ -78,10 +78,6 @@ export function moodLabel(mood: string | null): string {
   return mood.charAt(0).toUpperCase() + mood.slice(1);
 }
 
-export function complexityDots(complexity: number): { filled: number; empty: number } {
-  return { filled: Math.min(5, Math.max(1, complexity)), empty: 5 - Math.min(5, Math.max(1, complexity)) };
-}
-
 export function tierName(tier: number): string {
   return `Tier ${tier}`;
 }

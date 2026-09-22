@@ -32,5 +32,3 @@ export const RECOGNITION_META: Record<string, { display_name: string; descriptio
 };
 
 export const ALL_RECOGNITION_KEYS = Object.keys(RECOGNITION_META);
-
-export const TIER_THRESHOLDS = [0, 100, 250, 500, 1000, 2000, 4000, 8000];
