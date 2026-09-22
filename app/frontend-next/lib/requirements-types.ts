@@ -60,3 +60,32 @@ export interface RequirementWorkspaceDetail {
   sources: RequirementSource[];
   requirements: BusinessRequirement[];
 }
+
+export interface RequirementCandidate extends Omit<RequirementDraft, "source_id"> {
+  assumptions: string[];
+}
+
+export interface GatherSuggestions {
+  source_id: string;
+  model: string;
+  source_truncated: boolean;
+  discarded_candidates: number;
+  candidates: RequirementCandidate[];
+  questions: string[];
+}
+
+export interface RequirementAssistance {
+  model: string;
+  mode: "review" | "story";
+  base_revision: number;
+  input_truncated: boolean;
+  suggestions: {
+    findings?: { category: string; finding: string; question: string }[];
+    questions?: string[];
+    actor?: string;
+    action?: string;
+    benefit?: string;
+    acceptance_criteria?: string[];
+    assumptions?: string[];
+  };
+}

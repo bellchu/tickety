@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 
 from .database import (
     get_db, UserRecord, RequirementWorkspaceRecord, RequirementSourceRecord,
@@ -69,6 +69,10 @@ class ValidationInput(RevisionInput):
     validation_note: Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=4000)]
 
 
+class AssistanceInput(RevisionInput):
+    mode: Literal["review", "story"]
+
+
 def quality_issues(row: BusinessRequirementRecord) -> list[str]:
     issues = []
     for field, label in (("actor", "stakeholder or user role"), ("action", "required capability"), ("benefit", "business outcome")):
@@ -99,7 +103,7 @@ def requirement_out(row):
     }
 
 
-def create_router(require_user):
+def create_router(require_user, require_ai_user, get_llm, reserve_ai):
     router = APIRouter(prefix="/requirements", tags=["Requirement gathering"])
 
     def workspace(db, workspace_id, user, *, lock=False):
@@ -147,7 +151,7 @@ def create_router(require_user):
     @router.get("/{workspace_id}")
     def get_workspace(workspace_id: str, db: Session = Depends(get_db), user: UserRecord = Depends(require_user)):
         row = workspace(db, workspace_id, user)
-        sources = db.query(RequirementSourceRecord).filter_by(workspace_id=row.id).order_by(RequirementSourceRecord.created_at, RequirementSourceRecord.id).all()
+        sources = db.query(RequirementSourceRecord).options(defer(RequirementSourceRecord.content)).filter_by(workspace_id=row.id).order_by(RequirementSourceRecord.created_at, RequirementSourceRecord.id).all()
         requirements = db.query(BusinessRequirementRecord).filter_by(workspace_id=row.id).order_by(BusinessRequirementRecord.created_at, BusinessRequirementRecord.id).all()
         return {"workspace": row, "sources": [{field: getattr(source, field) for field in ("id", "title", "kind", "content_sha256", "created_at")} for source in sources], "requirements": [requirement_out(item) for item in requirements]}
 
@@ -231,5 +235,46 @@ def create_router(require_user):
             row.updated_at = datetime.utcnow()
             db.commit()
         return requirement_out(row)
+
+    @router.post("/{workspace_id}/sources/{source_id}/gather")
+    async def gather_requirements(workspace_id: str, source_id: str, db: Session = Depends(get_db), user: UserRecord = Depends(require_ai_user)):
+        from .requirements_ai import gather, prepare_prompt
+
+        initiative = workspace(db, workspace_id, user)
+        source = db.query(RequirementSourceRecord).filter_by(id=source_id, workspace_id=workspace_id).first()
+        if source is None:
+            raise HTTPException(404, "Source not found")
+        llm = get_llm()
+        original_content = source.content
+        prompt = prepare_prompt(llm, objective=initiative.objective, source_title=source.title, content=original_content)
+        reserve_ai(db, user.id, "requirements_gather")
+        suggestions = await gather(llm, prompt, original_content)
+        return {**suggestions, "source_id": source_id, "model": llm.model_name}
+
+    @router.post("/{workspace_id}/items/{requirement_id}/assist")
+    async def assist_requirement(workspace_id: str, requirement_id: str, data: AssistanceInput, db: Session = Depends(get_db), user: UserRecord = Depends(require_ai_user)):
+        from .requirements_ai import prepare_prompt, suggest, ReviewSuggestions, StorySuggestions
+
+        row = requirement(db, workspace_id, requirement_id, user, data.revision)
+        if data.mode == "story" and row.status != "validated":
+            raise HTTPException(409, "Sign off the requirement before requesting story refinement")
+        llm = get_llm()
+        prompt = prepare_prompt(llm, requirement=json.dumps({
+            "title": row.title, "actor": row.actor, "action": row.action,
+            "benefit": row.benefit, "evidence_quote": row.evidence_quote,
+            "acceptance_criteria": json.loads(row.acceptance_json),
+        }, ensure_ascii=False))
+        # Release the row lock before any provider work. Suggestions cannot write
+        # data, and applying a suggestion still requires the captured revision.
+        db.rollback()
+        reserve_ai(db, user.id, f"requirements_{data.mode}")
+        if data.mode == "review":
+            result = await suggest(llm, prompt, ReviewSuggestions,
+                "Review this requirement for ambiguity, testability, missing context, unsupported claims and scope. Return findings and stakeholder questions only. Never declare it approved or signed off.")
+        else:
+            result = await suggest(llm, prompt, StorySuggestions,
+                "Suggest a clearer user role, capability, outcome and testable acceptance criteria for this signed-off requirement. Preserve its scope and evidence. Mark every proposed new condition as an assumption. A human must review any changes before new sign-off.")
+        return {"suggestions": result, "base_revision": data.revision, "mode": data.mode, "model": llm.model_name,
+                "input_truncated": any(value for key, value in json.loads(prompt).items() if key.endswith("_truncated"))}
 
     return router

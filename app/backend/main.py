@@ -623,11 +623,6 @@ def require_protected_ai_role(*roles: str):
     return checker
 
 
-app.include_router(create_requirements_router(
-    require_authenticated_role("admin", "supervisor", "agent")
-))
-
-
 def require_admin_callback_user(
     user: UserRecord = Depends(get_authenticated_user),
 ) -> UserRecord:
@@ -15373,3 +15368,11 @@ async def ws_notifications(ws: WebSocket):
             pass
         if (ws_user.id, ws) in _notification_subscribers:
             _notification_subscribers.remove((ws_user.id, ws))
+
+
+app.include_router(create_requirements_router(
+    require_authenticated_role("admin", "supervisor", "agent"),
+    require_protected_ai_role("admin", "supervisor", "agent"),
+    lambda: llm_mgr,
+    lambda db, actor_id, task: _reserve_ai_request(db, actor_id, task),
+))

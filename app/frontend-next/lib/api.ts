@@ -1,5 +1,5 @@
 import { QueryClient } from "@tanstack/react-query";
-import type { BusinessRequirement, RequirementDraft, RequirementSource, RequirementWorkspace, RequirementWorkspaceDetail, SourceKind } from "./requirements-types";
+import type { BusinessRequirement, GatherSuggestions, RequirementAssistance, RequirementDraft, RequirementSource, RequirementWorkspace, RequirementWorkspaceDetail, SourceKind } from "./requirements-types";
 
 export const queryClient = new QueryClient({
   defaultOptions: {
@@ -172,6 +172,8 @@ export const api = {
   saveBusinessRequirement: (id: string, payload: RequirementDraft, item?: { id: string; revision: number }) => fetchAPI<BusinessRequirement>(`/requirements/${encodeURIComponent(id)}/items${item ? `/${encodeURIComponent(item.id)}` : ""}`, { method: item ? "PUT" : "POST", body: JSON.stringify({ ...payload, ...(item ? { revision: item.revision } : {}) }) }),
   validateBusinessRequirement: (workspace: string, item: BusinessRequirement, review: { reviewer_role: string; validation_note: string }) => fetchAPI<BusinessRequirement>(`/requirements/${encodeURIComponent(workspace)}/items/${encodeURIComponent(item.id)}/validate`, { method: "POST", body: JSON.stringify({ revision: item.revision, ...review }) }),
   createRequirementStory: (workspace: string, item: BusinessRequirement) => fetchAPI<BusinessRequirement>(`/requirements/${encodeURIComponent(workspace)}/items/${encodeURIComponent(item.id)}/story`, { method: "POST", body: JSON.stringify({ revision: item.revision }) }),
+  gatherRequirements: (workspace: string, source: string) => fetchAPI<GatherSuggestions>(`/requirements/${encodeURIComponent(workspace)}/sources/${encodeURIComponent(source)}/gather`, { method: "POST" }),
+  assistRequirement: (workspace: string, item: BusinessRequirement, mode: "review" | "story") => fetchAPI<RequirementAssistance>(`/requirements/${encodeURIComponent(workspace)}/items/${encodeURIComponent(item.id)}/assist`, { method: "POST", body: JSON.stringify({ revision: item.revision, mode }) }),
   getHealth: () => fetchAPI<{ status: string; mode: "demo" | "production" }>("/health"),
   getPortalConfig: () => fetchAPI<{ mode: "demo" | "production"; support_url: string | null }>("/portal/config"),
   getReadiness: () => fetchAPI<import("./types").ReadinessStatus>("/health/ready"),
