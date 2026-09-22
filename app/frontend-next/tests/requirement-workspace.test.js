@@ -209,3 +209,17 @@ test('open decision triage prioritizes blockers without reordering history or sa
   assert.deepEqual(rows.map(x => x.id), original);
   assert.deepEqual(library.filterDecisions(rows, 'open', 'missing', 'explore-2').map(x => x.id), ['explore-2']);
 });
+
+
+test('unlinked background material does not delay agreed story preparation, but remains discoverable afterwards', () => {
+  const agreed = { ...item, priority: 'must', status: 'validated' };
+  const sources = [{ id: 's1', title: 'SOP' }, { id: 's2', title: 'Background interview' }];
+  const workspace = detail([agreed], sources);
+  assert.equal(workspaceFocus(workspace).action, 'story');
+  assert.equal(workspaceFocus(workspace).item.id, agreed.id);
+  assert.equal(workspaceFocus(detail([{ ...agreed, story: {} }], sources)).sourceId, 's2');
+  assert.equal(workspaceFocus({ ...workspace, decisions: [{ requirement_id: agreed.id, status: 'open', blocking: true, owner_role: 'Sponsor', question: 'Confirm scope' }] }).action, 'decisions');
+  assert.equal(workspaceFocus(detail([{ ...agreed, priority: 'wont' }], sources)).action, 'gather');
+  assert.equal(workspace.requirements[0].story, null);
+  assert.equal(workspace.sources.length, 2);
+});

@@ -28,6 +28,12 @@ missing material, blocking questions, incomplete drafts, reviewable requirements
 and agreed work awaiting a story. It is guidance, not a sequence of mandatory screens.
 Search and the readiness filters let you return to any part of the work.
 
+When signed-off work awaits a story, that delivery conversation takes precedence
+over exploring material with no linked requirement. Unlinked material may be
+background context; it is not a new approval gate. It remains available and becomes
+the suggested exploration once the agreed work has stories. Blocking questions and
+quality issues still take precedence.
+
 | What you know now | Useful action | What must remain explicit |
 | --- | --- | --- |
 | The outcome is unclear | State the business objective and raise a stakeholder question | Who should answer and which scope is affected |

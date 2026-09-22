@@ -80,6 +80,12 @@ export function workspaceFocus(detail: RequirementWorkspaceDetail) {
     reason: `${reviewable.reference} has the essential detail and comes next by recorded business priority. Confirm it with the accountable stakeholder and record the decision.`,
     label: "Review the requirement", action: "review" as const, item: reviewable,
   };
+  const agreed = items.find(item => item.status === "validated" && !item.story);
+  if (agreed) return {
+    title: "Turn agreement into a delivery conversation",
+    reason: `${agreed.reference} is signed off and comes next by recorded business priority. Create a story with the agreed scope and acceptance criteria for delivery-team review.`,
+    label: "Prepare its user story", action: "story" as const, item: agreed,
+  };
   const linkedSources = sourceRequirementCounts(detail.requirements);
   const unstated = detail.sources.find(source => !linkedSources.has(source.id));
   if (unstated) return {
@@ -91,12 +97,6 @@ export function workspaceFocus(detail: RequirementWorkspaceDetail) {
     title: "The captured needs are outside this delivery scope",
     reason: "Keep their evidence for future planning. Bring a requirement back into scope when its business priority changes.",
     label: "Review deferred needs", action: "deferred" as const,
-  };
-  const agreed = items.find(item => item.status === "validated" && !item.story);
-  if (agreed) return {
-    title: "Turn agreement into a delivery conversation",
-    reason: `${agreed.reference} is signed off and comes next by recorded business priority. Create a story with the agreed scope and acceptance criteria for delivery-team review.`,
-    label: "Prepare its user story", action: "story" as const, item: agreed,
   };
   return {
     title: "Ready for a delivery review",
