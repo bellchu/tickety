@@ -48,7 +48,8 @@ COPY app/frontend-next/package.json app/frontend-next/package-lock.json* ./
 RUN npm install --global "npm@$NPM_VERSION" && npm ci && npm ls --all
 COPY app/frontend-next/ ./
 RUN npm run build
-RUN npm run verify:production-routes
+# Compiler caches are build inputs, not runtime assets.
+RUN npm run verify:production-routes && rm -rf .next/cache
 LABEL com.tickety.build-stage="frontend"
 
 # Stage 3: Frontend runtime (Node)
@@ -56,17 +57,17 @@ FROM node:24.19.0-alpine AS frontend
 ARG NPM_VERSION=12.0.2
 WORKDIR /app
 COPY --from=frontend-builder /frontend/package.json /frontend/package-lock.json* ./
+RUN npm install --global "npm@$NPM_VERSION" && npm ci --omit=dev && npm ls --omit=dev --all
 COPY --from=frontend-builder /frontend/next.config.js ./
 COPY --from=frontend-builder /frontend/server.js ./
 COPY --from=frontend-builder /frontend/lib/ws-proxy-security.js ./lib/ws-proxy-security.js
 COPY --from=frontend-builder /frontend/tsconfig.json ./
 COPY --from=frontend-builder /frontend/tailwind.config.ts ./
 COPY --from=frontend-builder /frontend/postcss.config.js ./
-COPY --from=frontend-builder /frontend/.next ./.next
+# Only Next runtime output needs write access (for regenerated caches).
+COPY --chown=node:node --from=frontend-builder /frontend/.next ./.next
 COPY --from=frontend-builder /frontend/app ./app
 COPY --from=frontend-builder /frontend/public ./public
-RUN npm install --global "npm@$NPM_VERSION" && npm ci --omit=dev && npm ls --omit=dev --all
-RUN chown -R node:node /app
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
 ENV NODE_ENV=production
