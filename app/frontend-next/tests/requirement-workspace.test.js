@@ -198,3 +198,14 @@ test('agreed view isolates signed-off requirements still awaiting story preparat
   assert.equal(filterRequirements(rows, '', 'agreed', [{ requirement_id: null, status: 'open', blocking: true }]).length, 0);
   assert.equal(filterRequirements([{ ...signed, status: 'draft' }], '', 'agreed').length, 0);
 });
+
+test('open decision triage prioritizes blockers without reordering history or saved records', () => {
+  const base = { status: 'open', question: 'Confirm the business rule', owner_role: 'Sponsor' };
+  const rows = [{ ...base, id: 'explore-1', blocking: false }, { ...base, id: 'block-1', blocking: true },
+    { ...base, id: 'explore-2', blocking: false }, { ...base, id: 'block-2', blocking: true }];
+  const original = rows.map(x => x.id);
+  assert.deepEqual(library.filterDecisions(rows, 'open', '').map(x => x.id), ['block-1', 'block-2', 'explore-1', 'explore-2']);
+  assert.deepEqual(library.filterDecisions(rows, 'all', '').map(x => x.id), original);
+  assert.deepEqual(rows.map(x => x.id), original);
+  assert.deepEqual(library.filterDecisions(rows, 'open', 'missing', 'explore-2').map(x => x.id), ['explore-2']);
+});

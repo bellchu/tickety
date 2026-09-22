@@ -250,3 +250,7 @@ list and returns to the first page.
 The overview also identifies signed-off requirements still awaiting story
 preparation and deferred needs, so these do not disappear between the draft and
 prepared-story counts. All counts come from one grouped query per overview page.
+
+The open-question view lists sign-off blockers before exploratory questions,
+preserving recorded order within each group. The all-records and recorded-decision
+views retain their original order for historical review.

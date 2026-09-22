@@ -110,6 +110,7 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
         </select></label>
       </div>
       <label className="block space-y-1 text-sm">Decisions affecting<select className={inputStyle} value={scope} onChange={event => onScopeChange(event.target.value)}><option value="">All requirements</option>{requirements.map(item => <option key={item.id} value={item.id}>{item.reference} · {item.title}</option>)}</select></label>
+      {view === "open" && <p className="text-xs text-ink-500">Questions blocking sign-off appear first; each group keeps its recorded order.</p>}
       {scope && <p className="text-xs text-ink-500">Includes whole-initiative questions and decisions, which also affect this requirement.</p>}
       {resolving && <p className="text-xs text-ink-500">The question you are answering stays visible while you filter.</p>}
       {displayedDecisions.map(item => <article key={item.id} className="space-y-3 rounded-lg border border-linen-400 p-4">

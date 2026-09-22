@@ -4,13 +4,17 @@ export type DecisionFilter = "open" | "blocking" | "exploratory" | "recorded" | 
 
 export function filterDecisions(items: RequirementDecision[], filter: DecisionFilter, search: string, editingId = "", requirementId = "") {
   const query = search.trim().toLocaleLowerCase();
-  return items.filter(item => {
+  const matching = items.filter(item => {
     if (item.id === editingId) return true;
     if (requirementId && item.requirement_id && item.requirement_id !== requirementId) return false;
     const matchesStatus = filter === "all" || (filter === "recorded" ? item.status === "resolved"
       : item.status === "open" && (filter === "open" || (filter === "blocking" ? item.blocking : !item.blocking)));
     return matchesStatus && (!query || [item.question, item.owner_role, item.resolution || ""].some(value => value.toLocaleLowerCase().includes(query)));
   });
+  // Triage open work by its effect on agreement, preserving order within each group.
+  return filter === "open" ? matching.sort((left, right) =>
+    Number(right.status === "open" && right.blocking) - Number(left.status === "open" && left.blocking),
+  ) : matching;
 }
 
 export type RequirementFilter = "all" | "questions" | "review" | "agreed" | "delivery" | "deferred";
