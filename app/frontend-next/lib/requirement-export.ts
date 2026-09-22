@@ -1,4 +1,4 @@
-import { currentScopeBlockers, filterDecisions, requirementPriorityLabels } from "./requirement-workspace";
+import { currentScopeBlockers, filterDecisions, orderRequirements, requirementPriorityLabels } from "./requirement-workspace";
 import type { BusinessRequirement, RequirementWorkspaceDetail } from "./requirements-types";
 
 export function requirementBriefFilename(workspace: { title: string; id: string }): string {
@@ -61,8 +61,9 @@ export function requirementBrief(detail: RequirementWorkspaceDetail): string {
       `  ${sourceLinks.has(source.id) ? `Supports: ${sourceLinks.get(source.id)!.join(", ")}` : "Supporting context — no linked requirements recorded."}`,
     ]), "",
     "## Documented requirements and functional specification",
+    "Requirements follow recorded business priority: must have, should have, could have, then deferred. Equal priorities retain recorded order.",
   ];
-  for (const row of requirements) {
+  for (const row of orderRequirements(requirements, "priority")) {
     lines.push("", `### ${row.reference}: ${inline(row.title)}`, `Status: ${row.status === "validated" ? "Signed off" : "Draft — awaiting agreement"} | Priority: ${requirementPriorityLabels[row.priority]} | Revision: ${row.revision}`,
       `Delivery scope: ${row.priority === "wont" ? "Deferred — not this time" : "Included"}`,
       `Stakeholder: ${inline(row.actor || "To confirm")}`, `Required capability: ${prose(row.action || "To clarify")}`,

@@ -213,3 +213,18 @@ test('evidence register retains explicit background review attribution', () => {
   assert.ok(brief.includes('Kept as background by reviewer at 2026-09-22T00:00:00Z; still available for exploration.'));
   assert.ok(brief.includes('Supporting context — no linked requirements recorded.'));
 });
+
+
+test('brief puts current business priorities before deferred scope without changing saved order', () => {
+  const requirements = ['wont', 'could', 'must', 'should', 'must'].map((priority, index) => ({
+    id: `r${index}`, reference: `REQ-00${index + 1}`, title: `Need ${index + 1}`, priority,
+    status: 'draft', revision: 1, actor: 'Analyst', action: 'Confirm receipt', benefit: 'Track intake',
+    source_id: 's1', evidence_quote: 'Confirm receipt.', acceptance_criteria: [], quality_issues: [], story: null,
+  }));
+  const brief = library.requirementBrief({ workspace: { id: 'w', title: 'Planning review', objective: 'Agree scope', request_type: 'enhancement' }, sources: [], requirements });
+  const references = [...brief.matchAll(/^### (REQ-\d+):/gm)].map(match => match[1]);
+  assert.deepEqual(references, ['REQ-003', 'REQ-005', 'REQ-004', 'REQ-002', 'REQ-001']);
+  assert.deepEqual(requirements.map(row => row.reference), ['REQ-001', 'REQ-002', 'REQ-003', 'REQ-004', 'REQ-005']);
+  assert.ok(brief.includes('Included in this initiative: 4 requirements'));
+  assert.ok(brief.includes('Deferred — not this time: 1'));
+});

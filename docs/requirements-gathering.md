@@ -327,7 +327,9 @@ Unrelated decisions and deferred or unsigned stories are excluded.
 
 **Export BRD** opens with scope and readiness counts so recipients can distinguish
 drafts, signed-off requirements awaiting stories, prepared stories and deferred
-needs. The evidence register lists the requirements supported by each source, marks
+needs. Requirement sections follow business priority, with deferred needs last and
+recorded order preserved within each priority. Export does not reorder saved work.
+The evidence register lists the requirements supported by each source, marks
 deferred links and retains unlinked background material. It includes the objective,
 requirements, capabilities,
 acceptance criteria, clarifications, decisions, sign-offs and eligible stories. Copy
