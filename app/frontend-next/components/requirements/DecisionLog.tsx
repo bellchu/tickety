@@ -138,7 +138,7 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
       {displayedDecisions.map(item => <article key={item.id} className="space-y-3 rounded-lg border border-linen-400 p-4">
         {item.id === decisionRequest?.id && <p className="text-xs font-semibold text-clay-700">Suggested business question</p>}
         <div className="flex flex-wrap justify-between gap-2 text-xs text-ink-500"><span>{item.requirement_id ? requirementNames.get(item.requirement_id) || "Requirement unavailable" : "Whole initiative"} · {item.owner_role}</span><span>{item.status === "resolved" ? "Decision recorded" : item.blocking ? "Blocks sign-off" : "Exploratory"}</span></div>
-        <h4 className="text-sm font-semibold">{item.question}</h4>
+        <h4 className="whitespace-pre-wrap break-words text-sm font-semibold">{item.question}</h4>
         {affectedRequirementsLink(item.requirement_id)}
         {item.status === "resolved" ? <><p className="whitespace-pre-wrap text-sm text-ink-600">{item.resolution}</p><p className="text-xs text-ink-400">Recorded by {item.resolved_by || "Former member"} · {formatLocalDateTime(item.resolved_at!)}</p></> : resolving === item.id ? <form className="space-y-3" onSubmit={event => { event.preventDefault(); void save(() => api.resolveRequirementDecision(workspaceId, item.id, resolution), () => { clearAnswer(); setRecordedScope(item.requirement_id); }); }}>
           {hasAnswer && <p role="status" className="text-xs text-amber-800">Unsaved answer · Kept in this tab while you browse.</p>}

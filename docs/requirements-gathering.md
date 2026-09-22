@@ -208,7 +208,11 @@ affected requirement selector. The collapsed register summarizes current and
 deferred blockers separately without changing the underlying decisions.
 
 AI questions, review findings and story-refinement assumptions can prefill the log
-for human review. Questions from an existing requirement retain that scope; source
+for human review. A tracked review finding includes its question, reviewed requirement
+versions and AI background labelled **Context to confirm**. The complete question is
+retained; unusually long background is marked **context shortened** to fit the decision
+field. Review the original finding when that marker appears, and confirm the wording
+before saving. Questions from an existing requirement retain that scope; source
 exploration starts at initiative scope. Choose the owner, affected scope
 and blocking status before saving. Replacing an unfinished question, or switching
 away from an unfinished answer, asks whether to keep or discard the draft.

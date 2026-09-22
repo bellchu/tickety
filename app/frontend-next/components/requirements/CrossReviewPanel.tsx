@@ -1,6 +1,7 @@
 "use client";
 
 import { filterRequirements, requirementSnapshotsCurrent } from "@/lib/requirement-workspace";
+import { reviewQuestionDraft } from "@/lib/requirement-review-question";
 import { requirementErrorMessage } from "@/lib/requirement-errors";
 
 import { useState } from "react";
@@ -42,7 +43,7 @@ export function CrossReviewPanel({ workspaceId, items, onQuestion }: { workspace
         {result.input_truncated && <p className="text-xs text-amber-800">Some requirement details did not fit in the analysis. Check the complete requirements before deciding.</p>}
         {stale && <p role="status" className="text-sm text-amber-800">A reviewed requirement has changed. Run a new cross-check before tracking these findings.</p>}
         {result.findings.length === 0 && <p className="text-sm text-ink-500">No findings were suggested. This does not establish that the requirements are complete or consistent.</p>}
-        {result.findings.map((finding, index) => <article key={index} className="space-y-2 rounded-lg bg-linen-100 p-3 text-sm"><p className="text-xs font-semibold uppercase text-clay-700">{finding.category.replaceAll("_", " ")} · {finding.references.join(", ")}</p><p>{finding.finding}</p><p className="text-ink-500">{finding.question}</p><Button size="sm" variant="secondary" disabled={Boolean(stale)} onClick={() => onQuestion(`${finding.references.join(", ")}: ${finding.question}`, finding.references.length === 1 ? result.requirements.find(item => item.reference === finding.references[0])?.id || null : null)}>Track review question</Button></article>)}
+        {result.findings.map((finding, index) => <article key={index} className="space-y-2 rounded-lg bg-linen-100 p-3 text-sm"><p className="text-xs font-semibold uppercase text-clay-700">{finding.category.replaceAll("_", " ")} · {finding.references.join(", ")}</p><p>{finding.finding}</p><p className="text-ink-500">{finding.question}</p><Button size="sm" variant="secondary" disabled={Boolean(stale)} onClick={() => onQuestion(reviewQuestionDraft(finding.question, finding.finding, finding.references.flatMap(reference => result.requirements.filter(item => item.reference === reference))), finding.references.length === 1 ? result.requirements.find(item => item.reference === finding.references[0])?.id || null : null)}>Track review question</Button></article>)}
       </div>}
     </div>}
   </section>;
