@@ -188,5 +188,7 @@ See [runtime boundaries](requirements-runtime.md) for import limits, audit behav
 AI admission and capacity constraints.
 
 When a save conflicts with newer server work, the workspace refreshes its saved
-data without discarding your draft. Review the updated version or decision before
-trying again; the application does not automatically replay the failed write.
+data without discarding your draft. An outdated requirement editor shows both
+revision numbers and offers change history plus **Load latest saved version**. Copy
+useful wording before loading; replacing unsaved edits requires confirmation.
+Review the updated version or decision before trying again; the application does not automatically replay the failed write.

@@ -206,6 +206,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
   }
 
   async function saveDraft() {
+    if (editOutdated) { setError(new Error("Review the latest saved version before saving these edits.")); return; }
     if (parsedCriteria.issue) { setError(new Error(parsedCriteria.issue)); return; }
     let saved: Awaited<ReturnType<typeof api.saveBusinessRequirement>> | undefined;
     await run("requirement", async () => {
@@ -236,6 +237,8 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
 
   if (!detail || !overview) return <PageFrame><Button variant="ghost" onClick={onBack}>Back to initiatives</Button><ErrorMessage error={query.error} />{query.isPending ? <p role="status">Loading initiative…</p> : <Button onClick={() => query.refetch()}>Retry</Button>}</PageFrame>;
   const { focus, blockedIds, questions, deliveryReady, sourceNames } = overview;
+  const currentEdit = editing ? detail.requirements.find(item => item.id === editing.id) : undefined;
+  const editOutdated = Boolean(editing && (!currentEdit || currentEdit.revision !== editing.revision));
   const currentReview = reviewing ? detail.requirements.find(item => item.id === reviewing.id) : undefined;
   const reviewIssue = reviewing ? reviewUnavailableReason(reviewing, currentReview, blockedIds.has(reviewing.id)) : null;
 
@@ -331,6 +334,10 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
         <h2 className="text-lg font-semibold">{editing ? "Edit requirement" : "Gather a requirement"}</h2>
         {dirty && <p role="status" className="text-xs text-amber-800">Unsaved changes · Kept in this tab while you browse. Save before refreshing or closing.</p>}
         {draftAssumptions.length > 0 && <div className="rounded-lg bg-amber-50 p-3 text-sm text-amber-800"><strong>Resolve these assumptions while reviewing</strong><ul className="list-disc pl-5">{draftAssumptions.map((item, index) => <li key={index}>{item}<Button size="sm" variant="ghost" onClick={() => trackQuestion(item, editing?.id || null)}>Track assumption</Button></li>)}</ul></div>}
+        {editing && editOutdated && <div role="alert" className="space-y-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
+          <p>{currentEdit ? `You started from revision ${editing.revision}; revision ${currentEdit.revision} is now saved.` : "This requirement is no longer available."} Your edits are preserved. Copy any wording you want to keep before loading another version.</p>
+          {currentEdit && <div className="flex flex-wrap gap-2"><Button size="sm" variant="secondary" onClick={() => setHistoryItem(editing.id)}>Compare change history</Button><Button size="sm" variant="secondary" disabled={Boolean(pending)} onClick={() => switchEditor(() => edit(currentEdit))}>Load latest saved version</Button></div>}
+        </div>}
         {editing?.status === "validated" && <p className="text-sm text-amber-700">Saving changes resets validation and removes the existing user story. Review the updated requirement again.</p>}
         <Field label="Evidence source"><select required value={draft.source_id} onChange={event => setDraft({ ...draft, source_id: event.target.value, evidence_quote: "" })} className={inputStyle}>{detail.sources.map(item => <option key={item.id} value={item.id}>{item.title}</option>)}</select></Field>
         <ErrorMessage error={source.error} />{source.isPending && <p role="status">Loading source…</p>}
@@ -342,7 +349,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
         <Field label="So that… (business outcome)"><textarea maxLength={4000} className={inputStyle} value={draft.benefit} onChange={event => setDraft({ ...draft, benefit: event.target.value })} /></Field>
         <Field label="Acceptance criteria · one per line"><textarea rows={4} maxLength={20020} aria-invalid={Boolean(parsedCriteria.issue)} aria-describedby="requirement-criteria-help" className={inputStyle} value={criteria} onChange={event => setCriteria(event.target.value)} placeholder="Given a valid request, when it is submitted, then a receipt appears within 30 seconds." /></Field>
         <p id="requirement-criteria-help" className={`text-xs ${parsedCriteria.issue ? "text-rust-600" : "text-ink-500"}`}>{parsedCriteria.issue || `${parsedCriteria.criteria.length} / 20 criteria · 10–1,000 characters each. You can leave this empty while drafting.`}</p>
-        <div className="flex gap-2"><Button type="submit" pending={pending === "requirement"} disabled={Boolean(pending) || source.isError || Boolean(parsedCriteria.issue)}>Save draft</Button><Button variant="ghost" disabled={Boolean(pending)} onClick={() => switchEditor(() => setShowForm(false))}>Cancel</Button></div>
+        <div className="flex gap-2"><Button type="submit" pending={pending === "requirement"} disabled={Boolean(pending) || editOutdated || source.isError || Boolean(parsedCriteria.issue)}>Save draft</Button><Button variant="ghost" disabled={Boolean(pending)} onClick={() => switchEditor(() => setShowForm(false))}>Cancel</Button></div>
         </fieldset>
       </form>}
 
