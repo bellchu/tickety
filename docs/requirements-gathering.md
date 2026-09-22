@@ -71,7 +71,9 @@ AI never replace that person's decision.
 Saving changed business content withdraws its current sign-off and story. Saving
 without changes preserves agreement, story and revision. Concurrent edits
 use revision checks: stale work receives a conflict instead of overwriting newer
-changes. Use **History** to compare earlier wording, agreement and stories. Copying
+changes. Use **History** to compare earlier wording, agreement and stories. Each revision
+summarizes changed business fields, scope changes and withdrawn agreement or stories
+before you expand the detailed comparison. Copying
 old wording into a new edit still requires fresh sign-off; history itself is read-only.
 
 ## Resolve business questions

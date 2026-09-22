@@ -1,5 +1,6 @@
 "use client";
 
+import { requirementChanges, requirementChangeSummary } from "@/lib/requirement-history";
 import { requirementErrorMessage } from "@/lib/requirement-errors";
 
 import { useState } from "react";
@@ -10,7 +11,6 @@ import { Button } from "@/components/ui";
 import type { BusinessRequirement } from "@/lib/requirements-types";
 
 const labels: Record<string, string> = { created: "Requirement captured", edited: "Requirement revised", signed_off: "Business sign-off", story_created: "Story prepared", blocked: "Reopened by a blocking question" };
-const fields: [keyof BusinessRequirement, string][] = [["title", "Title"], ["actor", "Stakeholder"], ["action", "Capability"], ["benefit", "Outcome"], ["priority", "Priority"], ["source_id", "Source"], ["evidence_quote", "Evidence"], ["acceptance_criteria", "Acceptance criteria"], ["status", "Agreement status"], ["validated_by", "Signed off by"], ["validated_at", "Signed off at"], ["reviewer_role", "Review capacity"], ["validation_note", "Review note"], ["story", "User story"]];
 function value(item: unknown, field: keyof BusinessRequirement): string {
   if (item === null || item === undefined || item === "") return "—";
   if (field === "priority") return ({ must: "Must have", should: "Should have", could: "Could have", wont: "Not this time" } as Record<string, string>)[String(item)] || String(item);
@@ -34,9 +34,9 @@ export function RequirementHistoryPanel({ workspaceId, itemId, revision, onClose
     {query.isError && <div role="alert"><p className="text-sm text-rust-600">{requirementErrorMessage(query.error)}</p><Button variant="secondary" onClick={() => query.refetch()}>Retry history</Button></div>}
     {query.data?.total === 0 && <p className="text-sm text-ink-500">No history has been recorded yet. Changes made before history tracking was introduced are not reconstructed.</p>}
     {query.data?.items.map(event => <details key={event.id} className="rounded-lg border border-linen-400 p-4">
-      <summary className="cursor-pointer text-sm font-semibold">{event.after.reference} · Revision {event.revision} · {labels[event.action] || event.action}</summary>
+      <summary className="cursor-pointer text-sm font-semibold">{event.after.reference} · Revision {event.revision} · {labels[event.action] || event.action}<span className="mt-1 block text-xs font-normal leading-5 text-ink-500">{requirementChangeSummary(event.before, event.after)}</span></summary>
       <p className="my-3 text-xs text-ink-500">{formatLocalDateTime(event.created_at)} · {event.actor_id || "Former member"}</p>
-      <div className="space-y-4">{fields.filter(([key]) => !event.before || JSON.stringify(event.before[key]) !== JSON.stringify(event.after[key])).map(([key, label]) => <div key={key}>
+      <div className="space-y-4">{requirementChanges(event.before, event.after).map(([key, label]) => <div key={key}>
         <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-500">{label}</h3>
         <div className="mt-1 grid gap-2 sm:grid-cols-2">{event.before && <div className="min-w-0 rounded bg-linen-100 p-3"><p className="text-[10px] text-ink-400">Before</p><pre className="whitespace-pre-wrap break-words font-sans text-xs leading-5">{value(event.before[key], key)}</pre></div>}<div className="min-w-0 rounded bg-moss-500/5 p-3"><p className="text-[10px] text-ink-400">After</p><pre className="whitespace-pre-wrap break-words font-sans text-xs leading-5">{value(event.after[key], key)}</pre></div></div>
       </div>)}</div>
