@@ -1,3 +1,4 @@
+import { requirementTextBounds } from "./requirement-text";
 import type { RequirementSourceDraft } from "./requirement-editor-cache";
 
 type Preview = (workspace: string, content: string) => Promise<{ title: string; content: string; warnings: string[] }>;
@@ -27,7 +28,8 @@ export async function prepareRequirementSource(
   let content: string;
   try { content = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
   catch { throw new Error("This text file is not valid UTF-8. Export it as UTF-8 and import it again."); }
-  if (content.length > 100000 || content.includes("\0")) throw new Error("Source text must contain at most 100,000 characters and no NUL characters.");
-  if (content.trim().length < 10) throw new Error("The file needs at least 10 characters of source text.");
+  const bounds = requirementTextBounds(content, 100000);
+  if (bounds.length > 100000 || content.includes("\0")) throw new Error("Source text must contain at most 100,000 characters and no NUL characters.");
+  if (bounds.length < 10) throw new Error("The file needs at least 10 characters of source text.");
   return { title: file.name, kind: /\.(vtt|srt)$/i.test(file.name) ? "transcript" : "document", content, warnings: [] };
 }

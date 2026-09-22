@@ -132,3 +132,20 @@ refresh completes. These tests cover component rendering and the save lifecycle;
 they do not simulate another browser tab changing server data. Cross-requirement
 AI analysis remains independent because it produces suggestions without saving
 business records.
+
+### Unicode source and evidence limits
+
+Source import, pasted source text, selected passages and requirement evidence use
+`requirementTextBounds` to count Unicode code points after trimming boundary
+whitespace. They retain the supplied text rather than truncating it. Native
+textarea UTF-16 length constraints are removed from these fields; the action is
+disabled when the shared bounds check fails. Exact source matching remains a
+separate requirement. Combining marks count separately, as they do in the API.
+
+Against the pre-fix importer, 50,001 supplementary characters were rejected,
+five emoji were accepted despite the ten-character minimum, and 100,000 ASCII
+characters surrounded by spaces were rejected. The import regression test now
+checks all three cases. Shared bounds tests cover the 4,000, 12,000 and 100,000
+limits, short input and NUL rejection. Acceptance criteria already counted code
+points. Other short text fields still use native browser length constraints;
+this change does not claim to normalize every input in the application.

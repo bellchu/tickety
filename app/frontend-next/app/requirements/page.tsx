@@ -3,6 +3,7 @@
 import { captureRequirementDraftSave, readRequirementEditor, rememberRequirementEditor, readRequirementSourceDraft, readRequirementDecisionDraft } from "@/lib/requirement-editor-cache";
 import { invalidateRequirementOverviews } from "@/lib/requirement-workspace-query";
 import { requirementSourceQuery } from "@/lib/requirement-source-query";
+import { requirementTextBounds } from "@/lib/requirement-text";
 import { parseRequirementCriteria } from "@/lib/requirement-criteria";
 import { requirementErrorMessage } from "@/lib/requirement-errors";
 
@@ -149,6 +150,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
   const [draftAssumptions, setDraftAssumptions] = useState<string[]>(restored?.assumptions || []);
   const [draft, setDraft] = useState<RequirementDraft>(restored?.draft || { ...blankDraft });
   const [criteria, setCriteria] = useState(restored?.criteria || "");
+  const evidenceBounds = useMemo(() => requirementTextBounds(draft.evidence_quote, 4000), [draft.evidence_quote]);
   const parsedCriteria = useMemo(() => parseRequirementCriteria(criteria), [criteria]);
   const [draftBaseline, setDraftBaseline] = useState(restored?.baseline || "");
   const [transition, setTransition] = useState<(() => void) | null>(null);
@@ -246,6 +248,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
 
   async function saveDraft() {
     if (editOutdated) { setError(new Error("Review the latest saved version before saving these edits.")); return; }
+    if (!evidenceBounds.valid) { setError(new Error("Use 10–4,000 evidence characters after trimming spaces, without NUL characters.")); return; }
     if (parsedCriteria.issue) { setError(new Error(parsedCriteria.issue)); return; }
     let saved: Awaited<ReturnType<typeof api.saveBusinessRequirement>> | undefined;
     await run("requirement", async () => {
@@ -382,14 +385,15 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
         <Field label="Evidence source"><select required value={draft.source_id} onChange={event => setDraft({ ...draft, source_id: event.target.value, evidence_quote: "" })} className={inputStyle}>{detail.sources.map(item => <option key={item.id} value={item.id}>{item.title}</option>)}</select></Field>
         <ErrorMessage error={source.error} />{source.isPending && <p role="status">Loading source…</p>}
         {source.data?.content && <details className="rounded-lg bg-linen-100 p-3" open><summary className="cursor-pointer text-sm font-medium">Read source and copy an exact excerpt</summary><pre className="mt-3 max-h-52 overflow-auto whitespace-pre-wrap break-words font-sans text-sm leading-6 text-ink-500">{source.data.content}</pre></details>}
-        <Field label="Exact evidence excerpt"><textarea required minLength={10} maxLength={4000} rows={3} className={inputStyle} value={draft.evidence_quote} onChange={event => setDraft({ ...draft, evidence_quote: event.target.value })} /></Field>
+        <p className="text-xs text-ink-500">Evidence: {evidenceBounds.length.toLocaleString()} / 4,000 characters. Use at least 10 characters from the original source.</p>
+        <Field label="Exact evidence excerpt"><textarea required aria-invalid={Boolean(draft.evidence_quote) && !evidenceBounds.valid} rows={3} className={inputStyle} value={draft.evidence_quote} onChange={event => setDraft({ ...draft, evidence_quote: event.target.value })} /></Field>
         <Field label="Requirement title"><input required maxLength={200} className={inputStyle} value={draft.title} onChange={event => setDraft({ ...draft, title: event.target.value })} /></Field>
         <div className="grid gap-4 md:grid-cols-2"><Field label="As a… (stakeholder or user role)"><input maxLength={200} className={inputStyle} value={draft.actor} onChange={event => setDraft({ ...draft, actor: event.target.value })} placeholder="finance analyst" /></Field><Field label="Priority"><select className={inputStyle} value={draft.priority} onChange={event => setDraft({ ...draft, priority: event.target.value as RequirementPriority })}>{Object.entries(priorities).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field></div>
         <Field label="I want to… (required capability)"><textarea maxLength={4000} className={inputStyle} value={draft.action} onChange={event => setDraft({ ...draft, action: event.target.value })} /></Field>
         <Field label="So that… (business outcome)"><textarea maxLength={4000} className={inputStyle} value={draft.benefit} onChange={event => setDraft({ ...draft, benefit: event.target.value })} /></Field>
         <Field label="Acceptance criteria · one per line"><textarea rows={4} maxLength={20020} aria-invalid={Boolean(parsedCriteria.issue)} aria-describedby="requirement-criteria-help" className={inputStyle} value={criteria} onChange={event => setCriteria(event.target.value)} placeholder="Given a valid request, when it is submitted, then a receipt appears within 30 seconds." /></Field>
         <p id="requirement-criteria-help" className={`text-xs ${parsedCriteria.issue ? "text-rust-600" : "text-ink-500"}`}>{parsedCriteria.issue || `${parsedCriteria.criteria.length} / 20 criteria · 10–1,000 characters each. You can leave this empty while drafting.`}</p>
-        <div className="flex gap-2"><Button type="submit" pending={pending === "requirement"} disabled={Boolean(pending) || editOutdated || source.isError || Boolean(parsedCriteria.issue)}>Save draft</Button><Button variant="ghost" disabled={Boolean(pending)} onClick={() => switchEditor(() => setShowForm(false))}>Cancel</Button></div>
+        <div className="flex gap-2"><Button type="submit" pending={pending === "requirement"} disabled={Boolean(pending) || editOutdated || source.isError || !evidenceBounds.valid || Boolean(parsedCriteria.issue)}>Save draft</Button><Button variant="ghost" disabled={Boolean(pending)} onClick={() => switchEditor(() => setShowForm(false))}>Cancel</Button></div>
         </fieldset>
       </form>}
 

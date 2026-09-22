@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { loadPureTs } = require('./helpers/load-pure-ts');
-const library = loadPureTs('requirement-source-import.ts');
+const library = loadPureTs('requirement-source-import.ts', { './requirement-text': loadPureTs('requirement-text.ts') });
 const prepare = library.prepareRequirementSource;
 const file = (name, bytes) => ({ name, size: bytes.length, arrayBuffer: async () => Uint8Array.from(bytes).buffer });
 const textFile = (name, text) => file(name, new TextEncoder().encode(text));
@@ -39,4 +39,12 @@ test('document previews preserve conversion warnings and select the correct serv
 test('a failed preview cannot return a partial replacement', async () => {
   const error = new Error('Encrypted documents cannot be previewed');
   await assert.rejects(prepare(file('source.pdf', [1]), 'workspace', { previewRequirementPdf: async () => { throw error; } }), received => received === error);
+});
+
+test('source imports use trimmed Unicode character limits without changing the source text', async () => {
+  const valid = '  ' + '𠮷'.repeat(50001) + '  ';
+  assert.equal((await prepare(textFile('unicode.txt', valid), 'workspace', noPreview)).content, valid);
+  await assert.rejects(prepare(textFile('short.txt', '😀'.repeat(5)), 'workspace', noPreview), /at least 10/);
+  const padded = ' ' + 'x'.repeat(100000) + ' ';
+  assert.equal((await prepare(textFile('padded.txt', padded), 'workspace', noPreview)).content, padded);
 });
