@@ -14,7 +14,6 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
-  Clock3,
   Cpu,
   ExternalLink,
   ListChecks,

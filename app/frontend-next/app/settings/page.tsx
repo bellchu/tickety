@@ -9,9 +9,7 @@ import { queryKeys } from "@/lib/query-keys";
 import { canAccessAdministration, canAccessProtectedIntelligence, isDemoAdministrationContext } from "@/lib/auth";
 import {
   Settings as SettingsType,
-  LlmCatalog,
   LlmProvider,
-  TicketCategory,
   TicketPriorityConfig,
   TicketStatusConfig,
   BuildInfo,
@@ -19,7 +17,7 @@ import {
 import { cn } from "@/lib/utils";
 import {
   Settings as SettingsIcon, Save, RefreshCw, CheckCircle2, AlertCircle,
-  Users, Download, Database, Zap, Plus, Trash2, ShieldCheck, Activity,
+  Users, Download, Zap, Plus, Trash2, ShieldCheck, Activity,
   Power, KeyRound, Link2, SlidersHorizontal,
   Mail, Search, ChevronLeft, ChevronRight, Route,
 } from "lucide-react";
