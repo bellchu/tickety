@@ -8,7 +8,10 @@ test('incomplete drafts may omit criteria and empty entries are ignored', () => 
   assert.deepEqual(parse(['  Confirm receipt  ', '', '  Record time  ']), { criteria: ['Confirm receipt', 'Record time'], issue: null });
 });
 test('validation identifies the original criterion position after empty entries', () => {
-  assert.match(parse(['Confirm receipt', '', ' short ']).issue, /Criterion 3 has 5 characters/);
+  const invalid = parse(['Confirm receipt', '', ' short ']);
+  assert.match(invalid.issue, /Criterion 3 has 5 characters/);
+  assert.equal(invalid.invalidIndex, 2);
+  assert.equal(parse(['Confirm receipt', '', 'Valid criterion']).invalidIndex, undefined);
   assert.equal(parse(['x'.repeat(10)]).issue, null);
   assert.equal(parse(['x'.repeat(1000)]).issue, null);
   assert.match(parse(['x'.repeat(1001)]).issue, /1001 characters/);
@@ -36,5 +39,6 @@ test('saved and suggested multiline criteria retain their boundaries during edit
 test('unsupported control characters are located before submitting criteria', () => {
   const result = parse(['Confirm the receipt.', 'Keep the\0request for retry.']);
   assert.match(result.issue, /Criterion 2.*unsupported control character/);
+  assert.equal(result.invalidIndex, 1);
   assert.equal(result.criteria[1], 'Keep the\0request for retry.');
 });
