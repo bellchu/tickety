@@ -18,6 +18,7 @@ import { CrossReviewPanel } from "@/components/requirements/CrossReviewPanel";
 import { SourceExplorer } from "@/components/requirements/SourceExplorer";
 import { SourceIntakeForm } from "@/components/requirements/SourceIntakeForm";
 import { Field, inputStyle, panelStyle, kinds, priorities } from "@/components/requirements/fields";
+import { SignOffDecisions } from "@/components/requirements/SignOffDecisions";
 import { DecisionLog } from "@/components/requirements/DecisionLog";
 import { AIRequirementReview } from "@/components/requirements/AIRequirementReview";
 import { RequirementCard } from "@/components/requirements/RequirementCard";
@@ -366,6 +367,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
           <h3 className="text-sm font-semibold">Evidence · {sourceNames.get(reviewing.source_id) || "Source unavailable"}</h3>
           <blockquote className="whitespace-pre-wrap border-l-2 border-clay-300 pl-3 text-sm leading-6 text-ink-500">{reviewing.evidence_quote}</blockquote>
         </section>
+        <SignOffDecisions requirementId={reviewing.id} decisions={detail.decisions || []} />
         {reviewIssue && <div role="alert" className="space-y-2 rounded-lg bg-amber-50 p-3 text-sm text-amber-800"><p>{reviewIssue}</p>{currentReview && currentReview.revision !== reviewing.revision && <Button variant="secondary" size="sm" disabled={Boolean(pending)} onClick={() => setReviewing(currentReview)}>Review current version</Button>}</div>}
         <Field label="Review capacity"><select className={inputStyle} value={reviewerRole} onChange={event => setReviewerRole(event.target.value)}>{["Product Owner", "Business Stakeholder", "Technical Business Analyst", "DTL"].map(role => <option key={role}>{role}</option>)}</select></Field>
         <Field label="Sign-off note"><textarea required minLength={10} maxLength={4000} className={inputStyle} value={reviewNote} onChange={event => setReviewNote(event.target.value)} placeholder="What was confirmed, and with whom?" /></Field>

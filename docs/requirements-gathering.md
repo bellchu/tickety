@@ -102,6 +102,13 @@ applies to new capture, not to edits of an existing record.
 Sign-off requires complete quality checks, no applicable open blocking questions,
 and active delivery scope. Review capacity can be Product Owner, Business Stakeholder,
 Technical Business Analyst or DTL; this label does not grant application permissions.
+The sign-off review also shows questions and decisions affecting this requirement,
+including whole-initiative decisions. Expand a question to read its recorded answer
+and answer owner alongside the requirement and acceptance criteria. Open blocking
+questions prevent agreement; exploratory questions remain visible without becoming
+an extra approval gate. An empty register is not evidence that every assumption
+has been resolved.
+
 The signed-in reviewer, note, time and revision are recorded. Automated checks and
 AI never replace that person's decision.
 
