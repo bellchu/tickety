@@ -116,6 +116,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
   const [sourceSearch, setSourceSearch] = useState("");
   const [unlinkedOnly, setUnlinkedOnly] = useState(false);
   const [sourceViewing, setSourceViewing] = useState("");
+  const [listWindow, setListWindow] = useState({ key: "", limit: 20 });
   const [order, setOrder] = useState<RequirementOrder>("recorded");
   const [filter, setFilter] = useState<RequirementFilter>("all");
   const [search, setSearch] = useState("");
@@ -147,6 +148,9 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
     sourceNames: new Map(detail.sources.map(item => [item.id, item.title])),
   } : null, [detail]);
   const visibleItems = useMemo(() => detail ? orderRequirements(filterRequirements(detail.requirements, search, filter, detail.decisions), order) : [], [detail, search, filter, order]);
+  const listKey = JSON.stringify([search, filter, order]);
+  const visibleLimit = listWindow.key === listKey ? listWindow.limit : 20;
+  const displayedItems = visibleItems.slice(0, visibleLimit);
   const sourceQuery = sourceSearch.trim().toLocaleLowerCase();
   const visibleSources = useMemo(() => (detail?.sources || []).filter(item => (!sourceQuery || item.title.toLocaleLowerCase().includes(sourceQuery)) && (!unlinkedOnly || !sourceCounts.has(item.id))), [detail?.sources, sourceQuery, unlinkedOnly, sourceCounts]);
   function revealSource(sourceId: string) {
@@ -356,7 +360,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
 
         {visibleItems.length === 0 && <div className={`${panelStyle} py-10 text-center`}><FileText className="mx-auto text-ink-300" /><h3 className="mt-3 font-semibold">{detail.requirements.length ? "No requirements match this view" : "Give the business need a clear shape"}</h3><p className="mx-auto mt-2 max-w-md text-sm leading-6 text-ink-500">{detail.requirements.length ? "Try a different search or show all work." : "Explore your material, capture an outcome, or start with a question. Your evidence and decisions will stay connected here."}</p></div>}
         {search.trim() && <p role="status" className="text-xs text-ink-500">{visibleItems.length} matching requirements · Searches include evidence, acceptance criteria and user stories.</p>}
-        {visibleItems.map(row => <RequirementCard key={row.id} item={row} blocked={blockedIds.has(row.id)} sourceTitle={sourceNames.get(row.source_id) || "Source unavailable"} canAI={canAI} busy={Boolean(pending)} pending={pending}
+        {displayedItems.map(row => <RequirementCard key={row.id} item={row} blocked={blockedIds.has(row.id)} sourceTitle={sourceNames.get(row.source_id) || "Source unavailable"} canAI={canAI} busy={Boolean(pending)} pending={pending}
           onEvidence={() => { revealSource(row.source_id); setSourceFocus({ sourceId: row.source_id, quote: row.evidence_quote, reference: row.reference }); }}
           onEdit={() => switchEditor(() => edit(row))}
           onHistory={() => setHistoryItem(row.id)}
@@ -366,6 +370,10 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
           onCopyStory={() => run(`copy-${row.id}`, () => navigator.clipboard.writeText(requirementStoryText(detail, row)), () => setNotice("Copied user story."), false)}
           onRefine={() => run(`refine-${row.id}`, async () => { setAssistance(null); setAssistance({ item: row, result: await api.assistRequirement(id, row, "story") }); }, undefined, false)}
         />)}
+        {visibleItems.length > 20 && <div className="flex flex-wrap items-center justify-between gap-3">
+          <p role="status" className="text-xs text-ink-500">Showing {displayedItems.length} of {visibleItems.length} matching requirements. Search and filters cover all saved work.</p>
+          {displayedItems.length < visibleItems.length && <Button variant="secondary" onClick={() => setListWindow({ key: listKey, limit: visibleLimit + 20 })}>Show {Math.min(20, visibleItems.length - displayedItems.length)} more requirements</Button>}
+        </div>}
       </section>
     </div>
   </PageFrame>;

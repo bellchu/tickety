@@ -98,3 +98,7 @@ Saved source bodies share an account-scoped query cache between reading and edit
 Because saved sources are immutable, cached bodies do not refetch on focus or reopen;
 normal inactive-query eviction and sign-out cache clearing still apply. Closed
 requirement editors do not initiate source-body queries.
+
+The requirement card list initially renders 20 matches and can reveal 20 more at a
+time. Search, scope filters and sorting run over the complete workspace before this
+display limit is applied; BRD export continues to include all saved requirements.
