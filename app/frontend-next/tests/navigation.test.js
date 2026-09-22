@@ -33,7 +33,7 @@ test("workspace navigation stays within four directly scannable sections", () =>
   );
   assert.deepEqual(
     navigationSections[0].items.map((item) => item.href),
-    ["/", "/agent", "/tickets", "/time"],
+    ["/", "/agent", "/tickets", "/time", "/requirements"],
   );
   assert.ok(
     navigationSections.every((section) => section.items.length <= 5),
@@ -45,7 +45,7 @@ test("navigation destinations are unique and remain directly reachable", () => {
   const items = navigationSections.flatMap((section) => section.items);
   const hrefs = items.map((item) => item.href);
   assert.equal(new Set(hrefs).size, hrefs.length);
-  assert.equal(items.length, 16);
+  assert.equal(items.length, 17);
   assert.ok(items.every((item) => item.href.startsWith("/")));
 });
 

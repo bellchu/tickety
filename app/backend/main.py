@@ -63,6 +63,7 @@ from .ai_eligibility import (
     terminal_ticket_filter,
     terminal_status_names as shared_terminal_status_names,
 )
+from .requirements_gathering import create_router as create_requirements_router
 from .sla_policy import sla_eligible_filter, ticket_is_sla_exempt
 from .portable_keys import portable_ascii_lower, portable_ascii_lower_expression
 from .schema import (
@@ -620,6 +621,11 @@ def require_protected_ai_role(*roles: str):
             raise HTTPException(status_code=403, detail="Insufficient permissions")
         return user
     return checker
+
+
+app.include_router(create_requirements_router(
+    require_authenticated_role("admin", "supervisor", "agent")
+))
 
 
 def require_admin_callback_user(

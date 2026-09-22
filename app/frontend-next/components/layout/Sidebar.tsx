@@ -35,6 +35,7 @@ import {
   Mail,
   BriefcaseBusiness,
   Route,
+  ClipboardList,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -56,6 +57,7 @@ const navigationIcons: Record<NavigationIconKey, typeof LayoutDashboard> = {
   reports: BarChart3,
   intelligence: Radar,
   routing: Route,
+  requirements: ClipboardList,
 };
 
 function initials(name?: string) {

@@ -1534,6 +1534,55 @@ class NotificationConfigRecord(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class RequirementWorkspaceRecord(Base):
+    __tablename__ = "requirement_workspaces"
+
+    id = Column(String(36), primary_key=True)
+    owner_id = Column(String, ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    title = Column(String(200), nullable=False)
+    objective = Column(Text, nullable=False)
+    request_type = Column(String(30), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class RequirementSourceRecord(Base):
+    __tablename__ = "requirement_sources"
+
+    id = Column(String(36), primary_key=True)
+    workspace_id = Column(String(36), ForeignKey("requirement_workspaces.id"), nullable=False, index=True)
+    title = Column(String(200), nullable=False)
+    kind = Column(String(20), nullable=False)
+    content = Column(Text, nullable=False)
+    content_sha256 = Column(String(64), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class BusinessRequirementRecord(Base):
+    __tablename__ = "business_requirements"
+    __table_args__ = (UniqueConstraint("workspace_id", "number", name="uq_business_requirement_number"),)
+
+    id = Column(String(36), primary_key=True)
+    workspace_id = Column(String(36), ForeignKey("requirement_workspaces.id"), nullable=False, index=True)
+    source_id = Column(String(36), ForeignKey("requirement_sources.id"), nullable=False)
+    number = Column(Integer, nullable=False)
+    title = Column(String(200), nullable=False)
+    actor = Column(String(200), nullable=False)
+    action = Column(Text, nullable=False)
+    benefit = Column(Text, nullable=False)
+    evidence_quote = Column(Text, nullable=False)
+    acceptance_json = Column(Text, nullable=False)
+    priority = Column(String(20), nullable=False)
+    status = Column(String(20), nullable=False, default="draft")
+    revision = Column(Integer, nullable=False, default=1)
+    validated_by = Column(String, ForeignKey("users.id", ondelete="SET NULL"))
+    validated_at = Column(DateTime)
+    reviewer_role = Column(String(40))
+    validation_note = Column(Text)
+    story_json = Column(Text)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
 class ProjectRecord(Base):
     """Organisational workspaces — group tickets/assets/users into projects."""
     __tablename__ = "projects"

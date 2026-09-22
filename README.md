@@ -103,6 +103,7 @@ npm run build
 - [Deployment](docs/deployment.md) — Docker Compose and production Kubernetes
 - [Development deployment](docs/dev-deployment.md) — MicroK8s
 - [Database migrations](docs/database-migrations.md)
+- [Requirements gathering](docs/requirements-gathering.md) — source evidence, sign-off, BRD and user stories
 - [Freshworks app](freshworks-app/README.md)
 - [RAG operations](docs/rag-v2.md) — indexing, rollout, and rollback
 
