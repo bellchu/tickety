@@ -104,7 +104,10 @@ away from an unfinished answer, asks whether to keep or discard the draft.
 Requirement search includes the stakeholder, outcome, evidence excerpt, acceptance
 criteria and prepared story, including its reference. Wrapped text is searchable as
 a continuous phrase. Search combines with the selected readiness or deferred-scope
-view; it does not change delivery eligibility.
+view; it does not change delivery eligibility. Choose **Business priority** to discuss
+must-have needs first, followed by should-have, could-have and deferred needs. Equal
+priorities retain their recorded order. Return to **Recorded order** at any time;
+sorting does not update priorities or saved records.
 
 While reading a saved source, select or paste an exact 10–4,000-character passage
 and choose **Draft a requirement from this passage**. The draft carries the source

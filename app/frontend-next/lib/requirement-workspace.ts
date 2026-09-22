@@ -107,3 +107,9 @@ export function reviewUnavailableReason(reviewed: BusinessRequirement, current: 
   if (current.quality_issues.length) return "Clarify the requirement's open quality issues before signing off.";
   return null;
 }
+
+export type RequirementOrder = "recorded" | "priority";
+const priorityOrder = { must: 0, should: 1, could: 2, wont: 3 };
+export function orderRequirements(items: BusinessRequirement[], order: RequirementOrder) {
+  return order === "priority" ? [...items].sort((left, right) => priorityOrder[left.priority] - priorityOrder[right.priority]) : items;
+}

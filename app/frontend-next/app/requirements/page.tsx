@@ -18,7 +18,7 @@ import { SourceIntakeForm } from "@/components/requirements/SourceIntakeForm";
 import { Field, inputStyle, panelStyle, kinds, priorities } from "@/components/requirements/fields";
 import { DecisionLog } from "@/components/requirements/DecisionLog";
 import { RequirementCard } from "@/components/requirements/RequirementCard";
-import { reviewUnavailableReason, sourceRequirementCounts, blockedRequirementIds, filterRequirements, workspaceFocus, type RequirementFilter } from "@/lib/requirement-workspace";
+import { orderRequirements, type RequirementOrder, reviewUnavailableReason, sourceRequirementCounts, blockedRequirementIds, filterRequirements, workspaceFocus, type RequirementFilter } from "@/lib/requirement-workspace";
 import { api, APIError } from "@/lib/api";
 import type { BusinessRequirement, GatherSuggestions, RequirementAssistance, RequirementDraft, RequirementPriority, RequirementWorkspaceDetail } from "@/lib/requirements-types";
 import { Button, ConfirmDialog } from "@/components/ui";
@@ -116,6 +116,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
   const [sourceSearch, setSourceSearch] = useState("");
   const [unlinkedOnly, setUnlinkedOnly] = useState(false);
   const [sourceViewing, setSourceViewing] = useState("");
+  const [order, setOrder] = useState<RequirementOrder>("recorded");
   const [filter, setFilter] = useState<RequirementFilter>("all");
   const [search, setSearch] = useState("");
   const [draftAssumptions, setDraftAssumptions] = useState<string[]>(restored?.assumptions || []);
@@ -145,7 +146,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
     deliveryReady: detail.requirements.filter(item => item.priority !== "wont" && item.story).length,
     sourceNames: new Map(detail.sources.map(item => [item.id, item.title])),
   } : null, [detail]);
-  const visibleItems = useMemo(() => detail ? filterRequirements(detail.requirements, search, filter, detail.decisions) : [], [detail, search, filter]);
+  const visibleItems = useMemo(() => detail ? orderRequirements(filterRequirements(detail.requirements, search, filter, detail.decisions), order) : [], [detail, search, filter, order]);
   const sourceQuery = sourceSearch.trim().toLocaleLowerCase();
   const visibleSources = useMemo(() => (detail?.sources || []).filter(item => (!sourceQuery || item.title.toLocaleLowerCase().includes(sourceQuery)) && (!unlinkedOnly || !sourceCounts.has(item.id))), [detail?.sources, sourceQuery, unlinkedOnly, sourceCounts]);
   function revealSource(sourceId: string) {
@@ -289,7 +290,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
       </aside>
       <section className="min-w-0 space-y-5" aria-label="Requirements and decisions">
         <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-lg font-semibold text-ink-700">Requirements & decisions</h2><p className="mt-1 text-xs text-ink-400">{questions ? `${questions} items need clarification` : "Keep the evidence, decision and delivery story together"}</p></div><Button leadingIcon={<Plus size={15} />} disabled={!detail.sources.length || Boolean(pending)} onClick={() => switchEditor(() => edit())}>New requirement</Button></div>
-        <div className="flex flex-col gap-3 sm:flex-row"><label className="flex-1"><span className="sr-only">Search requirements</span><input className={inputStyle} type="search" placeholder="Find a requirement, evidence or acceptance criterion…" value={search} onChange={event => setSearch(event.target.value)} /></label><label><span className="sr-only">Show requirements</span><select className={inputStyle} value={filter} onChange={event => setFilter(event.target.value as RequirementFilter)}><option value="all">All work</option><option value="questions">Open questions</option><option value="review">Ready for review</option><option value="delivery">Delivery ready</option><option value="deferred">Not this time</option></select></label></div>
+        <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap"><label className="min-w-48 flex-1"><span className="sr-only">Search requirements</span><input className={inputStyle} type="search" placeholder="Find a requirement, evidence or acceptance criterion…" value={search} onChange={event => setSearch(event.target.value)} /></label><label><span className="sr-only">Show requirements</span><select className={inputStyle} value={filter} onChange={event => setFilter(event.target.value as RequirementFilter)}><option value="all">All work</option><option value="questions">Open questions</option><option value="review">Ready for review</option><option value="delivery">Delivery ready</option><option value="deferred">Not this time</option></select></label><label><span className="sr-only">Order requirements</span><select className={inputStyle} value={order} onChange={event => setOrder(event.target.value as RequirementOrder)}><option value="recorded">Recorded order</option><option value="priority">Business priority</option></select></label></div>
     {canAI && detail.requirements.length >= 2 && <CrossReviewPanel workspaceId={id} items={detail.requirements} onQuestion={trackQuestion} />}
     {historyItem && <RequirementHistoryPanel key={historyItem} workspaceId={id} itemId={historyItem} revision={detail.requirements.find(item => item.id === historyItem)?.revision || 0} onClose={() => setHistoryItem(null)} />}
     {gathered && <section className={`${panelStyle} space-y-4`} aria-label="AI gathering suggestions">

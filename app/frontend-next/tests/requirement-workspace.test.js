@@ -112,3 +112,14 @@ test('review availability rejects stale snapshots and changed business gates', (
   assert.match(check(reviewed, true), /blocking business questions/);
   assert.match(check({ ...reviewed, quality_issues: ['Missing outcome'] }), /quality issues/);
 });
+
+
+test('business-priority ordering keeps equal priorities stable and does not mutate saved order', () => {
+  const items = ['could', 'must', 'wont', 'should', 'must'].map((priority, index) => ({ ...item, id: `r${index}`, priority }));
+  const result = library.orderRequirements(items, 'priority');
+  assert.deepEqual(result.map(row => row.id), ['r1', 'r4', 'r3', 'r0', 'r2']);
+  assert.deepEqual(items.map(row => row.id), ['r0', 'r1', 'r2', 'r3', 'r4']);
+  assert.equal(library.orderRequirements(items, 'recorded'), items);
+  const active = filterRequirements(items, '', 'review');
+  assert.deepEqual(library.orderRequirements(active, 'priority').map(row => row.id), ['r1', 'r4', 'r3', 'r0']);
+});
