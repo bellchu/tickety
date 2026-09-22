@@ -2,7 +2,7 @@ import type { BusinessRequirement, RequirementDecision, RequirementPriority, Req
 
 export const requirementPriorityLabels: Record<RequirementPriority, string> = { must: "Must have", should: "Should have", could: "Could have", wont: "Not this time" };
 
-export type DecisionFilter = "open" | "blocking" | "exploratory" | "recorded" | "all";
+export type DecisionFilter = "open" | "blocking" | "current" | "exploratory" | "recorded" | "all";
 
 /** Put unresolved approval gates first, retaining recorded order within both groups. */
 export function prioritizeBlockingDecisions(items: RequirementDecision[]) {
@@ -11,12 +11,13 @@ export function prioritizeBlockingDecisions(items: RequirementDecision[]) {
   );
 }
 
-export function filterDecisions(items: RequirementDecision[], filter: DecisionFilter, search: string, editingId = "", requirementId = "") {
+export function filterDecisions(items: RequirementDecision[], filter: DecisionFilter, search: string, editingId = "", requirementId = "", requirements: BusinessRequirement[] = []) {
   const query = search.trim().toLocaleLowerCase();
+  const current = filter === "current" ? new Set(currentScopeBlockers(requirements, items)) : null;
   const matching = items.filter(item => {
     if (item.id === editingId) return true;
     if (requirementId && item.requirement_id && item.requirement_id !== requirementId) return false;
-    const matchesStatus = filter === "all" || (filter === "recorded" ? item.status === "resolved"
+    const matchesStatus = filter === "all" || (filter === "current" ? current!.has(item) : filter === "recorded" ? item.status === "resolved"
       : item.status === "open" && (filter === "open" || (filter === "blocking" ? item.blocking : !item.blocking)));
     return matchesStatus && (!query || [item.question, item.owner_role, item.resolution || ""].some(value => value.toLocaleLowerCase().includes(query)));
   });

@@ -81,9 +81,9 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
   }
   const outstanding = useMemo(() => decisions.filter(item => item.status === "open"), [decisions]);
   const visibleDecisions = useMemo(() => {
-    const matching = filterDecisions(decisions, view, search, resolving, scope);
+    const matching = filterDecisions(decisions, view, search, resolving, scope, requirements);
     return decisionRequest ? matching.sort((left, right) => Number(right.id === decisionRequest.id) - Number(left.id === decisionRequest.id)) : matching;
-  }, [decisions, view, search, resolving, scope, decisionRequest]);
+  }, [decisions, view, search, resolving, scope, decisionRequest, requirements]);
   const requirementNames = useMemo(() => new Map(requirements.map(item => [item.id, `${item.reference}${item.priority === "wont" ? " · Not this time" : ""}`])), [requirements]);
   const blockers = useMemo(() => outstanding.filter(item => item.blocking).length, [outstanding]);
   const currentBlockers = useMemo(() => currentScopeBlockers(requirements, decisions).length, [requirements, decisions]);
@@ -127,12 +127,13 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
       <div className="grid gap-3 md:grid-cols-2">
         <label className="space-y-1 text-sm">Find questions, owners or decisions<input type="search" className={inputStyle} value={search} onChange={event => setSearch(event.target.value)} /></label>
         <label className="space-y-1 text-sm">Show decisions<select className={inputStyle} value={view} onChange={event => setView(event.target.value as DecisionFilter)}>
-          <option value="open">Open questions</option><option value="blocking">Blocks sign-off</option><option value="exploratory">Exploratory questions</option><option value="recorded">Recorded decisions</option><option value="all">All questions & decisions</option>
+          <option value="open">Open questions</option><option value="current">Current delivery blockers</option><option value="blocking">All sign-off blockers</option><option value="exploratory">Exploratory questions</option><option value="recorded">Recorded decisions</option><option value="all">All questions & decisions</option>
         </select></label>
       </div>
       <label className="block space-y-1 text-sm">Decisions affecting<select className={inputStyle} value={scope} onChange={event => onScopeChange(event.target.value)}><option value="">All requirements</option>{requirements.map(item => <option key={item.id} value={item.id}>{item.reference} · {item.title}</option>)}</select></label>
       {view === "open" && <p className="text-xs text-ink-500">{decisionRequest ? "The suggested question appears first when it matches this view. Other blocking questions follow in recorded order." : "Questions blocking sign-off appear first; each group keeps its recorded order."}</p>}
       {scope && <p className="text-xs text-ink-500">Includes whole-initiative questions and decisions, which also affect this requirement.</p>}
+      {view === "current" && <p className="text-xs text-ink-500">Includes current delivery and scope needing confirmation. Questions linked only to deferred requirements are excluded.</p>}
       {resolving && <p className="text-xs text-ink-500">The question you are answering stays visible while you filter.</p>}
       {displayedDecisions.map(item => <article key={item.id} className="space-y-3 rounded-lg border border-linen-400 p-4">
         {item.id === decisionRequest?.id && <p className="text-xs font-semibold text-clay-700">Suggested business question</p>}

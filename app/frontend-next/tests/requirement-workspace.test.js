@@ -245,3 +245,15 @@ test('current scope excludes only known deferred blockers and keeps unknown scop
   assert.deepEqual(library.currentScopeBlockers([], [decisions[0], decisions[3]]).map(row => row.id), ['d0', 'd3']);
   assert.equal(decisions.length, 6);
 });
+
+test('current delivery decision filter composes with search and scope while preserving a deferred answer draft', () => {
+  const requirements = [{ ...item, id: 'active', priority: 'must' }, { ...item, id: 'later', priority: 'wont' }];
+  const rows = [null, 'active', 'later', 'missing'].map((requirement_id, index) => ({ id: `d${index}`, requirement_id, question: `Question ${index}`, owner_role: 'Sponsor', status: 'open', blocking: true }));
+  rows.push({ ...rows[1], id: 'resolved', status: 'resolved' }, { ...rows[1], id: 'optional', blocking: false });
+  const select = (search = '', editing = '', scope = '') => library.filterDecisions(rows, 'current', search, editing, scope, requirements).map(row => row.id);
+  assert.deepEqual(select(), ['d0', 'd1', 'd3']);
+  assert.deepEqual(select('Question 1'), ['d1']);
+  assert.deepEqual(select('', '', 'active'), ['d0', 'd1']);
+  assert.deepEqual(select('no match', 'd2', 'active'), ['d2']);
+  assert.deepEqual(library.filterDecisions(rows, 'blocking', '', '', '', requirements).map(row => row.id), ['d0', 'd1', 'd2', 'd3']);
+});
