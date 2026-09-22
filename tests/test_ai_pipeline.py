@@ -17,6 +17,7 @@ from app.backend import database as database_module
 from app.backend import llm_manager as llm_module
 from app.backend import main, sync_worker, ticket_vectors
 from app.backend import intelligence
+from app.backend.integrations import sync as integration_sync
 from app.backend.ai_contracts import (
     ResolutionAnalysis,
     ResolverRoutingAnalysis,
@@ -1824,7 +1825,7 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 "provider_capacity_retry_after",
                 return_value=300,
             ),
-            patch.object(sync_worker, "queue_active_routing_backlog") as routing,
+            patch.object(integration_sync, "queue_active_routing_backlog") as routing,
             patch.object(sync_worker, "queue_recent_automatic_ai") as recent,
             patch.object(main, "_auto_process", new=process),
         ):
@@ -1842,7 +1843,7 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 "queue_recent_automatic_ai",
                 return_value={"lookback_days": 28, "queued": 5},
             ) as recent,
-            patch.object(sync_worker, "queue_active_routing_backlog") as history,
+            patch.object(integration_sync, "queue_active_routing_backlog") as history,
             patch.object(
                 sync_worker, "active_routing_backlog_enabled", return_value=True
             ),
@@ -2262,7 +2263,7 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 },
             ),
             patch.object(
-                sync_worker,
+                integration_sync,
                 "queue_active_routing_backlog",
                 return_value={"enabled": False, "queued": 0},
             ),
@@ -2325,7 +2326,7 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 side_effect=lambda key, *_args: key == "AUTO_ROUTE_ENABLED",
             ),
             patch.object(
-                sync_worker,
+                integration_sync,
                 "queue_active_routing_backlog",
                 return_value={"enabled": False, "queued": 0},
             ),

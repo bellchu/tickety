@@ -30,7 +30,6 @@ from .integrations.sync import (
     PROVIDER_TIMESTAMP_REPAIR_DAYS,
     active_routing_backlog_enabled,
     freshservice_sync_limits,
-    queue_active_routing_backlog,
     queue_recent_automatic_ai,
     sync_tickets_from_external,
 )
