@@ -1,27 +1,14 @@
+const { loadPureTs } = require("./helpers/load-pure-ts");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
-const ts = require("typescript");
 
 const root = path.join(__dirname, "..");
 const read = (...parts) => fs.readFileSync(path.join(root, ...parts), "utf8");
 
 function loadOptionsHelper() {
-  const filename = path.join(root, "lib", "ticket-config-options.ts");
-  const output = ts.transpileModule(read("lib", "ticket-config-options.ts"), {
-    compilerOptions: {
-      module: ts.ModuleKind.CommonJS,
-      target: ts.ScriptTarget.ES2020,
-    },
-    fileName: filename,
-  }).outputText;
-  const loaded = { exports: {} };
-  const compile = new Function("require", "exports", "module", output);
-  compile((specifier) => {
-    throw new Error(`Unexpected runtime import: ${specifier}`);
-  }, loaded.exports, loaded);
-  return loaded.exports;
+  return loadPureTs("ticket-config-options.ts");
 }
 
 test("configured ticket choices follow sort_order and retain configured labels", () => {
