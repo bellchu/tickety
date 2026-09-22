@@ -104,7 +104,7 @@ function RequirementsContent() {
       </fieldset>
     </form>}
     <form className="flex flex-wrap gap-2" onSubmit={event => { event.preventDefault(); setOffset(0); setInitiativeSearch(searchInput.trim()); }}>
-      <label className="min-w-48 flex-1"><span className="sr-only">Find initiatives by name or objective</span><input type="search" maxLength={200} className={inputStyle} placeholder="Find an initiative by name or business objective…" value={searchInput} onChange={event => setSearchInput(event.target.value)} /></label>
+      <label className="min-w-48 flex-1"><span className="sr-only">Find initiatives by name or objective</span><RequirementInput type="search" maxLength={200} className={inputStyle} placeholder="Find an initiative by name or business objective…" value={searchInput} onChange={event => setSearchInput(event.target.value)} /></label>
       <Button type="submit" variant="secondary">Search initiatives</Button>
       {initiativeSearch && <Button variant="ghost" onClick={() => { setSearchInput(""); setInitiativeSearch(""); setOffset(0); }}>Clear search</Button>}
     </form>

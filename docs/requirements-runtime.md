@@ -150,8 +150,8 @@ limits, short input and NUL rejection. Acceptance criteria already counted code
 points. Business names, roles, objectives, questions, answers and sign-off notes now use
 shared Unicode-aware controls backed by native custom validity. Optional draft
 fields remain optional, required whitespace-only fields are rejected, and overlong
-text remains available for editing. The initiative search box still uses its native
-query-length limit. Acceptance criteria are bounded per line, without a second
+text remains available for editing. Initiative search uses the same Unicode-aware control; its query is trimmed before
+submission and remains limited to 200 characters. Acceptance criteria are bounded per line, without a second
 UTF-16 cap on the entire textarea.
 
 ### File import navigation regression
