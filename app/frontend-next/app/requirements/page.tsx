@@ -23,6 +23,7 @@ import { Field, inputStyle, panelStyle, kinds, priorities } from "@/components/r
 import { SignOffDecisions } from "@/components/requirements/SignOffDecisions";
 import { DecisionLog } from "@/components/requirements/DecisionLog";
 import { AIRequirementReview } from "@/components/requirements/AIRequirementReview";
+import { AcceptanceCriteriaEditor } from "@/components/requirements/AcceptanceCriteriaEditor";
 import { RequirementCard } from "@/components/requirements/RequirementCard";
 import { orderRequirements, type RequirementOrder, reviewUnavailableReason, sourceRequirementCounts, blockedRequirementIds, filterRequirements, workspaceFocus, type RequirementFilter } from "@/lib/requirement-workspace";
 import { api, APIError } from "@/lib/api";
@@ -402,16 +403,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
         <div className="grid gap-4 md:grid-cols-2"><Field label="As a… (stakeholder or user role)"><RequirementInput maxLength={200} className={inputStyle} value={draft.actor} onChange={event => setDraft({ ...draft, actor: event.target.value })} placeholder="finance analyst" /></Field><Field label="Priority"><select className={inputStyle} value={draft.priority} onChange={event => setDraft({ ...draft, priority: event.target.value as RequirementPriority })}>{Object.entries(priorities).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field></div>
         <Field label="I want to… (required capability)"><RequirementTextarea maxLength={4000} className={inputStyle} value={draft.action} onChange={event => setDraft({ ...draft, action: event.target.value })} /></Field>
         <Field label="So that… (business outcome)"><RequirementTextarea maxLength={4000} className={inputStyle} value={draft.benefit} onChange={event => setDraft({ ...draft, benefit: event.target.value })} /></Field>
-        <section className="space-y-3" aria-label="Acceptance criteria editor">
-          <h3 className="text-sm font-medium">Acceptance criteria</h3>
-          <p className="text-xs text-ink-500">Keep one observable outcome per criterion. Line breaks within a criterion stay together.</p>
-          {criteria.map((criterion, index) => <div key={index} className="rounded-lg border border-linen-400 p-3">
-            <Field label={`Criterion ${index + 1}`}><textarea rows={3} aria-describedby="requirement-criteria-help" className={inputStyle} value={criterion} onChange={event => setCriteria(criteria.map((value, position) => position === index ? event.target.value : value))} placeholder="Given a valid request, when it is submitted, then a receipt appears within the agreed time." /></Field>
-            <Button size="sm" variant="ghost" onClick={() => setCriteria(criteria.filter((_, position) => position !== index))}>Remove criterion {index + 1}</Button>
-          </div>)}
-          <Button size="sm" variant="secondary" disabled={criteria.length >= 20} onClick={() => setCriteria([...criteria, ""])}>Add acceptance criterion</Button>
-        </section>
-        <p id="requirement-criteria-help" className={`text-xs ${parsedCriteria.issue ? "text-rust-600" : "text-ink-500"}`}>{parsedCriteria.issue || `${parsedCriteria.criteria.length} / 20 criteria · 10–1,000 characters each. You can leave this empty while drafting.`}</p>
+        <AcceptanceCriteriaEditor criteria={criteria} issue={parsedCriteria.issue} count={parsedCriteria.criteria.length} onChange={setCriteria} />
         <div className="flex gap-2"><Button type="submit" pending={pending === "requirement"} disabled={Boolean(pending) || editOutdated || source.isError || !evidenceBounds.valid || Boolean(parsedCriteria.issue)}>Save draft</Button><Button variant="ghost" disabled={Boolean(pending)} onClick={() => switchEditor(() => setShowForm(false))}>Cancel</Button></div>
         </fieldset>
       </form>}
