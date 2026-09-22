@@ -119,3 +119,17 @@ test('brief readiness distinguishes drafts, agreed work, prepared stories and de
   for (const line of ['Included in this initiative: 3 requirements', 'Drafts awaiting agreement: 1', 'Signed off, awaiting story preparation: 1', 'User stories prepared for delivery-team review: 1', 'Deferred — not this time: 1', 'Inclusion is not sign-off']) assert.ok(output.includes(line), line);
   assert.ok(output.indexOf('## Scope and readiness') < output.indexOf('## Evidence register'));
 });
+
+
+test('evidence register maps sources to requirements without losing deferred or supporting context', () => {
+  const row = { title: 'Receipt', revision: 1, status: 'draft', actor: 'Analyst', action: 'Confirm receipt', benefit: 'Avoid delays', evidence_quote: 'Confirm receipt within thirty seconds.', acceptance_criteria: [], quality_issues: [], story: null };
+  const brief = library.requirementBrief({ workspace: { id: 'w', title: 'Intake', objective: 'Reduce delays', request_type: 'enhancement' },
+    sources: [{ id: 's1', title: 'Operations SOP', kind: 'sop', content_sha256: 'digest-one' }, { id: 's2', title: 'Background interview', kind: 'transcript', content_sha256: 'digest-two' }],
+    requirements: [{ ...row, reference: 'REQ-001', source_id: 's1', priority: 'must' }, { ...row, reference: 'REQ-002', source_id: 's1', priority: 'wont' }], decisions: [] });
+  const register = brief.split('## Evidence register')[1].split('## Documented requirements')[0];
+  assert.ok(register.includes('Supports: REQ-001, REQ-002 (deferred)'));
+  assert.ok(register.includes('Background interview'));
+  assert.ok(register.includes('Supporting context — no linked requirements recorded.'));
+  assert.ok(register.includes('digest-one'));
+  assert.ok(register.includes('digest-two'));
+});

@@ -21,6 +21,12 @@ export function requirementBrief(detail: RequirementWorkspaceDetail): string {
   const agreed = included.filter(item => item.status === "validated" && !item.story).length;
   const stories = included.filter(item => item.story).length;
   const blockers = (detail.decisions || []).filter(item => item.status === "open" && item.blocking).length;
+  const sourceLinks = new Map<string, string[]>();
+  for (const row of requirements) {
+    const references = sourceLinks.get(row.source_id) || [];
+    references.push(`${row.reference}${row.priority === "wont" ? " (deferred)" : ""}`);
+    sourceLinks.set(row.source_id, references);
+  }
   const lines = [
     `# Business requirements: ${inline(workspace.title)}`, "",
     `Initiative ID: ${workspace.id}`,
@@ -35,7 +41,10 @@ export function requirementBrief(detail: RequirementWorkspaceDetail): string {
     `- Open blocking business questions: ${blockers}`,
     "", "This brief is a snapshot of recorded work. Inclusion is not sign-off; prepared stories still need delivery-team review and planning.", "",
     "## Evidence register",
-    ...sources.map(source => `- ${inline(source.title)} (${source.kind}) — ${source.id}; SHA-256: ${source.content_sha256}`), "",
+    ...sources.flatMap(source => [
+      `- ${inline(source.title)} (${source.kind}) — ${source.id}; SHA-256: ${source.content_sha256}`,
+      `  ${sourceLinks.has(source.id) ? `Supports: ${sourceLinks.get(source.id)!.join(", ")}` : "Supporting context — no linked requirements recorded."}`,
+    ]), "",
     "## Documented requirements and functional specification",
   ];
   for (const row of requirements) {
