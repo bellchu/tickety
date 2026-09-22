@@ -9,8 +9,10 @@ test('cross-check keeps selected scope visible and submits it across changing se
   let cursor = 0;
   let submitted;
   let tracked;
+  let scans = 0;
+  const workspace = loadPureTs('requirement-workspace.ts');
   const { CrossReviewPanel } = loadComponentTs('requirements/CrossReviewPanel.tsx', {
-    react: { useState: initial => {
+    react: { useMemo: calculate => calculate(), useState: initial => {
       const index = cursor++;
       if (!(index in states)) states[index] = initial;
       return [states[index], value => { states[index] = value; }];
@@ -19,7 +21,7 @@ test('cross-check keeps selected scope visible and submits it across changing se
     '@/components/ui': { Button: 'button' },
     './fields': { Field: 'div', inputStyle: '' },
     '@/lib/requirement-review-question': loadPureTs('requirement-review-question.ts'),
-    '@/lib/requirement-workspace': loadPureTs('requirement-workspace.ts'),
+    '@/lib/requirement-workspace': { ...workspace, filterRequirements(...args) { scans++; return workspace.filterRequirements(...args); } },
     '@/lib/requirement-errors': { requirementErrorMessage: error => error.message },
     '@/lib/api': { api: { crossReviewRequirements: async (workspaceId, ids) => {
       submitted = { workspaceId, ids };
@@ -30,7 +32,9 @@ test('cross-check keeps selected scope visible and submits it across changing se
   const render = () => { cursor = 0; return CrossReviewPanel({ workspaceId: 'workspace', items, onQuestion: (question, requirementId) => { tracked = { question, requirementId }; } }); };
   const search = (tree, value) => descendants(tree, 'input').find(input => input.props.type === 'search').props.onChange({ target: { value } });
   const checkboxes = tree => descendants(tree, 'input').filter(input => input.props.type === 'checkbox');
-  descendants(render(), 'button')[0].props.onClick();
+  const closed = render();
+  assert.equal(scans, 0, 'closed cross-check does not scan requirement text');
+  descendants(closed, 'button')[0].props.onClick();
   let tree = render();
   checkboxes(tree)[0].props.onChange({ target: { checked: true } });
   tree = render();
@@ -43,6 +47,14 @@ test('cross-check keeps selected scope visible and submits it across changing se
   search(tree, 'unmatched');
   tree = render();
   assert.equal(checkboxes(tree).length, 0);
+  descendants(tree, 'button').find(button => button.props.children === 'Close cross-check').props.onClick();
+  const scansBeforeClose = scans;
+  tree = render();
+  render();
+  assert.equal(scans, scansBeforeClose, 'hidden search remains idle through parent renders');
+  descendants(tree, 'button')[0].props.onClick();
+  tree = render();
+  assert.equal(checkboxes(tree).length, 0, 'reopening retains the search');
   const review = descendants(tree, 'button').find(button => button.props.children === 'Review selected requirements');
   assert.equal(review.props.disabled, false);
   await review.props.onClick();

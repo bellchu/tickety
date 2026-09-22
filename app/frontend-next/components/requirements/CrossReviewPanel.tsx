@@ -4,7 +4,7 @@ import { filterRequirements, requirementSnapshotsCurrent } from "@/lib/requireme
 import { reviewQuestionDraft } from "@/lib/requirement-review-question";
 import { requirementErrorMessage } from "@/lib/requirement-errors";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui";
 import { Field, inputStyle } from "./fields";
@@ -17,8 +17,8 @@ export function CrossReviewPanel({ workspaceId, items, onQuestion }: { workspace
   const [pending, setPending] = useState(false);
   const [result, setResult] = useState<RequirementCrossReview | null>(null);
   const [error, setError] = useState("");
-  const matching = filterRequirements(items, search, "all");
-  const chosen = items.filter(item => selected.includes(item.id));
+  const matching = useMemo(() => open ? filterRequirements(items, search, "all") : [], [open, items, search]);
+  const chosen = useMemo(() => open ? items.filter(item => selected.includes(item.id)) : [], [open, items, selected]);
   const stale = Boolean(result && !requirementSnapshotsCurrent(result.requirements, items));
   async function review() {
     if (pending) return;
