@@ -141,3 +141,11 @@ than wall-clock timestamps. A unique `(requirement_id, revision)` index both ser
 this ordering and rejects duplicate revision events. Existing history is preserved
 by the index migration; inconsistent duplicate data makes the migration fail
 rather than silently discarding audit evidence.
+
+For long sources, expand the saved text and select or paste a continuous passage
+into **Focus on a passage**. The server verifies it matches the immutable source
+before reserving AI budget. Only that passage (plus initiative objective and source
+title) is sent through the existing redaction and prompt limits. Suggestions are
+labelled as passage-scoped and retain the original source link. Invalid passages
+never reach the provider. Explore later sections separately when a full-source
+analysis was truncated; neither mode claims complete document coverage.

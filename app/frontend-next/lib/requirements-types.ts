@@ -70,6 +70,7 @@ export interface GatherSuggestions {
   source_id: string;
   model: string;
   source_truncated: boolean;
+  scope?: "source" | "excerpt";
   discarded_candidates: number;
   candidates: RequirementCandidate[];
   questions: string[];

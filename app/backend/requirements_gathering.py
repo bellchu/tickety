@@ -45,6 +45,10 @@ class SourceCreate(InputModel):
     content: Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=100000)]
 
 
+class GatherInput(InputModel):
+    excerpt: Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=12000)]
+
+
 class FilePreviewInput(InputModel):
     content_base64: Annotated[str, StringConstraints(min_length=1, max_length=533336)]
 
@@ -375,7 +379,7 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
         } for row in rows]}
 
     @router.post("/{workspace_id}/sources/{source_id}/gather")
-    async def gather_requirements(workspace_id: str, source_id: str, db: Session = Depends(get_db), user: UserRecord = Depends(require_ai_user)):
+    async def gather_requirements(workspace_id: str, source_id: str, data: GatherInput | None = None, db: Session = Depends(get_db), user: UserRecord = Depends(require_ai_user)):
         from .requirements_ai import gather, prepare_prompt
 
         initiative = workspace(db, workspace_id, user)
@@ -384,10 +388,13 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
             raise HTTPException(404, "Source not found")
         llm = get_llm()
         original_content = source.content
-        prompt = prepare_prompt(llm, objective=initiative.objective, source_title=source.title, content=original_content)
+        selected_content = data.excerpt if data else original_content
+        if data and selected_content not in original_content:
+            raise HTTPException(422, "Choose an exact passage from the saved source")
+        prompt = prepare_prompt(llm, objective=initiative.objective, source_title=source.title, content=selected_content)
         reserve_ai(db, user.id, "requirements_gather")
         suggestions = await gather(llm, prompt, original_content)
-        return {**suggestions, "source_id": source_id, "model": llm.model_name}
+        return {**suggestions, "source_id": source_id, "model": llm.model_name, "scope": "excerpt" if data else "source"}
 
     @router.post("/{workspace_id}/items/{requirement_id}/assist")
     async def assist_requirement(workspace_id: str, requirement_id: str, data: AssistanceInput, db: Session = Depends(get_db), user: UserRecord = Depends(require_ai_user)):

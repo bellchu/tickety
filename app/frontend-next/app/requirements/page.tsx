@@ -7,6 +7,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ClipboardList, Download, FileText, Plus, Sparkles, ArrowUpRight } from "lucide-react";
 import { requirementBrief } from "@/lib/requirement-export";
 import { RequirementHistoryPanel } from "@/components/requirements/RequirementHistoryPanel";
+import { SourceExplorer } from "@/components/requirements/SourceExplorer";
 import { SourceIntakeForm } from "@/components/requirements/SourceIntakeForm";
 import { Field, inputStyle, panelStyle, kinds } from "@/components/requirements/fields";
 import { DecisionLog } from "@/components/requirements/DecisionLog";
@@ -193,7 +194,7 @@ function Workspace({ id, canAI, onBack }: { id: string; canAI: boolean; onBack: 
             <span className="text-[10px] font-semibold uppercase tracking-wide text-clay-700">{kinds[item.kind]}</span><h3 className="mt-1 text-sm font-semibold text-ink-700">{item.title}</h3>
             <p className="mt-1 text-xs text-ink-400">{detail.requirements.filter(row => row.source_id === item.id).length} linked requirements</p>
           </button>
-          {sourceViewing === item.id && <div><ErrorMessage error={evidence.error} />{evidence.isPending ? <p role="status" className="text-xs">Loading source…</p> : <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-linen-100 p-3 font-sans text-xs leading-5 text-ink-500">{evidence.data?.content}</pre>}</div>}
+          {sourceViewing === item.id && <div><ErrorMessage error={evidence.error} />{evidence.isPending ? <p role="status" className="text-xs">Loading source…</p> : evidence.data?.content && <SourceExplorer key={item.id} content={evidence.data.content} canAI={canAI} busy={Boolean(pending)} onExplore={excerpt => run(`gather-${item.id}`, async () => { setGathered(null); setGathered(await api.gatherRequirements(id, item.id, excerpt)); }, undefined, false)} />}</div>}
           <div className="flex flex-wrap gap-1"><Button size="sm" variant="ghost" disabled={Boolean(pending)} onClick={() => { edit(); setDraft({ ...blankDraft, source_id: item.id }); }}>Link a requirement</Button>
             {canAI && <Button size="sm" variant="secondary" leadingIcon={<Sparkles size={13} />} pending={pending === `gather-${item.id}`} disabled={Boolean(pending)} onClick={() => run(`gather-${item.id}`, async () => { setGathered(null); setGathered(await api.gatherRequirements(id, item.id)); }, undefined, false)}>Explore with AI</Button>}
           </div>
@@ -207,6 +208,7 @@ function Workspace({ id, canAI, onBack }: { id: string; canAI: boolean; onBack: 
     {gathered && <section className={`${panelStyle} space-y-4`} aria-label="AI gathering suggestions">
       <div className="flex items-center justify-between gap-3"><h2 className="font-semibold">AI gathering suggestions</h2><Button variant="ghost" onClick={() => setGathered(null)}>Dismiss suggestions</Button></div>
       <p className="text-xs text-ink-400">{gathered.model} · {detail.sources.find(item => item.id === gathered.source_id)?.title}</p>
+      {gathered.scope === "excerpt" && <p className="text-sm text-ink-500">These suggestions cover only your selected passage. Explore other passages to review the rest of the source.</p>}
       {gathered.source_truncated && <p className="text-sm text-amber-800">Only part of this source fit in the analysis. Review the full source for missing requirements.</p>}
       {gathered.discarded_candidates > 0 && <p className="text-sm text-amber-800">{gathered.discarded_candidates} suggestions were excluded because their evidence could not be matched to the source.</p>}
       {gathered.candidates.length === 0 && <p className="text-sm">No verifiable requirements were found. You can gather a requirement manually.</p>}

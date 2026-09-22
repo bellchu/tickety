@@ -347,6 +347,39 @@ class RequirementGatheringTests(unittest.TestCase):
             with self.assertRaises(IntegrityError):
                 db.commit()
 
+    def test_ai_can_explore_a_later_passage_without_sending_the_document_prefix(self):
+        self.user.role = "admin"
+        workspace = self.workspace()
+        excerpt = "Escalate unacknowledged supplier requests after five minutes."
+        source = self.client.post(f"{self.path}/{workspace}/sources", json={"title": "Long operations guide", "kind": "sop", "content": "Earlier context without the exception policy. " * 1000 + excerpt}).json()["id"]
+        candidate = {key: value for key, value in self.payload(source).items() if key != "source_id"}
+        candidate.update(evidence_quote=excerpt, assumptions=[])
+        manager = self.ai_manager({"candidates": [candidate, {**candidate, "evidence_quote": "Earlier context without the exception policy."}], "questions": []})
+        with patch.object(main, "llm_mgr", manager):
+            response = self.client.post(f"{self.path}/{workspace}/sources/{source}/gather", json={"excerpt": excerpt}, headers={"Origin": "http://testserver"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["scope"], "excerpt")
+        self.assertEqual(response.json()["discarded_candidates"], 1)
+        self.assertFalse(response.json()["source_truncated"])
+        self.assertEqual(response.json()["candidates"][0]["evidence_quote"], excerpt)
+        prompt = json.loads(manager.analyze.call_args.args[0])
+        self.assertEqual(prompt["content"], excerpt)
+        self.assertNotIn("Earlier context", manager.analyze.call_args.args[0])
+        self.assertEqual(self.client.get(f"{self.path}/{workspace}").json()["requirements"], [])
+
+    def test_ai_passage_must_match_saved_evidence_before_budget_or_provider_use(self):
+        self.user.role = "admin"
+        workspace = self.workspace()
+        source = self.source(workspace)
+        manager = self.ai_manager({"candidates": [], "questions": []})
+        with patch.object(main, "llm_mgr", manager):
+            for excerpt in ["This sentence is not in the saved source.", "x" * 12001, "short"]:
+                response = self.client.post(f"{self.path}/{workspace}/sources/{source}/gather", json={"excerpt": excerpt}, headers={"Origin": "http://testserver"})
+                self.assertEqual(response.status_code, 422)
+        manager.analyze.assert_not_awaited()
+        with self.sessions() as db:
+            self.assertEqual(db.query(AIUsageEventRecord).count(), 0)
+
     def ai_manager(self, result):
         return SimpleNamespace(is_mock=False, prompt_char_limit=4000, model_name="test/configured-provider", analyze=AsyncMock(return_value=result))
 
