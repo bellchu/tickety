@@ -1,21 +1,13 @@
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
 const test = require('node:test');
 const React = require('react');
 const { renderToStaticMarkup } = require('react-dom/server');
 const query = require('@tanstack/react-query');
-const ts = require('typescript');
-const { loadPureTs } = require('./helpers/load-pure-ts');
+const { loadPureTs, loadComponentTs } = require('./helpers/load-pure-ts');
 const drafts = loadPureTs('requirement-editor-cache.ts');
 const workspace = loadPureTs('requirement-workspace.ts');
 
 function loadDecisionLog(overrides = {}) {
-  const fileName = path.join(__dirname, '../components/requirements/DecisionLog.tsx');
-  const output = ts.transpileModule(fs.readFileSync(fileName, 'utf8'), {
-    fileName, compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
-  }).outputText;
-  const loaded = { exports: {} };
   const dependencies = {
     react: React, 'react/jsx-runtime': require('react/jsx-runtime'),
     '@tanstack/react-query': query, './fields': { inputStyle: '' },
@@ -29,11 +21,8 @@ function loadDecisionLog(overrides = {}) {
     },
   };
   Object.assign(dependencies, overrides);
-  new Function('require', 'exports', 'module', output)(name => {
-    if (!(name in dependencies)) throw new Error(`Unexpected dependency: ${name}`);
-    return dependencies[name];
-  }, loaded.exports, loaded);
-  return loaded.exports.DecisionLog;
+  const { DecisionLog } = loadComponentTs('requirements/DecisionLog.tsx', dependencies);
+  return DecisionLog;
 }
 const DecisionLog = loadDecisionLog();
 const decisions = Array.from({ length: 200 }, (_, index) => ({

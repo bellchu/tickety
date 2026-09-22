@@ -1,21 +1,13 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const fs = require('node:fs');
-const path = require('node:path');
-const ts = require('typescript');
 const React = require('react');
 const { QueryClient } = require('@tanstack/react-query');
-const { loadPureTs } = require('./helpers/load-pure-ts');
+const { loadPureTs, loadComponentTs } = require('./helpers/load-pure-ts');
 const drafts = loadPureTs('requirement-editor-cache.ts');
 
 function pendingImport(client) {
   let finish, fail;
   const request = new Promise((resolve, reject) => { finish = resolve; fail = reject; });
-  const fileName = path.join(__dirname, '../components/requirements/SourceIntakeForm.tsx');
-  const output = ts.transpileModule(fs.readFileSync(fileName, 'utf8'), {
-    fileName, compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
-  }).outputText;
-  const loaded = { exports: {} };
   const dependencies = {
     react: { ...React, useEffect() {}, useMemo: compute => compute(), useState: initial => [typeof initial === 'function' ? initial() : initial, () => {}] },
     'react/jsx-runtime': require('react/jsx-runtime'),
@@ -27,11 +19,8 @@ function pendingImport(client) {
     '@/lib/api': { api: {} }, '@/components/ui': { Button: 'button', ConfirmDialog: () => null },
     './fields': { Field: 'label', inputStyle: '', panelStyle: '', kinds: {} },
   };
-  new Function('require', 'exports', output)(name => {
-    if (!(name in dependencies)) throw new Error(`Unexpected dependency: ${name}`);
-    return dependencies[name];
-  }, loaded.exports);
-  const tree = loaded.exports.SourceIntakeForm({ workspaceId: 'w1', userId: 'owner', open: true, pending: '', onSave() {} });
+  const { SourceIntakeForm } = loadComponentTs('requirements/SourceIntakeForm.tsx', dependencies);
+  const tree = SourceIntakeForm({ workspaceId: 'w1', userId: 'owner', open: true, pending: '', onSave() {} });
   function findInput(node) {
     if (!node || typeof node !== 'object') return undefined;
     if (node.type === 'input' && node.props.type === 'file') return node;

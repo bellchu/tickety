@@ -1,28 +1,17 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const fs = require('node:fs');
-const path = require('node:path');
 const React = require('react');
 const { renderToStaticMarkup } = require('react-dom/server');
-const ts = require('typescript');
-const { loadPureTs } = require('./helpers/load-pure-ts');
-const fileName = path.join(__dirname, '../components/requirements/AIRequirementReview.tsx');
-const output = ts.transpileModule(fs.readFileSync(fileName, 'utf8'), {
-  fileName, compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 },
-}).outputText;
-const loaded = { exports: {} };
+const { loadPureTs, loadComponentTs } = require('./helpers/load-pure-ts');
 const dependencies = {
   'react/jsx-runtime': require('react/jsx-runtime'), './fields': { panelStyle: '' },
   '@/lib/requirement-workspace': loadPureTs('requirement-workspace.ts'),
   '@/components/ui': { Button: ({ children, disabled }) => React.createElement('button', { disabled }, children) },
 };
-new Function('require', 'exports', 'module', output)(name => {
-  if (!(name in dependencies)) throw new Error(`Unexpected dependency: ${name}`);
-  return dependencies[name];
-}, loaded.exports, loaded);
+const { AIRequirementReview } = loadComponentTs('requirements/AIRequirementReview.tsx', dependencies);
 const item = { id: 'r1', reference: 'REQ-001', revision: 2, status: 'validated', priority: 'must' };
 function render(current, mode = 'story', busy = false) {
-  return renderToStaticMarkup(React.createElement(loaded.exports.AIRequirementReview, {
+  return renderToStaticMarkup(React.createElement(AIRequirementReview, {
     assistance: { item, result: { mode, model: 'Configured provider', base_revision: 2, input_truncated: true,
       suggestions: { actor: 'Analyst', action: 'confirm receipt', benefit: 'track requests', assumptions: ['Confirm target'], questions: ['Who owns failures?'] } } },
     current, busy, onDismiss() {}, onQuestion() {}, onReanalyze() {}, onRefine() {},

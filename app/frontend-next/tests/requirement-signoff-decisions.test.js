@@ -1,22 +1,13 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const fs = require('node:fs');
-const path = require('node:path');
-const ts = require('typescript');
 const React = require('react');
 const { renderToStaticMarkup } = require('react-dom/server');
-const { loadPureTs } = require('./helpers/load-pure-ts');
-const fileName = path.join(__dirname, '../components/requirements/SignOffDecisions.tsx');
-const output = ts.transpileModule(fs.readFileSync(fileName, 'utf8'), {
-  fileName, compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
-}).outputText;
-const loaded = { exports: {} };
-new Function('require', 'exports', output)(name => {
-  if (name === 'react/jsx-runtime') return require(name);
-  if (name === '@/lib/requirement-workspace') return loadPureTs('requirement-workspace.ts');
-  throw new Error(`Unexpected dependency: ${name}`);
-}, loaded.exports);
-const render = decisions => renderToStaticMarkup(React.createElement(loaded.exports.SignOffDecisions, { requirementId: 'r1', decisions }));
+const { loadPureTs, loadComponentTs } = require('./helpers/load-pure-ts');
+const { SignOffDecisions } = loadComponentTs('requirements/SignOffDecisions.tsx', {
+  'react/jsx-runtime': require('react/jsx-runtime'),
+  '@/lib/requirement-workspace': loadPureTs('requirement-workspace.ts'),
+});
+const render = decisions => renderToStaticMarkup(React.createElement(SignOffDecisions, { requirementId: 'r1', decisions }));
 
 test('sign-off context includes global and scoped decisions with distinct unresolved gates', () => {
   const base = { owner_role: 'Sponsor', blocking: true, status: 'open', resolution: null };
