@@ -233,3 +233,7 @@ Selected evidence passages remain in tab memory when you close a material or
 browse another initiative. Each material has its own passage; **Clear passage**
 removes it. These selections are not saved to the server or browser storage and
 are cleared by a full reload or sign-out.
+
+History shows the range of records currently displayed. **Latest changes** returns
+to the newest entries from any older page. When refreshed workspace data reveals
+a new requirement revision, the history panel starts at the latest entries.

@@ -26,7 +26,9 @@ function value(item: unknown, field: keyof BusinessRequirement): string {
 }
 
 export function RequirementHistoryPanel({ workspaceId, itemId, revision, onClose }: { workspaceId: string; itemId: string; revision: number; onClose: () => void }) {
-  const [offset, setOffset] = useState(0);
+  const [page, setPage] = useState({ revision, offset: 0 });
+  const offset = page.revision === revision ? page.offset : 0;
+  function setOffset(next: number) { setPage({ revision, offset: next }); }
   const query = useQuery({ queryKey: ["requirement-history", workspaceId, itemId, revision, offset], queryFn: () => api.getRequirementHistory(workspaceId, itemId, offset) });
   return <section className="space-y-4 rounded-xl border border-linen-400 bg-white p-5" aria-label="Requirement history">
     <div className="flex items-center justify-between"><h2 className="font-semibold">Requirement history</h2><Button variant="ghost" onClick={onClose}>Close history</Button></div>
@@ -42,6 +44,7 @@ export function RequirementHistoryPanel({ workspaceId, itemId, revision, onClose
         <div className="mt-1 grid gap-2 sm:grid-cols-2">{event.before && <div className="min-w-0 rounded bg-linen-100 p-3"><p className="text-[10px] text-ink-400">Before</p><pre className="whitespace-pre-wrap break-words font-sans text-xs leading-5">{value(event.before[key], key)}</pre></div>}<div className="min-w-0 rounded bg-moss-500/5 p-3"><p className="text-[10px] text-ink-400">After</p><pre className="whitespace-pre-wrap break-words font-sans text-xs leading-5">{value(event.after[key], key)}</pre></div></div>
       </div>)}</div>
     </details>)}
-    {query.data && query.data.total > 10 && <div className="flex items-center justify-between"><Button variant="secondary" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 10))}>Newer changes</Button><span className="text-xs">{query.data.total} changes</span><Button variant="secondary" disabled={offset + 10 >= query.data.total} onClick={() => setOffset(offset + 10)}>Older changes</Button></div>}
+    {offset > 0 && <Button size="sm" variant="ghost" onClick={() => setOffset(0)}>Latest changes</Button>}
+    {query.data && query.data.total > 10 && <div className="flex items-center justify-between"><Button variant="secondary" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 10))}>Newer changes</Button><span className="text-xs" role="status">Changes {offset + 1}–{Math.min(offset + query.data.items.length, query.data.total)} of {query.data.total}</span><Button variant="secondary" disabled={offset + 10 >= query.data.total} onClick={() => setOffset(offset + 10)}>Older changes</Button></div>}
   </section>;
 }
