@@ -2,12 +2,23 @@ import type { BusinessRequirement, RequirementDecision, RequirementWorkspaceDeta
 
 export type RequirementFilter = "all" | "questions" | "review" | "delivery" | "deferred";
 
+export function blockedRequirementIds(items: BusinessRequirement[], decisions: RequirementDecision[] = []): Set<string> {
+  const blocked = new Set<string>();
+  for (const decision of decisions) {
+    if (decision.status !== "open" || !decision.blocking) continue;
+    if (!decision.requirement_id) return new Set(items.map(item => item.id));
+    blocked.add(decision.requirement_id);
+  }
+  return blocked;
+}
+
 export function filterRequirements(items: BusinessRequirement[], search: string, filter: RequirementFilter, decisions: RequirementDecision[] = []) {
   const query = search.trim().toLocaleLowerCase();
+  const blockedIds = blockedRequirementIds(items, decisions);
   return items.filter(item => {
     const matchesText = !query || [item.reference, item.title, item.actor, item.action, item.benefit]
       .some(value => value.toLocaleLowerCase().includes(query));
-    const blocked = decisions.some(decision => decision.status === "open" && decision.blocking && (!decision.requirement_id || decision.requirement_id === item.id));
+    const blocked = blockedIds.has(item.id);
     const matchesFilter = filter === "all"
       || (filter === "deferred" && item.priority === "wont")
       || (filter === "questions" && item.priority !== "wont" && (blocked || item.quality_issues.length > 0))

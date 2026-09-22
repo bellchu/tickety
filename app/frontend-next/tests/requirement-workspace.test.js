@@ -45,3 +45,20 @@ test('deferred requirements remain discoverable without demanding review or deli
   const decisions = [{ requirement_id: 'r1', blocking: true, status: 'open', owner_role: 'Sponsor', question: 'Future question' }];
   assert.equal(workspaceFocus({ ...detail([deferred, current]), decisions }).item.id, 'r2');
 });
+
+test('blocker indexing distinguishes global, scoped, resolved and exploratory decisions', () => {
+  const items = [item, { ...item, id: 'r2' }, { ...item, id: 'r3', priority: 'wont' }];
+  const decisions = [
+    { requirement_id: 'r1', status: 'open', blocking: true },
+    { requirement_id: 'r1', status: 'open', blocking: true },
+    { requirement_id: 'r3', status: 'open', blocking: true },
+    { requirement_id: null, status: 'resolved', blocking: true },
+    { requirement_id: 'r2', status: 'open', blocking: false },
+  ];
+  assert.deepEqual([...library.blockedRequirementIds(items, decisions)], ['r1', 'r3']);
+  assert.deepEqual(filterRequirements(items, '', 'questions', decisions).map(row => row.id), ['r1']);
+  assert.deepEqual(filterRequirements(items, '', 'review', decisions).map(row => row.id), ['r2']);
+  decisions.push({ requirement_id: null, status: 'open', blocking: true });
+  assert.deepEqual([...library.blockedRequirementIds(items, decisions)], ['r1', 'r2', 'r3']);
+  assert.deepEqual(filterRequirements(items, '', 'questions', decisions).map(row => row.id), ['r1', 'r2']);
+});

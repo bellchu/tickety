@@ -17,7 +17,7 @@ import { SourceIntakeForm } from "@/components/requirements/SourceIntakeForm";
 import { Field, inputStyle, panelStyle, kinds } from "@/components/requirements/fields";
 import { DecisionLog } from "@/components/requirements/DecisionLog";
 import { RequirementCard } from "@/components/requirements/RequirementCard";
-import { filterRequirements, workspaceFocus, type RequirementFilter } from "@/lib/requirement-workspace";
+import { blockedRequirementIds, filterRequirements, workspaceFocus, type RequirementFilter } from "@/lib/requirement-workspace";
 import { api } from "@/lib/api";
 import type { BusinessRequirement, GatherSuggestions, RequirementAssistance, RequirementDraft, RequirementPriority, RequirementWorkspaceDetail } from "@/lib/requirements-types";
 import { Button, ConfirmDialog } from "@/components/ui";
@@ -201,7 +201,8 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
   if (!detail) return <PageFrame><Button variant="ghost" onClick={onBack}>Back to initiatives</Button><ErrorMessage error={query.error} />{query.isPending ? <p role="status">Loading initiative…</p> : <Button onClick={() => query.refetch()}>Retry</Button>}</PageFrame>;
   const focus = workspaceFocus(detail);
   const visibleItems = filterRequirements(detail.requirements, search, filter, detail.decisions);
-  const questions = detail.requirements.filter(item => item.priority !== "wont" && item.quality_issues.length > 0).length;
+  const blockedIds = blockedRequirementIds(detail.requirements, detail.decisions);
+  const questions = filterRequirements(detail.requirements, "", "questions", detail.decisions).length;
   const deliveryReady = detail.requirements.filter(item => item.priority !== "wont" && item.story).length;
   const sourceNames = new Map(detail.sources.map(item => [item.id, item.title]));
 
@@ -298,7 +299,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
       </form>}
 
         {visibleItems.length === 0 && <div className={`${panelStyle} py-10 text-center`}><FileText className="mx-auto text-ink-300" /><h3 className="mt-3 font-semibold">{detail.requirements.length ? "No requirements match this view" : "Give the business need a clear shape"}</h3><p className="mx-auto mt-2 max-w-md text-sm leading-6 text-ink-500">{detail.requirements.length ? "Try a different search or show all work." : "Explore your material, capture an outcome, or start with a question. Your evidence and decisions will stay connected here."}</p></div>}
-        {visibleItems.map(row => <RequirementCard key={row.id} item={row} blocked={(detail.decisions || []).some(decision => decision.status === "open" && decision.blocking && (!decision.requirement_id || decision.requirement_id === row.id))} sourceTitle={sourceNames.get(row.source_id) || "Source unavailable"} canAI={canAI} busy={Boolean(pending)} pending={pending}
+        {visibleItems.map(row => <RequirementCard key={row.id} item={row} blocked={blockedIds.has(row.id)} sourceTitle={sourceNames.get(row.source_id) || "Source unavailable"} canAI={canAI} busy={Boolean(pending)} pending={pending}
           onEdit={() => switchEditor(() => edit(row))}
           onHistory={() => setHistoryItem(row.id)}
           onReview={() => run(`review-${row.id}`, async () => { setAssistance(null); setAssistance({ item: row, result: await api.assistRequirement(id, row, "review") }); }, undefined, false)}
