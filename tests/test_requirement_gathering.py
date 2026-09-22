@@ -468,6 +468,30 @@ class RequirementGatheringTests(unittest.TestCase):
         self.assertEqual(reused.json()["id"], source)
         self.assertEqual(self.client.post(route, json={"title": "Over limit", "kind": "document", "content": "An additional new source over the limit."}).status_code, 409)
 
+    def test_history_existence_check_does_not_load_requirement_payload(self):
+        workspace = self.workspace()
+        source = self.source(workspace)
+        row = self.client.post(f"{self.path}/{workspace}/items", json=self.payload(source)).json()
+        statements = []
+        def capture(connection, cursor, statement, parameters, context, executemany):
+            if "FROM business_requirements" in statement:
+                statements.append(statement)
+        event.listen(self.engine, "before_cursor_execute", capture)
+        try:
+            response = self.client.get(f"{self.path}/{workspace}/items/{row['id']}/history")
+        finally:
+            event.remove(self.engine, "before_cursor_execute", capture)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["items"][0]["after"]["evidence_quote"], self.payload(source)["evidence_quote"])
+        self.assertEqual(len(statements), 1)
+        projection = statements[0].split("FROM")[0]
+        self.assertNotIn("evidence_quote", projection)
+        self.assertNotIn("acceptance_json", projection)
+        self.assertNotIn("story_json", projection)
+        self.assertEqual(self.client.get(f"{self.path}/{workspace}/items/missing/history").status_code, 404)
+        self.user = UserRecord(id="other", name="Other", role="agent", is_active=True)
+        self.assertEqual(self.client.get(f"{self.path}/{workspace}/items/{row['id']}/history").status_code, 404)
+
     def test_history_uses_unique_revision_order_without_temporary_sort(self):
         from datetime import datetime, timedelta
         from sqlalchemy.exc import IntegrityError

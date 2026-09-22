@@ -188,7 +188,7 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
         return row
 
     def check_source(db, workspace_id, data):
-        source = db.query(RequirementSourceRecord).filter_by(id=data.source_id, workspace_id=workspace_id).first()
+        source = db.query(RequirementSourceRecord.content).filter_by(id=data.source_id, workspace_id=workspace_id).first()
         if source is None:
             raise HTTPException(422, "Choose a source from this workspace")
         if data.evidence_quote not in source.content:
@@ -233,7 +233,7 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
         affected = db.query(BusinessRequirementRecord).filter_by(workspace_id=workspace_id)
         if data.requirement_id:
             affected = affected.filter_by(id=data.requirement_id)
-            if affected.first() is None:
+            if affected.with_entities(BusinessRequirementRecord.id).first() is None:
                 raise HTTPException(422, "Choose a requirement from this workspace")
         existing = db.query(RequirementDecisionRecord).filter_by(
             workspace_id=workspace_id, status="open", **data.model_dump(),
@@ -400,7 +400,7 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
     @router.get("/{workspace_id}/items/{requirement_id}/history")
     def requirement_history(workspace_id: str, requirement_id: str, offset: int = Query(0, ge=0), db: Session = Depends(get_db), user: UserRecord = Depends(require_user)):
         workspace(db, workspace_id, user)
-        if not db.query(BusinessRequirementRecord).filter_by(id=requirement_id, workspace_id=workspace_id).first():
+        if not db.query(BusinessRequirementRecord.id).filter_by(id=requirement_id, workspace_id=workspace_id).first():
             raise HTTPException(404, "Requirement not found")
         query = db.query(RequirementHistoryRecord).filter_by(requirement_id=requirement_id)
         total = query.count()
