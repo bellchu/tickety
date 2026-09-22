@@ -256,6 +256,36 @@ class RequirementGatheringTests(unittest.TestCase):
         response = self.client.post(base + "/items/" + row["id"] + "/validate", json={"revision": 1, "reviewer_role": "DTL", "validation_note": "Current scope is confirmed."})
         self.assertEqual(response.status_code, 200, response.text)
 
+    def test_source_previews_release_database_before_parsing(self):
+        workspace = self.workspace()
+        active = []
+        def session_override():
+            with self.sessions() as db:
+                active.append(db)
+                yield db
+        main.app.dependency_overrides[get_db] = session_override
+        for kind, module, parser in [("pdf", "requirement_pdf", "preview_pdf"), ("docx", "requirement_docx", "preview_docx"), ("email", "requirement_email", "preview_email")]:
+            with self.subTest(kind=kind):
+                def parse(_content):
+                    self.assertFalse(active[-1].in_transaction())
+                    return {"title": "Preview", "content": "Original business material", "warnings": []}
+                with patch(f"app.backend.{module}.{parser}", side_effect=parse) as mocked:
+                    response = self.client.post(f"{self.path}/{workspace}/{kind}-preview", json={"content_base64": "YQ=="})
+                    self.assertEqual(response.status_code, 200, response.text)
+                    mocked.assert_called_once_with("YQ==")
+                with patch(f"app.backend.{module}.{parser}", side_effect=ValueError("Unreadable material")):
+                    response = self.client.post(f"{self.path}/{workspace}/{kind}-preview", json={"content_base64": "YQ=="})
+                    self.assertEqual(response.status_code, 422)
+                    self.assertEqual(response.json()["detail"], "Unreadable material")
+                self.user.id = "other"
+                try:
+                    with patch(f"app.backend.{module}.{parser}") as mocked:
+                        response = self.client.post(f"{self.path}/{workspace}/{kind}-preview", json={"content_base64": "YQ=="})
+                        self.assertEqual(response.status_code, 404)
+                        mocked.assert_not_called()
+                finally:
+                    self.user.id = "owner"
+
     def test_email_preview_is_private_and_does_not_save_sources(self):
         import base64
         workspace = self.workspace()

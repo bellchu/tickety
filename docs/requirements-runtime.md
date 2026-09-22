@@ -37,8 +37,8 @@ PDF extraction uses a separate process, with at most two concurrent parsers per 
 process. A parent watchdog terminates workers after ten seconds or above 256 MiB
 resident memory. Linux additionally enforces a 256 MiB address-space limit; Linux
 and macOS apply a five-second CPU limit. macOS memory checks are sampled, so transient
-peaks can exceed the threshold before termination. PDF preview parsing releases the
-workspace database transaction before processing.
+peaks can exceed the threshold before termination. All file previews check workspace access and release the database transaction
+before parsing; file processing does not keep a database connection occupied.
 
 ## AI input and output
 
