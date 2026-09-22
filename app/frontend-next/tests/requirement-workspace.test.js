@@ -123,3 +123,17 @@ test('business-priority ordering keeps equal priorities stable and does not muta
   const active = filterRequirements(items, '', 'review');
   assert.deepEqual(library.orderRequirements(active, 'priority').map(row => row.id), ['r1', 'r4', 'r3', 'r0']);
 });
+
+
+test('suggested focus respects business priority without bypassing blocking questions or deferred scope', () => {
+  const optional = { ...item, id: 'optional', priority: 'could' };
+  const essential = { ...item, id: 'essential', priority: 'must' };
+  const deferred = { ...item, id: 'deferred', priority: 'wont' };
+  const workspace = detail([optional, essential, deferred]);
+  assert.equal(workspaceFocus(workspace).item.id, 'essential');
+  assert.deepEqual(workspace.requirements.map(row => row.id), ['optional', 'essential', 'deferred']);
+  const agreed = { ...workspace, requirements: workspace.requirements.map(row => ({ ...row, status: 'validated' })) };
+  assert.equal(workspaceFocus(agreed).item.id, 'essential');
+  assert.equal(workspaceFocus({ ...workspace, decisions: [{ requirement_id: 'optional', status: 'open', blocking: true, owner_role: 'Sponsor', question: 'Confirm ownership' }] }).action, 'decisions');
+  assert.equal(workspaceFocus(detail([{ ...essential, quality_issues: ['Confirm outcome'] }, optional])).action, 'questions');
+});

@@ -107,7 +107,9 @@ a continuous phrase. Search combines with the selected readiness or deferred-sco
 view; it does not change delivery eligibility. Choose **Business priority** to discuss
 must-have needs first, followed by should-have, could-have and deferred needs. Equal
 priorities retain their recorded order. Return to **Recorded order** at any time;
-sorting does not update priorities or saved records.
+sorting does not update priorities or saved records. Suggested focus also uses recorded
+priority when choosing among reviewable requirements or signed-off requirements
+awaiting a story. Blocking questions and unclear requirements still take precedence.
 
 While reading a saved source, select or paste an exact 10–4,000-character passage
 and choose **Draft a requirement from this passage**. The draft carries the source

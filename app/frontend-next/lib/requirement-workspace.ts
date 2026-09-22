@@ -48,7 +48,7 @@ export function filterRequirements(items: BusinessRequirement[], search: string,
 }
 
 export function workspaceFocus(detail: RequirementWorkspaceDetail) {
-  const items = detail.requirements.filter(item => item.priority !== "wont");
+  const items = orderRequirements(detail.requirements.filter(item => item.priority !== "wont"), "priority");
   const activeIds = new Set(items.map(item => item.id));
   const blockers = (detail.decisions || []).filter(item => item.status === "open" && item.blocking && (!item.requirement_id || activeIds.has(item.requirement_id)));
   if (blockers.length) return {
@@ -70,7 +70,7 @@ export function workspaceFocus(detail: RequirementWorkspaceDetail) {
   const reviewable = items.find(item => item.status === "draft");
   if (reviewable) return {
     title: "A business decision is ready",
-    reason: `${reviewable.reference} has the essential detail. Confirm it with the accountable stakeholder and record the decision.`,
+    reason: `${reviewable.reference} has the essential detail and comes next by recorded business priority. Confirm it with the accountable stakeholder and record the decision.`,
     label: "Review the requirement", action: "review" as const, item: reviewable,
   };
   const linkedSources = sourceRequirementCounts(detail.requirements);
@@ -88,7 +88,7 @@ export function workspaceFocus(detail: RequirementWorkspaceDetail) {
   const agreed = items.find(item => item.status === "validated" && !item.story);
   if (agreed) return {
     title: "Turn agreement into a delivery conversation",
-    reason: `${agreed.reference} is signed off. Create a story with the agreed scope and acceptance criteria for delivery-team review.`,
+    reason: `${agreed.reference} is signed off and comes next by recorded business priority. Create a story with the agreed scope and acceptance criteria for delivery-team review.`,
     label: "Prepare its user story", action: "story" as const, item: agreed,
   };
   return {
