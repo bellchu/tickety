@@ -39,3 +39,15 @@ test("draft exports retain open questions without fabricating sign-off", () => {
   assert.ok(brief.includes("Add the business outcome."));
   assert.ok(!brief.includes("Signed off by"));
 });
+
+test("BRD carries business decisions and reports unresolved blockers honestly", () => {
+  const brief = loaded.exports.requirementBrief({
+    workspace: { id: "w", title: "Supplier intake", objective: "Reduce delays", request_type: "enhancement" },
+    sources: [], requirements: [], decisions: [
+      { question: "Who owns delivery failures?", owner_role: "Operations lead", requirement_id: null, status: "open", blocking: true, resolution: null },
+      { question: "Which deadline was agreed?", owner_role: "Sponsor", requirement_id: null, status: "resolved", blocking: true, resolution: "Within five minutes", resolved_by: "reviewer-1", resolved_at: "2026-09-21T00:00:00Z" },
+    ],
+  });
+  for (const value of ["Who owns delivery failures?", "Operations lead", "Whole initiative", "Within five minutes", "reviewer-1", "0 user stories prepared", "1 blocking business questions remain"]) assert.ok(brief.includes(value), value);
+  assert.ok(!brief.includes("User stories are ready"));
+});

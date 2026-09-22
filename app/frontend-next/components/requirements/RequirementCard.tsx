@@ -6,10 +6,11 @@ import { formatLocalDateTime } from "@/lib/date-time";
 import type { BusinessRequirement } from "@/lib/requirements-types";
 
 export function RequirementCard({
-  item, sourceTitle, canAI, busy, pending,
+  item, sourceTitle, canAI, busy, pending, blocked,
   onEdit, onReview, onSignOff, onCreateStory, onCopyStory, onRefine,
 }: {
   item: BusinessRequirement;
+  blocked: boolean;
   sourceTitle: string;
   canAI: boolean;
   busy: boolean;
@@ -21,7 +22,7 @@ export function RequirementCard({
   onCopyStory: () => void;
   onRefine: () => void;
 }) {
-  const needsClarity = item.quality_issues.length > 0;
+  const needsClarity = blocked || item.quality_issues.length > 0;
   const status = item.story ? "Delivery ready" : item.status === "validated" ? "Agreed" : needsClarity ? "Needs clarity" : "Ready for review";
   return (
     <article className="overflow-hidden rounded-xl border border-linen-400 bg-white shadow-sm">
@@ -38,7 +39,7 @@ export function RequirementCard({
           <span>{sourceTitle}</span>
         </div>
         {needsClarity && <div className="rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
-          <p className="font-medium">Questions to resolve</p>
+          <p className="font-medium">Questions to resolve</p>{blocked && <p className="mt-1">Resolve the linked blocking questions in the decision log before sign-off.</p>}
           <ul className="mt-1 list-disc space-y-1 pl-5">{item.quality_issues.map(issue => <li key={issue}>{issue}</li>)}</ul>
         </div>}
         <details className="text-sm">

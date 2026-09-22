@@ -1,15 +1,16 @@
-import type { BusinessRequirement, RequirementWorkspaceDetail } from "./requirements-types";
+import type { BusinessRequirement, RequirementDecision, RequirementWorkspaceDetail } from "./requirements-types";
 
 export type RequirementFilter = "all" | "questions" | "review" | "delivery";
 
-export function filterRequirements(items: BusinessRequirement[], search: string, filter: RequirementFilter) {
+export function filterRequirements(items: BusinessRequirement[], search: string, filter: RequirementFilter, decisions: RequirementDecision[] = []) {
   const query = search.trim().toLocaleLowerCase();
   return items.filter(item => {
     const matchesText = !query || [item.reference, item.title, item.actor, item.action, item.benefit]
       .some(value => value.toLocaleLowerCase().includes(query));
+    const blocked = decisions.some(decision => decision.status === "open" && decision.blocking && (!decision.requirement_id || decision.requirement_id === item.id));
     const matchesFilter = filter === "all"
-      || (filter === "questions" && item.quality_issues.length > 0)
-      || (filter === "review" && item.status === "draft" && item.quality_issues.length === 0)
+      || (filter === "questions" && (blocked || item.quality_issues.length > 0))
+      || (filter === "review" && item.status === "draft" && !blocked && item.quality_issues.length === 0)
       || (filter === "delivery" && item.story !== null);
     return matchesText && matchesFilter;
   });
@@ -17,6 +18,12 @@ export function filterRequirements(items: BusinessRequirement[], search: string,
 
 export function workspaceFocus(detail: RequirementWorkspaceDetail) {
   const items = detail.requirements;
+  const blockers = (detail.decisions || []).filter(item => item.status === "open" && item.blocking);
+  if (blockers.length) return {
+    title: "A business answer is needed",
+    reason: `${blockers.length} blocking questions need a recorded decision. Start with ${blockers[0].owner_role}: ${blockers[0].question}`,
+    label: "Open the decision log", action: "decisions" as const,
+  };
   if (!detail.sources.length) return {
     title: "Ground the business need",
     reason: "Add the material behind the request so decisions can be traced to evidence.",

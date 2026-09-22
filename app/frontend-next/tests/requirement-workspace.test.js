@@ -31,3 +31,11 @@ test('search combines with readiness filters without treating agreement as a sto
   assert.deepEqual(filterRequirements(items, '', 'delivery').map(x => x.id), ['r4']);
   assert.equal(filterRequirements(items, 'missing', 'all').length, 0);
 });
+test('business blockers take precedence and affect only their scope in filtered views', () => {
+  const decisions = [{ requirement_id: 'r1', blocking: true, status: 'open', owner_role: 'Sponsor', question: 'Who owns the exception path?' }];
+  assert.equal(workspaceFocus({ ...detail([item]), decisions }).action, 'decisions');
+  assert.equal(filterRequirements([item], '', 'review', decisions).length, 0);
+  assert.equal(filterRequirements([item], '', 'questions', decisions).length, 1);
+  assert.equal(filterRequirements([{ ...item, id: 'r2' }], '', 'review', decisions).length, 1);
+  assert.equal(workspaceFocus({ ...detail([item]), decisions: [{ ...decisions[0], status: 'resolved' }] }).action, 'review');
+});

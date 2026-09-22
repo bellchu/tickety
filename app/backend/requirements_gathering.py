@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session, defer
 
 from .database import (
     get_db, UserRecord, RequirementWorkspaceRecord, RequirementSourceRecord,
-    BusinessRequirementRecord,
+    BusinessRequirementRecord, RequirementDecisionRecord,
 )
 
 Title = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
@@ -69,6 +69,17 @@ class ValidationInput(RevisionInput):
     validation_note: Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=4000)]
 
 
+class DecisionInput(InputModel):
+    requirement_id: Annotated[str, StringConstraints(min_length=1, max_length=36)] | None = None
+    question: Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=4000)]
+    owner_role: Title
+    blocking: bool = Field(default=True, strict=True)
+
+
+class DecisionResolution(InputModel):
+    resolution: Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=4000)]
+
+
 class AssistanceInput(RevisionInput):
     mode: Literal["review", "story"]
 
@@ -87,6 +98,13 @@ def quality_issues(row: BusinessRequirementRecord) -> list[str]:
     if len({item.casefold() for item in criteria}) != len(criteria):
         issues.append("Remove duplicate acceptance criteria.")
     return issues
+
+
+def invalidate_agreement(row):
+    row.status, row.validated_by, row.validated_at, row.story_json = "draft", None, None, None
+    row.reviewer_role, row.validation_note = None, None
+    row.revision += 1
+    row.updated_at = datetime.utcnow()
 
 
 def requirement_out(row):
@@ -153,7 +171,47 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
         row = workspace(db, workspace_id, user)
         sources = db.query(RequirementSourceRecord).options(defer(RequirementSourceRecord.content)).filter_by(workspace_id=row.id).order_by(RequirementSourceRecord.created_at, RequirementSourceRecord.id).all()
         requirements = db.query(BusinessRequirementRecord).filter_by(workspace_id=row.id).order_by(BusinessRequirementRecord.created_at, BusinessRequirementRecord.id).all()
-        return {"workspace": row, "sources": [{field: getattr(source, field) for field in ("id", "title", "kind", "content_sha256", "created_at")} for source in sources], "requirements": [requirement_out(item) for item in requirements]}
+        return {"workspace": row, "sources": [{field: getattr(source, field) for field in ("id", "title", "kind", "content_sha256", "created_at")} for source in sources], "requirements": [requirement_out(item) for item in requirements], "decisions": db.query(RequirementDecisionRecord).filter_by(workspace_id=row.id).order_by(RequirementDecisionRecord.created_at, RequirementDecisionRecord.id).all()}
+
+    def unresolved_decisions(db, workspace_id, requirement_id):
+        return db.query(RequirementDecisionRecord).filter(
+            RequirementDecisionRecord.workspace_id == workspace_id,
+            RequirementDecisionRecord.status == "open",
+            RequirementDecisionRecord.blocking.is_(True),
+            (RequirementDecisionRecord.requirement_id.is_(None)) | (RequirementDecisionRecord.requirement_id == requirement_id),
+        ).count()
+
+    @router.post("/{workspace_id}/decisions", status_code=201)
+    def add_decision(workspace_id: str, data: DecisionInput, db: Session = Depends(get_db), user: UserRecord = Depends(require_user)):
+        workspace(db, workspace_id, user, lock=True)
+        affected = db.query(BusinessRequirementRecord).filter_by(workspace_id=workspace_id)
+        if data.requirement_id:
+            affected = affected.filter_by(id=data.requirement_id)
+            if affected.first() is None:
+                raise HTTPException(422, "Choose a requirement from this workspace")
+        if db.query(RequirementDecisionRecord).filter_by(workspace_id=workspace_id).count() >= 200:
+            raise HTTPException(409, "This workspace already has 200 decision records")
+        row = RequirementDecisionRecord(id=str(uuid4()), workspace_id=workspace_id, created_by=user.id, **data.model_dump())
+        db.add(row)
+        if data.blocking:
+            for item in affected.with_for_update().all():
+                invalidate_agreement(item)
+        db.commit()
+        db.refresh(row)
+        return row
+
+    @router.post("/{workspace_id}/decisions/{decision_id}/resolve")
+    def resolve_decision(workspace_id: str, decision_id: str, data: DecisionResolution, db: Session = Depends(get_db), user: UserRecord = Depends(require_user)):
+        workspace(db, workspace_id, user, lock=True)
+        row = db.query(RequirementDecisionRecord).filter_by(workspace_id=workspace_id, id=decision_id).with_for_update().first()
+        if row is None:
+            raise HTTPException(404, "Decision record not found")
+        if row.status != "open":
+            raise HTTPException(409, "This decision has already been recorded. Raise a new question if circumstances change.")
+        row.status, row.resolution, row.resolved_by, row.resolved_at = "resolved", data.resolution, user.id, datetime.utcnow()
+        db.commit()
+        db.refresh(row)
+        return row
 
     @router.post("/{workspace_id}/sources", status_code=201)
     def add_source(workspace_id: str, data: SourceCreate, db: Session = Depends(get_db), user: UserRecord = Depends(require_user)):
@@ -195,10 +253,7 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
         for key, value in data.model_dump(exclude={"acceptance_criteria", "revision"}).items():
             setattr(row, key, value)
         row.acceptance_json = json.dumps(data.acceptance_criteria)
-        row.status, row.validated_by, row.validated_at, row.story_json = "draft", None, None, None
-        row.reviewer_role, row.validation_note = None, None
-        row.revision += 1
-        row.updated_at = datetime.utcnow()
+        invalidate_agreement(row)
         db.commit()
         return requirement_out(row)
 
@@ -207,6 +262,8 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
         row = requirement(db, workspace_id, requirement_id, user, data.revision)
         if row.status != "draft":
             raise HTTPException(409, "This requirement is already signed off. Edit it to start a new review.")
+        if unresolved_decisions(db, workspace_id, row.id):
+            raise HTTPException(409, "Resolve the blocking business questions before sign-off")
         issues = quality_issues(row)
         if issues:
             raise HTTPException(422, " ".join(issues))
@@ -222,6 +279,8 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
         row = requirement(db, workspace_id, requirement_id, user, data.revision)
         if row.status != "validated" or not row.validated_at:
             raise HTTPException(409, "Validate the requirement before creating its user story")
+        if unresolved_decisions(db, workspace_id, row.id):
+            raise HTTPException(409, "Resolve the blocking business questions before preparing delivery")
         if row.story_json is None:
             row.story_json = json.dumps({
                 "title": row.title,

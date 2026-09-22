@@ -1,5 +1,5 @@
 import { QueryClient } from "@tanstack/react-query";
-import type { BusinessRequirement, GatherSuggestions, RequirementAssistance, RequirementDraft, RequirementSource, RequirementWorkspace, RequirementWorkspaceDetail, SourceKind } from "./requirements-types";
+import type { BusinessRequirement, RequirementDecision, GatherSuggestions, RequirementAssistance, RequirementDraft, RequirementSource, RequirementWorkspace, RequirementWorkspaceDetail, SourceKind } from "./requirements-types";
 
 export const queryClient = new QueryClient({
   defaultOptions: {
@@ -173,6 +173,8 @@ export const api = {
   validateBusinessRequirement: (workspace: string, item: BusinessRequirement, review: { reviewer_role: string; validation_note: string }) => fetchAPI<BusinessRequirement>(`/requirements/${encodeURIComponent(workspace)}/items/${encodeURIComponent(item.id)}/validate`, { method: "POST", body: JSON.stringify({ revision: item.revision, ...review }) }),
   createRequirementStory: (workspace: string, item: BusinessRequirement) => fetchAPI<BusinessRequirement>(`/requirements/${encodeURIComponent(workspace)}/items/${encodeURIComponent(item.id)}/story`, { method: "POST", body: JSON.stringify({ revision: item.revision }) }),
   gatherRequirements: (workspace: string, source: string) => fetchAPI<GatherSuggestions>(`/requirements/${encodeURIComponent(workspace)}/sources/${encodeURIComponent(source)}/gather`, { method: "POST" }),
+  addRequirementDecision: (workspace: string, data: { question: string; owner_role: string; blocking: boolean; requirement_id: string | null }) => fetchAPI<RequirementDecision>(`/requirements/${encodeURIComponent(workspace)}/decisions`, { method: "POST", body: JSON.stringify(data) }),
+  resolveRequirementDecision: (workspace: string, decision: string, resolution: string) => fetchAPI<RequirementDecision>(`/requirements/${encodeURIComponent(workspace)}/decisions/${encodeURIComponent(decision)}/resolve`, { method: "POST", body: JSON.stringify({ resolution }) }),
   assistRequirement: (workspace: string, item: BusinessRequirement, mode: "review" | "story") => fetchAPI<RequirementAssistance>(`/requirements/${encodeURIComponent(workspace)}/items/${encodeURIComponent(item.id)}/assist`, { method: "POST", body: JSON.stringify({ revision: item.revision, mode }) }),
   getHealth: () => fetchAPI<{ status: string; mode: "demo" | "production" }>("/health"),
   getPortalConfig: () => fetchAPI<{ mode: "demo" | "production"; support_url: string | null }>("/portal/config"),

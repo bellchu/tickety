@@ -131,6 +131,56 @@ class RequirementGatheringTests(unittest.TestCase):
         workspace = self.workspace()
         self.assertEqual(self.client.post(f"{self.path}/{workspace}/sources", json={"title": "Too big", "kind": "document", "content": "x" * 100001}).status_code, 422)
 
+    def test_blocking_question_invalidates_only_affected_agreement_and_needs_new_signoff(self):
+        workspace = self.workspace()
+        source = self.source(workspace)
+        base = f"{self.path}/{workspace}"
+        item = self.client.post(base + "/items", json=self.payload(source)).json()
+        other = self.client.post(base + "/items", json=self.payload(source)).json()
+        route = base + "/items/" + item["id"]
+        signed = self.client.post(route + "/validate", json={"revision": 1, "reviewer_role": "Product Owner", "validation_note": "Confirmed the business need."}).json()
+        self.client.post(route + "/story", json={"revision": signed["revision"]})
+        response = self.client.post(base + "/decisions", json={"requirement_id": item["id"], "question": "Who handles acknowledgement failures?", "owner_role": "Operations lead"})
+        self.assertEqual(response.status_code, 201, response.text)
+        decision = response.json()
+        detail = self.client.get(base).json()
+        changed = next(row for row in detail["requirements"] if row["id"] == item["id"])
+        unchanged = next(row for row in detail["requirements"] if row["id"] == other["id"])
+        self.assertEqual(unchanged["revision"], 1)
+        self.assertEqual(changed["status"], "draft")
+        self.assertIsNone(changed["story"])
+        review = {"revision": changed["revision"], "reviewer_role": "Product Owner", "validation_note": "Confirmed the business need."}
+        self.assertEqual(self.client.post(route + "/validate", json=review).status_code, 409)
+        resolved = self.client.post(base + "/decisions/" + decision["id"] + "/resolve", json={"resolution": "Operations lead monitors failures and retries within five minutes."})
+        self.assertEqual(resolved.status_code, 200, resolved.text)
+        self.assertEqual(resolved.json()["resolved_by"], "owner")
+        self.assertIsNotNone(resolved.json()["resolved_at"])
+        self.assertEqual(self.client.post(route + "/story", json={"revision": changed["revision"]}).status_code, 409)
+        self.assertEqual(self.client.post(route + "/validate", json=review).status_code, 200)
+        self.assertEqual(self.client.post(base + "/decisions/" + decision["id"] + "/resolve", json={"resolution": "Attempt to replace the signed decision."}).status_code, 409)
+
+    def test_workspace_blocker_applies_to_future_requirements_and_private_decisions(self):
+        workspace = self.workspace()
+        source = self.source(workspace)
+        base = f"{self.path}/{workspace}"
+        decision = self.client.post(base + "/decisions", json={"question": "Which business unit owns this process?", "owner_role": "Sponsor"}).json()
+        row = self.client.post(base + "/items", json=self.payload(source)).json()
+        self.assertEqual(self.client.post(base + "/items/" + row["id"] + "/validate", json={"revision": 1, "reviewer_role": "DTL", "validation_note": "Ready for delivery review."}).status_code, 409)
+        other = self.workspace()
+        self.assertEqual(self.client.post(f"{self.path}/{other}/decisions", json={"requirement_id": row["id"], "question": "Which business unit owns this process?", "owner_role": "Sponsor"}).status_code, 422)
+        self.user.id = "other"
+        self.assertEqual(self.client.post(base + "/decisions/" + decision["id"] + "/resolve", json={"resolution": "I cannot access this workspace."}).status_code, 404)
+
+    def test_nonblocking_question_preserves_agreement(self):
+        workspace = self.workspace()
+        source = self.source(workspace)
+        base = f"{self.path}/{workspace}"
+        row = self.client.post(base + "/items", json=self.payload(source)).json()
+        self.client.post(base + "/decisions", json={"requirement_id": row["id"], "question": "Could a future phase support extra languages?", "owner_role": "Product Owner", "blocking": False})
+        self.assertEqual(self.client.get(base).json()["requirements"][0]["revision"], 1)
+        response = self.client.post(base + "/items/" + row["id"] + "/validate", json={"revision": 1, "reviewer_role": "DTL", "validation_note": "Current scope is confirmed."})
+        self.assertEqual(response.status_code, 200, response.text)
+
     def ai_manager(self, result):
         return SimpleNamespace(is_mock=False, prompt_char_limit=4000, model_name="test/configured-provider", analyze=AsyncMock(return_value=result))
 

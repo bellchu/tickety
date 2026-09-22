@@ -4,6 +4,7 @@ import { useState, type FormEvent, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ClipboardList, Download, FileText, Plus, Sparkles, ArrowUpRight } from "lucide-react";
 import { requirementBrief } from "@/lib/requirement-export";
+import { DecisionLog } from "@/components/requirements/DecisionLog";
 import { RequirementCard } from "@/components/requirements/RequirementCard";
 import { filterRequirements, workspaceFocus, type RequirementFilter } from "@/lib/requirement-workspace";
 import { api } from "@/lib/api";
@@ -90,6 +91,8 @@ export default function RequirementsPage() {
 
 function Workspace({ id, canAI, onBack }: { id: string; canAI: boolean; onBack: () => void }) {
   const query = useQuery({ queryKey: ["requirement-workspace", id], queryFn: () => api.getRequirementWorkspace(id) });
+  const [decisionsOpen, setDecisionsOpen] = useState(false);
+  const [questionSeed, setQuestionSeed] = useState<{ question: string; requirementId: string | null } | null>(null);
   const [sourceFormOpen, setSourceFormOpen] = useState(false);
   const [sourceViewing, setSourceViewing] = useState("");
   const [filter, setFilter] = useState<RequirementFilter>("all");
@@ -145,13 +148,14 @@ function Workspace({ id, canAI, onBack }: { id: string; canAI: boolean; onBack: 
 
   if (!detail) return <PageFrame><Button variant="ghost" onClick={onBack}>Back to initiatives</Button><ErrorMessage error={query.error} />{query.isPending ? <p role="status">Loading initiative…</p> : <Button onClick={() => query.refetch()}>Retry</Button>}</PageFrame>;
   const focus = workspaceFocus(detail);
-  const visibleItems = filterRequirements(detail.requirements, search, filter);
+  const visibleItems = filterRequirements(detail.requirements, search, filter, detail.decisions);
   const questions = detail.requirements.filter(item => item.quality_issues.length > 0).length;
   const deliveryReady = detail.requirements.filter(item => item.story).length;
   const sourceNames = new Map(detail.sources.map(item => [item.id, item.title]));
 
   function followFocus() {
-    if (focus.action === "source") setSourceFormOpen(true);
+    if (focus.action === "decisions") setDecisionsOpen(true);
+    else if (focus.action === "source") setSourceFormOpen(true);
     else if (focus.action === "questions") { setFilter("questions"); setSearch(""); }
     else if (focus.action === "review") { setReviewing(focus.item); setShowForm(false); setReviewNote(""); }
     else if (focus.action === "gather") setSourceViewing(focus.sourceId);
@@ -168,6 +172,7 @@ function Workspace({ id, canAI, onBack }: { id: string; canAI: boolean; onBack: 
       <div className="max-w-2xl"><p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-cyan-200">Worth your attention</p><h2 className="mt-2 text-lg font-medium">{focus.title}</h2><p className="mt-2 text-sm leading-6 text-slate-200">{focus.reason}</p></div>
       <Button className="shrink-0" variant="secondary" trailingIcon={<ArrowUpRight size={15} />} disabled={Boolean(pending)} onClick={followFocus}>{focus.label}</Button>
     </section>
+    <DecisionLog workspaceId={id} requirements={detail.requirements} decisions={detail.decisions || []} open={decisionsOpen} onToggle={() => setDecisionsOpen(!decisionsOpen)} seed={questionSeed} onSeedUsed={() => setQuestionSeed(null)} onSaved={() => query.refetch()} />
     <ErrorMessage error={error || query.error} />{notice && <p role="status" className="text-sm text-moss-700">{notice}</p>}
     <div className="grid items-start gap-6 xl:grid-cols-[300px_minmax(0,1fr)]">
       <aside className="min-w-0 space-y-4" aria-label="Business context">
@@ -203,14 +208,14 @@ function Workspace({ id, canAI, onBack }: { id: string; canAI: boolean; onBack: 
       {gathered.source_truncated && <p className="text-sm text-amber-800">Only part of this source fit in the analysis. Review the full source for missing requirements.</p>}
       {gathered.discarded_candidates > 0 && <p className="text-sm text-amber-800">{gathered.discarded_candidates} suggestions were excluded because their evidence could not be matched to the source.</p>}
       {gathered.candidates.length === 0 && <p className="text-sm">No verifiable requirements were found. You can gather a requirement manually.</p>}
-      {gathered.questions.length > 0 && <div><h3 className="text-sm font-semibold">Questions for stakeholders</h3><ul className="list-disc pl-5 text-sm">{gathered.questions.map((question, index) => <li key={index}>{question}</li>)}</ul></div>}
+      {gathered.questions.length > 0 && <div><h3 className="text-sm font-semibold">Questions for stakeholders</h3><ul className="list-disc pl-5 text-sm">{gathered.questions.map((question, index) => <li key={index}>{question}<Button size="sm" variant="ghost" onClick={() => { setQuestionSeed({ question, requirementId: null }); setDecisionsOpen(true); }}>Track question</Button></li>)}</ul></div>}
       {gathered.candidates.map((candidate, index) => <article key={index} className="space-y-3 rounded-lg border border-linen-400 p-4"><h3 className="font-semibold">{candidate.title}</h3><p className="text-sm text-ink-500">{candidate.action}</p><blockquote className="border-l-2 border-clay-300 pl-3 text-sm">{candidate.evidence_quote}</blockquote>{candidate.assumptions.length > 0 && <div className="text-sm text-amber-800"><strong>Assumptions to confirm</strong><ul className="list-disc pl-5">{candidate.assumptions.map((assumption, index) => <li key={index}>{assumption}</li>)}</ul></div>}<Button variant="secondary" disabled={Boolean(pending)} onClick={() => { edit(); const { assumptions: _assumptions, ...fields } = candidate; setDraft({ ...fields, source_id: gathered.source_id }); setCriteria(candidate.acceptance_criteria.join("\n")); setDraftAssumptions(candidate.assumptions); setGathered(null); }}>Review draft</Button></article>)}
     </section>}
     {assistance && <section className={`${panelStyle} space-y-4`} aria-label="AI requirement review">
       <div className="flex items-center justify-between gap-3"><h2 className="font-semibold">AI {assistance.result.mode === "review" ? "review" : "story refinement"} · {assistance.item.reference}</h2><Button variant="ghost" onClick={() => setAssistance(null)}>Dismiss review</Button></div>
       <p className="text-xs text-ink-400">{assistance.result.model} · Based on revision {assistance.result.base_revision}</p>
       {assistance.result.input_truncated && <p className="text-sm text-amber-800">This review covers only part of the requirement. Check the complete requirement before making a decision.</p>}
-      {assistance.result.suggestions.findings?.map((finding, index) => <div key={index} className="rounded-lg bg-linen-100 p-3 text-sm"><strong>{finding.category.replaceAll("_", " ")}</strong><p>{finding.finding}</p><p className="mt-2 text-ink-500">{finding.question}</p></div>)}
+      {assistance.result.suggestions.findings?.map((finding, index) => <div key={index} className="rounded-lg bg-linen-100 p-3 text-sm"><strong>{finding.category.replaceAll("_", " ")}</strong><p>{finding.finding}</p><p className="mt-2 text-ink-500">{finding.question}</p><Button size="sm" variant="ghost" onClick={() => { setQuestionSeed({ question: finding.question, requirementId: assistance.item.id }); setDecisionsOpen(true); }}>Track question</Button></div>)}
       {assistance.result.mode === "review" && assistance.result.suggestions.findings?.length === 0 && <p className="text-sm">No findings were suggested. Human review and sign-off are still required.</p>}
       {assistance.result.suggestions.questions?.map((question, index) => <p key={index} className="text-sm">{question}</p>)}
       {assistance.result.mode === "story" && <><p className="text-sm">As a {assistance.result.suggestions.actor}, I want to {assistance.result.suggestions.action}, so that {assistance.result.suggestions.benefit}.</p><ul className="list-disc pl-5 text-sm">{assistance.result.suggestions.acceptance_criteria?.map((criterion, index) => <li key={index}>{criterion}</li>)}</ul>{Boolean(assistance.result.suggestions.assumptions?.length) && <div className="text-sm text-amber-800"><strong>Assumptions to confirm</strong><ul className="list-disc pl-5">{assistance.result.suggestions.assumptions?.map((assumption, index) => <li key={index}>{assumption}</li>)}</ul></div>}<p className="text-xs text-ink-500">Saving this refinement creates a revised draft and requires a new sign-off.</p><Button variant="secondary" disabled={Boolean(pending)} onClick={() => { const { item, result } = assistance; edit(item); setDraft({ source_id: item.source_id, title: item.title, evidence_quote: item.evidence_quote, priority: item.priority, actor: result.suggestions.actor || item.actor, action: result.suggestions.action || item.action, benefit: result.suggestions.benefit || item.benefit, acceptance_criteria: result.suggestions.acceptance_criteria || item.acceptance_criteria }); setCriteria((result.suggestions.acceptance_criteria || item.acceptance_criteria).join("\n")); setDraftAssumptions(result.suggestions.assumptions || []); setAssistance(null); }}>Review as a new revision</Button></>}
@@ -224,7 +229,7 @@ function Workspace({ id, canAI, onBack }: { id: string; canAI: boolean; onBack: 
       </form>}
       {showForm && <form className={`${panelStyle} space-y-4`} onSubmit={event => { event.preventDefault(); void run("requirement", () => api.saveBusinessRequirement(id, { ...draft, acceptance_criteria: criteria.split("\n").map(line => line.trim()).filter(Boolean) }, editing), () => { setShowForm(false); setEditing(undefined); }); }}>
         <h2 className="text-lg font-semibold">{editing ? "Edit requirement" : "Gather a requirement"}</h2>
-        {draftAssumptions.length > 0 && <div className="rounded-lg bg-amber-50 p-3 text-sm text-amber-800"><strong>Resolve these assumptions while reviewing</strong><ul className="list-disc pl-5">{draftAssumptions.map((item, index) => <li key={index}>{item}</li>)}</ul></div>}
+        {draftAssumptions.length > 0 && <div className="rounded-lg bg-amber-50 p-3 text-sm text-amber-800"><strong>Resolve these assumptions while reviewing</strong><ul className="list-disc pl-5">{draftAssumptions.map((item, index) => <li key={index}>{item}<Button size="sm" variant="ghost" onClick={() => { setQuestionSeed({ question: item, requirementId: editing?.id || null }); setDecisionsOpen(true); }}>Track assumption</Button></li>)}</ul></div>}
         {editing?.status === "validated" && <p className="text-sm text-amber-700">Saving changes resets validation and removes the existing user story. Review the updated requirement again.</p>}
         <Field label="Evidence source"><select required value={draft.source_id} onChange={event => setDraft({ ...draft, source_id: event.target.value, evidence_quote: "" })} className={inputStyle}>{detail.sources.map(item => <option key={item.id} value={item.id}>{item.title}</option>)}</select></Field>
         <ErrorMessage error={source.error} />{source.isPending && <p role="status">Loading source…</p>}
@@ -239,7 +244,7 @@ function Workspace({ id, canAI, onBack }: { id: string; canAI: boolean; onBack: 
       </form>}
 
         {visibleItems.length === 0 && <div className={`${panelStyle} py-10 text-center`}><FileText className="mx-auto text-ink-300" /><h3 className="mt-3 font-semibold">{detail.requirements.length ? "No requirements match this view" : "Give the business need a clear shape"}</h3><p className="mx-auto mt-2 max-w-md text-sm leading-6 text-ink-500">{detail.requirements.length ? "Try a different search or show all work." : "Explore your material, capture an outcome, or start with a question. Your evidence and decisions will stay connected here."}</p></div>}
-        {visibleItems.map(row => <RequirementCard key={row.id} item={row} sourceTitle={sourceNames.get(row.source_id) || "Source unavailable"} canAI={canAI} busy={Boolean(pending)} pending={pending}
+        {visibleItems.map(row => <RequirementCard key={row.id} item={row} blocked={(detail.decisions || []).some(decision => decision.status === "open" && decision.blocking && (!decision.requirement_id || decision.requirement_id === row.id))} sourceTitle={sourceNames.get(row.source_id) || "Source unavailable"} canAI={canAI} busy={Boolean(pending)} pending={pending}
           onEdit={() => edit(row)}
           onReview={() => run(`review-${row.id}`, async () => { setAssistance(null); setAssistance({ item: row, result: await api.assistRequirement(id, row, "review") }); }, undefined, false)}
           onSignOff={() => { setReviewing(row); setShowForm(false); setReviewNote(""); }}

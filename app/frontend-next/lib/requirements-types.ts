@@ -59,6 +59,7 @@ export interface RequirementWorkspaceDetail {
   workspace: RequirementWorkspace;
   sources: RequirementSource[];
   requirements: BusinessRequirement[];
+  decisions: RequirementDecision[];
 }
 
 export interface RequirementCandidate extends Omit<RequirementDraft, "source_id"> {
@@ -88,4 +89,18 @@ export interface RequirementAssistance {
     acceptance_criteria?: string[];
     assumptions?: string[];
   };
+}
+
+export interface RequirementDecision {
+  id: string;
+  requirement_id: string | null;
+  question: string;
+  owner_role: string;
+  blocking: boolean;
+  status: "open" | "resolved";
+  resolution: string | null;
+  created_by: string | null;
+  resolved_by: string | null;
+  created_at: string;
+  resolved_at: string | null;
 }

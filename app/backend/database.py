@@ -1583,6 +1583,23 @@ class BusinessRequirementRecord(Base):
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
+class RequirementDecisionRecord(Base):
+    __tablename__ = "requirement_decisions"
+
+    id = Column(String(36), primary_key=True)
+    workspace_id = Column(String(36), ForeignKey("requirement_workspaces.id"), nullable=False, index=True)
+    requirement_id = Column(String(36), ForeignKey("business_requirements.id"))
+    question = Column(Text, nullable=False)
+    owner_role = Column(String(200), nullable=False)
+    blocking = Column(Boolean, nullable=False, default=True)
+    status = Column(String(20), nullable=False, default="open")
+    resolution = Column(Text)
+    created_by = Column(String, ForeignKey("users.id", ondelete="SET NULL"))
+    resolved_by = Column(String, ForeignKey("users.id", ondelete="SET NULL"))
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    resolved_at = Column(DateTime)
+
+
 class ProjectRecord(Base):
     """Organisational workspaces — group tickets/assets/users into projects."""
     __tablename__ = "projects"

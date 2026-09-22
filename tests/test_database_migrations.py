@@ -47,7 +47,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             for table_name, table in Base.metadata.tables.items():
                 actual_columns = {column["name"] for column in inspector.get_columns(table_name)}
                 self.assertEqual(actual_columns, set(table.columns.keys()), table_name)
-            self.assertEqual(self._current_revision(engine), "0041")
+            self.assertEqual(self._current_revision(engine), "0042")
             self.assertIn("external_users", inspector.get_table_names())
             self.assertIn("external_conversations", inspector.get_table_names())
             self.assertIn("external_activity_ledger", inspector.get_table_names())
@@ -220,7 +220,7 @@ class DatabaseMigrationTests(unittest.TestCase):
                     index["name"] for index in inspector.get_indexes(table_name)
                 }
                 self.assertTrue(names.issubset(actual), table_name)
-            self.assertEqual(self._current_revision(engine), "0041")
+            self.assertEqual(self._current_revision(engine), "0042")
         finally:
             engine.dispose()
 
@@ -253,7 +253,7 @@ class DatabaseMigrationTests(unittest.TestCase):
                 state["provider_timestamp_repair_workspace_index"], 0
             )
             self.assertEqual(state["provider_timestamp_repair_processed"], 0)
-            self.assertEqual(self._current_revision(engine), "0041")
+            self.assertEqual(self._current_revision(engine), "0042")
         finally:
             engine.dispose()
 
@@ -284,7 +284,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertEqual(state["background_history_page"], 17)
             self.assertTrue(state["background_history_complete"])
             self.assertEqual(state["background_history_processed"], 1_700)
-            self.assertEqual(self._current_revision(engine), "0041")
+            self.assertEqual(self._current_revision(engine), "0042")
         finally:
             engine.dispose()
 
@@ -335,7 +335,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertEqual(route["ai_affected_service"], "customer portal")
             self.assertEqual(route["ai_failure_domain"], "web-layer failure")
             self.assertEqual(route["ai_routing_reason"], "Observed portal error")
-            self.assertEqual(self._current_revision(engine), "0041")
+            self.assertEqual(self._current_revision(engine), "0042")
         finally:
             engine.dispose()
 
@@ -429,7 +429,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertEqual(requester_identity["link_method"], "source")
             self.assertEqual(membership, "SERVICE_DESK")
             self.assertEqual(user_count, 1)
-            self.assertEqual(self._current_revision(engine), "0041")
+            self.assertEqual(self._current_revision(engine), "0042")
         finally:
             engine.dispose()
 
@@ -493,7 +493,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertEqual(survey["delivery_status"], "legacy")
             self.assertIsNone(survey["response_token_hash"])
             self.assertEqual(response_count, 1)
-            self.assertEqual(self._current_revision(engine), "0041")
+            self.assertEqual(self._current_revision(engine), "0042")
         finally:
             engine.dispose()
 
@@ -623,7 +623,7 @@ class DatabaseMigrationTests(unittest.TestCase):
                 scopes,
                 "freshservice.tickets.view freshservice.agents.manage",
             )
-            self.assertEqual(self._current_revision(engine), "0041")
+            self.assertEqual(self._current_revision(engine), "0042")
         finally:
             engine.dispose()
 
@@ -682,7 +682,7 @@ class DatabaseMigrationTests(unittest.TestCase):
                     "DELETE FROM ticket_priority_config WHERE name = 'p1'"
                 ))
             command.upgrade(self.config, "head")
-            self.assertEqual(self._current_revision(engine), "0041")
+            self.assertEqual(self._current_revision(engine), "0042")
         finally:
             engine.dispose()
 
@@ -790,7 +790,7 @@ class DatabaseMigrationTests(unittest.TestCase):
                     {"id": "second", "email": "other@example.com", "email_key": "other@example.com"},
                 ],
             )
-            self.assertEqual(self._current_revision(engine), "0041")
+            self.assertEqual(self._current_revision(engine), "0042")
         finally:
             engine.dispose()
 
@@ -818,7 +818,7 @@ class DatabaseMigrationTests(unittest.TestCase):
                     {"id": "legacy-problem", "status": "Under Investigation"},
                 ],
             )
-            self.assertEqual(self._current_revision(engine), "0041")
+            self.assertEqual(self._current_revision(engine), "0042")
         finally:
             engine.dispose()
 
@@ -850,7 +850,7 @@ class DatabaseMigrationTests(unittest.TestCase):
                     {"id": "repair", "status": "Broken"},
                 ],
             )
-            self.assertEqual(self._current_revision(engine), "0041")
+            self.assertEqual(self._current_revision(engine), "0042")
         finally:
             engine.dispose()
 
@@ -923,7 +923,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             }
             self.assertFalse(status_column["nullable"])
             self.assertIn("ck_changes_status_completion", check_names)
-            self.assertEqual(self._current_revision(engine), "0041")
+            self.assertEqual(self._current_revision(engine), "0042")
 
             for values in (
                 "('invalid-null', 'Null status', NULL, NULL)",
@@ -1026,7 +1026,7 @@ class DatabaseMigrationTests(unittest.TestCase):
                 index["name"] for index in inspect(engine).get_indexes("tickets")
             }
             self.assertIn("ix_tickets_escalation_risk_backfill_pending", indexes)
-            self.assertEqual(self._current_revision(engine), "0041")
+            self.assertEqual(self._current_revision(engine), "0042")
         finally:
             engine.dispose()
 
@@ -1073,7 +1073,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertEqual(aligned, 1)
             self.assertIsNotNone(manual["due_by"])
             self.assertIsNotNone(manual["resolved_at"])
-            self.assertEqual(self._current_revision(engine), "0041")
+            self.assertEqual(self._current_revision(engine), "0042")
         finally:
             engine.dispose()
 
@@ -1114,7 +1114,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("ix_surveys_response_token_hash", survey_indexes)
             self.assertIn("fk_surveys_sent_by_users", survey_foreign_keys)
             self.assertIn("uix_survey_response_once", response_constraints)
-            self.assertEqual(self._current_revision(engine), "0041")
+            self.assertEqual(self._current_revision(engine), "0042")
         finally:
             engine.dispose()
 
@@ -1183,7 +1183,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIsNone(approval["approver_id"])
             self.assertEqual(approval["decision"], "approved")
             self.assertEqual(approval["comment"], "Historical decision")
-            self.assertEqual(self._current_revision(engine), "0041")
+            self.assertEqual(self._current_revision(engine), "0042")
         finally:
             engine.dispose()
 
@@ -1272,14 +1272,14 @@ class DatabaseMigrationTests(unittest.TestCase):
             engine.dispose()
 
     def test_demo_schema_guard_rejects_invalid_revision_sets(self):
-        for current_heads in (set(), {"unknown"}, {"0041", "unexpected"}):
+        for current_heads in (set(), {"unknown"}, {"0042", "unexpected"}):
             with self.subTest(current_heads=current_heads):
                 with (
                     patch.object(database, "_sa_inspect") as inspect_schema,
                     patch.object(
                         database,
                         "_database_revision_sets",
-                        return_value=({"0041"}, current_heads),
+                        return_value=({"0042"}, current_heads),
                     ),
                 ):
                     inspect_schema.return_value.has_table.return_value = True

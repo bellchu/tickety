@@ -22,6 +22,15 @@ export function requirementBrief(detail: RequirementWorkspaceDetail): string {
     if (row.story) lines.push("", `#### ${row.story.reference}: ${row.story.title}`, row.story.statement,
       `Traces to ${row.story.requirement_reference}, validated revision ${row.story.validated_revision}.`);
   }
-  lines.push("", "## Development handoff", "User stories are ready for delivery-team review. No external development tickets have been created.", "");
+  lines.push("", "## Questions and business decisions");
+  for (const item of detail.decisions || []) {
+    const scope = item.requirement_id ? requirements.find(row => row.id === item.requirement_id)?.reference || item.requirement_id : "Whole initiative";
+    lines.push("", `### ${item.question}`, `Scope: ${scope} | Answer owner: ${item.owner_role}`,
+      `Status: ${item.status} | Blocks sign-off: ${item.blocking ? "Yes" : "No"}`);
+    if (item.resolution) lines.push(`Decision: ${item.resolution}`, `Recorded by ${item.resolved_by || "Former member"} at ${item.resolved_at}`);
+  }
+  const blockers = (detail.decisions || []).filter(item => item.status === "open" && item.blocking).length;
+  const stories = requirements.filter(item => item.story).length;
+  lines.push("", "## Development handoff", `${stories} user stories prepared for delivery-team review; ${blockers} blocking business questions remain. No external development tickets have been created.`, "");
   return lines.join("\n");
 }

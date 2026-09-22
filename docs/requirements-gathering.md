@@ -55,3 +55,19 @@ responses are presented when a provider is unavailable. Real sessions and explic
 request origins are required; local demo AI additionally requires an administrator.
 Source bodies are loaded only when reading or analyzing that source, not with every
 workspace overview refresh.
+
+## Questions and decisions
+
+Track stakeholder questions and assumptions in the decision log, including an
+answer owner and either one affected requirement or the whole initiative.
+AI gathering and review questions can be copied into this log for human review.
+The owner is a follow-up label, not an access grant or automated notification.
+
+Blocking questions reopen affected requirements, withdraw their generated stories,
+and prevent sign-off until answered. Initiative-wide blockers also apply to future
+requirements. Exploratory questions do not block agreement. An answer records the
+signed-in author, time, and rationale; it cannot overwrite a prior resolution.
+Changed circumstances require a new question. Resolving a blocker never restores
+sign-off automatically: revise the scope if needed, then obtain a fresh review.
+The BRD includes open questions and recorded decisions. Each workspace holds at
+most 200 decision records.
