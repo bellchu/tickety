@@ -96,6 +96,35 @@ class RequirementGatheringTests(unittest.TestCase):
         self.user = UserRecord(id="other", name="Other", role="agent", is_active=True)
         self.assertEqual(self.client.get(self.path).json()["summaries"], {})
 
+    def test_overview_statistics_query_budget_is_constant_and_bound_to_visible_page(self):
+        workspace_ids = [self.workspace() for _ in range(6)]
+        for workspace_id in workspace_ids:
+            response = self.client.post(f"{self.path}/{workspace_id}/decisions", json={
+                "question": "Which business outcome must be agreed?", "owner_role": "Sponsor", "blocking": True,
+            })
+            self.assertEqual(response.status_code, 201, response.text)
+        statements = []
+        def capture(connection, cursor, statement, parameters, context, executemany):
+            statements.append((statement, parameters))
+        event.listen(self.engine, "before_cursor_execute", capture)
+        try:
+            response = self.client.get(self.path, params={"offset": 2, "limit": 3}).json()
+        finally:
+            event.remove(self.engine, "before_cursor_execute", capture)
+        visible = {item["id"] for item in response["items"]}
+        self.assertEqual(len(visible), 3)
+        self.assertEqual(set(response["summaries"]), visible)
+        self.assertTrue(all(item["blocking_questions"] == 1 for item in response["summaries"].values()))
+        selects = [(sql, parameters) for sql, parameters in statements if sql.lstrip().upper().startswith("SELECT")]
+        self.assertEqual(len(selects), 4)
+        for table in ("business_requirements", "requirement_decisions"):
+            aggregate = [(sql, parameters) for sql, parameters in selects if f"GROUP BY {table}.workspace_id" in sql]
+            self.assertEqual(len(aggregate), 1)
+            sql, parameters = aggregate[0]
+            self.assertEqual(set(parameters).intersection(workspace_ids), visible)
+            for field in ("evidence_quote", "acceptance_json", "requirement_decisions.question", "requirement_decisions.resolution"):
+                self.assertNotIn(field, sql)
+
     def test_overview_blockers_respect_scope_and_include_empty_initiatives(self):
         workspace = self.workspace()
         source = self.source(workspace)
