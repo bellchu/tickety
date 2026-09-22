@@ -104,3 +104,8 @@ export interface RequirementDecision {
   created_at: string;
   resolved_at: string | null;
 }
+
+export interface RequirementHistory {
+  total: number;
+  items: { id: string; actor_id: string | null; action: string; revision: number; created_at: string; before: BusinessRequirement | null; after: BusinessRequirement }[];
+}

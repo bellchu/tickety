@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session, defer
 
 from .database import (
     get_db, UserRecord, RequirementWorkspaceRecord, RequirementSourceRecord,
-    BusinessRequirementRecord, RequirementDecisionRecord,
+    BusinessRequirementRecord, RequirementDecisionRecord, RequirementHistoryRecord,
 )
 
 Title = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
@@ -130,6 +130,16 @@ def requirement_out(row):
     }
 
 
+def record_history(db, row, user, action, before=None):
+    if action == "created":
+        db.flush()  # Materialize database defaults for the initial snapshot.
+    db.add(RequirementHistoryRecord(
+        id=str(uuid4()), requirement_id=row.id, actor_id=user.id, action=action,
+        revision=row.revision, before_json=json.dumps(before, default=str) if before else None,
+        after_json=json.dumps(requirement_out(row), default=str),
+    ))
+
+
 def create_router(require_user, require_ai_user, get_llm, reserve_ai):
     router = APIRouter(prefix="/requirements", tags=["Requirement gathering"])
 
@@ -204,7 +214,9 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
         db.add(row)
         if data.blocking:
             for item in affected.with_for_update().all():
+                before = requirement_out(item)
                 invalidate_agreement(item)
+                record_history(db, item, user, "blocked", before)
         db.commit()
         db.refresh(row)
         return row
@@ -279,6 +291,7 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
         values = data.model_dump(exclude={"acceptance_criteria"})
         row = BusinessRequirementRecord(id=str(uuid4()), workspace_id=workspace_id, number=count + 1, acceptance_json=json.dumps(data.acceptance_criteria), **values)
         db.add(row)
+        record_history(db, row, user, "created")
         db.commit()
         db.refresh(row)
         return requirement_out(row)
@@ -287,10 +300,12 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
     def update_requirement(workspace_id: str, requirement_id: str, data: RequirementUpdate, db: Session = Depends(get_db), user: UserRecord = Depends(require_user)):
         row = requirement(db, workspace_id, requirement_id, user, data.revision)
         check_source(db, workspace_id, data)
+        before = requirement_out(row)
         for key, value in data.model_dump(exclude={"acceptance_criteria", "revision"}).items():
             setattr(row, key, value)
         row.acceptance_json = json.dumps(data.acceptance_criteria)
         invalidate_agreement(row)
+        record_history(db, row, user, "edited", before)
         db.commit()
         return requirement_out(row)
 
@@ -305,10 +320,12 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
         issues = quality_issues(row)
         if issues:
             raise HTTPException(422, " ".join(issues))
+        before = requirement_out(row)
         row.status, row.validated_by, row.validated_at = "validated", user.id, datetime.utcnow()
         row.reviewer_role, row.validation_note = data.reviewer_role, data.validation_note
         row.revision += 1
         row.updated_at = datetime.utcnow()
+        record_history(db, row, user, "signed_off", before)
         db.commit()
         return requirement_out(row)
 
@@ -321,6 +338,7 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
         if unresolved_decisions(db, workspace_id, row.id):
             raise HTTPException(409, "Resolve the blocking business questions before preparing delivery")
         if row.story_json is None:
+            before = requirement_out(row)
             row.story_json = json.dumps({
                 "title": row.title,
                 "statement": f"As a {row.actor}, I want to {row.action}, so that {row.benefit}.",
@@ -331,8 +349,24 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
             })
             row.revision += 1
             row.updated_at = datetime.utcnow()
+            record_history(db, row, user, "story_created", before)
             db.commit()
         return requirement_out(row)
+
+    @router.get("/{workspace_id}/items/{requirement_id}/history")
+    def requirement_history(workspace_id: str, requirement_id: str, offset: int = Query(0, ge=0), db: Session = Depends(get_db), user: UserRecord = Depends(require_user)):
+        workspace(db, workspace_id, user)
+        if not db.query(BusinessRequirementRecord).filter_by(id=requirement_id, workspace_id=workspace_id).first():
+            raise HTTPException(404, "Requirement not found")
+        query = db.query(RequirementHistoryRecord).filter_by(requirement_id=requirement_id)
+        total = query.count()
+        rows = query.order_by(RequirementHistoryRecord.created_at.desc(), RequirementHistoryRecord.id).offset(offset).limit(10).all()
+        return {"total": total, "items": [{
+            "id": row.id, "actor_id": row.actor_id, "action": row.action,
+            "revision": row.revision, "created_at": row.created_at,
+            "before": json.loads(row.before_json) if row.before_json else None,
+            "after": json.loads(row.after_json),
+        } for row in rows]}
 
     @router.post("/{workspace_id}/sources/{source_id}/gather")
     async def gather_requirements(workspace_id: str, source_id: str, db: Session = Depends(get_db), user: UserRecord = Depends(require_ai_user)):

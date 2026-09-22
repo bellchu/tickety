@@ -114,3 +114,16 @@ is sampled, so transient peaks can exceed the threshold before termination.
 Encrypted files are rejected. Pages without extractable text are listed explicitly,
 and all-empty PDFs are rejected rather than silently creating empty evidence.
 This is text extraction, not OCR; reading order, tables and symbols need review.
+
+## Requirement history
+
+Each requirement has a read-only History view with before/after values, action,
+revision, actor and time. Creation, editing, sign-off, story preparation and
+reopening by a blocking question are recorded in the same database transaction
+as the business change. A failed history write prevents the change from committing.
+Older sign-offs and stories therefore remain inspectable after current agreement
+is withdrawn. History is private to the same workspace access boundary and loaded
+only on request in pages of ten events. There is no history-edit or delete API.
+For requirements created before this feature, the first later change captures
+its previous state; earlier actions are not invented or backfilled. Earlier wording
+can be copied into a new edit, which still requires fresh sign-off.

@@ -1,5 +1,5 @@
 import { QueryClient } from "@tanstack/react-query";
-import type { BusinessRequirement, RequirementDecision, GatherSuggestions, RequirementAssistance, RequirementDraft, RequirementSource, RequirementWorkspace, RequirementWorkspaceDetail, SourceKind } from "./requirements-types";
+import type { BusinessRequirement, RequirementHistory, RequirementDecision, GatherSuggestions, RequirementAssistance, RequirementDraft, RequirementSource, RequirementWorkspace, RequirementWorkspaceDetail, SourceKind } from "./requirements-types";
 
 export const queryClient = new QueryClient({
   defaultOptions: {
@@ -166,6 +166,7 @@ async function downloadReportCsv(filters: import("./types").ReportFilters) {
 export const api = {
   getRequirementWorkspaces: (offset = 0) => fetchAPI<{ items: RequirementWorkspace[]; total: number; limit: number; offset: number }>(`/requirements?offset=${offset}&limit=25`),
   createRequirementWorkspace: (payload: { title: string; objective: string; request_type: "approved_project" | "enhancement" }) => fetchAPI<RequirementWorkspace>("/requirements", { method: "POST", body: JSON.stringify(payload) }),
+  getRequirementHistory: (workspace: string, item: string, offset: number) => fetchAPI<RequirementHistory>(`/requirements/${encodeURIComponent(workspace)}/items/${encodeURIComponent(item)}/history?offset=${offset}`),
   getRequirementWorkspace: (id: string) => fetchAPI<RequirementWorkspaceDetail>(`/requirements/${encodeURIComponent(id)}`),
   addRequirementSource: (id: string, payload: { title: string; kind: SourceKind; content: string }) => fetchAPI<RequirementSource>(`/requirements/${encodeURIComponent(id)}/sources`, { method: "POST", body: JSON.stringify(payload) }),
   getRequirementSource: (id: string, source: string) => fetchAPI<RequirementSource>(`/requirements/${encodeURIComponent(id)}/sources/${encodeURIComponent(source)}`),

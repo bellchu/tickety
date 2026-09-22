@@ -7,7 +7,7 @@ import type { BusinessRequirement } from "@/lib/requirements-types";
 
 export function RequirementCard({
   item, sourceTitle, canAI, busy, pending, blocked,
-  onEdit, onReview, onSignOff, onCreateStory, onCopyStory, onRefine,
+  onEdit, onReview, onHistory, onSignOff, onCreateStory, onCopyStory, onRefine,
 }: {
   item: BusinessRequirement;
   blocked: boolean;
@@ -16,6 +16,7 @@ export function RequirementCard({
   busy: boolean;
   pending: string;
   onEdit: () => void;
+  onHistory: () => void;
   onReview: () => void;
   onSignOff: () => void;
   onCreateStory: () => void;
@@ -55,6 +56,7 @@ export function RequirementCard({
         </details>
         <div className="flex flex-wrap gap-2">
           <Button size="sm" variant="secondary" disabled={busy} onClick={onEdit}>Edit</Button>
+          <Button size="sm" variant="ghost" onClick={onHistory}>History</Button>
           {canAI && <Button size="sm" variant="ghost" leadingIcon={<Sparkles size={14} />} pending={pending === `review-${item.id}`} disabled={busy} onClick={onReview}>Get AI perspective</Button>}
           {!deferred && (item.status === "draft" ? (
             <Button size="sm" leadingIcon={<CheckCircle2 size={14} />} disabled={busy || needsClarity} onClick={onSignOff}>Sign off</Button>

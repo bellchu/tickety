@@ -237,6 +237,48 @@ class RequirementGatheringTests(unittest.TestCase):
         self.user.id = "other"
         self.assertEqual(self.client.post(url, json={"content_base64": pdf_source()}).status_code, 404)
 
+    def test_history_preserves_previous_signoff_and_story_after_edit_and_blocker(self):
+        workspace = self.workspace()
+        source = self.source(workspace)
+        base = f"{self.path}/{workspace}"
+        row = self.client.post(base + "/items", json=self.payload(source)).json()
+        item = base + "/items/" + row["id"]
+        signed = self.client.post(item + "/validate", json={"revision": 1, "reviewer_role": "Product Owner", "validation_note": "Original business agreement."}).json()
+        story = self.client.post(item + "/story", json={"revision": signed["revision"]}).json()
+        self.client.put(item, json={**self.payload(source), "revision": story["revision"], "benefit": "A revised business outcome"})
+        self.client.post(base + "/decisions", json={"question": "Who owns the revised business outcome?", "owner_role": "Sponsor"})
+        history = self.client.get(item + "/history").json()
+        self.assertEqual(history["total"], 5)
+        edited = next(entry for entry in history["items"] if entry["action"] == "edited")
+        self.assertEqual(edited["before"]["validation_note"], "Original business agreement.")
+        self.assertEqual(edited["before"]["story"]["reference"], "US-001")
+        self.assertIsNone(edited["after"]["story"])
+        self.assertEqual(edited["actor_id"], "owner")
+        self.assertEqual(edited["after"]["benefit"], "A revised business outcome")
+        self.assertEqual(self.client.get(item + "/history?offset=5").json()["items"], [])
+        self.assertEqual(self.client.get(item + "/history?offset=-1").status_code, 422)
+        other_workspace = self.workspace()
+        self.assertEqual(self.client.get(f"{self.path}/{other_workspace}/items/{row['id']}/history").status_code, 404)
+        self.user.id = "other"
+        self.assertEqual(self.client.get(item + "/history").status_code, 404)
+
+    def test_failed_history_write_rolls_back_requirement_changes(self):
+        from app.backend.database import RequirementHistoryRecord
+        workspace = self.workspace()
+        source = self.source(workspace)
+        row = self.client.post(f"{self.path}/{workspace}/items", json=self.payload(source)).json()
+        def fail_history(*args):
+            raise RuntimeError("Simulated unavailable history storage")
+        event.listen(RequirementHistoryRecord, "before_insert", fail_history)
+        try:
+            with self.assertRaises(RuntimeError):
+                self.client.put(f"{self.path}/{workspace}/items/{row['id']}", json={**self.payload(source), "revision": 1, "title": "Must roll back"})
+        finally:
+            event.remove(RequirementHistoryRecord, "before_insert", fail_history)
+        saved = self.client.get(f"{self.path}/{workspace}").json()["requirements"][0]
+        self.assertEqual(saved["title"], row["title"])
+        self.assertEqual(saved["revision"], 1)
+
     def ai_manager(self, result):
         return SimpleNamespace(is_mock=False, prompt_char_limit=4000, model_name="test/configured-provider", analyze=AsyncMock(return_value=result))
 

@@ -6,6 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ClipboardList, Download, FileText, Plus, Sparkles, ArrowUpRight } from "lucide-react";
 import { requirementBrief } from "@/lib/requirement-export";
+import { RequirementHistoryPanel } from "@/components/requirements/RequirementHistoryPanel";
 import { DecisionLog } from "@/components/requirements/DecisionLog";
 import { RequirementCard } from "@/components/requirements/RequirementCard";
 import { filterRequirements, workspaceFocus, type RequirementFilter } from "@/lib/requirement-workspace";
@@ -106,6 +107,7 @@ function RequirementsContent() {
 
 function Workspace({ id, canAI, onBack }: { id: string; canAI: boolean; onBack: () => void }) {
   const query = useQuery({ queryKey: ["requirement-workspace", id], queryFn: () => api.getRequirementWorkspace(id) });
+  const [historyItem, setHistoryItem] = useState<string | null>(null);
   const [decisionsOpen, setDecisionsOpen] = useState(false);
   const [questionSeed, setQuestionSeed] = useState<{ question: string; requirementId: string | null } | null>(null);
   const [sourceFormOpen, setSourceFormOpen] = useState(false);
@@ -232,6 +234,7 @@ function Workspace({ id, canAI, onBack }: { id: string; canAI: boolean; onBack: 
       <section className="min-w-0 space-y-5" aria-label="Requirements and decisions">
         <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-lg font-semibold text-ink-700">Requirements & decisions</h2><p className="mt-1 text-xs text-ink-400">{questions ? `${questions} items need clarification` : "Keep the evidence, decision and delivery story together"}</p></div><Button leadingIcon={<Plus size={15} />} disabled={!detail.sources.length || Boolean(pending)} onClick={() => edit()}>New requirement</Button></div>
         <div className="flex flex-col gap-3 sm:flex-row"><label className="flex-1"><span className="sr-only">Search requirements</span><input className={inputStyle} placeholder="Find a requirement, outcome or stakeholder…" value={search} onChange={event => setSearch(event.target.value)} /></label><label><span className="sr-only">Show requirements</span><select className={inputStyle} value={filter} onChange={event => setFilter(event.target.value as RequirementFilter)}><option value="all">All work</option><option value="questions">Open questions</option><option value="review">Ready for review</option><option value="delivery">Delivery ready</option><option value="deferred">Not this time</option></select></label></div>
+    {historyItem && <RequirementHistoryPanel key={historyItem} workspaceId={id} itemId={historyItem} revision={detail.requirements.find(item => item.id === historyItem)?.revision || 0} onClose={() => setHistoryItem(null)} />}
     {gathered && <section className={`${panelStyle} space-y-4`} aria-label="AI gathering suggestions">
       <div className="flex items-center justify-between gap-3"><h2 className="font-semibold">AI gathering suggestions</h2><Button variant="ghost" onClick={() => setGathered(null)}>Dismiss suggestions</Button></div>
       <p className="text-xs text-ink-400">{gathered.model} · {detail.sources.find(item => item.id === gathered.source_id)?.title}</p>
@@ -276,6 +279,7 @@ function Workspace({ id, canAI, onBack }: { id: string; canAI: boolean; onBack: 
         {visibleItems.length === 0 && <div className={`${panelStyle} py-10 text-center`}><FileText className="mx-auto text-ink-300" /><h3 className="mt-3 font-semibold">{detail.requirements.length ? "No requirements match this view" : "Give the business need a clear shape"}</h3><p className="mx-auto mt-2 max-w-md text-sm leading-6 text-ink-500">{detail.requirements.length ? "Try a different search or show all work." : "Explore your material, capture an outcome, or start with a question. Your evidence and decisions will stay connected here."}</p></div>}
         {visibleItems.map(row => <RequirementCard key={row.id} item={row} blocked={(detail.decisions || []).some(decision => decision.status === "open" && decision.blocking && (!decision.requirement_id || decision.requirement_id === row.id))} sourceTitle={sourceNames.get(row.source_id) || "Source unavailable"} canAI={canAI} busy={Boolean(pending)} pending={pending}
           onEdit={() => edit(row)}
+          onHistory={() => setHistoryItem(row.id)}
           onReview={() => run(`review-${row.id}`, async () => { setAssistance(null); setAssistance({ item: row, result: await api.assistRequirement(id, row, "review") }); }, undefined, false)}
           onSignOff={() => { setReviewing(row); setShowForm(false); setReviewNote(""); }}
           onCreateStory={() => run(row.id, () => api.createRequirementStory(id, row))}

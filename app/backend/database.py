@@ -1600,6 +1600,19 @@ class RequirementDecisionRecord(Base):
     resolved_at = Column(DateTime)
 
 
+class RequirementHistoryRecord(Base):
+    __tablename__ = "requirement_history"
+
+    id = Column(String(36), primary_key=True)
+    requirement_id = Column(String(36), ForeignKey("business_requirements.id"), nullable=False, index=True)
+    actor_id = Column(String, ForeignKey("users.id", ondelete="SET NULL"))
+    action = Column(String(30), nullable=False)
+    revision = Column(Integer, nullable=False)
+    before_json = Column(Text)
+    after_json = Column(Text, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
 class ProjectRecord(Base):
     """Organisational workspaces — group tickets/assets/users into projects."""
     __tablename__ = "projects"
