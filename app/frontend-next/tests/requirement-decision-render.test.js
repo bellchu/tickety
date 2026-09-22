@@ -40,14 +40,14 @@ const decisions = Array.from({ length: 200 }, (_, index) => ({
   id: `d${index}`, requirement_id: 'r1', question: `Business question ${index}`,
   owner_role: 'Sponsor', status: 'open', blocking: true,
 }));
-function render({ open = true, scope = '', draft, pending = false } = {}) {
+function render({ open = true, scope = '', draft, pending = false, records = decisions } = {}) {
   const client = new query.QueryClient();
   if (draft) drafts.rememberRequirementDecisionDraft(client, 'owner', 'w1', draft);
   try {
     return renderToStaticMarkup(React.createElement(query.QueryClientProvider, { client },
       React.createElement(DecisionLog, {
         workspaceId: 'w1', userId: 'owner', requirements: [{ id: 'r1', reference: 'REQ-001', title: 'Receipt' }],
-        decisions, open, scope, pending, onPendingChange() {}, seed: null, onToggle() {}, onScopeChange() {}, onSeedUsed() {}, async onSaved() {},
+        decisions: records, open, scope, pending, onFindRequirements() {}, onPendingChange() {}, seed: null, onToggle() {}, onScopeChange() {}, onSeedUsed() {}, async onSaved() {},
       })));
   } finally { client.clear(); }
 }
@@ -122,5 +122,64 @@ test('decision save reports busy through the request and subsequent refresh, the
     refresh.resolve();
     await new Promise(setImmediate);
     assert.deepEqual(changes, [true, false]);
+  } finally { client.clear(); }
+});
+
+test('decision navigation distinguishes a known requirement, whole initiative and unavailable scope', () => {
+  const html = render({ records: [
+    { ...decisions[0], id: 'known', requirement_id: 'r1' },
+    { ...decisions[0], id: 'global', requirement_id: null },
+    { ...decisions[0], id: 'missing', requirement_id: 'removed' },
+  ] });
+  assert.equal((html.match(/href="#requirement-list"/g) || []).length, 2);
+  assert.ok(html.includes('Find REQ-001'));
+  assert.ok(html.includes('View initiative requirements'));
+  assert.ok(html.includes('Requirement unavailable'));
+});
+
+test('recording an answer retains an actionable follow-up after the open question disappears', async () => {
+  const client = new query.QueryClient();
+  const draft = { question: '', owner: '', requirementId: '', blocking: true, resolving: 'd0', resolution: 'Agreed receipt within thirty seconds' };
+  drafts.rememberRequirementDecisionDraft(client, 'owner', 'w1', draft);
+  const state = [];
+  let cursor = 0;
+  let pending = false;
+  let saved = false;
+  const targets = [];
+  const Component = loadDecisionLog({
+    react: { ...React, useEffect() {}, useMemo: compute => compute(), useState(initial) {
+      const index = cursor++;
+      if (!(index in state)) state[index] = typeof initial === 'function' ? initial() : initial;
+      return [state[index], value => { state[index] = typeof value === 'function' ? value(state[index]) : value; }];
+    } },
+    '@tanstack/react-query': { useQueryClient: () => client },
+    '@/lib/api': { api: { async resolveRequirementDecision(id, decisionId, answer) {
+      assert.equal(id, 'w1'); assert.equal(decisionId, 'd0'); assert.equal(answer, draft.resolution);
+    } }, APIError: Error },
+  });
+  function renderTree() {
+    cursor = 0;
+    return Component({ workspaceId: 'w1', userId: 'owner', requirements: [{ id: 'r1', reference: 'REQ-001' }],
+      decisions: saved ? [{ ...decisions[0], status: 'resolved', resolution: draft.resolution }] : [decisions[0]],
+      open: true, scope: '', seed: null, pending, onPendingChange: value => { pending = value; },
+      onToggle() {}, onScopeChange() {}, onSeedUsed() {}, onFindRequirements: id => targets.push(id),
+      async onSaved() { saved = true; } });
+  }
+  function descendants(node, type) {
+    if (!node || typeof node !== 'object') return [];
+    return [...(node.type === type ? [node] : []), ...React.Children.toArray(node.props?.children).flatMap(child => descendants(child, type))];
+  }
+  try {
+    descendants(renderTree(), 'form')[1].props.onSubmit({ preventDefault() {} });
+    assert.equal(pending, true);
+    await new Promise(setImmediate);
+    assert.equal(pending, false);
+    const tree = renderTree();
+    const html = renderToStaticMarkup(tree);
+    assert.ok(html.includes('Decision recorded. Check the affected requirements'));
+    assert.ok(!html.includes('Business question 0'));
+    const link = descendants(tree, 'a').find(item => item.props.href === '#requirement-list');
+    link.props.onClick();
+    assert.deepEqual(targets, ['r1']);
   } finally { client.clear(); }
 });

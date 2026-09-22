@@ -12,10 +12,11 @@ import { api, APIError } from "@/lib/api";
 import { formatLocalDateTime } from "@/lib/date-time";
 import type { BusinessRequirement, RequirementDecision } from "@/lib/requirements-types";
 
-export function DecisionLog({ workspaceId, userId, requirements, decisions, open, onToggle, scope, onScopeChange, seed, onSeedUsed, onSaved, pending, onPendingChange }: {
+export function DecisionLog({ workspaceId, userId, requirements, decisions, open, onToggle, scope, onScopeChange, seed, onSeedUsed, onSaved, pending, onPendingChange, onFindRequirements }: {
   workspaceId: string; userId: string; requirements: BusinessRequirement[]; decisions: RequirementDecision[];
   open: boolean; onToggle: () => void;
   pending: boolean; onPendingChange: (pending: boolean) => void;
+  onFindRequirements: (requirementId: string | null) => void;
   scope: string; onScopeChange: (value: string) => void;
   seed: { question: string; requirementId: string | null } | null;
   onSeedUsed: () => void; onSaved: () => Promise<unknown>;
@@ -30,6 +31,7 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
   const [resolving, setResolving] = useState(restored?.resolving || "");
   const [resolution, setResolution] = useState(restored?.resolution || "");
   const [error, setError] = useState("");
+  const [recordedScope, setRecordedScope] = useState<string | null | undefined>(undefined);
   const [view, setView] = useState<DecisionFilter>("open");
   const [search, setSearch] = useState("");
   const [registerWindow, setRegisterWindow] = useState({ key: "", limit: 20 });
@@ -61,7 +63,7 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
   async function save(operation: () => Promise<unknown>, done: () => void) {
     if (pending) return;
     const isCurrent = captureRequirementDraftSave(client, userId, workspaceId, "decision");
-    onPendingChange(true); setError("");
+    onPendingChange(true); setError(""); setRecordedScope(undefined);
     try { await operation(); if (isCurrent()) done(); await onSaved(); }
     catch (caught) {
       setError(requirementErrorMessage(caught));
@@ -78,6 +80,10 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
   const windowKey = JSON.stringify([view, search, scope]);
   const limit = registerWindow.key === windowKey ? registerWindow.limit : 20;
   const displayedDecisions = useMemo(() => decisionWindow(visibleDecisions, limit, resolving), [visibleDecisions, limit, resolving]);
+  function affectedRequirementsLink(requirementId: string | null) {
+    if (requirementId && !requirementNames.has(requirementId)) return null;
+    return <a href="#requirement-list" onClick={() => onFindRequirements(requirementId)} className="inline-flex text-sm font-medium text-clay-700 underline underline-offset-2">{requirementId ? `Find ${requirementNames.get(requirementId)}` : "View initiative requirements"}</a>;
+  }
   return <section id="business-decisions" tabIndex={-1} className="rounded-xl border border-linen-400 bg-white p-5" aria-label="Business decision log">
     <ConfirmDialog open={Boolean(transition)} onOpenChange={open => { if (!open) setTransition(null); }} title="Replace unsaved decision work?" description="The current question or answer will be discarded. Saved decisions are unchanged." cancelLabel="Keep editing" confirmLabel="Discard and continue" destructive onConfirm={() => { const action = transition; setTransition(null); action?.(); }} />
     <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-semibold text-ink-700">Questions & decisions</h2><p className="mt-1 text-xs text-ink-500">{outstanding.length} open · {blockers} blocking · {decisions.length - outstanding.length} decisions recorded</p></div><Button variant="secondary" onClick={onToggle}>{open ? "Close decision log" : "Open decision log"}</Button></div>
@@ -101,6 +107,10 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
         <textarea aria-label="Unsubmitted decision notes" readOnly className={inputStyle} value={resolution} />
         <Button variant="ghost" disabled={pending} onClick={() => setTransition(() => clearAnswer)}>Discard answer draft</Button>
       </div>}
+      {recordedScope !== undefined && <div role="status" className="space-y-2 rounded-lg bg-moss-500/10 p-3 text-sm text-moss-700">
+        <p>Decision recorded. Check the affected requirements and acceptance criteria against this answer before signing off. Recording an answer does not update their wording or restore a previous sign-off.</p>
+        {affectedRequirementsLink(recordedScope)}
+      </div>}
       {error && <p role="alert" className="text-sm text-rust-600">{error}</p>}
       <h3 className="text-sm font-semibold">Decision register</h3>
       <div className="grid gap-3 md:grid-cols-2">
@@ -116,7 +126,8 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
       {displayedDecisions.map(item => <article key={item.id} className="space-y-3 rounded-lg border border-linen-400 p-4">
         <div className="flex flex-wrap justify-between gap-2 text-xs text-ink-500"><span>{item.requirement_id ? requirementNames.get(item.requirement_id) || "Requirement unavailable" : "Whole initiative"} · {item.owner_role}</span><span>{item.status === "resolved" ? "Decision recorded" : item.blocking ? "Blocks sign-off" : "Exploratory"}</span></div>
         <h4 className="text-sm font-semibold">{item.question}</h4>
-        {item.status === "resolved" ? <><p className="whitespace-pre-wrap text-sm text-ink-600">{item.resolution}</p><p className="text-xs text-ink-400">Recorded by {item.resolved_by || "Former member"} · {formatLocalDateTime(item.resolved_at!)}</p></> : resolving === item.id ? <form className="space-y-3" onSubmit={event => { event.preventDefault(); void save(() => api.resolveRequirementDecision(workspaceId, item.id, resolution), clearAnswer); }}>
+        {affectedRequirementsLink(item.requirement_id)}
+        {item.status === "resolved" ? <><p className="whitespace-pre-wrap text-sm text-ink-600">{item.resolution}</p><p className="text-xs text-ink-400">Recorded by {item.resolved_by || "Former member"} · {formatLocalDateTime(item.resolved_at!)}</p></> : resolving === item.id ? <form className="space-y-3" onSubmit={event => { event.preventDefault(); void save(() => api.resolveRequirementDecision(workspaceId, item.id, resolution), () => { clearAnswer(); setRecordedScope(item.requirement_id); }); }}>
           {hasAnswer && <p role="status" className="text-xs text-amber-800">Unsaved answer · Kept in this tab while you browse.</p>}
           <label className="block space-y-1 text-sm">Decision and rationale<textarea disabled={pending} required minLength={10} maxLength={4000} className={inputStyle} value={resolution} onChange={event => setResolution(event.target.value)} placeholder="What was decided, with whom, and why? Update the requirement separately if its scope changes." /></label>
           <div className="flex gap-2"><Button type="submit" pending={pending} disabled={pending}>Record decision</Button><Button variant="ghost" disabled={pending} onClick={() => changeAnswer("")}>Cancel</Button></div>

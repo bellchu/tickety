@@ -144,6 +144,13 @@ retains its author, time and rationale; an earlier resolution cannot be overwrit
 Changed circumstances require a new question. Answering a blocker does not restore
 sign-off automatically: update the requirement if needed and obtain a fresh review.
 
+**Find REQ-…** searches the complete requirement list for the affected reference,
+clearing previous status and source filters. Whole-initiative questions offer
+**View initiative requirements** instead. After recording an answer, a confirmation
+keeps this review link available even when the question leaves the open register.
+Check the requirement wording and acceptance criteria against the answer before
+signing off; the answer itself does not update or sign off a requirement.
+
 Filter the register to open, blocking, exploratory or recorded decisions, and search
 by question, answer owner or resolution. An answer being edited stays visible across
 filters. Questions linked to deferred requirements display **Not this time**.
