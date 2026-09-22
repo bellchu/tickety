@@ -1,4 +1,6 @@
-import type { BusinessRequirement, RequirementDecision, RequirementWorkspaceDetail } from "./requirements-types";
+import type { BusinessRequirement, RequirementDecision, RequirementPriority, RequirementWorkspaceDetail } from "./requirements-types";
+
+export const requirementPriorityLabels: Record<RequirementPriority, string> = { must: "Must have", should: "Should have", could: "Could have", wont: "Not this time" };
 
 export type DecisionFilter = "open" | "blocking" | "exploratory" | "recorded" | "all";
 

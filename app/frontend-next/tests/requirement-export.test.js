@@ -66,7 +66,7 @@ test('copied stories include signed criteria, provenance and only relevant open 
     { requirement_id: 'r1', status: 'resolved', question: 'Already answered question' },
   ] };
   const output = library.requirementStoryText(detail, row);
-  for (const required of ['US-001', 'REQ-001', 'signed-off revision 2', '30 seconds', 'Operations SOP', 'digest', 'Confirm the submission', 'Product Owner', 'Confirmed with operations.', 'Which languages', 'Could receipt text', 'Reduce manual follow-up.']) assert.ok(output.includes(required), required);
+  for (const required of ['US-001', 'REQ-001', 'Business priority: Must have', 'Delivery scope: Included in the current initiative', 'signed-off revision 2', '30 seconds', 'Operations SOP', 'digest', 'Confirm the submission', 'Product Owner', 'Confirmed with operations.', 'Which languages', 'Could receipt text', 'Reduce manual follow-up.']) assert.ok(output.includes(required), required);
   assert.ok(!output.includes('Unrelated requirement question'));
   assert.ok(output.includes('Already answered question'));
   assert.throws(() => library.requirementStoryText(detail, { ...row, priority: 'wont' }), /in-scope/);

@@ -1,4 +1,4 @@
-import { filterDecisions } from "./requirement-workspace";
+import { filterDecisions, requirementPriorityLabels } from "./requirement-workspace";
 import type { BusinessRequirement, RequirementWorkspaceDetail } from "./requirements-types";
 
 export function requirementBriefFilename(workspace: { title: string; id: string }): string {
@@ -96,7 +96,9 @@ export function requirementStoryText(detail: RequirementWorkspaceDetail, row: Bu
   const lines = [
     `# ${story.reference}: ${inline(story.title)}`, "", prose(story.statement), "",
     "## Acceptance criteria", ...story.acceptance_criteria.map(bullet), "",
-    "## Business context", prose(detail.workspace.objective), "",
+    "## Business context", prose(detail.workspace.objective),
+    `Business priority: ${requirementPriorityLabels[row.priority]}`,
+    "Delivery scope: Included in the current initiative", "",
     "## Traceability",
     `Initiative: ${inline(detail.workspace.title)} (${detail.workspace.id})`,
     `Requirement: ${story.requirement_reference}; signed-off revision ${story.validated_revision}`,
