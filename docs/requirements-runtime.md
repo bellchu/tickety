@@ -102,3 +102,16 @@ requirement editors do not initiate source-body queries.
 The requirement card list initially renders 20 matches and can reveal 20 more at a
 time. Search, scope filters and sorting run over the complete workspace before this
 display limit is applied; BRD export continues to include all saved requirements.
+
+### Evidence passage navigation regression
+
+With a local synthetic source, paste an exact excerpt into **Focus on a passage**.
+Close and reopen the source: the excerpt must remain. Open a different source:
+its passage must be independent. Return to the first source: its excerpt must
+remain. **Clear passage** must remove only that source's selection.
+
+Before the passage-cache fix, the first close/reopen reset the textarea to empty.
+The same browser sequence passed after moving passage state into the shared,
+account/workspace/source-scoped tab draft cache. Cache tests additionally cover
+account and initiative isolation and logout clearing. Full reload persistence is
+intentionally unsupported; this check does not claim persistence across reloads.

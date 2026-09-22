@@ -228,3 +228,8 @@ Use **Agreed · needs a story** to find signed-off, in-scope requirements awaiti
 story preparation. The view excludes requirements with blocking questions and
 works with source search and business-priority ordering. Creating a story moves
 the requirement into **Delivery ready**; editing it returns it to human review.
+
+Selected evidence passages remain in tab memory when you close a material or
+browse another initiative. Each material has its own passage; **Clear passage**
+removes it. These selections are not saved to the server or browser storage and
+are cleared by a full reload or sign-out.

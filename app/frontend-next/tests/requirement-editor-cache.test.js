@@ -97,3 +97,21 @@ test('late save completion cannot clear a newer draft after navigation', () => {
     assert.equal(nextSave(), false);
   }
 });
+
+test('selected passages survive remounts without crossing material, initiative or account boundaries', () => {
+  const client = new QueryClient();
+  const read = library.readRequirementPassage;
+  const remember = library.rememberRequirementPassage;
+  remember(client, 'alice', 'w1', 's1', 'Exact passage from the first material.');
+  remember(client, 'alice', 'w1', 's2', 'Different material passage.');
+  assert.equal(read(client, 'alice', 'w1', 's1'), 'Exact passage from the first material.');
+  assert.equal(read(client, 'bob', 'w1', 's1'), '');
+  assert.equal(read(client, 'alice', 'w2', 's1'), '');
+  assert.equal(hasDrafts(client), true);
+  remember(client, 'alice', 'w1', 's1', '');
+  assert.equal(read(client, 'alice', 'w1', 's1'), '');
+  assert.equal(read(client, 'alice', 'w1', 's2'), 'Different material passage.');
+  client.clear();
+  assert.equal(read(client, 'alice', 'w1', 's2'), '');
+  assert.equal(hasDrafts(client), false);
+});

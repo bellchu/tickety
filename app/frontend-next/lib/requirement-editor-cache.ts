@@ -22,7 +22,7 @@ export function rememberRequirementEditor(client: QueryClient, userId: string, w
   rememberDraft(client, [...prefix, userId, workspaceId], draft);
 }
 
-function rememberDraft(client: QueryClient, queryKey: string[], draft: RequirementEditorDraft | RequirementSourceDraft | RequirementDecisionDraft | null) {
+function rememberDraft(client: QueryClient, queryKey: string[], draft: RequirementEditorDraft | RequirementSourceDraft | RequirementDecisionDraft | { excerpt: string } | null) {
   if (!draft) { client.removeQueries({ queryKey, exact: true }); return; }
   // These are tab-memory drafts, never fetched or persisted to browser storage.
   // Keep them until saved/discarded or the authenticated query cache is cleared.
@@ -69,4 +69,11 @@ export function captureRequirementDraftSave(client: QueryClient, userId: string,
   const key = [...prefix, userId, workspaceId, ...(kind ? [kind] : [])];
   const submitted = client.getQueryData(key);
   return () => client.getQueryData(key) === submitted;
+}
+
+export function readRequirementPassage(client: QueryClient, userId: string, workspaceId: string, sourceId: string) {
+  return client.getQueryData<{ excerpt: string }>([...prefix, userId, workspaceId, "passage", sourceId])?.excerpt || "";
+}
+export function rememberRequirementPassage(client: QueryClient, userId: string, workspaceId: string, sourceId: string, excerpt: string) {
+  rememberDraft(client, [...prefix, userId, workspaceId, "passage", sourceId], excerpt ? { excerpt } : null);
 }
