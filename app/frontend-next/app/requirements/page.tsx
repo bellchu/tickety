@@ -138,6 +138,16 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
   const evidence = useQuery({ queryKey: ["requirement-source", id, sourceViewing], queryFn: () => api.getRequirementSource(id, sourceViewing), enabled: Boolean(sourceViewing) });
   const detail = query.data;
   const sourceCounts = useMemo(() => sourceRequirementCounts(detail?.requirements || []), [detail?.requirements]);
+  const overview = useMemo(() => detail ? {
+    focus: workspaceFocus(detail),
+    blockedIds: blockedRequirementIds(detail.requirements, detail.decisions),
+    questions: filterRequirements(detail.requirements, "", "questions", detail.decisions).length,
+    deliveryReady: detail.requirements.filter(item => item.priority !== "wont" && item.story).length,
+    sourceNames: new Map(detail.sources.map(item => [item.id, item.title])),
+  } : null, [detail]);
+  const visibleItems = useMemo(() => detail ? filterRequirements(detail.requirements, search, filter, detail.decisions) : [], [detail, search, filter]);
+  const sourceQuery = sourceSearch.trim().toLocaleLowerCase();
+  const visibleSources = useMemo(() => (detail?.sources || []).filter(item => (!sourceQuery || item.title.toLocaleLowerCase().includes(sourceQuery)) && (!unlinkedOnly || !sourceCounts.has(item.id))), [detail?.sources, sourceQuery, unlinkedOnly, sourceCounts]);
   function revealSource(sourceId: string) {
     setSourceSearch(""); setUnlinkedOnly(false); setSourceViewing(sourceId);
   }
@@ -215,15 +225,8 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
   }
 
 
-  if (!detail) return <PageFrame><Button variant="ghost" onClick={onBack}>Back to initiatives</Button><ErrorMessage error={query.error} />{query.isPending ? <p role="status">Loading initiative…</p> : <Button onClick={() => query.refetch()}>Retry</Button>}</PageFrame>;
-  const focus = workspaceFocus(detail);
-  const visibleItems = filterRequirements(detail.requirements, search, filter, detail.decisions);
-  const blockedIds = blockedRequirementIds(detail.requirements, detail.decisions);
-  const questions = filterRequirements(detail.requirements, "", "questions", detail.decisions).length;
-  const deliveryReady = detail.requirements.filter(item => item.priority !== "wont" && item.story).length;
-  const sourceQuery = sourceSearch.trim().toLocaleLowerCase();
-  const visibleSources = detail.sources.filter(item => (!sourceQuery || item.title.toLocaleLowerCase().includes(sourceQuery)) && (!unlinkedOnly || !sourceCounts.has(item.id)));
-  const sourceNames = new Map(detail.sources.map(item => [item.id, item.title]));
+  if (!detail || !overview) return <PageFrame><Button variant="ghost" onClick={onBack}>Back to initiatives</Button><ErrorMessage error={query.error} />{query.isPending ? <p role="status">Loading initiative…</p> : <Button onClick={() => query.refetch()}>Retry</Button>}</PageFrame>;
+  const { focus, blockedIds, questions, deliveryReady, sourceNames } = overview;
 
   function followFocus() {
     if (focus.action === "decisions") setDecisionsOpen(true);
