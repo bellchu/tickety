@@ -73,6 +73,11 @@ export function RequirementCard({
       {!deferred && item.story && <details className="border-t border-linen-400 bg-linen-50 px-5 py-4" open>
         <summary className="cursor-pointer text-sm font-semibold text-ink-700">{item.story.reference} · User story</summary>
         <p className="mt-3 text-sm leading-6 text-ink-600">{item.story.statement}</p>
+        <p className="mt-2 text-xs text-ink-500">Based on {item.story.requirement_reference} · Signed-off revision {item.story.validated_revision}</p>
+        <details className="mt-3 text-sm">
+          <summary className="cursor-pointer font-medium text-ink-700">Acceptance criteria for delivery ({item.story.acceptance_criteria.length})</summary>
+          <ul className="mt-2 list-disc space-y-1 pl-5 text-ink-600">{item.story.acceptance_criteria.map((criterion, index) => <li key={index} className="whitespace-pre-wrap break-words">{criterion}</li>)}</ul>
+        </details>
         <div className="mt-3 flex flex-wrap gap-2">
           <Button size="sm" variant="secondary" disabled={busy} onClick={onCopyStory}>Copy story</Button>
           {canAI && <Button size="sm" variant="ghost" leadingIcon={<Sparkles size={14} />} pending={pending === `refine-${item.id}`} disabled={busy} onClick={onRefine}>Explore another wording</Button>}
