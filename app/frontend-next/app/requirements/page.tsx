@@ -288,6 +288,10 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
   const currentReview = reviewing ? detail.requirements.find(item => item.id === reviewing.id) : undefined;
   const reviewIssue = reviewing ? reviewUnavailableReason(reviewing, currentReview, blockedIds.has(reviewing.id)) : null;
 
+  const canDeliverSnapshot = !pending && !query.isFetching && !query.isError;
+  function exportCurrentBrief() {
+    if (canDeliverSnapshot) exportBrief(detail!);
+  }
   function followFocus() {
     if (focus.action === "decisions") { setDecisionScope(""); setDecisionsOpen(true); }
     else if (focus.action === "source") setSourceFormOpen(true);
@@ -296,7 +300,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
     else if (focus.action === "review") signOff(focus.item);
     else if (focus.action === "gather") revealSource(focus.sourceId);
     else if (focus.action === "story") void run(focus.item.id, () => api.createRequirementStory(id, focus.item));
-    else exportBrief(detail!);
+    else exportCurrentBrief();
   }
 
   return <PageFrame width="wide">
@@ -304,13 +308,14 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
     <Button variant="ghost" leadingIcon={<ArrowLeft size={16} />} onClick={onBack}>All initiatives</Button>
     <PageHeader eyebrow="Business workspace" title={detail.workspace.title} description={detail.workspace.objective}
       meta={`${detail.workspace.request_type === "enhancement" ? "Enhancement" : "Approved project / request"} · ${detail.requirements.length} requirements · ${deliveryReady} delivery ready`}
-      actions={<><Button variant="ghost" pending={query.isFetching} disabled={Boolean(pending) || query.isFetching} onClick={() => query.refetch()}>Refresh</Button><Button variant="secondary" disabled={Boolean(pending) || query.isFetching} leadingIcon={<Download size={16} />} onClick={() => exportBrief(detail)}>Export BRD</Button></>} />
+      actions={<><Button variant="ghost" pending={query.isFetching} disabled={Boolean(pending) || query.isFetching} onClick={() => query.refetch()}>Refresh</Button><Button variant="secondary" disabled={!canDeliverSnapshot} leadingIcon={<Download size={16} />} onClick={exportCurrentBrief}>Export BRD</Button></>} />
     <section className="flex flex-col gap-5 rounded-xl border border-clay-300/40 bg-gradient-to-r from-[#06243A] to-[#103E50] p-5 text-white sm:flex-row sm:items-center sm:justify-between" aria-label="Suggested focus">
       <div className="max-w-2xl"><p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-cyan-200">Worth your attention</p><h2 className="mt-2 text-lg font-medium">{focus.title}</h2><p className="mt-2 text-sm leading-6 text-slate-200">{focus.reason}</p></div>
-      <Button className="shrink-0" variant="secondary" trailingIcon={<ArrowUpRight size={15} />} disabled={Boolean(pending)} onClick={followFocus}>{focus.label}</Button>
+      <Button className="shrink-0" variant="secondary" trailingIcon={<ArrowUpRight size={15} />} disabled={Boolean(pending) || (focus.action === "export" && !canDeliverSnapshot)} onClick={followFocus}>{focus.label}</Button>
     </section>
     <DecisionLog onFindRequirements={requirementId => { setFilter("all"); setSourceFilter(""); setSearch(detail.requirements.find(item => item.id === requirementId)?.reference || ""); }} pending={Boolean(pending)} onPendingChange={setDecisionPending} scope={decisionScope} onScopeChange={setDecisionScope} workspaceId={id} userId={userId} requirements={detail.requirements} decisions={detail.decisions || []} open={decisionsOpen} onToggle={() => setDecisionsOpen(!decisionsOpen)} seed={questionSeed} onSeedUsed={() => setQuestionSeed(null)} onSaved={refreshSavedWorkspace} />
     {query.isFetching && <p role="status" className="text-sm text-ink-500">Refreshing saved work… Your unsaved drafts are kept.</p>}
+    {query.isError && <p role="status" className="text-sm text-amber-800">Showing previously loaded work. Refresh successfully before exporting the brief or copying stories.</p>}
     <ErrorMessage error={error || query.error} />{notice && <p role="status" className="text-sm text-moss-700">{notice}</p>}
     <div className="grid items-start gap-6 xl:grid-cols-[300px_minmax(0,1fr)]">
       <aside className="min-w-0 space-y-4" aria-label="Business context">
@@ -404,7 +409,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
 
         {visibleItems.length === 0 && <div className={`${panelStyle} py-10 text-center`}><FileText className="mx-auto text-ink-300" /><h3 className="mt-3 font-semibold">{detail.requirements.length ? "No requirements match this view" : "Give the business need a clear shape"}</h3><p className="mx-auto mt-2 max-w-md text-sm leading-6 text-ink-500">{detail.requirements.length ? "Try a different search or show all work." : "Explore your material, capture an outcome, or start with a question. Your evidence and decisions will stay connected here."}</p></div>}
         {search.trim() && <p role="status" className="text-xs text-ink-500">{visibleItems.length} matching requirements · Searches include evidence, acceptance criteria and user stories.</p>}
-        {displayedItems.map(row => <RequirementCard key={row.id} item={row} blocked={blockedIds.has(row.id)} sourceTitle={sourceNames.get(row.source_id) || "Source unavailable"} canAI={canAI} busy={Boolean(pending)} pending={pending}
+        {displayedItems.map(row => <RequirementCard key={row.id} item={row} blocked={blockedIds.has(row.id)} sourceTitle={sourceNames.get(row.source_id) || "Source unavailable"} canAI={canAI} canCopyStory={canDeliverSnapshot} busy={Boolean(pending)} pending={pending}
           onDecisions={() => { setDecisionScope(row.id); setDecisionsOpen(true); }}
           onEvidence={() => { revealSource(row.source_id); setSourceFocus({ sourceId: row.source_id, quote: row.evidence_quote, reference: row.reference }); }}
           onEdit={() => switchEditor(() => edit(row))}
@@ -412,7 +417,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
           onReview={() => run(`review-${row.id}`, async () => { setAssistance(null); setAssistance({ item: row, result: await api.assistRequirement(id, row, "review") }); }, undefined, false)}
           onSignOff={() => signOff(row)}
           onCreateStory={() => run(row.id, () => api.createRequirementStory(id, row))}
-          onCopyStory={() => run(`copy-${row.id}`, () => navigator.clipboard.writeText(requirementStoryText(detail, row)), () => setNotice("Copied user story."), false)}
+          onCopyStory={() => canDeliverSnapshot && run(`copy-${row.id}`, () => navigator.clipboard.writeText(requirementStoryText(detail, row)), () => setNotice("Copied user story."), false)}
           onRefine={() => run(`refine-${row.id}`, async () => { setAssistance(null); setAssistance({ item: row, result: await api.assistRequirement(id, row, "story") }); }, undefined, false)}
         />)}
         {visibleItems.length > 20 && <div className="flex flex-wrap items-center justify-between gap-3">

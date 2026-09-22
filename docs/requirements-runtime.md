@@ -188,3 +188,22 @@ Supplier onboarding pilot (REQ-002 revision 6):
 This sequence passed in the browser. No business record or sign-off was changed.
 It verifies rendered interaction, supplementing the component and boundary tests;
 it does not exercise provider analysis, file uploads or a Dev deployment.
+
+### Refresh-failure delivery regression
+
+The page shares one snapshot-availability condition across BRD export, the export
+recommendation and story copying: no save in progress, no workspace refresh in
+progress and no workspace query error. Failed refreshes retain readable data but
+show an explicit old-snapshot notice; a successful refresh restores delivery actions.
+
+Repeatable local check with an already loaded synthetic initiative and prepared
+story: stop only its local preview API, click **Refresh**, and let the query retries
+finish. Before this fix, **Export BRD** and **Copy story** were enabled despite the
+service-unavailable message. After the fix both remain disabled during refresh and
+after failure. Restart the same API and refresh successfully: both become available
+again and the notice clears. This before/after sequence passed in the browser;
+no record was changed and no file or clipboard content was exported. The story-card
+test also verifies that an unavailable snapshot remains readable but not copyable.
+The recommendation export uses the same guarded callback; that specific recommendation
+was not displayed by the synthetic initiative during this browser check. This guard
+does not detect changes made in another tab after the last successful fetch.

@@ -7,13 +7,14 @@ import { formatLocalDateTime } from "@/lib/date-time";
 import type { BusinessRequirement } from "@/lib/requirements-types";
 
 export function RequirementCard({
-  item, sourceTitle, canAI, busy, pending, blocked,
+  item, sourceTitle, canAI, canCopyStory, busy, pending, blocked,
   onDecisions, onEvidence, onEdit, onReview, onHistory, onSignOff, onCreateStory, onCopyStory, onRefine,
 }: {
   item: BusinessRequirement;
   blocked: boolean;
   sourceTitle: string;
   canAI: boolean;
+  canCopyStory: boolean;
   busy: boolean;
   pending: string;
   onDecisions: () => void;
@@ -79,7 +80,7 @@ export function RequirementCard({
           <ul className="mt-2 list-disc space-y-1 pl-5 text-ink-600">{item.story.acceptance_criteria.map((criterion, index) => <li key={index} className="whitespace-pre-wrap break-words">{criterion}</li>)}</ul>
         </details>
         <div className="mt-3 flex flex-wrap gap-2">
-          <Button size="sm" variant="secondary" disabled={busy} onClick={onCopyStory}>Copy story</Button>
+          <Button size="sm" variant="secondary" disabled={busy || !canCopyStory} onClick={onCopyStory}>Copy story</Button>
           {canAI && <Button size="sm" variant="ghost" leadingIcon={<Sparkles size={14} />} pending={pending === `refine-${item.id}`} disabled={busy} onClick={onRefine}>Explore another wording</Button>}
         </div>
       </details>}
