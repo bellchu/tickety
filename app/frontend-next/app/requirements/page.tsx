@@ -140,7 +140,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
   const [historyItem, setHistoryItem] = useState<string | null>(null);
   const [decisionsOpen, setDecisionsOpen] = useState(() => Boolean(readRequirementDecisionDraft(editorClient, userId, id)));
   const [decisionScope, setDecisionScope] = useState("");
-  const [decisionRequest, setDecisionRequest] = useState<{ id: string } | null>(null);
+  const [decisionRequest, setDecisionRequest] = useState<{ id: string; includeRecorded?: boolean } | null>(null);
   const [questionSeed, setQuestionSeed] = useState<{ question: string; requirementId: string | null } | null>(null);
   const [sourceFormOpen, setSourceFormOpen] = useState(() => Boolean(readRequirementSourceDraft(editorClient, userId, id)));
   const [sourceFocus, setSourceFocus] = useState<{ sourceId: string; quote: string; reference: string }>();
@@ -347,7 +347,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
         {filter === "agreed" && <p className="text-xs text-ink-500">These requirements are signed off and have no blocking business questions. Prepare their user stories for delivery-team review.</p>}
         {sourceFilter && <div role="status" className="flex flex-wrap items-center gap-2 text-xs text-ink-500"><span>{visibleItems.length} matching requirements from {sourceNames.get(sourceFilter) || "the selected source"}.</span><Button size="sm" variant="ghost" onClick={() => setSourceFilter("")}>Show all sources</Button></div>}
     {canAI && detail.requirements.length >= 2 && <CrossReviewPanel workspaceId={id} items={detail.requirements} onQuestion={trackQuestion} />}
-    {historyItem && <RequirementHistoryPanel sourceNames={sourceNames} key={historyItem} workspaceId={id} itemId={historyItem} revision={detail.requirements.find(item => item.id === historyItem)?.revision || 0} onClose={() => setHistoryItem(null)} />}
+    {historyItem && <RequirementHistoryPanel onDecisions={() => { setDecisionScope(historyItem); setDecisionRequest({ id: "", includeRecorded: true }); setDecisionsOpen(true); }} sourceNames={sourceNames} key={historyItem} workspaceId={id} itemId={historyItem} revision={detail.requirements.find(item => item.id === historyItem)?.revision || 0} onClose={() => setHistoryItem(null)} />}
     {gathered && <section className={`${panelStyle} space-y-4`} aria-label="AI gathering suggestions">
       <div className="flex items-center justify-between gap-3"><h2 className="font-semibold">AI gathering suggestions</h2><Button variant="ghost" onClick={() => setGathered(null)}>Dismiss suggestions</Button></div>
       <p className="text-xs text-ink-400">{gathered.model} · {detail.sources.find(item => item.id === gathered.source_id)?.title}</p>

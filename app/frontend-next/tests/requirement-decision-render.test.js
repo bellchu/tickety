@@ -221,6 +221,12 @@ test('opening a suggestion clears old register filters without changing an answe
     assert.ok(html.includes('Business question 199'));
     assert.ok(!html.includes('No matching question'));
     assert.ok(html.includes('Preserved answer rationale</textarea>'));
+    const historyRequest = { id: '', includeRecorded: true };
+    tree(historyRequest);
+    effects.forEach(effect => effect());
+    const historyTree = tree(historyRequest);
+    assert.ok(descendants(historyTree, 'select').some(node => node.props.value === 'all'));
+    assert.ok(renderToStaticMarkup(historyTree).includes('Preserved answer rationale</textarea>'));
   } finally { client.clear(); }
 });
 

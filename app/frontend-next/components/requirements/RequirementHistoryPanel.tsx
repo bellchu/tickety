@@ -26,7 +26,7 @@ function value(item: unknown, field: keyof BusinessRequirement, sourceNames: Map
   return String(item);
 }
 
-export function RequirementHistoryPanel({ workspaceId, itemId, revision, sourceNames, onClose }: { sourceNames: Map<string, string>; workspaceId: string; itemId: string; revision: number; onClose: () => void }) {
+export function RequirementHistoryPanel({ workspaceId, itemId, revision, sourceNames, onClose, onDecisions }: { sourceNames: Map<string, string>; workspaceId: string; itemId: string; revision: number; onClose: () => void; onDecisions: () => void }) {
   const panel = useRef<HTMLElement>(null);
   useEffect(() => {
     panel.current?.scrollIntoView({ block: "start" });
@@ -45,6 +45,7 @@ export function RequirementHistoryPanel({ workspaceId, itemId, revision, sourceN
     {query.data?.total === 0 && <p className="text-sm text-ink-500">No history has been recorded yet. Changes made before history tracking was introduced are not reconstructed.</p>}
     {query.data?.items.map(event => <details key={event.id} className="rounded-lg border border-linen-400 p-4">
       <summary className="cursor-pointer text-sm font-semibold">{event.after.reference} · Revision {event.revision} · {labels[event.action] || event.action}<span className="mt-1 block text-xs font-normal text-ink-500">{formatLocalDateTime(event.created_at)} · {event.actor_id || "Former member"}</span><span className="mt-1 block text-xs font-normal leading-5 text-ink-500">{requirementChangeSummary(event.before, event.after, event.action)}</span></summary>
+      {event.action === "blocked" && <p className="mt-3 text-xs text-ink-500"><a href="#business-decisions" onClick={onDecisions} className="font-medium text-clay-700 underline underline-offset-2">Review related questions and decisions</a> for this requirement and the whole initiative. Their current status may differ from this historical event.</p>}
       <div className="mt-3 space-y-4">{requirementChanges(event.before, event.after).map(([key, label]) => <div key={key}>
         <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-500">{label}</h3>
         <div className="mt-1 grid gap-2 sm:grid-cols-2">{event.before && <div className="min-w-0 rounded bg-linen-100 p-3"><p className="text-[10px] text-ink-400">Before</p><pre className="whitespace-pre-wrap break-words font-sans text-xs leading-5">{value(event.before[key], key, sourceNames)}</pre></div>}<div className="min-w-0 rounded bg-moss-500/5 p-3"><p className="text-[10px] text-ink-400">After</p><pre className="whitespace-pre-wrap break-words font-sans text-xs leading-5">{value(event.after[key], key, sourceNames)}</pre></div></div>

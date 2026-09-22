@@ -20,7 +20,7 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
   pending: boolean; onPendingChange: (pending: boolean) => void;
   onFindRequirements: (requirementId: string | null) => void;
   scope: string; onScopeChange: (value: string) => void;
-  decisionRequest?: { id: string } | null;
+  decisionRequest?: { id: string; includeRecorded?: boolean } | null;
   seed: { question: string; requirementId: string | null } | null;
   onSeedUsed: () => void; onSaved: () => Promise<unknown>;
 }) {
@@ -39,7 +39,7 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
   const [search, setSearch] = useState("");
   const [registerWindow, setRegisterWindow] = useState({ key: "", limit: 20 });
   useEffect(() => {
-    if (decisionRequest) { setView("open"); setSearch(""); }
+    if (decisionRequest) { setView(decisionRequest.includeRecorded ? "all" : "open"); setSearch(""); }
   }, [decisionRequest]);
   const hasQuestion = Boolean(question || owner || requirementId || !blocking);
   const hasAnswer = Boolean(resolving && resolution);
@@ -82,7 +82,7 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
   const outstanding = useMemo(() => decisions.filter(item => item.status === "open"), [decisions]);
   const visibleDecisions = useMemo(() => {
     const matching = filterDecisions(decisions, view, search, resolving, scope, requirements);
-    return decisionRequest ? matching.sort((left, right) => Number(right.id === decisionRequest.id) - Number(left.id === decisionRequest.id)) : matching;
+    return decisionRequest?.id ? matching.sort((left, right) => Number(right.id === decisionRequest.id) - Number(left.id === decisionRequest.id)) : matching;
   }, [decisions, view, search, resolving, scope, decisionRequest, requirements]);
   const requirementNames = useMemo(() => new Map(requirements.map(item => [item.id, `${item.reference}${item.priority === "wont" ? " · Not this time" : ""}`])), [requirements]);
   const blockers = useMemo(() => outstanding.filter(item => item.blocking).length, [outstanding]);
@@ -131,7 +131,7 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
         </select></label>
       </div>
       <label className="block space-y-1 text-sm">Decisions affecting<select className={inputStyle} value={scope} onChange={event => onScopeChange(event.target.value)}><option value="">All requirements</option>{requirements.map(item => <option key={item.id} value={item.id}>{item.reference} · {item.title}</option>)}</select></label>
-      {view === "open" && <p className="text-xs text-ink-500">{decisionRequest ? "The suggested question appears first when it matches this view. Other blocking questions follow in recorded order." : "Questions blocking sign-off appear first; each group keeps its recorded order."}</p>}
+      {view === "open" && <p className="text-xs text-ink-500">{decisionRequest?.id ? "The suggested question appears first when it matches this view. Other blocking questions follow in recorded order." : "Questions blocking sign-off appear first; each group keeps its recorded order."}</p>}
       {scope && <p className="text-xs text-ink-500">Includes whole-initiative questions and decisions, which also affect this requirement.</p>}
       {view === "current" && <p className="text-xs text-ink-500">Includes current delivery and scope needing confirmation. Questions linked only to deferred requirements are excluded.</p>}
       {resolving && <p className="text-xs text-ink-500">The question you are answering stays visible while you filter.</p>}
