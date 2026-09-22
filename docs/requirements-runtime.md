@@ -356,3 +356,16 @@ source text intact. Enter-key activation also moved to the second match correctl
 The isolated tab and both temporary services were closed afterward. The main preview
 was updated and retained its original source texts/digests and requirement statuses.
 No business records in the main preview were changed. Build and route checks passed.
+
+### Priority guidance and source disclosure
+
+The production build at `e1f0d67` passed build and production-route checks. In the
+local supplier pilot, the existing blocking decision remained the suggested focus.
+The SOP card exposed **Read source text** with a collapsed accessibility state;
+clicking it displayed the saved text and changed the state to expanded with
+**Hide source text**. Enter-key activation collapsed it again. These browser checks
+were read-only. Cross-stage priority combinations are covered by the 287 passing
+frontend tests, including a signed-off must-have preceding an unclear could-have,
+same-priority clarification, and preservation of recorded blocking gates. They were
+not separately exercised against new browser records in this check. Typecheck and
+lint also passed. This verifies the local preview, not a Dev deployment.
