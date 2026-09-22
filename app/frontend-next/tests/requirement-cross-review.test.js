@@ -1,12 +1,8 @@
+const { descendants } = require('./helpers/react-tree');
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const React = require('react');
 const { loadComponentTs, loadPureTs } = require('./helpers/load-pure-ts');
 
-function descendants(node, type) {
-  if (!node || typeof node !== 'object') return [];
-  return [...(node.type === type ? [node] : []), ...React.Children.toArray(node.props?.children).flatMap(child => descendants(child, type))];
-}
 
 test('cross-check keeps selected scope visible and submits it across changing searches', async () => {
   const states = [];

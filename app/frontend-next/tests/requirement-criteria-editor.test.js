@@ -1,6 +1,6 @@
+const { descendants } = require('./helpers/react-tree');
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const React = require('react');
 const { loadComponentTs, loadPureTs } = require('./helpers/load-pure-ts');
 const parse = loadPureTs('requirement-criteria.ts', { './requirement-text': loadPureTs('requirement-text.ts') }).parseRequirementCriteria;
 let hooks;
@@ -12,10 +12,6 @@ const { AcceptanceCriteriaEditor: Editor } = loadComponentTs('requirements/Accep
   }, 'react/jsx-runtime': require('react/jsx-runtime'),
   '@/components/ui': { Button: 'button' }, './fields': { Field: 'label', inputStyle: '' },
 });
-function descendants(node, type) {
-  if (!node || typeof node !== 'object') return [];
-  return [...(node.type === type ? [node] : []), ...React.Children.toArray(node.props?.children).flatMap(child => descendants(child, type))];
-}
 function editor(initial) {
   let criteria = initial;
   const state = { refs: [], cursor: 0, effects: [] };

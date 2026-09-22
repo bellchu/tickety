@@ -1,3 +1,4 @@
+const { descendants } = require('./helpers/react-tree');
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { loadPureTs } = require('./helpers/load-pure-ts');
@@ -21,7 +22,6 @@ test('unique, missing or changed quotations do not produce stale navigation targ
 });
 
 test('source navigation moves the highlight while keeping the selected passage intact', () => {
-  const React = require('react');
   const { loadComponentTs } = require('./helpers/load-pure-ts');
   const quote = 'Confirm receipt within 30 seconds.';
   const content = `${quote}\nPrevious message:\n${quote}`;
@@ -40,10 +40,6 @@ test('source navigation moves the highlight while keeping the selected passage i
     '@/lib/requirement-editor-cache': { readRequirementPassage: () => quote, rememberRequirementPassage: () => { passageWrites++; } },
     'lucide-react': { Sparkles: 'span' }, '@/components/ui': { Button: 'button' }, './fields': { Field: 'label', inputStyle: '' },
   });
-  function descendants(node, type) {
-    if (!node || typeof node !== 'object') return [];
-    return [...(node.type === type ? [node] : []), ...React.Children.toArray(node.props?.children).flatMap(child => descendants(child, type))];
-  }
   let focus = { quote, reference: 'REQ-001' };
   const render = () => { cursor = 0; return SourceExplorer({ userId: 'u', workspaceId: 'w', sourceId: 's', content, focus, busy: false, canAI: false, onCapture() {}, onExplore: async () => {} }); };
   const button = (tree, label) => descendants(tree, 'button').find(node => node.props.children === label);

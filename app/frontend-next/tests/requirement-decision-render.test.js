@@ -1,3 +1,4 @@
+const { descendants } = require('./helpers/react-tree');
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const React = require('react');
@@ -167,10 +168,6 @@ test('recording an answer retains an actionable follow-up after the open questio
       onToggle() {}, onScopeChange() {}, onSeedUsed() {}, onFindRequirements: id => targets.push(id),
       async onSaved() { saved = true; } });
   }
-  function descendants(node, type) {
-    if (!node || typeof node !== 'object') return [];
-    return [...(node.type === type ? [node] : []), ...React.Children.toArray(node.props?.children).flatMap(child => descendants(child, type))];
-  }
   try {
     descendants(renderTree(), 'form')[1].props.onSubmit({ preventDefault() {} });
     assert.equal(pending, true);
@@ -204,10 +201,6 @@ test('opening a suggestion clears old register filters without changing an answe
     cursor = 0; effects.length = 0;
     return Component({ workspaceId: 'w1', userId: 'owner', requirements: [], decisions,
       open: true, scope: '', seed: null, pending: false, decisionRequest, onFindRequirements() {} });
-  }
-  function descendants(node, type) {
-    if (!node || typeof node !== 'object') return [];
-    return [...(node.type === type ? [node] : []), ...React.Children.toArray(node.props?.children).flatMap(child => descendants(child, type))];
   }
   try {
     const first = tree(null);
