@@ -16,11 +16,15 @@ function evidenceBlock(value: string): string {
 
 export function requirementBrief(detail: RequirementWorkspaceDetail): string {
   const { workspace, requirements, sources } = detail;
+  const requirementsById = new Map(requirements.map(item => [item.id, item]));
   const included = requirements.filter(item => item.priority !== "wont");
   const drafts = included.filter(item => item.status === "draft").length;
   const agreed = included.filter(item => item.status === "validated" && !item.story).length;
   const stories = included.filter(item => item.story).length;
-  const blockers = (detail.decisions || []).filter(item => item.status === "open" && item.blocking).length;
+  const openBlockers = (detail.decisions || []).filter(item => item.status === "open" && item.blocking);
+  const blockers = openBlockers.length;
+  const deferredBlockers = openBlockers.filter(item => item.requirement_id && requirementsById.get(item.requirement_id)?.priority === "wont").length;
+  const currentBlockers = blockers - deferredBlockers;
   const sourceLinks = new Map<string, string[]>();
   for (const row of requirements) {
     const references = sourceLinks.get(row.source_id) || [];
@@ -39,6 +43,8 @@ export function requirementBrief(detail: RequirementWorkspaceDetail): string {
     `- User stories prepared for delivery-team review: ${stories}`,
     `- Deferred — not this time: ${requirements.length - included.length}`,
     `- Open blocking business questions: ${blockers}`,
+    `- Affecting current scope or requiring scope confirmation: ${currentBlockers}`,
+    `- Linked only to deferred requirements: ${deferredBlockers}`,
     "", "This brief is a snapshot of recorded work. Inclusion is not sign-off; prepared stories still need delivery-team review and planning.", "",
     "## Evidence register",
     ...sources.flatMap(source => [
@@ -61,12 +67,12 @@ export function requirementBrief(detail: RequirementWorkspaceDetail): string {
   }
   lines.push("", "## Questions and business decisions");
   for (const item of detail.decisions || []) {
-    const scope = item.requirement_id ? requirements.find(row => row.id === item.requirement_id)?.reference || item.requirement_id : "Whole initiative";
+    const scope = item.requirement_id ? requirementsById.get(item.requirement_id)?.reference || item.requirement_id : "Whole initiative";
     lines.push("", `### ${inline(item.question)}`, `Scope: ${scope} | Answer owner: ${inline(item.owner_role || "Unassigned")}`,
       `Status: ${item.status} | Blocks sign-off: ${item.blocking ? "Yes" : "No"}`);
     if (item.resolution) lines.push(`Decision: ${prose(item.resolution)}`, `Recorded by ${item.resolved_by || "Former member"} at ${item.resolved_at}`);
   }
-  lines.push("", "## Development handoff", `${stories} user stories prepared for delivery-team review; ${blockers} blocking business questions remain. No external development tickets have been created.`, "");
+  lines.push("", "## Development handoff", `${stories} user stories prepared for delivery-team review; ${blockers} blocking business questions remain. ${currentBlockers} affect current scope or need scope confirmation; ${deferredBlockers} relate only to deferred requirements. No external development tickets have been created.`, "");
   return lines.join("\n");
 }
 

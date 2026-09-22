@@ -133,3 +133,25 @@ test('evidence register maps sources to requirements without losing deferred or 
   assert.ok(register.includes('digest-one'));
   assert.ok(register.includes('digest-two'));
 });
+
+test('brief distinguishes deferred blockers without losing global or unknown-scope questions', () => {
+  const row = { id: 'deferred', reference: 'REQ-009', title: 'Later', priority: 'wont', status: 'draft', revision: 1,
+    actor: '', action: '', benefit: '', source_id: 's1', evidence_quote: 'Supporting material.', acceptance_criteria: [], quality_issues: [], story: null };
+  const blocker = { status: 'open', blocking: true, owner_role: 'Sponsor', question: 'Confirm responsibility?' };
+  const output = library.requirementBrief({
+    workspace: { id: 'w1', title: 'Scope review', objective: 'Agree delivery scope', request_type: 'enhancement' },
+    sources: [], requirements: [row], decisions: [
+      { ...blocker, requirement_id: 'deferred' },
+      { ...blocker, requirement_id: null },
+      { ...blocker, requirement_id: 'missing' },
+      { ...blocker, requirement_id: 'deferred', status: 'resolved', resolution: 'Confirmed' },
+      { ...blocker, requirement_id: 'deferred', blocking: false },
+    ],
+  });
+  assert.ok(output.includes('Open blocking business questions: 3'));
+  assert.ok(output.includes('Affecting current scope or requiring scope confirmation: 2'));
+  assert.ok(output.includes('Linked only to deferred requirements: 1'));
+  assert.ok(output.includes('Scope: REQ-009'));
+  assert.ok(output.includes('Scope: missing'));
+  assert.ok(output.includes('3 blocking business questions remain'));
+});

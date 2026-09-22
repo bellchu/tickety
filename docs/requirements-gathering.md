@@ -218,3 +218,8 @@ answer currently being edited remains visible when the scope changes.
 Long decision registers initially display 20 matching records. **Show more records**
 expands the list; searches always cover the full register. An answer being edited
 remains visible even outside the displayed batch, and filtering never clears its draft.
+
+The BRD readiness summary separates blocking questions linked only to deferred
+requirements from those affecting current scope. Questions with unavailable scope
+remain counted as needing scope confirmation; the complete decision register and
+overall blocker count remain in the brief.
