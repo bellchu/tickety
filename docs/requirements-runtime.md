@@ -149,3 +149,18 @@ checks all three cases. Shared bounds tests cover the 4,000, 12,000 and 100,000
 limits, short input and NUL rejection. Acceptance criteria already counted code
 points. Other short text fields still use native browser length constraints;
 this change does not claim to normalize every input in the application.
+
+### File import navigation regression
+
+An in-flight source import owns a draft-cache identity. A completed preview is
+written to that cache before updating component state, so leaving the initiative
+while parsing does not discard the result. Replacing or discarding the draft,
+or clearing the cache on sign-out, invalidates that identity. A late result cannot
+recreate a discarded draft or overwrite newer work. An import failure restores
+the previous draft only when the request still owns it.
+
+The component lifecycle test suppresses post-request render effects to reproduce
+navigation/unmount: the pre-fix component failed to retain the completed preview.
+The fixed test passes and also covers newer drafts, sign-out and failures with or
+without an existing draft. This is tab-memory protection, not persistence across
+a full browser reload; returning and editing a draft can supersede the old import.

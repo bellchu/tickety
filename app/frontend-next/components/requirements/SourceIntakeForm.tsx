@@ -39,12 +39,21 @@ export function SourceIntakeForm({ workspaceId, userId, open, pending, onSave }:
     setSourceTitle(""); setContent(""); setSourceKind("document"); setImportWarnings([]); setError(null); setDiscarding(false);
   }
   async function importText(file?: File) {
-    if (!file) return;
+    if (!file || importing || pending) return;
+    const previous = readRequirementSourceDraft(client, userId, workspaceId);
+    // Keep a pending draft identity so navigation, replacement and logout are distinguishable.
+    rememberRequirementSourceDraft(client, userId, workspaceId, { title: sourceTitle, kind: sourceKind, content, warnings: importWarnings });
+    const isCurrent = captureRequirementDraftSave(client, userId, workspaceId, "source");
     setError(null); setImporting(true);
     try {
       const result = await prepareRequirementSource(file, workspaceId, api);
+      if (!isCurrent()) return;
+      rememberRequirementSourceDraft(client, userId, workspaceId, result);
       setContent(result.content); setSourceTitle(result.title); setSourceKind(result.kind); setImportWarnings(result.warnings);
-    } catch (caught) { setError(caught); }
+    } catch (caught) {
+      if (isCurrent()) rememberRequirementSourceDraft(client, userId, workspaceId, previous || null);
+      setError(caught);
+    }
     finally { setImporting(false); }
   }
 
