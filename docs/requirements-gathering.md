@@ -101,6 +101,12 @@ criteria and prepared story, including its reference. Wrapped text is searchable
 a continuous phrase. Search combines with the selected readiness or deferred-scope
 view; it does not change delivery eligibility.
 
+While reading a saved source, select or paste an exact 10–4,000-character passage
+and choose **Draft a requirement from this passage**. The draft carries the source
+and excerpt; describe the stakeholder, business outcome and acceptance criteria
+before saving. This action is available without AI and protects existing unsaved
+edits before replacing them.
+
 ## Use AI where it helps
 
 - **Explore with AI** proposes up to eight requirements from one source. Unverifiable

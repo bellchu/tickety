@@ -176,6 +176,16 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
     setShowForm(true); setReviewing(null); setDraftAssumptions([]); setError(null);
   }
 
+  function captureFromSource(sourceId: string, excerpt = "") {
+    switchEditor(() => {
+      edit();
+      const empty = { ...blankDraft, source_id: sourceId };
+      setDraft({ ...empty, evidence_quote: excerpt });
+      setDraftBaseline(JSON.stringify([empty, ""]));
+      setNotice("");
+    });
+  }
+
   async function saveDraft() {
     if (parsedCriteria.issue) { setError(new Error(parsedCriteria.issue)); return; }
     let saved: Awaited<ReturnType<typeof api.saveBusinessRequirement>> | undefined;
@@ -253,8 +263,8 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
             <span className="text-[10px] font-semibold uppercase tracking-wide text-clay-700">{kinds[item.kind]}</span><h3 className="mt-1 text-sm font-semibold text-ink-700">{item.title}</h3>
             <p className="mt-1 text-xs text-ink-400">{sourceCounts.get(item.id) || 0} linked requirements</p>
           </button>
-          {sourceViewing === item.id && <div><ErrorMessage error={evidence.error} />{evidence.isPending ? <p role="status" className="text-xs">Loading source…</p> : evidence.data?.content && <SourceExplorer key={item.id} content={evidence.data.content} focus={sourceFocus?.sourceId === item.id ? sourceFocus : undefined} canAI={canAI} busy={Boolean(pending)} onExplore={excerpt => run(`gather-${item.id}`, async () => { setGathered(null); setGathered(await api.gatherRequirements(id, item.id, excerpt)); }, undefined, false)} />}</div>}
-          <div className="flex flex-wrap gap-1"><Button size="sm" variant="ghost" disabled={Boolean(pending)} onClick={() => switchEditor(() => { edit(); const nextDraft = { ...blankDraft, source_id: item.id }; setDraft(nextDraft); setDraftBaseline(JSON.stringify([nextDraft, ""])); })}>Link a requirement</Button>
+          {sourceViewing === item.id && <div><ErrorMessage error={evidence.error} />{evidence.isPending ? <p role="status" className="text-xs">Loading source…</p> : evidence.data?.content && <SourceExplorer key={item.id} content={evidence.data.content} focus={sourceFocus?.sourceId === item.id ? sourceFocus : undefined} canAI={canAI} busy={Boolean(pending)} onCapture={excerpt => captureFromSource(item.id, excerpt)} onExplore={excerpt => run(`gather-${item.id}`, async () => { setGathered(null); setGathered(await api.gatherRequirements(id, item.id, excerpt)); }, undefined, false)} />}</div>}
+          <div className="flex flex-wrap gap-1"><Button size="sm" variant="ghost" disabled={Boolean(pending)} onClick={() => captureFromSource(item.id)}>Link a requirement</Button>
             {canAI && <Button size="sm" variant="secondary" leadingIcon={<Sparkles size={13} />} pending={pending === `gather-${item.id}`} disabled={Boolean(pending)} onClick={() => run(`gather-${item.id}`, async () => { setGathered(null); setGathered(await api.gatherRequirements(id, item.id)); }, undefined, false)}>Explore with AI</Button>}
           </div>
         </div>)}
