@@ -1,4 +1,4 @@
-import { filterDecisions, requirementPriorityLabels } from "./requirement-workspace";
+import { currentScopeBlockers, filterDecisions, requirementPriorityLabels } from "./requirement-workspace";
 import type { BusinessRequirement, RequirementWorkspaceDetail } from "./requirements-types";
 
 export function requirementBriefFilename(workspace: { title: string; id: string }): string {
@@ -30,8 +30,9 @@ export function requirementBrief(detail: RequirementWorkspaceDetail): string {
   const stories = included.filter(item => item.story).length;
   const openBlockers = (detail.decisions || []).filter(item => item.status === "open" && item.blocking);
   const blockers = openBlockers.length;
-  const deferredBlockers = openBlockers.filter(item => item.requirement_id && requirementsById.get(item.requirement_id)?.priority === "wont").length;
-  const currentBlockers = blockers - deferredBlockers;
+  const currentBlocking = new Set(currentScopeBlockers(requirements, detail.decisions));
+  const currentBlockers = currentBlocking.size;
+  const deferredBlockers = blockers - currentBlockers;
   const sourceLinks = new Map<string, string[]>();
   for (const row of requirements) {
     const references = sourceLinks.get(row.source_id) || [];
@@ -74,9 +75,7 @@ export function requirementBrief(detail: RequirementWorkspaceDetail): string {
   }
   lines.push("", "## Questions and business decisions",
     "Open blockers affecting current scope or needing scope confirmation appear first. Other records retain their recorded order.");
-  const currentBlocking = (item: RequirementWorkspaceDetail["decisions"][number]) => item.status === "open" && item.blocking
-    && (!item.requirement_id || requirementsById.get(item.requirement_id)?.priority !== "wont");
-  const orderedDecisions = [...(detail.decisions || [])].sort((left, right) => Number(currentBlocking(right)) - Number(currentBlocking(left)));
+  const orderedDecisions = [...(detail.decisions || [])].sort((left, right) => Number(currentBlocking.has(right)) - Number(currentBlocking.has(left)));
   for (const item of orderedDecisions) {
     const scope = item.requirement_id ? requirementsById.get(item.requirement_id)?.reference || item.requirement_id : "Whole initiative";
     const deferred = item.requirement_id && requirementsById.get(item.requirement_id)?.priority === "wont";

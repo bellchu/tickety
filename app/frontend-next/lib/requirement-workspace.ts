@@ -26,6 +26,13 @@ export function filterDecisions(items: RequirementDecision[], filter: DecisionFi
 
 export type RequirementFilter = "all" | "questions" | "review" | "agreed" | "delivery" | "deferred";
 
+/** Only explicitly deferred scope can be excluded; unknown scope needs confirmation. */
+export function currentScopeBlockers(items: BusinessRequirement[], decisions: RequirementDecision[] = []) {
+  const deferredIds = new Set(items.filter(item => item.priority === "wont").map(item => item.id));
+  return decisions.filter(item => item.status === "open" && item.blocking
+    && (!item.requirement_id || !deferredIds.has(item.requirement_id)));
+}
+
 export function sourceRequirementCounts(items: BusinessRequirement[]): Map<string, number> {
   const counts = new Map<string, number>();
   for (const item of items) counts.set(item.source_id, (counts.get(item.source_id) || 0) + 1);
@@ -63,11 +70,9 @@ export function filterRequirements(items: BusinessRequirement[], search: string,
 
 export function workspaceFocus(detail: RequirementWorkspaceDetail) {
   const items = orderRequirements(detail.requirements.filter(item => item.priority !== "wont"), "priority");
-  const activeIds = new Set(items.map(item => item.id));
   const priorities = new Map(items.map(item => [item.id, priorityOrder[item.priority]]));
   const blockerPriority = (item: RequirementDecision) => item.requirement_id ? (priorities.get(item.requirement_id) ?? 3) : -1;
-  const blockers = (detail.decisions || [])
-    .filter(item => item.status === "open" && item.blocking && (!item.requirement_id || activeIds.has(item.requirement_id)))
+  const blockers = currentScopeBlockers(detail.requirements, detail.decisions)
     .sort((left, right) => blockerPriority(left) - blockerPriority(right));
   if (blockers.length) return {
     title: "A business answer is needed",

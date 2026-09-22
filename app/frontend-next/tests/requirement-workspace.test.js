@@ -235,3 +235,13 @@ test('unlinked background material does not delay agreed story preparation, but 
   assert.equal(workspace.requirements[0].story, null);
   assert.equal(workspace.sources.length, 2);
 });
+
+test('current scope excludes only known deferred blockers and keeps unknown scope actionable', () => {
+  const items = [{ ...item, id: 'active', priority: 'must' }, { ...item, id: 'later', priority: 'wont' }];
+  const decisions = [null, 'active', 'later', 'missing'].map((requirement_id, index) => ({ id: `d${index}`, requirement_id, status: 'open', blocking: true, owner_role: 'Sponsor', question: 'Confirm affected scope' }));
+  decisions.push({ ...decisions[0], id: 'resolved', status: 'resolved' }, { ...decisions[0], id: 'exploratory', blocking: false });
+  assert.deepEqual(library.currentScopeBlockers(items, decisions).map(row => row.id), ['d0', 'd1', 'd3']);
+  assert.equal(workspaceFocus({ ...detail(items), decisions: [decisions[3]] }).decisionId, 'd3');
+  assert.deepEqual(library.currentScopeBlockers([], [decisions[0], decisions[3]]).map(row => row.id), ['d0', 'd3']);
+  assert.equal(decisions.length, 6);
+});
