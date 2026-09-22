@@ -93,6 +93,10 @@ Each requirement links to one exact excerpt from a saved source. Add a stakehold
 capability, business outcome, priority and observable acceptance criteria. Incomplete
 work can be saved as a draft with a stable initiative-local reference such as
 `REQ-001`. Quality checks flag missing detail, vague wording and duplicate criteria.
+Vague-wording findings name the affected capability or numbered criterion and the
+terms to clarify. Replace words such as “fast” with the stakeholder's agreed,
+observable outcome; do not invent a target merely to clear the check. These checks
+support the review, while the stakeholder confirms business meaning and exceptions.
 The editor accepts up to 20 criteria, one per line, with 10–1,000 characters each;
 it identifies invalid lines before saving. Empty criteria remain allowed for drafts.
 
