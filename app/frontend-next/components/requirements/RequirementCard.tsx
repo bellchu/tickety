@@ -7,7 +7,7 @@ import type { BusinessRequirement } from "@/lib/requirements-types";
 
 export function RequirementCard({
   item, sourceTitle, canAI, busy, pending, blocked,
-  onEdit, onReview, onHistory, onSignOff, onCreateStory, onCopyStory, onRefine,
+  onEvidence, onEdit, onReview, onHistory, onSignOff, onCreateStory, onCopyStory, onRefine,
 }: {
   item: BusinessRequirement;
   blocked: boolean;
@@ -15,6 +15,7 @@ export function RequirementCard({
   canAI: boolean;
   busy: boolean;
   pending: string;
+  onEvidence: () => void;
   onEdit: () => void;
   onHistory: () => void;
   onReview: () => void;
@@ -49,6 +50,7 @@ export function RequirementCard({
           <summary className="cursor-pointer font-medium text-ink-600">Evidence & acceptance criteria</summary>
           <div className="mt-3 space-y-3 text-ink-500">
             <blockquote className="border-l-2 border-clay-300 pl-3 italic">“{item.evidence_quote}”</blockquote>
+            <Button size="sm" variant="ghost" onClick={onEvidence}>Read in original source</Button>
             <p><strong className="font-medium">Business outcome:</strong> {item.benefit || "To agree"}</p>
             <ul className="list-disc space-y-1 pl-5">{item.acceptance_criteria.map((criterion, index) => <li key={index}>{criterion}</li>)}</ul>
             {item.validated_at && <p className="text-xs text-moss-700">Signed off as {item.reviewer_role} · {formatLocalDateTime(item.validated_at)}<br />{item.validation_note}</p>}

@@ -112,6 +112,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
   const [decisionsOpen, setDecisionsOpen] = useState(() => Boolean(readRequirementDecisionDraft(editorClient, userId, id)));
   const [questionSeed, setQuestionSeed] = useState<{ question: string; requirementId: string | null } | null>(null);
   const [sourceFormOpen, setSourceFormOpen] = useState(() => Boolean(readRequirementSourceDraft(editorClient, userId, id)));
+  const [sourceFocus, setSourceFocus] = useState<{ sourceId: string; quote: string; reference: string }>();
   const [sourceViewing, setSourceViewing] = useState("");
   const [filter, setFilter] = useState<RequirementFilter>("all");
   const [search, setSearch] = useState("");
@@ -238,7 +239,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
             <span className="text-[10px] font-semibold uppercase tracking-wide text-clay-700">{kinds[item.kind]}</span><h3 className="mt-1 text-sm font-semibold text-ink-700">{item.title}</h3>
             <p className="mt-1 text-xs text-ink-400">{detail.requirements.filter(row => row.source_id === item.id).length} linked requirements</p>
           </button>
-          {sourceViewing === item.id && <div><ErrorMessage error={evidence.error} />{evidence.isPending ? <p role="status" className="text-xs">Loading source…</p> : evidence.data?.content && <SourceExplorer key={item.id} content={evidence.data.content} canAI={canAI} busy={Boolean(pending)} onExplore={excerpt => run(`gather-${item.id}`, async () => { setGathered(null); setGathered(await api.gatherRequirements(id, item.id, excerpt)); }, undefined, false)} />}</div>}
+          {sourceViewing === item.id && <div><ErrorMessage error={evidence.error} />{evidence.isPending ? <p role="status" className="text-xs">Loading source…</p> : evidence.data?.content && <SourceExplorer key={item.id} content={evidence.data.content} focus={sourceFocus?.sourceId === item.id ? sourceFocus : undefined} canAI={canAI} busy={Boolean(pending)} onExplore={excerpt => run(`gather-${item.id}`, async () => { setGathered(null); setGathered(await api.gatherRequirements(id, item.id, excerpt)); }, undefined, false)} />}</div>}
           <div className="flex flex-wrap gap-1"><Button size="sm" variant="ghost" disabled={Boolean(pending)} onClick={() => switchEditor(() => { edit(); const nextDraft = { ...blankDraft, source_id: item.id }; setDraft(nextDraft); setDraftBaseline(JSON.stringify([nextDraft, ""])); })}>Link a requirement</Button>
             {canAI && <Button size="sm" variant="secondary" leadingIcon={<Sparkles size={13} />} pending={pending === `gather-${item.id}`} disabled={Boolean(pending)} onClick={() => run(`gather-${item.id}`, async () => { setGathered(null); setGathered(await api.gatherRequirements(id, item.id)); }, undefined, false)}>Explore with AI</Button>}
           </div>
@@ -300,6 +301,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
 
         {visibleItems.length === 0 && <div className={`${panelStyle} py-10 text-center`}><FileText className="mx-auto text-ink-300" /><h3 className="mt-3 font-semibold">{detail.requirements.length ? "No requirements match this view" : "Give the business need a clear shape"}</h3><p className="mx-auto mt-2 max-w-md text-sm leading-6 text-ink-500">{detail.requirements.length ? "Try a different search or show all work." : "Explore your material, capture an outcome, or start with a question. Your evidence and decisions will stay connected here."}</p></div>}
         {visibleItems.map(row => <RequirementCard key={row.id} item={row} blocked={blockedIds.has(row.id)} sourceTitle={sourceNames.get(row.source_id) || "Source unavailable"} canAI={canAI} busy={Boolean(pending)} pending={pending}
+          onEvidence={() => { setSourceViewing(row.source_id); setSourceFocus({ sourceId: row.source_id, quote: row.evidence_quote, reference: row.reference }); }}
           onEdit={() => switchEditor(() => edit(row))}
           onHistory={() => setHistoryItem(row.id)}
           onReview={() => run(`review-${row.id}`, async () => { setAssistance(null); setAssistance({ item: row, result: await api.assistRequirement(id, row, "review") }); }, undefined, false)}
