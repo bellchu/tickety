@@ -286,3 +286,14 @@ test('source filters combine origin, title and missing links while preserving re
   assert.deepEqual(select('', '', false), ['s1', 's2', 's3', 's4']);
   assert.equal(sources.length, 4);
 });
+
+
+test('readiness filtering skips long-text search for excluded requirements', () => {
+  let excludedTextReads = 0;
+  const excluded = { ...item, id: 'later', priority: 'wont', get evidence_quote() { excludedTextReads++; return 'Deferred matching evidence'; } };
+  const current = { ...item, priority: 'should', evidence_quote: 'Current matching evidence' };
+  assert.deepEqual(filterRequirements([excluded, current], 'matching evidence', 'review').map(row => row.id), ['r1']);
+  assert.equal(excludedTextReads, 0);
+  assert.deepEqual(filterRequirements([excluded, current], 'matching evidence', 'all').map(row => row.id), ['later', 'r1']);
+  assert.equal(excludedTextReads, 1);
+});

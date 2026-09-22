@@ -74,9 +74,6 @@ export function filterRequirements(items: BusinessRequirement[], search: string,
   const blockedIds = blockedRequirementIds(items, decisions);
   return items.filter(item => {
     if (sourceId && item.source_id !== sourceId) return false;
-    const matchesText = !query || [item.reference, item.title, item.actor, item.action, item.benefit, item.evidence_quote,
-      ...(item.acceptance_criteria || []), item.story?.reference, item.story?.title, item.story?.statement]
-      .some(value => value && searchableText(value).includes(query));
     const blocked = blockedIds.has(item.id);
     const matchesFilter = filter === "all"
       || (filter === "deferred" && item.priority === "wont")
@@ -84,7 +81,10 @@ export function filterRequirements(items: BusinessRequirement[], search: string,
       || (filter === "review" && item.priority !== "wont" && item.status === "draft" && !blocked && item.quality_issues.length === 0)
       || (filter === "agreed" && item.priority !== "wont" && item.status === "validated" && !item.story && !blocked)
       || (filter === "delivery" && item.priority !== "wont" && item.story !== null);
-    return matchesText && matchesFilter;
+    if (!matchesFilter) return false;
+    return !query || [item.reference, item.title, item.actor, item.action, item.benefit, item.evidence_quote,
+      ...(item.acceptance_criteria || []), item.story?.reference, item.story?.title, item.story?.statement]
+      .some(value => value && searchableText(value).includes(query));
   });
 }
 
