@@ -175,6 +175,11 @@ signing off; the answer itself does not update or sign off a requirement.
 Filter the register to open, blocking, exploratory or recorded decisions, and search
 by question, answer owner or resolution. An answer being edited stays visible across
 filters. Questions linked to deferred requirements display **Not this time**.
+Use **Current delivery blockers** to exclude questions linked only to deferred
+requirements; global blockers and unknown scope remain included. **All sign-off
+blockers** also includes deferred work. Both filters combine with search and the
+affected requirement selector. The collapsed register summarizes current and
+deferred blockers separately without changing the underlying decisions.
 
 AI questions, review findings and story-refinement assumptions can prefill the log
 for human review. Questions from an existing requirement retain that scope; source

@@ -220,3 +220,10 @@ cover a target beyond the first 20 records and preservation of another answer dr
 The browser check did not exercise the deferred-history message or a nonempty scope
 filter. Its synthetic REQ-002 question remains open pending approval to record the
 verification result; the attempted resolution was blocked by automatic approval.
+
+The current-delivery filter was checked in the browser using the production build
+at `2dd69dc`: the existing REQ-002 blocker appeared under **Current delivery blockers**,
+then disappeared when **Decisions affecting** selected REQ-001. Returning to all
+requirements restored the scope. The collapsed summary showed one current blocker
+and zero deferred blockers. No business records were written. Deferred, unknown-scope
+and active-answer combinations are covered by the automated filter/component tests.
