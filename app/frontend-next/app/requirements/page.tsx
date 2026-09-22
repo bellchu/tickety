@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ClipboardList, Download, FileText, Plus, Sparkles, ArrowUpRight } from "lucide-react";
-import { requirementBrief } from "@/lib/requirement-export";
+import { requirementBrief, requirementStoryText } from "@/lib/requirement-export";
 import { RequirementHistoryPanel } from "@/components/requirements/RequirementHistoryPanel";
 import { CrossReviewPanel } from "@/components/requirements/CrossReviewPanel";
 import { SourceExplorer } from "@/components/requirements/SourceExplorer";
@@ -256,7 +256,7 @@ function Workspace({ id, canAI, onBack }: { id: string; canAI: boolean; onBack: 
           onReview={() => run(`review-${row.id}`, async () => { setAssistance(null); setAssistance({ item: row, result: await api.assistRequirement(id, row, "review") }); }, undefined, false)}
           onSignOff={() => { setReviewing(row); setShowForm(false); setReviewNote(""); }}
           onCreateStory={() => run(row.id, () => api.createRequirementStory(id, row))}
-          onCopyStory={() => run(`copy-${row.id}`, () => navigator.clipboard.writeText([row.story!.title, row.story!.statement, ...row.story!.acceptance_criteria.map(item => `- ${item}`)].join("\n\n")), () => setNotice("Copied user story."), false)}
+          onCopyStory={() => run(`copy-${row.id}`, () => navigator.clipboard.writeText(requirementStoryText(detail, row)), () => setNotice("Copied user story."), false)}
           onRefine={() => run(`refine-${row.id}`, async () => { setAssistance(null); setAssistance({ item: row, result: await api.assistRequirement(id, row, "story") }); }, undefined, false)}
         />)}
       </section>

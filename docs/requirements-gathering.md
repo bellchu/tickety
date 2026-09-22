@@ -162,3 +162,11 @@ A finding can prefill a question in the decision log; the user still confirms it
 answer owner, affected scope and whether it blocks sign-off. Multi-requirement
 findings default to initiative scope for that confirmation. No findings are saved,
 merged, signed off or treated as proof of consistency automatically.
+
+**Copy story** prepares a self-contained Markdown handoff: story and acceptance
+criteria, business objective, initiative and requirement references, signed-off
+revision, evidence excerpt and text digest, reviewer details, and relevant open
+questions. It includes initiative-wide questions plus questions linked to that
+requirement, while excluding resolved or unrelated questions. Deferred and unsigned
+requirements cannot produce this handoff. Copying writes only to the clipboard;
+it does not create a ticket or send a message to a delivery system.

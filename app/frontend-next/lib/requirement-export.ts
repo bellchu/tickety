@@ -1,4 +1,4 @@
-import type { RequirementWorkspaceDetail } from "./requirements-types";
+import type { BusinessRequirement, RequirementWorkspaceDetail } from "./requirements-types";
 
 export function requirementBrief(detail: RequirementWorkspaceDetail): string {
   const { workspace, requirements, sources } = detail;
@@ -33,5 +33,34 @@ export function requirementBrief(detail: RequirementWorkspaceDetail): string {
   const blockers = (detail.decisions || []).filter(item => item.status === "open" && item.blocking).length;
   const stories = requirements.filter(item => item.priority !== "wont" && item.story).length;
   lines.push("", "## Development handoff", `${stories} user stories prepared for delivery-team review; ${blockers} blocking business questions remain. No external development tickets have been created.`, "");
+  return lines.join("\n");
+}
+
+
+export function requirementStoryText(detail: RequirementWorkspaceDetail, row: BusinessRequirement): string {
+  const story = row.story;
+  if (!story || row.status !== "validated" || row.priority === "wont") {
+    throw new Error("Prepare an in-scope, signed-off user story before copying it.");
+  }
+  const source = detail.sources.find(item => item.id === row.source_id);
+  const questions = (detail.decisions || []).filter(item => item.status === "open" && (!item.requirement_id || item.requirement_id === row.id));
+  const lines = [
+    `# ${story.reference}: ${story.title}`, "", story.statement, "",
+    "## Acceptance criteria", ...story.acceptance_criteria.map(item => `- ${item}`), "",
+    "## Business context", detail.workspace.objective, "",
+    "## Traceability",
+    `Initiative: ${detail.workspace.title} (${detail.workspace.id})`,
+    `Requirement: ${story.requirement_reference}; signed-off revision ${story.validated_revision}`,
+    `Source: ${source?.title || "Source unavailable"} (${row.source_id})`,
+    ...(source ? [`Evidence text SHA-256: ${source.content_sha256}`] : []),
+    `Evidence excerpt: ${row.evidence_quote}`,
+    `Signed off by: ${row.validated_by || "Former member"} as ${row.reviewer_role || "Unrecorded capacity"}`,
+    `Sign-off time: ${row.validated_at || "Unrecorded"}`,
+    `Review note: ${row.validation_note || "Unrecorded"}`, "",
+    "## Open business questions",
+    ...questions.map(item => `- ${item.blocking ? "Blocks sign-off" : "Exploratory"}: ${item.question} (Answer owner: ${item.owner_role})`),
+    ...(questions.length ? [] : ["No open questions are recorded for this requirement or its initiative."]), "",
+    "Prepared for delivery-team review. No external development ticket has been created.",
+  ];
   return lines.join("\n");
 }

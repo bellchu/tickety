@@ -62,3 +62,19 @@ test('deferred needs retain their evidence without exporting an old story as del
   assert.ok(!brief.includes('Old delivery wording'));
   assert.ok(brief.includes('0 user stories prepared'));
 });
+
+test('copied stories include signed criteria, provenance and only relevant open questions', () => {
+  const row = { id: 'r1', status: 'validated', priority: 'must', source_id: 's1', evidence_quote: 'Confirm the submission within thirty seconds.', validated_by: 'reviewer', reviewer_role: 'Product Owner', validated_at: '2026-09-21T00:00:00Z', validation_note: 'Confirmed with operations.', story: { reference: 'US-001', title: 'Receipt', statement: 'As an analyst, I want a receipt, so that I can track intake.', acceptance_criteria: ['Given valid input, a receipt appears within 30 seconds.'], requirement_reference: 'REQ-001', validated_revision: 2 } };
+  const detail = { workspace: { id: 'w', title: 'Supplier intake', objective: 'Reduce manual follow-up.' }, sources: [{ id: 's1', title: 'Operations SOP', content_sha256: 'digest' }], decisions: [
+    { requirement_id: null, status: 'open', blocking: false, question: 'Which languages might be added later?', owner_role: 'Sponsor' },
+    { requirement_id: 'r1', status: 'open', blocking: false, question: 'Could receipt text be configurable?', owner_role: 'Analyst' },
+    { requirement_id: 'r2', status: 'open', question: 'Unrelated requirement question' },
+    { requirement_id: 'r1', status: 'resolved', question: 'Already answered question' },
+  ] };
+  const output = loaded.exports.requirementStoryText(detail, row);
+  for (const required of ['US-001', 'REQ-001', 'signed-off revision 2', '30 seconds', 'Operations SOP', 'digest', 'Confirm the submission', 'Product Owner', 'Confirmed with operations.', 'Which languages', 'Could receipt text', 'Reduce manual follow-up.']) assert.ok(output.includes(required), required);
+  assert.ok(!output.includes('Unrelated requirement question'));
+  assert.ok(!output.includes('Already answered question'));
+  assert.throws(() => loaded.exports.requirementStoryText(detail, { ...row, priority: 'wont' }), /in-scope/);
+  assert.throws(() => loaded.exports.requirementStoryText(detail, { ...row, status: 'draft' }), /signed-off/);
+});
