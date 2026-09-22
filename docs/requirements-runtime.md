@@ -332,3 +332,14 @@ A 100,000-character source regression failed before this change and passes after
 it: SQL capture excludes the content column and the marking response stays below
 1,000 bytes. The full requirement suite passes 51 tests, including reversible
 marking, source reuse, privacy and preservation of signed-off delivery content.
+
+### Evidence exploration views
+
+Local browser checks passed for **Show evidence**: **Needs exploration** displayed
+only the unlinked, unreviewed email; **Kept as background** showed zero results
+because no sources had been marked. From that empty view, **Read in original source**
+on REQ-001 restored **All evidence** and focused its exact highlighted SOP excerpt.
+Combining **Needs exploration**, source type **SOP** and title search `supplier`
+produced zero results as expected. **Show all evidence** then cleared the title,
+type and review filters together. No source classification or business record was
+changed during these checks. Build and production-route verification also passed.
