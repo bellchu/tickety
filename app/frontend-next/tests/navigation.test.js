@@ -1,30 +1,13 @@
+const { loadPureTs } = require("./helpers/load-pure-ts");
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const path = require("node:path");
 const test = require("node:test");
-const ts = require("typescript");
 
-function loadNavigationHelpers() {
-  const filename = path.join(__dirname, "..", "lib", "navigation.ts");
-  const source = fs.readFileSync(filename, "utf8");
-  const output = ts.transpileModule(source, {
-    compilerOptions: {
-      module: ts.ModuleKind.CommonJS,
-      target: ts.ScriptTarget.ES2020,
-    },
-    fileName: filename,
-  }).outputText;
-  const loaded = { exports: {} };
-  const compile = new Function("exports", "module", output);
-  compile(loaded.exports, loaded);
-  return loaded.exports;
-}
 
 const {
   getCurrentNavigationItem,
   isNavigationItemActive,
   navigationSections,
-} = loadNavigationHelpers();
+} = loadPureTs("navigation.ts");
 
 test("workspace navigation stays within four directly scannable sections", () => {
   assert.deepEqual(

@@ -1,35 +1,8 @@
+const { loadPureTs } = require("./helpers/load-pure-ts");
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const path = require("node:path");
 const test = require("node:test");
-const ts = require("typescript");
 
-function loadHelpers() {
-  const filename = path.join(__dirname, "..", "lib", "ticket-intelligence.ts");
-  const source = fs.readFileSync(filename, "utf8");
-  const output = ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021 },
-    fileName: filename,
-  }).outputText;
-  const loaded = { exports: {} };
-  const dateTime = loadTypeScriptModule(path.join(__dirname, "..", "lib", "date-time.ts"));
-  new Function("require", "exports", "module", output)(
-    (specifier) => specifier === "@/lib/date-time" ? dateTime : require(specifier),
-    loaded.exports,
-    loaded,
-  );
-  return loaded.exports;
-}
 
-function loadTypeScriptModule(filename) {
-  const output = ts.transpileModule(fs.readFileSync(filename, "utf8"), {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021 },
-    fileName: filename,
-  }).outputText;
-  const loaded = { exports: {} };
-  new Function("exports", "module", output)(loaded.exports, loaded);
-  return loaded.exports;
-}
 
 const {
   analysisLifecycleLabel,
@@ -39,7 +12,7 @@ const {
   sourceKindLabel,
   ticketSentimentPresentation,
   ticketSignalRatings,
-} = loadHelpers();
+} = loadPureTs("ticket-intelligence.ts", { "@/lib/date-time": loadPureTs("date-time.ts") });
 const emptyAnalysis = {
   ai_status: null,
   ai_lease_expires_at: null,
