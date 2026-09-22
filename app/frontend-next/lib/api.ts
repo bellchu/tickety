@@ -164,7 +164,7 @@ async function downloadReportCsv(filters: import("./types").ReportFilters) {
 }
 
 export const api = {
-  getRequirementWorkspaces: (offset = 0) => fetchAPI<{ items: RequirementWorkspace[]; summaries?: Record<string, { requirements: number; drafts: number; stories: number }>; total: number; limit: number; offset: number }>(`/requirements?offset=${offset}&limit=25`),
+  getRequirementWorkspaces: (offset = 0, search = "") => fetchAPI<{ items: RequirementWorkspace[]; summaries?: Record<string, { requirements: number; drafts: number; stories: number }>; total: number; limit: number; offset: number }>(`/requirements?offset=${offset}&limit=25&search=${encodeURIComponent(search)}`),
   createRequirementWorkspace: (payload: { title: string; objective: string; request_type: "approved_project" | "enhancement" }) => fetchAPI<RequirementWorkspace>("/requirements", { method: "POST", body: JSON.stringify(payload) }),
   crossReviewRequirements: (workspace: string, requirement_ids: string[]) => fetchAPI<RequirementCrossReview>(`/requirements/${encodeURIComponent(workspace)}/cross-review`, { method: "POST", body: JSON.stringify({ requirement_ids }) }),
   getRequirementHistory: (workspace: string, item: string, offset: number) => fetchAPI<RequirementHistory>(`/requirements/${encodeURIComponent(workspace)}/items/${encodeURIComponent(item)}/history?offset=${offset}`),

@@ -242,3 +242,8 @@ The initiative list shows total captured requirements, in-scope drafts awaiting
 agreement, and prepared stories. Deferred needs remain in the total but do not
 inflate the active draft or story counts. Prepared stories still require delivery
 review; these counts are a progress overview, not a release approval.
+
+Search initiatives by name or business objective from the overview. Submit the
+search to inspect all matching initiatives you can access, including those beyond
+the current page. Search text is treated literally; clearing it restores the full
+list and returns to the first page.

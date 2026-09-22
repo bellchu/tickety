@@ -57,6 +57,19 @@ class RequirementGatheringTests(unittest.TestCase):
     def payload(self, source):
         return {"source_id": source, "title": "Acknowledge receipt", "actor": "finance analyst", "action": "receive an invoice acknowledgement", "benefit": "I can confirm successful submission", "evidence_quote": "Every invoice must receive an acknowledgement within 30 seconds.", "acceptance_criteria": ["Given a valid invoice, when submitted, then acknowledgement appears within 30 seconds."], "priority": "must"}
 
+    def test_workspace_search_is_literal_private_and_applied_before_pagination(self):
+        first = self.workspace()
+        special = self.client.post(self.path, json={"title": "100%_scope", "objective": "Improve supplier acknowledgement", "request_type": "enhancement"}).json()["id"]
+        found = self.client.get(self.path, params={"search": " SUPPLIER ", "limit": 1}).json()
+        self.assertEqual(found["total"], 1)
+        self.assertEqual(found["items"][0]["id"], special)
+        self.assertEqual(self.client.get(self.path, params={"search": "%_"}).json()["total"], 1)
+        self.assertEqual(self.client.get(self.path, params={"search": "invoice", "offset": 1}).json()["items"], [])
+        self.assertEqual(self.client.get(self.path, params={"search": "invoice"}).json()["items"][0]["id"], first)
+        self.assertEqual(self.client.get(self.path, params={"search": "x" * 201}).status_code, 422)
+        self.user = UserRecord(id="other", name="Other", role="agent", is_active=True)
+        self.assertEqual(self.client.get(self.path, params={"search": "supplier"}).json()["total"], 0)
+
     def test_workspace_summaries_are_page_scoped_and_do_not_read_requirement_text(self):
         workspace = self.workspace()
         source = self.source(workspace)

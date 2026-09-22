@@ -57,6 +57,8 @@ function RequirementsContent() {
   }
   function setSelected(id: string | null) { router.push(initiativeURL(id)); }
   const [offset, setOffset] = useState(0);
+  const [initiativeSearch, setInitiativeSearch] = useState("");
+  const [searchInput, setSearchInput] = useState("");
   const [creating, setCreating] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -66,7 +68,7 @@ function RequirementsContent() {
   const queryClient = useQueryClient();
   const auth = useQuery({ queryKey: ["auth-me"], queryFn: api.getAuthMe, retry: false });
   const allowed = !auth.isError && auth.data?.auth_kind === "session" && auth.data?.is_active && ["agent", "supervisor", "admin"].includes(auth.data.role.toLowerCase());
-  const list = useQuery({ queryKey: ["requirement-workspaces", offset], queryFn: () => api.getRequirementWorkspaces(offset), enabled: Boolean(allowed) && !selected });
+  const list = useQuery({ queryKey: ["requirement-workspaces", offset, initiativeSearch], queryFn: () => api.getRequirementWorkspaces(offset, initiativeSearch), enabled: Boolean(allowed) && !selected });
 
   async function create(event: FormEvent) {
     event.preventDefault();
@@ -96,10 +98,15 @@ function RequirementsContent() {
       <ErrorMessage error={error} /><Button type="submit" pending={pending}>Create initiative</Button>
       </fieldset>
     </form>}
+    <form className="flex flex-wrap gap-2" onSubmit={event => { event.preventDefault(); setOffset(0); setInitiativeSearch(searchInput.trim()); }}>
+      <label className="min-w-48 flex-1"><span className="sr-only">Find initiatives by name or objective</span><input type="search" maxLength={200} className={inputStyle} placeholder="Find an initiative by name or business objective…" value={searchInput} onChange={event => setSearchInput(event.target.value)} /></label>
+      <Button type="submit" variant="secondary">Search initiatives</Button>
+      {initiativeSearch && <Button variant="ghost" onClick={() => { setSearchInput(""); setInitiativeSearch(""); setOffset(0); }}>Clear search</Button>}
+    </form>
     <ErrorMessage error={list.error} />
     {list.isError && <Button variant="secondary" onClick={() => list.refetch()}>Retry loading initiatives</Button>}
     {list.isPending && <p role="status">Loading initiatives…</p>}
-    {list.data?.items.length === 0 && <div className={`${panelStyle} text-center`}><FileText className="mx-auto mb-3 text-ink-400" /><h2 className="font-semibold">Start with a business question</h2><p className="mt-2 text-sm text-ink-500">Create your first initiative, then add the material that explains the problem.</p></div>}
+    {list.data?.items.length === 0 && <div className={`${panelStyle} text-center`}><FileText className="mx-auto mb-3 text-ink-400" /><h2 className="font-semibold">{initiativeSearch ? "No initiatives match this search" : "Start with a business question"}</h2><p className="mt-2 text-sm text-ink-500">{initiativeSearch ? "Try another name or business objective, or clear the search." : "Create your first initiative, then add the material that explains the problem."}</p></div>}
     <div className="grid gap-4 md:grid-cols-2">{list.data?.items.map(workspace => <Link key={workspace.id} href={initiativeURL(workspace.id)} prefetch={false} className={`${panelStyle} text-left transition hover:border-clay-400 focus-visible:ring-2 focus-visible:ring-clay-400`}><h2 className="text-lg font-semibold text-ink-700">{workspace.title}</h2><p className="mt-2 line-clamp-3 text-sm text-ink-500">{workspace.objective}</p>{list.data?.summaries && <p className="mt-3 text-xs text-ink-500">{list.data.summaries[workspace.id]?.requirements || 0} requirements · {list.data.summaries[workspace.id]?.drafts || 0} awaiting agreement · {list.data.summaries[workspace.id]?.stories || 0} stories prepared</p>}<p className="mt-4 text-xs text-ink-400">Created {formatLocalDateTime(workspace.created_at)}</p></Link>)}</div>
     {list.data && <div className="flex items-center justify-between"><Button variant="secondary" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 25))}>Previous</Button><span className="text-xs text-ink-500">{list.data.total} initiatives</span><Button variant="secondary" disabled={offset + 25 >= list.data.total} onClick={() => setOffset(offset + 25)}>Next</Button></div>}
   </PageFrame>;

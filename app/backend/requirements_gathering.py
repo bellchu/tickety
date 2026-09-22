@@ -196,10 +196,16 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
             raise HTTPException(422, "Evidence must be an exact excerpt from the selected source")
 
     @router.get("")
-    def list_workspaces(offset: int = Query(0, ge=0), limit: int = Query(25, ge=1, le=100), db: Session = Depends(get_db), user: UserRecord = Depends(require_user)):
+    def list_workspaces(offset: int = Query(0, ge=0), limit: int = Query(25, ge=1, le=100), search: str = Query("", max_length=200), db: Session = Depends(get_db), user: UserRecord = Depends(require_user)):
         query = db.query(RequirementWorkspaceRecord)
         if user.role.lower() != "admin":
             query = query.filter_by(owner_id=user.id)
+        term = search.strip().lower()
+        if term:
+            query = query.filter(
+                func.lower(RequirementWorkspaceRecord.title).contains(term, autoescape=True)
+                | func.lower(RequirementWorkspaceRecord.objective).contains(term, autoescape=True)
+            )
         total = query.count()
         rows = query.order_by(RequirementWorkspaceRecord.created_at.desc(), RequirementWorkspaceRecord.id).offset(offset).limit(limit).all()
         summaries = {}
