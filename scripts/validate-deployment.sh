@@ -78,6 +78,10 @@ frontend_builder_line=$(grep -nF 'FROM node:24.19.0-alpine AS frontend-builder' 
 echo "Checking production target guard..."
 "$ROOT_DIR/scripts/verify-production-target.sh" --self-test
 grep -Fq -- '--host HOST' "$ROOT_DIR/scripts/verify-production-target.sh"
+grep -Fq -- '--release NAME' "$ROOT_DIR/scripts/verify-production-target.sh"
+grep -Fq 'FRONTEND_SELECTOR="$RELEASE_SELECTOR,app.kubernetes.io/component=frontend"' \
+  "$ROOT_DIR/scripts/verify-production-target.sh"
+grep -Fq -- '--release "$RELEASE"' "$ROOT_DIR/deploy.sh"
 grep -Fq 'tickety.example.com' "$ROOT_DIR/deploy/examples/production-values.yaml"
 grep -Fq -- '--metadata-file' "$ROOT_DIR/deploy.sh"
 grep -Fq -- 'docker buildx imagetools inspect' "$ROOT_DIR/deploy.sh"

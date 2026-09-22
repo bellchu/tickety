@@ -160,6 +160,45 @@ class NotificationOutboxTests(unittest.TestCase):
         self.assertEqual(dispatcher.cursor, 2)
         sent.assert_awaited_once()
 
+    def test_live_dispatch_rejects_mismatched_payload_cursor_without_suppressing_replay(self):
+        """A corrupt live row must not move a browser past later valid orders."""
+        sent = AsyncMock()
+        dispatcher = main._NotificationOutboxDispatcher(sent)
+        with (
+            patch.object(main, "SessionLocal", self.sessions_a),
+            patch.dict(os.environ, {"NOTIFICATION_OUTBOX_BATCH_SIZE": "1"}, clear=False),
+        ):
+            asyncio.run(dispatcher.initialize())
+            self._insert(event_id=1, payload=self._payload(100))
+            self._insert(event_id=2, payload=self._payload(2))
+            self.assertEqual(asyncio.run(dispatcher.dispatch_once()), 1)
+            # The first row is schema-valid but its claimed browser cursor
+            # differs from its durable dispatch order, so it never reaches a
+            # live socket.
+            sent.assert_not_awaited()
+            self.assertEqual(asyncio.run(dispatcher.dispatch_once()), 1)
+
+        sent.assert_awaited_once_with(self._payload(2).model_dump(mode="json"))
+        self.assertEqual(dispatcher.cursor, 2)
+
+        # The durable rows remain available for reconnect recovery.  The bad
+        # row advances only to its own verified order, then the next valid row
+        # is still delivered rather than being skipped by its forged id 100.
+        socket = MagicMock()
+        socket.send_json = AsyncMock()
+        with patch.object(main, "SessionLocal", self.sessions_a):
+            self.assertEqual(asyncio.run(main._register_notification_subscriber_with_replay(
+                "recipient", socket, 0
+            )), (True, False))
+        self.assertEqual(
+            [call.args[0] for call in socket.send_json.await_args_list],
+            [
+                {"type": "notification_cursor_advance", "cursor": 1},
+                self._payload(2).model_dump(mode="json"),
+            ],
+        )
+        main._remove_notification_subscriber("recipient", socket)
+
     def test_award_and_outbox_are_one_transaction(self):
         with self.sessions_a() as db:
             db.add_all((

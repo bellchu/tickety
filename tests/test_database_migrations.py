@@ -1,4 +1,5 @@
 import asyncio
+import importlib
 import os
 import tempfile
 import unittest
@@ -39,6 +40,23 @@ class DatabaseMigrationTests(unittest.TestCase):
     def _current_revision(self, engine):
         with engine.connect() as connection:
             return MigrationContext.configure(connection).get_current_revision()
+
+    def test_active_binding_fence_repair_accepts_postgresql_deparser_spellings(self):
+        migration = importlib.import_module(
+            "migrations.versions.0061_repair_integration_binding_schema_fence"
+        )
+        self.assertEqual(
+            migration._normalized("lower(TRIM(BOTH FROM provider))"),
+            "lowertrimprovider",
+        )
+        self.assertEqual(
+            migration._normalized("lower(btrim((provider)::text))"),
+            "lowertrimprovider",
+        )
+        self.assertEqual(
+            migration._normalized("((state)::text = 'active'::text)"),
+            "state='active'",
+        )
 
     def test_source_context_upgrade_rejects_incompatible_existing_columns(self):
         command.upgrade(self.config, "0044")

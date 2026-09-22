@@ -4,12 +4,13 @@ set -euo pipefail
 PRODUCTION_HOST=""
 PRODUCTION_URL=""
 NAMESPACE=""
+RELEASE=""
 KUBE_CONTEXT=""
 SELF_TEST=false
 
 usage() {
   cat <<'EOF'
-Usage: scripts/verify-production-target.sh --host HOST --namespace NAME [--context NAME]
+Usage: scripts/verify-production-target.sh --host HOST --namespace NAME --release NAME [--context NAME]
        scripts/verify-production-target.sh --self-test
 
 Prove that the selected Kubernetes namespace is the Tickety production target.
@@ -135,6 +136,10 @@ while (($#)); do
       NAMESPACE=${2:?--namespace requires a value}
       shift 2
       ;;
+    --release)
+      RELEASE=${2:?--release requires a value}
+      shift 2
+      ;;
     --context)
       KUBE_CONTEXT=${2:?--context requires a value}
       shift 2
@@ -156,7 +161,7 @@ while (($#)); do
 done
 
 if [[ $SELF_TEST == true ]]; then
-  if [[ -n $NAMESPACE || -n $KUBE_CONTEXT ]]; then
+  if [[ -n $NAMESPACE || -n $RELEASE || -n $KUBE_CONTEXT ]]; then
     echo "--self-test does not accept target options." >&2
     exit 1
   fi
@@ -164,13 +169,17 @@ if [[ $SELF_TEST == true ]]; then
   exit 0
 fi
 
-if [[ -z $NAMESPACE || -z $PRODUCTION_HOST ]]; then
-  echo "--host and --namespace are required." >&2
+if [[ -z $NAMESPACE || -z $RELEASE || -z $PRODUCTION_HOST ]]; then
+  echo "--host, --namespace, and --release are required." >&2
   usage >&2
   exit 1
 fi
 [[ $PRODUCTION_HOST =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])$ ]] || {
   echo "--host must be a lowercase DNS hostname." >&2
+  exit 1
+}
+[[ $RELEASE =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ && ${#RELEASE} -le 53 ]] || {
+  echo "--release must be a lowercase DNS label with at most 53 characters." >&2
   exit 1
 }
 PRODUCTION_URL=https://$PRODUCTION_HOST
@@ -188,32 +197,27 @@ if [[ -n $KUBE_CONTEXT ]]; then
 fi
 
 ACTIVE_CONTEXT=$("${KUBECTL[@]}" config current-context)
-INGRESS_HOSTS=$("${KUBECTL[@]}" get ingress --namespace "$NAMESPACE" -o jsonpath='{range .items[*].spec.rules[*]}{.host}{"\n"}{end}')
+RELEASE_SELECTOR="app.kubernetes.io/instance=$RELEASE"
+FRONTEND_SELECTOR="$RELEASE_SELECTOR,app.kubernetes.io/component=frontend"
+INGRESS_HOSTS=$("${KUBECTL[@]}" get ingress --namespace "$NAMESPACE" \
+  --selector "$RELEASE_SELECTOR" -o jsonpath='{range .items[*].spec.rules[*]}{.host}{"\n"}{end}')
 validate_ingress_host "$INGRESS_HOSTS"
 
 FRONTEND_DEPLOYMENTS=$("${KUBECTL[@]}" get deployments --namespace "$NAMESPACE" \
-  --selector app.kubernetes.io/component=frontend -o name)
+  --selector "$FRONTEND_SELECTOR" -o name)
 if ! FRONTEND_DEPLOYMENT=$(select_single_resource_name <<<"$FRONTEND_DEPLOYMENTS"); then
-  echo "Production target rejected: expected exactly one frontend Deployment selected by app.kubernetes.io/component=frontend in namespace $NAMESPACE." >&2
+  echo "Production target rejected: expected exactly one frontend Deployment for release $RELEASE in namespace $NAMESPACE." >&2
   exit 1
 fi
 FRONTEND_IMAGE=$("${KUBECTL[@]}" get "$FRONTEND_DEPLOYMENT" --namespace "$NAMESPACE" -o jsonpath='{.spec.template.spec.containers[0].image}')
 FRONTEND_PODS=$("${KUBECTL[@]}" get pods --namespace "$NAMESPACE" \
-  --selector app.kubernetes.io/component=frontend \
+  --selector "$FRONTEND_SELECTOR" \
   --field-selector status.phase=Running \
   -o custom-columns='NAME:.metadata.name,IMAGE:.spec.containers[0].image,DELETING:.metadata.deletionTimestamp,READY:.status.containerStatuses[0].ready' \
   --no-headers 2>/dev/null || true)
 FRONTEND_POD=$(select_active_frontend_pod "$FRONTEND_IMAGE" <<<"$FRONTEND_PODS")
 if [[ -z $FRONTEND_POD ]]; then
-  FRONTEND_PODS=$("${KUBECTL[@]}" get pods --namespace "$NAMESPACE" \
-    --selector app=frontend \
-    --field-selector status.phase=Running \
-    -o custom-columns='NAME:.metadata.name,IMAGE:.spec.containers[0].image,DELETING:.metadata.deletionTimestamp,READY:.status.containerStatuses[0].ready' \
-    --no-headers 2>/dev/null || true)
-  FRONTEND_POD=$(select_active_frontend_pod "$FRONTEND_IMAGE" <<<"$FRONTEND_PODS")
-fi
-if [[ -z $FRONTEND_POD ]]; then
-  echo "Production target rejected: no ready, non-terminating frontend Pod uses the Deployment image in namespace $NAMESPACE." >&2
+  echo "Production target rejected: no ready, non-terminating frontend Pod for release $RELEASE uses the Deployment image in namespace $NAMESPACE." >&2
   exit 1
 fi
 

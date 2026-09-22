@@ -141,6 +141,21 @@ class DeploymentHardeningTests(unittest.TestCase):
         )
         self.assertIn("resolves this non-secret token", chart_readme)
 
+    def test_production_target_verifier_is_scoped_to_the_deployed_release(self):
+        deployer = (self.root / "deploy.sh").read_text()
+        verifier = (self.root / "scripts/verify-production-target.sh").read_text()
+
+        self.assertIn('--release "$RELEASE"', deployer)
+        self.assertIn('--release NAME', verifier)
+        self.assertIn('RELEASE_SELECTOR="app.kubernetes.io/instance=$RELEASE"', verifier)
+        self.assertIn(
+            'FRONTEND_SELECTOR="$RELEASE_SELECTOR,app.kubernetes.io/component=frontend"',
+            verifier,
+        )
+        self.assertIn('--selector "$RELEASE_SELECTOR"', verifier)
+        self.assertIn('--selector "$FRONTEND_SELECTOR"', verifier)
+        self.assertNotIn('--selector app=frontend', verifier)
+
     def test_upgrade_drains_all_old_database_writers_before_auth_schema_migration(self):
         deployer = (self.root / "deploy.sh").read_text()
         chart_readme = (self.root / "deploy/helm/tickety/README.md").read_text()

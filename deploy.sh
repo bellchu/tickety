@@ -649,7 +649,7 @@ fi
 
 helm "${HELM_ARGS[@]}"
 helm test "$RELEASE" --namespace "$NAMESPACE" --timeout 2m
-"$ROOT_DIR/scripts/verify-production-target.sh" --host "$PRODUCTION_HOST" --namespace "$NAMESPACE"
+"$ROOT_DIR/scripts/verify-production-target.sh" --host "$PRODUCTION_HOST" --namespace "$NAMESPACE" --release "$RELEASE"
 if [[ -n $EXTERNAL_SECRET_NAME ]]; then
   CURRENT_SECRET_RESOURCE_VERSION=$(secret_resource_version "$EXTERNAL_SECRET_NAME")
   if [[ $CURRENT_SECRET_RESOURCE_VERSION != "$EXTERNAL_SECRET_RESOURCE_VERSION" ]]; then

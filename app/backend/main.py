@@ -1327,7 +1327,16 @@ class _NotificationOutboxDispatcher:
                 self.cursor = event_id
                 continue
             payload = _parse_points_notification(payload_json)
-            if payload is None or payload.get("user_id") != recipient_id:
+            # The payload's browser cursor must be the durable commit order
+            # selected by this row.  Replaying already enforces this fence;
+            # live fanout must do the same or a corrupt but schema-valid row
+            # could make a browser persist a future cursor and skip events on
+            # its next reconnect.
+            if (
+                payload is None
+                or payload.get("user_id") != recipient_id
+                or payload.get("event_id") != event_id
+            ):
                 self.cursor = event_id
                 continue
             await self._broadcast(payload)

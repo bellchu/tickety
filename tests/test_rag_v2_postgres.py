@@ -7,6 +7,7 @@ from unittest.mock import patch
 from alembic.operations import Operations
 from alembic.runtime.migration import MigrationContext
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from app.backend import ticket_vectors
 from app.backend.database import SessionLocal, engine
@@ -178,6 +179,78 @@ class RagV2PostgresIntegrationTests(unittest.IsolatedAsyncioTestCase):
         finally:
             with engine.begin() as connection:
                 connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+
+    def test_0061_repairs_the_resolved_schema_not_a_same_named_shadow_index(self):
+        """A shadow-schema index must not make the resolved fence look present."""
+        migration = importlib.import_module(
+            "migrations.versions.0061_repair_integration_binding_schema_fence"
+        )
+        schema = f"tickety_0061_fixture_{uuid.uuid4().hex}"
+        shadow_schema = f"{schema}_shadow"
+        try:
+            with engine.begin() as connection:
+                connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+                connection.execute(text(f'CREATE SCHEMA "{shadow_schema}"'))
+                connection.execute(text(f'SET LOCAL search_path TO "{schema}", "{shadow_schema}"'))
+                connection.execute(text(f"""
+                    CREATE TABLE "{shadow_schema}".integration_bindings (
+                        id VARCHAR(36) PRIMARY KEY,
+                        provider VARCHAR(64) NOT NULL,
+                        state VARCHAR(16) NOT NULL
+                    )
+                """))
+                connection.execute(text(f"""
+                    CREATE UNIQUE INDEX ix_integration_bindings_one_active_provider
+                    ON "{shadow_schema}".integration_bindings (lower(trim(provider)))
+                    WHERE state = 'active'
+                """))
+                connection.execute(text("""
+                    CREATE TABLE integration_bindings (
+                        id VARCHAR(36) PRIMARY KEY,
+                        provider VARCHAR(64) NOT NULL,
+                        state VARCHAR(16) NOT NULL
+                    )
+                """))
+                connection.execute(text("""
+                    INSERT INTO integration_bindings (id, provider, state)
+                    VALUES ('first', ' FreshService ', 'active')
+                """))
+
+                def upgrade_once() -> None:
+                    context = MigrationContext.configure(connection)
+                    with Operations.context(context):
+                        migration.upgrade()
+
+                # A relname-only pg_catalog lookup can observe the unrelated
+                # shadow-schema index and skip creation on this resolved table.
+                upgrade_once()
+                upgrade_once()
+                index = connection.execute(text("""
+                    SELECT pg_get_expr(idx.indexprs, idx.indrelid),
+                           pg_get_expr(idx.indpred, idx.indrelid)
+                    FROM pg_index AS idx
+                    JOIN pg_class AS cls ON cls.oid = idx.indexrelid
+                    WHERE idx.indrelid = 'integration_bindings'::regclass
+                      AND cls.relname = 'ix_integration_bindings_one_active_provider'
+                """)).one()
+                self.assertEqual(migration._normalized(index[0]), "lowertrimprovider")
+                self.assertEqual(migration._normalized(index[1]), "state='active'")
+                self.assertEqual(connection.execute(text(
+                    "SELECT provider FROM integration_bindings WHERE id = 'first'"
+                )).scalar_one(), "freshservice")
+                savepoint = connection.begin_nested()
+                try:
+                    with self.assertRaises(IntegrityError):
+                        connection.execute(text("""
+                            INSERT INTO integration_bindings (id, provider, state)
+                            VALUES ('second', 'FRESHSERVICE', 'active')
+                        """))
+                finally:
+                    savepoint.rollback()
+        finally:
+            with engine.begin() as connection:
+                connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+                connection.execute(text(f'DROP SCHEMA IF EXISTS "{shadow_schema}" CASCADE'))
 
     async def test_authorization_precedes_limits_and_snapshot_invalidates(self):
         self.assertTrue(store_v2.replace_source_chunks(self.db, "ticket", "ticket-a"))

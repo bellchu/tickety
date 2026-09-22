@@ -129,13 +129,13 @@ scripts/validate-deployment.sh
 scripts/verify-production-target.sh --self-test
 ```
 
-For a live release, the target gate requires a single ingress for
-the explicit production host, a ready non-terminating frontend Pod using the active image,
+For a live release, the target gate requires the selected Helm release to own a
+single ingress for the explicit production host, a ready non-terminating frontend Pod using the active image,
 matching internal/public hashed assets, and a public readiness response with
 `status=ready`. Run it with the selected namespace:
 
 ```sh
-scripts/verify-production-target.sh --host tickety.example.com --namespace tickety
+scripts/verify-production-target.sh --host tickety.example.com --namespace tickety --release tickety
 kubectl get pods,jobs,service,ingress --namespace tickety
 helm test tickety --namespace tickety --timeout 2m
 ```
