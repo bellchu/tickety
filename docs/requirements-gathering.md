@@ -96,6 +96,11 @@ AI questions can prefill the log for human review. Choose the owner, affected sc
 and blocking status before saving. Replacing an unfinished question, or switching
 away from an unfinished answer, asks whether to keep or discard the draft.
 
+Requirement search includes the stakeholder, outcome, evidence excerpt, acceptance
+criteria and prepared story, including its reference. Wrapped text is searchable as
+a continuous phrase. Search combines with the selected readiness or deferred-scope
+view; it does not change delivery eligibility.
+
 ## Use AI where it helps
 
 - **Explore with AI** proposes up to eight requirements from one source. Unverifiable

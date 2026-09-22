@@ -88,3 +88,14 @@ test('decision views separate blockers, exploration and recorded answers while r
   assert.deepEqual(ids('recorded', 'missing', 'a'), ['a']);
   assert.deepEqual(ids('open', 'missing'), []);
 });
+
+
+test('requirements can be found by evidence, acceptance criteria and story references across wrapped text', () => {
+  const row = { ...item, evidence_quote: 'Supplier receipt\nwithin thirty seconds.', acceptance_criteria: ['Given an outage, queue the acknowledgement.'], story: { reference: 'US-017', title: 'Confirm supplier intake', statement: 'As an analyst, I want a durable receipt.' } };
+  for (const query of [' receipt within ', 'OUTAGE', 'us-017', 'durable receipt', 'Confirm supplier intake']) {
+    assert.equal(filterRequirements([row], query, 'all').length, 1, query);
+  }
+  assert.equal(filterRequirements([row], 'supplier missing', 'all').length, 0);
+  assert.equal(filterRequirements([{ ...row, priority: 'wont' }], 'outage', 'delivery').length, 0);
+  assert.equal(filterRequirements([{ ...row, priority: 'wont' }], 'outage', 'deferred').length, 1);
+});
