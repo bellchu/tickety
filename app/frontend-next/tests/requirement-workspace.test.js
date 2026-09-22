@@ -148,6 +148,18 @@ test('AI snapshots expire on revision changes or removal, but not unrelated upda
   assert.equal(current([{ id: 'r1', revision: 3 }], [{ id: 'r1', revision: 3 }]), true);
 });
 
+test('focus routes blocking questions by business impact, preserving order within equal priorities', () => {
+  const requirements = ['could', 'must', 'must', 'wont'].map((priority, index) => ({ ...item, id: `r${index}`, priority }));
+  const decisions = requirements.map(row => ({ requirement_id: row.id, status: 'open', blocking: true, owner_role: row.id, question: `Question for ${row.id}` }));
+  const workspace = { ...detail(requirements), decisions };
+  assert.match(workspaceFocus(workspace).reason, /Start with r1:/);
+  assert.deepEqual(decisions.map(row => row.requirement_id), ['r0', 'r1', 'r2', 'r3']);
+  decisions[1] = { ...decisions[1], status: 'resolved' };
+  assert.match(workspaceFocus(workspace).reason, /Start with r2:/);
+  decisions.push({ requirement_id: null, status: 'open', blocking: true, owner_role: 'Sponsor', question: 'Whole initiative decision' });
+  assert.match(workspaceFocus(workspace).reason, /Start with Sponsor:/);
+});
+
 test('source traceability composes with search and readiness without changing saved work', () => {
   const rows = [{ ...item, source_id: 's1', priority: 'should' },
     { ...item, id: 'r2', source_id: 's2', priority: 'should' },

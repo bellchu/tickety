@@ -132,6 +132,9 @@ priorities retain their recorded order. Return to **Recorded order** at any time
 sorting does not update priorities or saved records. Suggested focus also uses recorded
 priority when choosing among reviewable requirements or signed-off requirements
 awaiting a story. Blocking questions and unclear requirements still take precedence.
+For blocking questions, the suggested focus starts with initiative-wide decisions,
+then follows the affected requirements' business priorities. Questions at the same
+priority retain their recorded order; deferred-only questions do not displace current work.
 
 The sign-off form displays the exact revision being reviewed, its priority, business
 outcome, acceptance criteria and evidence excerpt. Compare those commitments with

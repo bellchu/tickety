@@ -64,7 +64,11 @@ export function filterRequirements(items: BusinessRequirement[], search: string,
 export function workspaceFocus(detail: RequirementWorkspaceDetail) {
   const items = orderRequirements(detail.requirements.filter(item => item.priority !== "wont"), "priority");
   const activeIds = new Set(items.map(item => item.id));
-  const blockers = (detail.decisions || []).filter(item => item.status === "open" && item.blocking && (!item.requirement_id || activeIds.has(item.requirement_id)));
+  const priorities = new Map(items.map(item => [item.id, priorityOrder[item.priority]]));
+  const blockerPriority = (item: RequirementDecision) => item.requirement_id ? (priorities.get(item.requirement_id) ?? 3) : -1;
+  const blockers = (detail.decisions || [])
+    .filter(item => item.status === "open" && item.blocking && (!item.requirement_id || activeIds.has(item.requirement_id)))
+    .sort((left, right) => blockerPriority(left) - blockerPriority(right));
   if (blockers.length) return {
     title: "A business answer is needed",
     reason: `${blockers.length} blocking questions need a recorded decision. Start with ${blockers[0].owner_role}: ${blockers[0].question}`,
