@@ -114,19 +114,22 @@ export function workspaceFocus(detail: RequirementWorkspaceDetail) {
     reason: "Add the material behind the request so decisions can be traced to evidence.",
     label: "Add supporting material", action: "source" as const,
   };
-  const unclear = items.filter(item => item.quality_issues.length > 0);
+  const unfinished = items.filter(item => item.quality_issues.length > 0 || item.status === "draft" || !item.story);
+  const nextPriority = unfinished[0]?.priority;
+  const nextItems = unfinished.filter(item => item.priority === nextPriority);
+  const unclear = nextItems.filter(item => item.quality_issues.length > 0);
   if (unclear.length) return {
     title: "Resolve what is still uncertain",
-    reason: `${unclear.length} requirements have unanswered questions. Clarify the expected outcome or acceptance criteria before asking for agreement.`,
-    label: "Work through open questions", action: "questions" as const,
+    reason: `${unclear[0].reference} needs clarification among the highest-priority unfinished requirements. Check its expected outcome and acceptance criteria before asking for agreement.`,
+    label: "Clarify this requirement", action: "questions" as const, reference: unclear[0].reference,
   };
-  const reviewable = items.find(item => item.status === "draft");
+  const reviewable = nextItems.find(item => item.status === "draft");
   if (reviewable) return {
     title: "A business decision is ready",
     reason: `${reviewable.reference} has the essential detail and comes next by recorded business priority. Confirm it with the accountable stakeholder and record the decision.`,
     label: "Review the requirement", action: "review" as const, item: reviewable,
   };
-  const agreed = items.find(item => item.status === "validated" && !item.story);
+  const agreed = nextItems.find(item => item.status === "validated" && !item.story);
   if (agreed) return {
     title: "Turn agreement into a delivery conversation",
     reason: `${agreed.reference} is signed off and comes next by recorded business priority. Create a story with the agreed scope and acceptance criteria for delivery-team review.`,

@@ -342,3 +342,20 @@ test('evidence review views distinguish unexamined context, background and linke
   assert.deepEqual(ids('unreviewed', '', 'email'), []);
   assert.deepEqual(ids('all'), ['new', 'background', 'linked', 'both']);
 });
+
+
+test('focus advances the highest-priority unfinished need across workflow stages', () => {
+  const essential = { ...item, id: 'essential', reference: 'REQ-001', priority: 'must' };
+  const optional = { ...item, id: 'optional', reference: 'REQ-002', priority: 'could', quality_issues: ['Clarify the outcome'] };
+  assert.equal(workspaceFocus(detail([optional, essential])).item.id, 'essential');
+  const agreed = { ...essential, status: 'validated' };
+  assert.equal(workspaceFocus(detail([optional, agreed])).action, 'story');
+  assert.equal(workspaceFocus(detail([{ ...optional, quality_issues: [] }, agreed])).item.id, 'essential');
+  const next = workspaceFocus(detail([optional, { ...agreed, story: {} }]));
+  assert.equal(next.action, 'questions');
+  assert.equal(next.reference, 'REQ-002');
+  const peer = { ...optional, priority: 'must' };
+  assert.equal(workspaceFocus(detail([agreed, peer])).reference, 'REQ-002', 'same-priority uncertainty is clarified first');
+  const blocked = { ...detail([agreed, optional]), decisions: [{ id: 'd1', requirement_id: 'optional', status: 'open', blocking: true, question: 'Confirm ownership', owner_role: 'Sponsor' }] };
+  assert.equal(workspaceFocus(blocked).action, 'decisions', 'priority does not bypass a recorded business gate');
+});

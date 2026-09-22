@@ -300,7 +300,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
     if (focus.action === "decisions") { setDecisionScope(""); setDecisionRequest({ id: focus.decisionId }); setDecisionsOpen(true); }
     else if (focus.action === "source") setSourceFormOpen(true);
     else if (focus.action === "deferred") { setFilter("deferred"); setSearch(""); setSourceFilter(""); }
-    else if (focus.action === "questions") { setFilter("questions"); setSearch(""); setSourceFilter(""); }
+    else if (focus.action === "questions") { setFilter("questions"); setSearch(focus.reference); setSourceFilter(""); }
     else if (focus.action === "review") signOff(focus.item);
     else if (focus.action === "capture") switchEditor(() => edit());
     else if (focus.action === "gather") revealSource(focus.sourceId);

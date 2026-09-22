@@ -169,9 +169,13 @@ a continuous phrase. Search combines with the selected readiness or deferred-sco
 view; it does not change delivery eligibility. Choose **Business priority** to discuss
 must-have needs first, followed by should-have, could-have and deferred needs. Equal
 priorities retain their recorded order. Return to **Recorded order** at any time;
-sorting does not update priorities or saved records. Suggested focus also uses recorded
-priority when choosing among reviewable requirements or signed-off requirements
-awaiting a story. Blocking questions and unclear requirements still take precedence.
+sorting does not update priorities or saved records. Suggested focus chooses the
+highest-priority unfinished requirements across stages: a signed-off must-have can
+move to story preparation while a could-have still needs clarification. Within the
+same priority, clarify quality issues before review or story preparation. The
+clarification suggestion opens the named requirement in the open-questions view.
+Requirements with stories no longer hold back the next priority. Recorded blocking
+business questions still take precedence; suggestions never bypass an approval gate.
 For blocking questions, the suggested focus starts with initiative-wide decisions,
 then follows the affected requirements' business priorities. Questions at the same
 priority retain their recorded order; deferred-only questions do not displace current work.
