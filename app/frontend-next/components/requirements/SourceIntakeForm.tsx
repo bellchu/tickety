@@ -1,5 +1,6 @@
 "use client";
 
+import { prepareRequirementSource } from "@/lib/requirement-source-import";
 import { requirementErrorMessage } from "@/lib/requirement-errors";
 
 import { useQueryClient } from "@tanstack/react-query";
@@ -36,24 +37,10 @@ export function SourceIntakeForm({ workspaceId, userId, open, pending, onSave }:
   }
   async function importText(file?: File) {
     if (!file) return;
-    setError(null); setImportWarnings([]); setImporting(true);
+    setError(null); setImporting(true);
     try {
-      if (!/\.(txt|md|eml|docx|pdf|vtt|srt)$/i.test(file.name)) throw new Error("Choose a TXT, Markdown, EML, DOCX, PDF, VTT or SRT file. Text files must use UTF-8.");
-      if (file.size > 400000) throw new Error("Choose a file smaller than 400 KB.");
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      if (/\.(eml|docx|pdf)$/i.test(file.name)) {
-        let binary = "";
-        for (let offset = 0; offset < bytes.length; offset += 8192) binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
-        const isEmail = /\.eml$/i.test(file.name);
-        const preview = isEmail ? api.previewRequirementEmail : /\.pdf$/i.test(file.name) ? api.previewRequirementPdf : api.previewRequirementDocx;
-        const result = await preview(workspaceId, btoa(binary));
-        setContent(result.content); setSourceTitle(result.title || file.name); setSourceKind(isEmail ? "email" : "document"); setImportWarnings(result.warnings);
-        return;
-      }
-      const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-      if (text.length > 100000 || text.includes("\0")) throw new Error("Source text must contain at most 100,000 characters and no NUL characters.");
-      setContent(text); setSourceTitle(file.name);
-      if (/\.(vtt|srt)$/i.test(file.name)) setSourceKind("transcript");
+      const result = await prepareRequirementSource(file, workspaceId, api);
+      setContent(result.content); setSourceTitle(result.title); setSourceKind(result.kind); setImportWarnings(result.warnings);
     } catch (caught) { setError(caught); }
     finally { setImporting(false); }
   }
