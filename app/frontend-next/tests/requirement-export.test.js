@@ -68,7 +68,7 @@ test('copied stories include signed criteria, provenance and only relevant open 
   const output = library.requirementStoryText(detail, row);
   for (const required of ['US-001', 'REQ-001', 'signed-off revision 2', '30 seconds', 'Operations SOP', 'digest', 'Confirm the submission', 'Product Owner', 'Confirmed with operations.', 'Which languages', 'Could receipt text', 'Reduce manual follow-up.']) assert.ok(output.includes(required), required);
   assert.ok(!output.includes('Unrelated requirement question'));
-  assert.ok(!output.includes('Already answered question'));
+  assert.ok(output.includes('Already answered question'));
   assert.throws(() => library.requirementStoryText(detail, { ...row, priority: 'wont' }), /in-scope/);
   assert.throws(() => library.requirementStoryText(detail, { ...row, status: 'draft' }), /signed-off/);
 });
@@ -88,4 +88,20 @@ test('exports keep multiline evidence literal and user text inside its own struc
     assert.ok(!output.includes('\n~~~'));
     assert.ok(!output.includes('\n---\n'));
   }
+});
+
+
+test('story handoff preserves relevant business decisions and their attribution', () => {
+  const row = { id: 'r1', status: 'validated', priority: 'must', source_id: 's1', evidence_quote: 'Confirm receipt.', story: { reference: 'US-001', title: 'Receipt', statement: 'Confirm receipt.', acceptance_criteria: [], requirement_reference: 'REQ-001', validated_revision: 2 } };
+  const detail = { workspace: { id: 'w', title: 'Intake', objective: 'Reduce delays' }, sources: [], decisions: [
+    { requirement_id: null, status: 'resolved', question: 'Who owns failures?', owner_role: 'Operations', resolution: 'Queue and retry within five minutes.', resolved_by: 'reviewer-1', resolved_at: '2026-09-22T10:00:00Z' },
+    { requirement_id: 'r1', status: 'resolved', question: 'Which channels?', owner_role: 'Sponsor', resolution: 'Email only.\n## Quoted context', resolved_by: 'reviewer-2', resolved_at: '2026-09-22T11:00:00Z' },
+    { requirement_id: 'r2', status: 'resolved', question: 'Unrelated scope', resolution: 'Unrelated decision' },
+  ] };
+  const output = library.requirementStoryText(detail, row);
+  for (const value of ['Who owns failures?', 'Queue and retry within five minutes.', 'Whole initiative', 'Which channels?', 'This requirement', 'Operations', 'Sponsor', 'reviewer-1', 'reviewer-2', '2026-09-22T10:00:00Z']) assert.ok(output.includes(value), value);
+  assert.ok(!output.includes('Unrelated decision'));
+  assert.ok(!output.includes('\n## Quoted context'));
+  assert.ok(output.includes('No open questions are recorded'));
+  assert.ok(library.requirementStoryText({ ...detail, decisions: [] }, row).includes('No business decisions are recorded'));
 });

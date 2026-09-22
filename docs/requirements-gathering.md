@@ -143,7 +143,10 @@ blockers remain relevant.
 Prepare a `US-001` story from a signed-off requirement. **Copy story** provides Markdown
 with acceptance criteria, objective, initiative and requirement references, signed
 revision, source excerpt and digest, reviewer details and relevant open questions.
-Resolved or unrelated questions and deferred or unsigned stories are excluded.
+It also carries recorded decisions for the requirement and the whole initiative,
+including the answer owner, resolution, recorder and time. This preserves the
+business rationale behind scope and exception handling for the delivery team.
+Unrelated decisions and deferred or unsigned stories are excluded.
 
 **Export BRD** includes the objective, evidence register, requirements, capabilities,
 acceptance criteria, clarifications, decisions, sign-offs and eligible stories. Copy

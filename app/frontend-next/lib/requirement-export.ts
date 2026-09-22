@@ -57,7 +57,9 @@ export function requirementStoryText(detail: RequirementWorkspaceDetail, row: Bu
     throw new Error("Prepare an in-scope, signed-off user story before copying it.");
   }
   const source = detail.sources.find(item => item.id === row.source_id);
-  const questions = (detail.decisions || []).filter(item => item.status === "open" && (!item.requirement_id || item.requirement_id === row.id));
+  const relevantDecisions = (detail.decisions || []).filter(item => !item.requirement_id || item.requirement_id === row.id);
+  const questions = relevantDecisions.filter(item => item.status === "open");
+  const decisions = relevantDecisions.filter(item => item.status === "resolved");
   const lines = [
     `# ${story.reference}: ${inline(story.title)}`, "", prose(story.statement), "",
     "## Acceptance criteria", ...story.acceptance_criteria.map(bullet), "",
@@ -71,6 +73,15 @@ export function requirementStoryText(detail: RequirementWorkspaceDetail, row: Bu
     `Signed off by: ${row.validated_by || "Former member"} as ${row.reviewer_role || "Unrecorded capacity"}`,
     `Sign-off time: ${row.validated_at || "Unrecorded"}`,
     `Review note: ${prose(row.validation_note || "Unrecorded")}`, "",
+    "## Recorded business decisions",
+    ...decisions.flatMap(item => [
+      `### ${inline(item.question)}`,
+      `Scope: ${item.requirement_id ? "This requirement" : "Whole initiative"}`,
+      `Answer owner: ${inline(item.owner_role || "Unassigned")}`,
+      `Decision: ${prose(item.resolution || "No resolution text recorded")}`,
+      `Recorded by: ${inline(item.resolved_by || "Former member")} at ${inline(item.resolved_at || "Unrecorded")}`, "",
+    ]),
+    ...(decisions.length ? [] : ["No business decisions are recorded for this requirement or its initiative.", ""]),
     "## Open business questions",
     ...questions.map(item => bullet(`${item.blocking ? "Blocks sign-off" : "Exploratory"}: ${item.question} (Answer owner: ${item.owner_role || "Unassigned"})`)),
     ...(questions.length ? [] : ["No open questions are recorded for this requirement or its initiative."]), "",
