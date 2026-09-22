@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { Menu } from "lucide-react";
@@ -35,45 +35,62 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const [navigationOpen, setNavigationOpen] = useState(false);
+  const [hasDesktopSidebar, setHasDesktopSidebar] = useState(false);
   const [authState, setAuthState] = useState<"checking" | "authenticated" | "error">("checking");
   const [authContext, setAuthContext] = useState<AuthContext | null>(null);
   const [authAttempt, setAuthAttempt] = useState(0);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const authContextRef = useRef<AuthContext | null>(null);
+  const authValidationGeneration = useRef(0);
   const currentNavigationItem = getCurrentNavigationItem(pathname);
+  const closeNavigation = useCallback(() => {
+    setNavigationOpen(false);
+    requestAnimationFrame(() => menuButtonRef.current?.focus());
+  }, []);
 
   useEffect(() => {
     setNavigationOpen(false);
   }, [pathname]);
 
   useEffect(() => {
-    if (isPublicRoute(pathname)) {
-      // Login is a user-isolation boundary. No data from the previous session
-      // may survive into the next SPA navigation.
-      queryClient.clear();
-      setAuthContext(null);
-      setAuthState("authenticated");
-      return;
-    }
+    const desktopNavigation = window.matchMedia("(min-width: 1024px)");
+    const updateNavigationMode = () => {
+      setHasDesktopSidebar(desktopNavigation.matches);
+      if (desktopNavigation.matches) setNavigationOpen(false);
+    };
 
-    let cancelled = false;
+    updateNavigationMode();
+    desktopNavigation.addEventListener("change", updateNavigationMode);
+    return () => desktopNavigation.removeEventListener("change", updateNavigationMode);
+  }, []);
+
+  const validateAuthenticatedSession = useCallback(() => {
+    const generation = authValidationGeneration.current + 1;
+    authValidationGeneration.current = generation;
+    // Never continue to render a previous identity while the cookie may have
+    // changed in another tab. AppExperience unmounts while checking, which
+    // also closes its user-owned real-time subscription before a new identity
+    // is admitted.
     setAuthState("checking");
     api.getAuthMe()
       .then((context) => {
-        if (!cancelled) {
-          const previous = queryClient.getQueryData<AuthContext>(["auth-me"]);
+        if (authValidationGeneration.current === generation) {
+          const previous = authContextRef.current;
           if (previous && crossesAuthorizationBoundary(previous, context)) {
             queryClient.clear();
           }
           queryClient.setQueryData(["auth-me"], context);
+          authContextRef.current = context;
           setAuthContext(context);
           setAuthState("authenticated");
         }
       })
       .catch((error: unknown) => {
-        if (cancelled) return;
+        if (authValidationGeneration.current !== generation) return;
         // Never let a previously privileged identity survive a failed access
         // check in the shared query cache.
         queryClient.clear();
+        authContextRef.current = null;
         setAuthContext(null);
         if (error instanceof APIError && error.status === 401) {
           const destination = `${window.location.pathname}${window.location.search}`;
@@ -82,10 +99,36 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         }
         setAuthState("error");
       });
-    return () => {
-      cancelled = true;
+  }, [router]);
+
+  useEffect(() => {
+    if (isPublicRoute(pathname)) {
+      // Login is a user-isolation boundary. No data from the previous session
+      // may survive into the next SPA navigation.
+      authValidationGeneration.current += 1;
+      queryClient.clear();
+      authContextRef.current = null;
+      setAuthContext(null);
+      setAuthState("authenticated");
+      return;
+    }
+
+    validateAuthenticatedSession();
+  }, [authAttempt, pathname, validateAuthenticatedSession]);
+
+  useEffect(() => {
+    if (isPublicRoute(pathname)) return;
+
+    const revalidateWhenVisible = () => {
+      if (document.visibilityState === "visible") validateAuthenticatedSession();
     };
-  }, [authAttempt, pathname, router]);
+    window.addEventListener("focus", revalidateWhenVisible);
+    document.addEventListener("visibilitychange", revalidateWhenVisible);
+    return () => {
+      window.removeEventListener("focus", revalidateWhenVisible);
+      document.removeEventListener("visibilitychange", revalidateWhenVisible);
+    };
+  }, [pathname, validateAuthenticatedSession]);
 
   useEffect(() => {
     if (!navigationOpen) return;
@@ -104,8 +147,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        setNavigationOpen(false);
-        menuButtonRef.current?.focus();
+        closeNavigation();
         return;
       }
 
@@ -126,7 +168,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       document.body.style.overflow = previousOverflow;
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [navigationOpen]);
+  }, [closeNavigation, navigationOpen]);
 
   if (isPublicRoute(pathname)) return <>{children}</>;
 
@@ -163,7 +205,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <AppExperience realtimeEnabled={authContext?.auth_kind === "session"}>
+    <AppExperience
+      realtimeEnabled={authContext?.auth_kind === "session"}
+      userId={authContext?.auth_kind === "session" ? authContext.id : null}
+    >
       <div className="tickety-ambient min-h-screen [--app-sidebar-width:15rem]">
         <a
           href="#main-content"
@@ -172,17 +217,19 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           Skip to content
         </a>
 
-        <Sidebar open={navigationOpen} onClose={() => setNavigationOpen(false)} />
+        <Sidebar
+          open={navigationOpen}
+          inactive={!hasDesktopSidebar && !navigationOpen}
+          onClose={closeNavigation}
+          onNavigate={() => setNavigationOpen(false)}
+        />
 
         {navigationOpen && (
           <button
             type="button"
             aria-label="Close navigation"
             className="fixed inset-0 z-40 bg-[#010D1B]/70 backdrop-blur-sm lg:hidden"
-            onClick={() => {
-              setNavigationOpen(false);
-              menuButtonRef.current?.focus();
-            }}
+            onClick={closeNavigation}
           />
         )}
 

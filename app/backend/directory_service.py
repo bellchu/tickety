@@ -31,6 +31,7 @@ from .database import (
     normalize_user_email,
 )
 from .integrations.sync import (
+    ExternalDirectorySyncOwnershipLost,
     async_sync_external_users,
     reconcile_embedded_agent_identities,
 )
@@ -52,6 +53,10 @@ class DirectoryConflict(DirectoryError):
 
 class DirectoryIneligible(DirectoryError):
     pass
+
+
+class DirectorySyncOwnershipLost(DirectoryError):
+    """A stale directory worker must not publish after lease takeover."""
 
 
 def _canonical_json(value: Any) -> str:
@@ -1144,6 +1149,75 @@ def _acquire_directory_sync_lease(
         db.close()
 
 
+def _renew_directory_sync_lease(
+    *,
+    binding_id: str,
+    provider: str,
+    run_id: str,
+    lease_seconds: int,
+) -> bool:
+    """Renew only a still-live owner; expiry deliberately yields to recovery."""
+    db = SessionLocal()
+    now = datetime.utcnow()
+    try:
+        changed = db.query(DirectorySyncStateRecord).filter(
+            DirectorySyncStateRecord.binding_id == binding_id,
+            DirectorySyncStateRecord.provider == provider,
+            DirectorySyncStateRecord.current_run_id == run_id,
+            DirectorySyncStateRecord.lease_expires_at.isnot(None),
+            DirectorySyncStateRecord.lease_expires_at > now,
+        ).update(
+            {
+                DirectorySyncStateRecord.lease_expires_at: now + timedelta(
+                    seconds=lease_seconds
+                ),
+                DirectorySyncStateRecord.updated_at: now,
+            },
+            synchronize_session=False,
+        )
+        db.commit()
+        return changed == 1
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def _fence_directory_sync_write(
+    db: Session,
+    *,
+    binding_id: str,
+    provider: str,
+    run_id: str,
+    lease_seconds: int,
+) -> bool:
+    """Atomically renew ownership in the transaction that publishes a phase."""
+    now = datetime.utcnow()
+    # Do not flush staged rows before the compare-and-set.  ``FOR UPDATE`` is
+    # intentionally insufficient here: SQLite ignores it, which permits a
+    # successor to replace ``current_run_id`` between a stale worker's read and
+    # its later commit.  This conditional UPDATE both fences that race and
+    # takes the write lock until the caller commits its staged projection.
+    with db.no_autoflush:
+        changed = db.query(DirectorySyncStateRecord).filter(
+            DirectorySyncStateRecord.binding_id == binding_id,
+            DirectorySyncStateRecord.provider == provider,
+            DirectorySyncStateRecord.current_run_id == run_id,
+            DirectorySyncStateRecord.lease_expires_at.isnot(None),
+            DirectorySyncStateRecord.lease_expires_at > now,
+        ).update(
+            {
+                DirectorySyncStateRecord.lease_expires_at: now + timedelta(
+                    seconds=lease_seconds
+                ),
+                DirectorySyncStateRecord.updated_at: now,
+            },
+            synchronize_session=False,
+        )
+    return changed == 1
+
+
 def _finish_directory_sync(
     *,
     run_id: str,
@@ -1201,8 +1275,31 @@ async def run_directory_sync(
     result: dict[str, Any] = {}
     status = "failed"
     error_kind: Optional[str] = None
+
+    def ownership_checkpoint() -> bool:
+        return _renew_directory_sync_lease(
+            binding_id=binding_id,
+            provider=provider,
+            run_id=run_id,
+            lease_seconds=lease_seconds,
+        )
+
+    def ownership_write_guard(sync_db: Session) -> bool:
+        return _fence_directory_sync_write(
+            sync_db,
+            binding_id=binding_id,
+            provider=provider,
+            run_id=run_id,
+            lease_seconds=lease_seconds,
+        )
+
     try:
-        result = await async_sync_external_users(adapter, binding_id=binding_id)
+        result = await async_sync_external_users(
+            adapter,
+            binding_id=binding_id,
+            ownership_checkpoint=ownership_checkpoint,
+            ownership_write_guard=ownership_write_guard,
+        )
         if result.get("errors", 0):
             status = "failed" if not result.get("total", 0) else "partial"
             error_kind = "external_user_sync_failed"
@@ -1212,6 +1309,17 @@ async def run_directory_sync(
         else:
             db = SessionLocal()
             try:
+                if not _fence_directory_sync_write(
+                    db,
+                    binding_id=binding_id,
+                    provider=provider,
+                    run_id=run_id,
+                    lease_seconds=lease_seconds,
+                ):
+                    db.rollback()
+                    raise DirectorySyncOwnershipLost(
+                        "directory sync lease was replaced before local projection"
+                    )
                 projection = ensure_directory_projection(db)
                 auto_links = None
                 if settings_module.get_bool(
@@ -1231,6 +1339,14 @@ async def run_directory_sync(
                 db.close()
             status = "success"
         return {"status": status, "run_id": run_id, "result": result}
+    except (ExternalDirectorySyncOwnershipLost, DirectorySyncOwnershipLost):
+        status = "skipped"
+        error_kind = "directory_sync_ownership_lost"
+        return {
+            "status": status,
+            "reason": "directory_sync_ownership_lost",
+            "run_id": run_id,
+        }
     except Exception as exc:
         error_kind = f"directory_sync_failed:{type(exc).__name__}"
         raise

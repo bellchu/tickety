@@ -1,0 +1,29 @@
+{{- if ge (int .Values.backend.replicaCount) 2 }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "tickety.fullname" . }}-backend
+  labels:
+    {{- include "tickety.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backend
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "tickety.componentLabels" (dict "root" . "component" "backend") | nindent 6 }}
+{{- end }}
+{{- if ge (int .Values.frontend.replicaCount) 2 }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "tickety.fullname" . }}-frontend
+  labels:
+    {{- include "tickety.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "tickety.componentLabels" (dict "root" . "component" "frontend") | nindent 6 }}
+{{- end }}

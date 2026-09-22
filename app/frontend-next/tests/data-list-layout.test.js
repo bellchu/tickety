@@ -56,7 +56,7 @@ test("ticket queues preserve hierarchy without hiding routing or requester value
   assert.match(ticketList, /text=\{requesterName\(ticket\)\} lines=\{2\}/);
   assert.match(ticketList, /<table className="table-fixed text-left \[&_td\]:align-top \[&_td\]:whitespace-normal/);
   assert.match(ticketList, /style=\{\{ width: tableWidth, minWidth: "100%" \}\}/);
-  assert.match(ticketList, /COLUMN_WIDTHS_KEY = "tickety\.ticket-queue\.column-widths\.v3"/);
+  assert.match(ticketList, /COLUMN_WIDTHS_KEY = "tickety\.ticket-queue\.column-widths\.v4"/);
   assert.match(ticketList, /<TicketPriorityIndicator ticket=\{ticket\}/);
   assert.match(ticketList, /<TicketSentimentSubtitle ticket=\{ticket\}/);
   assert.match(ticketList, /grid grid-cols-1 gap-3[^\n]+sm:grid-cols-2/);

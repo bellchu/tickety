@@ -23,7 +23,10 @@ const dev = process.env.NODE_ENV !== "production";
 const port = parseInt(process.env.PORT || "3000", 10);
 const hostname = process.env.HOSTNAME || "0.0.0.0";
 
-const BACKEND = process.env.BACKEND_URL || "http://localhost:8000";
+// Keep WebSocket upgrades on the same runtime backend-resolution contract as
+// app/api/[...path]/route.ts. NEXT_PUBLIC_API_URL is a legacy server-side
+// deployment fallback only; it is never sent to browser code.
+const BACKEND = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const BACKEND_TLS_INSECURE = process.env.BACKEND_TLS_INSECURE === "true";
 
 const app = next({ dev, hostname, port });

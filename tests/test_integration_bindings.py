@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 from sqlalchemy import create_engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -165,6 +166,91 @@ class IntegrationBindingTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaisesRegex(bindings.BindingValidationError, "ticket.read"):
                     bindings.activate_binding(db, binding, actor_id="admin")
             self.assertFalse(result["ready_for_activation"])
+
+    def test_database_enforces_one_active_binding_per_provider(self):
+        """The provider boundary must hold even when callers skip app checks."""
+        with self.session_factory() as db:
+            first = self._create(db, "first.freshservice.com")
+            second = self._create(db, "second.freshservice.com")
+            first.state = "active"
+            db.commit()
+            second.state = "active"
+            with self.assertRaises(IntegrityError):
+                db.commit()
+            db.rollback()
+
+    def test_database_and_lookup_treat_provider_case_variants_as_one_identity(self):
+        """Legacy mixed-case rows cannot bypass the authoritative binding fence."""
+        with self.session_factory() as db:
+            first = self._create(db, "first.freshservice.com")
+            second = self._create(db, "second.freshservice.com")
+            first.provider = " FreshService "
+            first.state = "active"
+            db.commit()
+
+            self.assertEqual(
+                bindings.get_active_binding(db, "FRESHSERVICE").id,
+                first.id,
+            )
+            second.provider = "FRESHSERVICE"
+            second.state = "active"
+            with self.assertRaises(IntegrityError):
+                db.commit()
+            db.rollback()
+
+    def test_activation_translates_the_database_race_fence(self):
+        with self.session_factory() as db:
+            binding = self._create(db)
+            binding.state = "validating"
+            db.add(IntegrationCapabilityRecord(
+                binding_id=binding.id,
+                capability="ticket.read",
+                status="supported",
+            ))
+            db.commit()
+            conflict = IntegrityError(
+                "UPDATE integration_bindings",
+                {},
+                Exception("UNIQUE constraint failed: integration_bindings.provider"),
+            )
+            with patch.object(db, "commit", side_effect=conflict):
+                with self.assertRaisesRegex(
+                    bindings.BindingValidationError,
+                    "Another binding is already active",
+                ):
+                    bindings.activate_binding(db, binding, actor_id="admin")
+
+    def test_activation_endpoint_reports_an_active_provider_conflict_as_409(self):
+        with self.session_factory() as db:
+            binding = self._create(db, "candidate.freshservice.com")
+            binding.state = "validating"
+            db.add_all([
+                IntegrationCapabilityRecord(
+                    binding_id=binding.id,
+                    capability="ticket.read",
+                    status="supported",
+                ),
+                IntegrationBindingRecord(
+                    id="already-active",
+                    provider="freshservice",
+                    environment="trial",
+                    state="active",
+                    canonical_account_host="already-active.freshservice.com",
+                    workspace_ids="[]",
+                    credential_reference="env://freshservice",
+                ),
+            ])
+            db.commit()
+            user = db.get(UserRecord, "admin")
+
+            with self.assertRaises(main.HTTPException) as raised:
+                main.activate_integration_binding(binding.id, db, user)
+
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(
+            raised.exception.detail,
+            "Another binding is already active in this deployment",
+        )
 
     async def test_external_ticket_identity_is_scoped_by_binding(self):
         ticket = ExternalTicket(

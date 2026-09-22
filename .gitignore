@@ -19,6 +19,10 @@ build/
 *.egg-info/
 *.tsbuildinfo
 
+# Local package-manager diagnostics
+_logs/
+_update-notifier-last-checked
+
 # Freshworks local simulator
 freshworks-app/.fdk/
 freshworks-app/.report.json
@@ -32,6 +36,7 @@ freshworks-app/log/
 # IDE
 .idea/
 .vscode/
+.codex/debates/
 *.swp
 *.swo
 .DS_Store

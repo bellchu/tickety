@@ -6,6 +6,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..database import (
@@ -21,10 +23,39 @@ BINDING_STATES = {"draft", "validating", "active", "suspended", "expired", "reti
 CAPABILITY_STATUSES = {"supported", "unsupported", "restricted", "unknown", "degraded"}
 ALLOWED_CREDENTIAL_REFERENCES = {"env://freshservice"}
 REQUIRED_ACTIVATION_CAPABILITIES = {"ticket.read"}
+_ONE_ACTIVE_PROVIDER_INDEX = "ix_integration_bindings_one_active_provider"
 
 
 class BindingValidationError(ValueError):
     pass
+
+
+class BindingConflictError(BindingValidationError):
+    """A valid request lost a shared integration-state race."""
+
+
+def normalize_provider(value: object) -> str:
+    """Return the provider identity used by every binding boundary.
+
+    The provider column predates bindings and can contain legacy spelling.  Do
+    not let a case-only variant create a second active tenant boundary.
+    """
+    return str(value or "").strip().lower()
+
+
+def _is_active_binding_uniqueness_error(exc: IntegrityError) -> bool:
+    """Recognize only the database fence for the active-provider invariant."""
+    original = getattr(exc, "orig", None)
+    diagnostic = getattr(original, "diag", None)
+    constraint = str(getattr(diagnostic, "constraint_name", "") or "").lower()
+    message = str(original or exc).lower()
+    return (
+        constraint == _ONE_ACTIVE_PROVIDER_INDEX
+        or _ONE_ACTIVE_PROVIDER_INDEX in message
+        # SQLite names the constrained column rather than the partial-index
+        # name, while PostgreSQL exposes the index through diag.constraint_name.
+        or "unique constraint failed: integration_bindings.provider" in message
+    )
 
 
 def _utc_naive(value: Optional[datetime]) -> Optional[datetime]:
@@ -171,7 +202,7 @@ def create_binding(
     expires_at: Optional[datetime],
     actor_id: Optional[str],
 ) -> IntegrationBindingRecord:
-    provider = (provider or "").strip().lower()
+    provider = normalize_provider(provider)
     environment = (environment or "").strip().lower()
     if provider != "freshservice":
         raise BindingValidationError("Only Freshservice bindings are supported")
@@ -236,7 +267,10 @@ def get_active_binding(
         IntegrationBindingRecord.state == "active"
     )
     if provider:
-        query = query.filter(IntegrationBindingRecord.provider == provider)
+        query = query.filter(
+            func.lower(func.trim(IntegrationBindingRecord.provider))
+            == normalize_provider(provider)
+        )
     return query.order_by(IntegrationBindingRecord.activated_at.desc()).first()
 
 
@@ -331,17 +365,26 @@ def activate_binding(
         )
     other = db.query(IntegrationBindingRecord).filter(
         IntegrationBindingRecord.id != binding.id,
-        IntegrationBindingRecord.provider == binding.provider,
+        func.lower(func.trim(IntegrationBindingRecord.provider))
+        == normalize_provider(binding.provider),
         IntegrationBindingRecord.state == "active",
     ).first()
     if other:
-        raise BindingValidationError("Another binding is already active in this deployment")
+        raise BindingConflictError("Another binding is already active in this deployment")
     binding.state = "active"
     binding.activated_by = actor_id
     binding.activated_at = datetime.utcnow()
     binding.suspended_at = None
     _audit(db, binding.id, "binding.activated", actor_id)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        if _is_active_binding_uniqueness_error(exc):
+            raise BindingConflictError(
+                "Another binding is already active in this deployment"
+            ) from exc
+        raise
     db.refresh(binding)
     return binding
 

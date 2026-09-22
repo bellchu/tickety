@@ -16,7 +16,7 @@ spec:
       labels:
         app: tickety-backup
         app.kubernetes.io/name: tickety
-        app.kubernetes.io/component: migration
+        app.kubernetes.io/component: backup
         app.kubernetes.io/environment: development
     spec:
       restartPolicy: Never

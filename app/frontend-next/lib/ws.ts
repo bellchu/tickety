@@ -1,3 +1,5 @@
+import { readNotificationCursor } from "./notification-cursor";
+
 type WSMessageHandler = (data: any) => void;
 type WSCloseHandler = (event: CloseEvent) => void;
 type WSErrorHandler = (event: Event) => void;
@@ -5,13 +7,14 @@ type WSErrorHandler = (event: Event) => void;
 const POLICY_CLOSE_CODES = new Set([1008, 4001, 4003, 4401, 4403]);
 
 export class WSClient {
-  private url: string;
+  private path: string | (() => string);
   private ws: WebSocket | null = null;
   private handlers: Set<WSMessageHandler> = new Set();
   private closeHandlers: Set<WSCloseHandler> = new Set();
   private errorHandlers: Set<WSErrorHandler> = new Set();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private stableConnectionTimer: ReturnType<typeof setTimeout> | null = null;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private shouldReconnect = true;
   private reconnectAttempts = 0;
   // One-shot streams (e.g. triage) set this false so the server closing the
@@ -19,13 +22,28 @@ export class WSClient {
   // Long-lived sockets (notifications) keep it true.
   private autoReconnect: boolean;
   private maxReconnectAttempts: number;
+  private heartbeatIntervalMs: number | null;
+  private retryForever: boolean;
 
   constructor(
-    path: string,
-    opts: { autoReconnect?: boolean; maxReconnectAttempts?: number } = {}
+    path: string | (() => string),
+    opts: {
+      autoReconnect?: boolean;
+      maxReconnectAttempts?: number;
+      heartbeatIntervalMs?: number;
+      /** Keep long-lived subscriptions retrying with capped backoff after an outage. */
+      retryForever?: boolean;
+    } = {}
   ) {
     this.autoReconnect = opts.autoReconnect !== false;
     this.maxReconnectAttempts = opts.maxReconnectAttempts ?? 6;
+    this.heartbeatIntervalMs = opts.heartbeatIntervalMs ?? null;
+    this.retryForever = opts.retryForever === true;
+    this.path = path;
+  }
+
+  private socketUrl() {
+    const path = typeof this.path === "function" ? this.path() : this.path;
     // Connect to the same origin that served the page. The Next.js custom
     // server (server.js) proxies /ws/* upgrades to the backend at runtime via
     // BACKEND_URL. Deriving from window.location avoids the build-time
@@ -33,10 +51,9 @@ export class WSClient {
     // served (localhost dev or the in-cluster LoadBalancer).
     if (typeof window !== "undefined") {
       const proto = window.location.protocol === "https:" ? "wss" : "ws";
-      this.url = `${proto}://${window.location.host}${path}`;
-    } else {
-      this.url = `ws://localhost:3000${path}`;
+      return `${proto}://${window.location.host}${path}`;
     }
+    return `ws://localhost:3000${path}`;
   }
 
   connect() {
@@ -52,7 +69,7 @@ export class WSClient {
     // connection (duplicate notifications / duplicate triage streams).
     if (this.ws && this.ws.readyState !== WebSocket.CLOSED) return;
     try {
-      const ws = new WebSocket(this.url);
+      const ws = new WebSocket(this.socketUrl());
       this.ws = ws;
       ws.onopen = () => {
         if (this.ws !== ws) return;
@@ -61,6 +78,7 @@ export class WSClient {
           this.reconnectAttempts = 0;
           this.stableConnectionTimer = null;
         }, 60_000);
+        this.startHeartbeat(ws);
       };
       ws.onmessage = (ev) => {
         if (this.ws !== ws) return;
@@ -76,6 +94,7 @@ export class WSClient {
         this.ws = null;
         if (this.stableConnectionTimer) clearTimeout(this.stableConnectionTimer);
         this.stableConnectionTimer = null;
+        this.stopHeartbeat();
         this.closeHandlers.forEach((handler) => handler(event));
         if (POLICY_CLOSE_CODES.has(event.code)) {
           this.shouldReconnect = false;
@@ -98,18 +117,38 @@ export class WSClient {
 
   private scheduleReconnect() {
     if (!this.shouldReconnect || !this.autoReconnect || this.reconnectTimer) return;
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+    if (this.reconnectAttempts >= this.maxReconnectAttempts && !this.retryForever) {
       this.shouldReconnect = false;
       return;
     }
 
     const baseDelay = Math.min(30_000, 3_000 * 2 ** this.reconnectAttempts);
     const jitter = Math.round(baseDelay * 0.2 * Math.random());
-    this.reconnectAttempts += 1;
+    // Capping the exponent keeps long outages at the same 30-second maximum
+    // rather than overflowing the counter or abandoning notifications.
+    this.reconnectAttempts = Math.min(this.reconnectAttempts + 1, this.maxReconnectAttempts);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.openSocket();
     }, baseDelay + jitter);
+  }
+
+  private startHeartbeat(ws: WebSocket) {
+    if (!this.heartbeatIntervalMs) return;
+    this.stopHeartbeat();
+    this.heartbeatTimer = setInterval(() => {
+      if (this.ws !== ws || ws.readyState !== WebSocket.OPEN) return;
+      try {
+        ws.send("heartbeat");
+      } catch {
+        ws.close();
+      }
+    }, this.heartbeatIntervalMs);
+  }
+
+  private stopHeartbeat() {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = null;
   }
 
   onMessage(handler: WSMessageHandler) {
@@ -133,14 +172,22 @@ export class WSClient {
     this.reconnectTimer = null;
     if (this.stableConnectionTimer) clearTimeout(this.stableConnectionTimer);
     this.stableConnectionTimer = null;
+    this.stopHeartbeat();
     const ws = this.ws;
     this.ws = null;
     ws?.close();
   }
 }
 
-export function createNotificationsWS(): WSClient {
-  return new WSClient("/ws/notifications", { maxReconnectAttempts: 6 });
+export function createNotificationsWS(userId?: string): WSClient {
+  return new WSClient(() => {
+    const cursor = userId ? readNotificationCursor(userId) : 0;
+    return `/ws/notifications?cursor=${cursor}`;
+  }, {
+    maxReconnectAttempts: 6,
+    heartbeatIntervalMs: 30_000,
+    retryForever: true,
+  });
 }
 
 export function createTicketStreamWS(ticketId: string): WSClient {

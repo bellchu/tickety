@@ -11,7 +11,7 @@ interface Props {
 
 export function RecognitionToast({ recognitions, onClose }: Props) {
   return (
-    <div className="fixed inset-x-4 bottom-4 z-50 mt-20 sm:inset-x-auto sm:bottom-6 sm:right-6">
+    <div className="w-full sm:w-auto">
       <AnimatePresence>
         {recognitions.map((rec, i) => (
           <motion.div
@@ -34,7 +34,7 @@ export function RecognitionToast({ recognitions, onClose }: Props) {
               <div className="w-10 h-10 rounded-xl bg-linen-300 flex items-center justify-center flex-shrink-0">
                 <Award className="w-5 h-5 text-ink-600" />
               </div>
-              <div className="min-w-0">
+              <div role="status" aria-live="polite" aria-atomic="true" className="min-w-0">
                 <p className="text-xs font-medium text-ink-600 uppercase tracking-wider">
                   Recognition Unlocked
                 </p>

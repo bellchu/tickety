@@ -61,13 +61,65 @@ http://localhost:3000
 {{- end }}
 
 {{- define "tickety.backendImage" -}}
-{{- printf "%s:%s" .Values.backend.image.repository (.Values.backend.image.tag | default .Chart.AppVersion) }}
+{{- include "tickety.applicationImage" (dict "root" . "image" .Values.backend.image "component" "backend") }}
+{{- end }}
+
+{{- define "tickety.applicationImage" -}}
+{{- $root := .root -}}
+{{- $image := .image -}}
+{{- $component := .component -}}
+{{- $digest := $image.digest | default "" -}}
+{{- if $digest -}}
+  {{- if not (regexMatch "^sha256:[a-f0-9]{64}$" $digest) -}}
+    {{- fail (printf "%s.image.digest must be a sha256 manifest digest" $component) -}}
+  {{- end -}}
+  {{- printf "%s@%s" $image.repository $digest -}}
+{{- else -}}
+  {{- if ($root.Values.imageDigestPolicy.requireDigests | default false) -}}
+    {{- fail (printf "%s.image.digest is required when imageDigestPolicy.requireDigests=true" $component) -}}
+  {{- end -}}
+  {{- printf "%s:%s" $image.repository ($image.tag | default $root.Chart.AppVersion) -}}
+{{- end -}}
 {{- end }}
 
 {{- define "tickety.workerImage" -}}
-{{- $repository := .Values.worker.image.repository | default .Values.backend.image.repository -}}
-{{- $tag := .Values.worker.image.tag | default .Values.backend.image.tag | default .Chart.AppVersion -}}
-{{- printf "%s:%s" $repository $tag }}
+{{- $backendTag := .Values.backend.image.tag | default .Chart.AppVersion -}}
+{{- if and .Values.worker.image.repository (ne .Values.worker.image.repository .Values.backend.image.repository) -}}
+{{- fail "worker.image.repository must match backend.image.repository; worker and migration code must share one release image" -}}
+{{- end -}}
+{{- if and .Values.worker.image.tag (ne .Values.worker.image.tag $backendTag) -}}
+  {{- fail "worker.image.tag must match backend.image.tag; worker and migration code must share one release image" -}}
+{{- end -}}
+{{- if and .Values.worker.image.digest (ne .Values.worker.image.digest .Values.backend.image.digest) -}}
+  {{- fail "worker.image.digest must match backend.image.digest; worker and migration code must share one release image" -}}
+{{- end -}}
+{{- include "tickety.backendImage" . }}
+{{- end }}
+
+{{- define "tickety.frontendImage" -}}
+{{- include "tickety.applicationImage" (dict "root" . "image" .Values.frontend.image "component" "frontend") }}
+{{- end }}
+
+{{- define "tickety.postgresqlImage" -}}
+{{- $image := .Values.postgresql.image -}}
+{{- $digest := $image.digest | default "" -}}
+{{- if $digest -}}
+  {{- if not (regexMatch "^sha256:[a-f0-9]{64}$" $digest) -}}
+    {{- fail "postgresql.image.digest must be a sha256 manifest digest" -}}
+  {{- end -}}
+  {{- printf "%s@%s" $image.repository $digest -}}
+{{- else -}}
+  {{- if (.Values.imageDigestPolicy.requireDigests | default false) -}}
+    {{- fail "postgresql.image.digest is required when imageDigestPolicy.requireDigests=true and bundled PostgreSQL is enabled" -}}
+  {{- end -}}
+  {{- printf "%s:%s" $image.repository $image.tag -}}
+{{- end -}}
+{{- end }}
+
+{{- define "tickety.existingSecretRolloutAnnotations" -}}
+{{- if .Values.existingSecret -}}
+tickety.io/existing-secret-rollout-token: {{ .Values.existingSecretRolloutToken | quote }}
+{{- end -}}
 {{- end }}
 
 {{- define "tickety.workerPullPolicy" -}}

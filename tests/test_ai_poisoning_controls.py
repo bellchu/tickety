@@ -541,6 +541,50 @@ class KnowledgeAuthorityTests(unittest.IsolatedAsyncioTestCase):
                 )
             self.assertEqual(changed_during_review.exception.status_code, 409)
 
+    async def test_kb_delete_commits_v2_cleanup_intent_before_snapshot_drain(self):
+        admin = UserRecord(
+            id="kb-delete-admin", name="Admin", role="admin", is_active=True
+        )
+        with self.session_factory() as db:
+            db.add_all([
+                admin,
+                KbArticleRecord(
+                    id="kb-delete-rag-v2",
+                    title="Retire me",
+                    slug="retire-me",
+                    content="No longer admissible evidence.",
+                    status="published",
+                    author_id="author",
+                    reviewer_id=admin.id,
+                ),
+            ])
+            db.commit()
+
+            # ``delete_source_chunks`` performs its durable source mutation
+            # commit before any snapshot-drain failure is surfaced.  The route
+            # must use that v2 path rather than only deleting the legacy v1
+            # document row.
+            def committed_queue_then_failed_drain(_db, source_type, source_id):
+                self.assertEqual((source_type, source_id), ("kb_article", "kb-delete-rag-v2"))
+                _db.commit()
+                raise RuntimeError("snapshot drain interrupted")
+
+            with (
+                patch.object(main.ticket_vectors, "ticket_vector_store_ready", return_value=False),
+                patch("app.backend.rag.store_v2.store_ready", return_value=True),
+                patch(
+                    "app.backend.rag.store_v2.delete_source_chunks",
+                    side_effect=committed_queue_then_failed_drain,
+                ) as delete_v2,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "snapshot drain interrupted"):
+                    await main.delete_kb_article("kb-delete-rag-v2", db, admin)
+
+            delete_v2.assert_called_once_with(db, "kb_article", "kb-delete-rag-v2")
+            self.assertIsNone(
+                db.query(KbArticleRecord).filter_by(id="kb-delete-rag-v2").first()
+            )
+
     async def test_kb_publish_detects_revision_change_after_quota_reservation(self):
         author = UserRecord(
             id="race-author", name="Author", role="supervisor", is_active=True

@@ -24,7 +24,7 @@ from sqlalchemy import and_, case, desc, extract, func, or_, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from .database import (
-    Base, init_db, get_db, SessionLocal, normalize_user_email,
+    Base, init_db, get_db, SessionLocal, normalize_user_email, session_token_digest,
     TicketRecord, UserRecord, RecognitionRecord,
     ExternalUserRecord, ExternalGroupRecord, ExternalGroupMembershipRecord,
     IntelligenceStudyRecord,
@@ -35,13 +35,15 @@ from .database import (
     TicketCommentRecord, TicketCategoryRecord, TicketAuditLogRecord,
     SessionRecord, KbArticleRecord, TicketLinkRecord,
     TicketStatusConfigRecord, TicketPriorityConfigRecord, NotificationConfigRecord,
-    SsoIdentityRecord, SsoTransactionRecord,
+    NotificationOutboxRecord, NotificationOutboxSequenceRecord,
+    AuthSecurityEpochRecord, SsoIdentityRecord, SsoTransactionRecord,
     ProjectRecord, ServiceItemRecord, ServiceRequestRecord,
     ProblemRecord, ProblemTicketLinkRecord,
     ChangeRecord, ChangeApprovalRecord, ChangeTicketLinkRecord,
     AssetRecord,
     SurveyTemplateRecord, SurveyRecord, SurveyResponseRecord,
     TimeEntryRecord,
+    RequirementSourceRecord,
     AIUsageEventRecord,
     AIRequestBucketRecord,
     LLMCallRecord,
@@ -100,7 +102,6 @@ from .schema import (
     TimeEntry, TimeEntryCreate,
     PortalTicketCreate, PortalTicketOut, PortalTicketCreated,
     IntegrationBindingCreate, IntegrationBindingSuspend,
-    FreshworksBootstrapRequest, FreshworksBootstrapRedeem,
     ResolverCatalogRecommendationResponse,
     RoutingTriageManagementStatusResponse, RoutingTriageAutomationUpdate,
     AIBatchRequest, AIBatchPreviewResponse, AIBatchQueueResponse,
@@ -113,7 +114,13 @@ from .schema import (
     RoutingRuleCreate, RoutingRuleUpdate, RoutingRuleOut, RoutingRuleListResponse,
     TicketAttachment,
 )
-from .attachment_storage import AzureBlobAttachmentStore, AttachmentStorageError
+from .attachment_storage import (
+    AzureBlobAttachmentStore,
+    AttachmentStorageError,
+    attachment_storage_config,
+    attachment_storage_target_matches,
+    attachment_storage_configured,
+)
 from .branding import PRODUCT_NAME
 from .passwords import (
     PASSWORD_HASH_ITERATIONS,
@@ -191,6 +198,7 @@ from .integrations.sync import (
     ticket_created_within_filter,
 )
 from .integrations.bindings import (
+    BindingConflictError,
     BindingValidationError,
     activate_binding,
     create_binding,
@@ -199,18 +207,11 @@ from .integrations.bindings import (
     list_capabilities,
     serialize_binding,
     suspend_binding,
+    normalize_provider,
     validate_automatic_ai_rollout_evidence,
     validate_binding,
 )
-from .integrations.embedded import (
-    EmbeddedAuthError,
-    authenticate_session,
-    issue_bootstrap_code,
-    redeem_bootstrap_code,
-    require_ticket_scope,
-    verify_installation_secret,
-)
-from .sync_worker import start_sync_worker, stop_sync_worker, get_sync_status
+from .sync_worker import start_sync_worker, stop_sync_worker, get_sync_status, process_role
 from . import settings as settings_module
 from . import sso as sso_service
 from .security import RequestBodyLimitMiddleware
@@ -381,8 +382,13 @@ engine = IntelligenceEngine(llm_mgr)
 SESSION_COOKIE = "tickety_session"
 SESSION_TTL_DAYS = 14
 _SESSION_PRUNE_BATCH = 1_000
+_LEGACY_SESSION_TOKEN_MAX_CHARS = 128
+_AUTH_SECURITY_EPOCH_SINGLETON_ID = 1
+_AUTH_SECURITY_EPOCH_MAX = 9_223_372_036_854_775_807
 SSO_STATE_COOKIE = "tickety_sso_state"
 FRESHSERVICE_OAUTH_STATE_COOKIE = "tickety_freshservice_oauth_state"
+_SSO_LOGIN_WINDOW = timedelta(minutes=1)
+_SSO_TRANSACTION_PRUNE_BATCH = 1_000
 _LOGIN_FAILURE_WINDOW = timedelta(minutes=15)
 _LOGIN_FAILURE_LIMIT = 5
 _LOGIN_ACCOUNT_FAILURE_LIMIT = 20
@@ -408,7 +414,6 @@ _PUBLIC_HTTP_PATHS = {
 _PUBLIC_HTTP_PREFIXES = (
     "/portal/",
     "/webhooks/external/",
-    "/integrations/freshworks/",
     "/docs",
     "/redoc",
 )
@@ -507,10 +512,35 @@ def _roles_required_for_request(path: str, method: str) -> Optional[set[str]]:
 _OPERATIONAL_USER_ROLES = frozenset({"admin", "supervisor", "agent"})
 
 
+def _legacy_session_token_candidate(token: str) -> Optional[str]:
+    """Return a bounded raw-token fallback, never a stored SHA-256 digest.
+
+    Allowing a digest-shaped input through the legacy branch would turn a
+    database value into a bearer credential.  Legacy cookies were generated
+    by ``secrets.token_urlsafe(32)``, so this restriction cannot exclude a
+    valid issued cookie.
+    """
+    if not token or len(token) > _LEGACY_SESSION_TOKEN_MAX_CHARS:
+        return None
+    if re.fullmatch(r"[0-9a-fA-F]{64}", token):
+        return None
+    return token
+
+
+def _session_for_browser_token(db: Session, token: str) -> Optional[SessionRecord]:
+    """Find either a hashed session or a bounded legacy session."""
+    digest = session_token_digest(token)
+    legacy = _legacy_session_token_candidate(token)
+    criteria = [SessionRecord.token_hash == digest]
+    if legacy is not None:
+        criteria.append(SessionRecord.token_hash == legacy)
+    return db.query(SessionRecord).filter(or_(*criteria)).first()
+
+
 def _resolve_request_user(request: Request, db: Session, allow_demo: bool) -> Optional[UserRecord]:
     token = request.cookies.get(SESSION_COOKIE)
     if token:
-        session = db.query(SessionRecord).filter(SessionRecord.token == token).first()
+        session = _session_for_browser_token(db, token)
         if session and (not session.expires_at or session.expires_at > datetime.utcnow()):
             user = db.query(UserRecord).filter(UserRecord.id == session.user_id).first()
             if user and user.is_active:
@@ -861,7 +891,23 @@ async def require_auth_by_default(request: Request, call_next):
     # Unsafe methods must always pass the origin gate, even in no-login demo
     # mode: anonymous POSTs would otherwise execute as the demo fallback
     # identity with no cross-site protection at all.
-    if request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"} and not _request_origin_allowed(request):
+    unsafe_method = request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}
+    # A session cookie turns an otherwise ordinary unsafe request into a CSRF
+    # target.  Production must fail closed when neither Origin/Referer nor
+    # Fetch Metadata proves a same-origin browser request. Signed provider
+    # callbacks deliberately remain usable without browser-origin headers.
+    signed_provider_path = (
+        request.url.path == "/webhooks/external"
+        or request.url.path.startswith("/webhooks/external/")
+    )
+    require_explicit_origin = (
+        settings_module.is_production_mode()
+        and bool(request.cookies.get(SESSION_COOKIE))
+        and not signed_provider_path
+    )
+    if unsafe_method and not _request_origin_allowed(
+        request, require_explicit=require_explicit_origin
+    ):
         return JSONResponse({"detail": "Invalid request origin"}, status_code=403)
 
     if request.method == "OPTIONS" or _is_public_http_path(request.url.path):
@@ -900,50 +946,572 @@ async def require_auth_by_default(request: Request, call_next):
     return await call_next(request)
 
 # WebSocket connection manager for real-time notifications. Each entry is a
-# (user_id, websocket) pair so recipients only receive their own events and
-# dead connections are bounded by the heartbeat-free cleanup on failure.
+# (user_id, websocket) pair so recipients only receive their own events.
 _notification_subscribers: list[tuple[str, WebSocket]] = []
+_notification_subscriber_activity: dict[WebSocket, float] = {}
+# A replay and a dispatcher poll can otherwise both call ``send_json`` on the
+# same ASGI WebSocket.  Apart from the transport being unsafe for concurrent
+# sends, that lets a newer live award overtake an older reconnect replay.
+# Locks are deliberately local: each replica owns only its own sockets.
+_notification_subscriber_send_locks: dict[WebSocket, asyncio.Lock] = {}
+_notification_dispatch_task: Optional[asyncio.Task] = None
+_notification_dispatch_expected = False
+_notification_dispatch_last_success_at: Optional[float] = None
+_notification_dispatch_last_error_at: Optional[float] = None
+_notification_dispatch_consecutive_failures = 0
+_rag_retention_task: Optional[asyncio.Task] = None
+_NOTIFICATION_OUTBOX_EVENT_TYPE = "points_awarded"
+_NOTIFICATION_OUTBOX_PAYLOAD_MAX_BYTES = 16_384
+_NOTIFICATION_CURSOR_MAX = 9_007_199_254_740_991
+_NOTIFICATION_CURSOR_ADVANCE_TYPE = "notification_cursor_advance"
+
+
+def _notification_max_subscribers() -> int:
+    return _bounded_env_int("NOTIFICATION_WS_MAX_SUBSCRIBERS", 200, 1, 2000)
+
+
+def _notification_max_subscribers_per_user() -> int:
+    return _bounded_env_int("NOTIFICATION_WS_MAX_SUBSCRIBERS_PER_USER", 4, 1, 20)
+
+
+def _notification_send_timeout_seconds() -> int:
+    return _bounded_env_int("NOTIFICATION_WS_SEND_TIMEOUT_SECONDS", 2, 1, 10)
+
+
+def _notification_idle_timeout_seconds() -> int:
+    return _bounded_env_int("NOTIFICATION_WS_IDLE_TIMEOUT_SECONDS", 90, 30, 300)
+
+
+def _register_notification_subscriber(user_id: str, ws: WebSocket) -> bool:
+    if len(_notification_subscribers) >= _notification_max_subscribers():
+        return False
+    if sum(registered_user_id == user_id for registered_user_id, _ws in _notification_subscribers) >= _notification_max_subscribers_per_user():
+        return False
+    _notification_subscribers.append((user_id, ws))
+    _notification_subscriber_activity[ws] = time.monotonic()
+    _notification_subscriber_send_locks.setdefault(ws, asyncio.Lock())
+    return True
+
+
+def _remove_notification_subscriber(user_id: str, ws: WebSocket) -> None:
+    entry = (user_id, ws)
+    if entry in _notification_subscribers:
+        _notification_subscribers.remove(entry)
+    _notification_subscriber_activity.pop(ws, None)
+    _notification_subscriber_send_locks.pop(ws, None)
+
+
+def _touch_notification_subscriber(ws: WebSocket) -> None:
+    if ws in _notification_subscriber_activity:
+        _notification_subscriber_activity[ws] = time.monotonic()
+
+
+def _websocket_user_is_current(ws: WebSocket, expected_user_id: str) -> bool:
+    """Recheck the durable browser-session boundary before using a socket.
+
+    A WebSocket's in-memory handshake principal is not a durable authorization
+    grant: login sessions and account activation can change on another API
+    replica. Fail closed for an unavailable or malformed session lookup rather
+    than letting an already-open socket bypass that shared state.
+    """
+    try:
+        user = _websocket_user(ws)
+        if not user or user.id != expected_user_id:
+            return False
+        return not (
+            settings_module.is_demo_mode()
+            and (user.role or "").lower() != "admin"
+        )
+    except Exception:
+        return False
+
+
+def _notification_subscriber_authorized(entry: tuple[str, WebSocket]) -> bool:
+    """Keep notification fanout bound to the current shared session state."""
+    user_id, ws = entry
+    return _websocket_user_is_current(ws, user_id)
+
+
+async def _send_current_websocket_json(
+    ws: WebSocket, expected_user_id: str, payload: dict
+) -> bool:
+    """Send only while the browser session and account remain authorized."""
+    if not await asyncio.to_thread(_websocket_user_is_current, ws, expected_user_id):
+        try:
+            await ws.close(code=1008)
+        except Exception:
+            pass
+        return False
+    await ws.send_json(payload)
+    return True
+
+
+async def _send_notification_to_subscriber(
+    entry: tuple[str, WebSocket], notification: dict, *, lock_is_held: bool = False
+) -> Optional[tuple[str, WebSocket]]:
+    """Send one event through a connection's single ordered send lane."""
+    _user_id, ws = entry
+    lock = _notification_subscriber_send_locks.get(ws)
+    if lock is None:
+        return entry
+
+    async def send() -> None:
+        await asyncio.wait_for(
+            ws.send_json(notification), timeout=_notification_send_timeout_seconds()
+        )
+
+    async def authorize_and_send() -> Optional[tuple[str, WebSocket]]:
+        # A close/replay continuation can remove this subscriber while a
+        # fanout was waiting for its lock. Never send after that removal merely
+        # because this task captured the old lock.
+        if (
+            entry not in _notification_subscribers
+            or _notification_subscriber_send_locks.get(ws) is not lock
+        ):
+            return entry
+        # This applies to both live fanout and reconnect replay. A successful
+        # handshake must not authorize a replay page after logout, expiry, or
+        # deactivation on another API replica.
+        if not await asyncio.to_thread(_notification_subscriber_authorized, entry):
+            try:
+                await ws.close(code=1008)
+            except Exception:
+                pass
+            return entry
+        # Rechecking membership after the blocking authorization lookup
+        # preserves the no-send-after-removal invariant when a concurrent
+        # disconnect removes this local subscription.
+        if (
+            entry not in _notification_subscribers
+            or _notification_subscriber_send_locks.get(ws) is not lock
+        ):
+            return entry
+        await send()
+        return None
+
+    try:
+        if lock_is_held:
+            return await authorize_and_send()
+        async with lock:
+            return await authorize_and_send()
+    except Exception:
+        return entry
 
 
 async def _broadcast_notification(notification: dict):
     recipient_id = notification.get("user_id")
     if not isinstance(recipient_id, str) or not recipient_id:
         return
-    dead = []
-    for user_id, ws in list(_notification_subscribers):
-        if user_id != recipient_id:
-            continue
-        try:
-            await asyncio.wait_for(ws.send_json(notification), timeout=2)
-        except Exception:
-            dead.append((user_id, ws))
+    recipients = [
+        (user_id, ws)
+        for user_id, ws in list(_notification_subscribers)
+        if user_id == recipient_id
+    ]
+
+    dead = await asyncio.gather(*(
+        _send_notification_to_subscriber(entry, notification) for entry in recipients
+    ))
     for entry in dead:
-        if entry in _notification_subscribers:
-            _notification_subscribers.remove(entry)
+        if entry:
+            _remove_notification_subscriber(*entry)
+
+
+def _notification_outbox_poll_seconds() -> int:
+    return _bounded_env_int("NOTIFICATION_OUTBOX_POLL_SECONDS", 1, 1, 5)
+
+
+def _notification_outbox_batch_size() -> int:
+    return _bounded_env_int("NOTIFICATION_OUTBOX_BATCH_SIZE", 100, 1, 500)
+
+
+def _notification_outbox_replay_batch_size() -> int:
+    """Bound reconnect work independently from replica dispatch polling."""
+    return _bounded_env_int("NOTIFICATION_OUTBOX_REPLAY_BATCH_SIZE", 100, 1, 500)
+
+
+def _notification_outbox_ttl_seconds() -> int:
+    return _bounded_env_int("NOTIFICATION_OUTBOX_RETENTION_SECONDS", 3600, 300, 86_400)
+
+
+def _notification_outbox_api_prune_interval_seconds() -> int:
+    return _bounded_env_int(
+        "NOTIFICATION_OUTBOX_PRUNE_INTERVAL_SECONDS", 300, 60, 86_400
+    )
+
+
+def _notification_outbox_stale_seconds() -> int:
+    return _bounded_env_int("NOTIFICATION_OUTBOX_STALE_SECONDS", 30, 5, 300)
+
+
+def _notification_outbox_prune_batch_size() -> int:
+    return _bounded_env_int("NOTIFICATION_OUTBOX_PRUNE_BATCH_SIZE", 5_000, 100, 10_000)
+
+
+def _notification_outbox_prune_batches_per_run() -> int:
+    return _bounded_env_int(
+        "NOTIFICATION_OUTBOX_PRUNE_BATCHES_PER_RUN", 4, 1, 20
+    )
+
+
+def _points_notification_payload(notification: PointsAwardedNotification) -> str:
+    """Encode only the browser's reviewed PointsAwarded contract into the outbox."""
+    payload = PointsAwardedNotification.model_validate(notification).model_dump(
+        mode="json"
+    )
+    encoded = json.dumps(
+        payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False
+    )
+    if len(encoded.encode("utf-8")) > _NOTIFICATION_OUTBOX_PAYLOAD_MAX_BYTES:
+        raise ValueError("Points notification exceeds the outbox payload limit")
+    return encoded
+
+
+def _parse_points_notification(payload_json: str) -> Optional[dict]:
+    try:
+        payload = json.loads(payload_json)
+        if not isinstance(payload, dict):
+            return None
+        # Pydantic owns the producer/consumer contract. Round-trip through it
+        # so an accidental future schema drift cannot send arbitrary outbox
+        # JSON to a browser socket.
+        return PointsAwardedNotification.model_validate(payload).model_dump(mode="json")
+    except (TypeError, ValueError):
+        return None
+
+
+def _notification_outbox_max_dispatch_order() -> int:
+    db = SessionLocal()
+    try:
+        return int(
+            db.query(func.max(NotificationOutboxRecord.dispatch_order)).scalar() or 0
+        )
+    finally:
+        db.close()
+
+
+def _notification_outbox_after(cursor: int, limit: int) -> list[tuple[int, str, str, str]]:
+    db = SessionLocal()
+    try:
+        rows = db.query(NotificationOutboxRecord).filter(
+            NotificationOutboxRecord.dispatch_order > cursor,
+            NotificationOutboxRecord.expires_at > datetime.utcnow(),
+        ).order_by(NotificationOutboxRecord.dispatch_order.asc()).limit(limit).all()
+        return [
+            (
+                row.dispatch_order,
+                row.recipient_user_id,
+                row.event_type,
+                row.payload_json,
+            )
+            for row in rows
+        ]
+    finally:
+        db.close()
+
+
+def _notification_outbox_replay_after(
+    recipient_user_id: str, cursor: int, limit: int
+) -> tuple[list[tuple[int, str]], bool]:
+    """Return only one recipient's still-valid points events in commit order."""
+    db = SessionLocal()
+    try:
+        rows = db.query(NotificationOutboxRecord).filter(
+            NotificationOutboxRecord.recipient_user_id == recipient_user_id,
+            NotificationOutboxRecord.event_type == _NOTIFICATION_OUTBOX_EVENT_TYPE,
+            NotificationOutboxRecord.dispatch_order > cursor,
+            NotificationOutboxRecord.expires_at > datetime.utcnow(),
+        ).order_by(NotificationOutboxRecord.dispatch_order.asc()).limit(limit + 1).all()
+        return (
+            [(int(row.dispatch_order), row.payload_json) for row in rows[:limit]],
+            len(rows) > limit,
+        )
+    finally:
+        db.close()
+
+
+def _prune_expired_notification_outbox() -> int:
+    """Remove bounded expiry batches without allowing a permanent backlog."""
+    db = SessionLocal()
+    try:
+        deleted = 0
+        batch_size = _notification_outbox_prune_batch_size()
+        for _ in range(_notification_outbox_prune_batches_per_run()):
+            expired_ids = [
+                row_id for row_id, in db.query(NotificationOutboxRecord.id).filter(
+                    NotificationOutboxRecord.expires_at <= datetime.utcnow()
+                ).order_by(
+                    NotificationOutboxRecord.expires_at.asc(),
+                    NotificationOutboxRecord.id.asc(),
+                ).limit(batch_size).all()
+            ]
+            if not expired_ids:
+                break
+            deleted += db.query(NotificationOutboxRecord).filter(
+                NotificationOutboxRecord.id.in_(expired_ids)
+            ).delete(synchronize_session=False)
+            db.commit()
+            if len(expired_ids) < batch_size:
+                break
+        return deleted
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def _record_notification_dispatch_success() -> None:
+    global _notification_dispatch_last_success_at
+    global _notification_dispatch_last_error_at
+    global _notification_dispatch_consecutive_failures
+    _notification_dispatch_last_success_at = time.monotonic()
+    _notification_dispatch_last_error_at = None
+    _notification_dispatch_consecutive_failures = 0
+
+
+def _record_notification_dispatch_failure() -> None:
+    global _notification_dispatch_last_error_at
+    global _notification_dispatch_consecutive_failures
+    _notification_dispatch_last_error_at = time.monotonic()
+    _notification_dispatch_consecutive_failures += 1
+
+
+def _allocate_notification_dispatch_order(db: Session) -> int:
+    """Allocate an order that cannot commit ahead of an earlier allocation.
+
+    A normal PostgreSQL sequence is not suitable here: it assigns values
+    before transaction commit.  Locking this durable singleton in the same
+    transaction as the outbox insert instead serializes allocation *and* the
+    subsequent commit, so a dispatcher cursor never steps past a late lower
+    order.
+    """
+    sequence = db.query(NotificationOutboxSequenceRecord).filter(
+        NotificationOutboxSequenceRecord.singleton_id == 1
+    ).with_for_update().one_or_none()
+    if sequence is None:
+        raise RuntimeError("notification outbox dispatch sequence is unavailable")
+    # Migration 0049 repairs this invariant before production replicas start,
+    # and demo bootstrap does the same.  Retain this check at the allocation
+    # boundary as a recovery guard for restored/manual databases: without it
+    # a stale singleton turns a recoverable counter drift into a duplicate
+    # dispatch-order error that rolls back an otherwise valid award.
+    high_water = int(
+        db.query(func.max(NotificationOutboxRecord.dispatch_order)).scalar() or 0
+    )
+    if sequence.next_dispatch_order < high_water:
+        sequence.next_dispatch_order = high_water
+    if sequence.next_dispatch_order >= _NOTIFICATION_CURSOR_MAX:
+        raise RuntimeError("notification outbox dispatch order exceeds browser cursor range")
+    sequence.next_dispatch_order += 1
+    return int(sequence.next_dispatch_order)
+
+
+class _NotificationOutboxDispatcher:
+    """One local cursor per API process; events are deliberately not claimed."""
+    def __init__(self, broadcast=_broadcast_notification):
+        self.cursor = 0
+        self._broadcast = broadcast
+        self._next_prune_at = 0.0
+
+    async def initialize(self) -> None:
+        # Realtime toasts are for already-connected users, not historical
+        # inbox replay. Each replica therefore starts at the current highwater.
+        self.cursor = await asyncio.to_thread(_notification_outbox_max_dispatch_order)
+
+    async def dispatch_once(self) -> int:
+        rows = await asyncio.to_thread(
+            _notification_outbox_after, self.cursor, _notification_outbox_batch_size()
+        )
+        for event_id, recipient_id, event_type, payload_json in rows:
+            if event_type != _NOTIFICATION_OUTBOX_EVENT_TYPE:
+                self.cursor = event_id
+                continue
+            payload = _parse_points_notification(payload_json)
+            if payload is None or payload.get("user_id") != recipient_id:
+                self.cursor = event_id
+                continue
+            await self._broadcast(payload)
+            # Only acknowledge this order after its local fanout completed.
+            # If it raises, the next poll retries this same durable event.
+            self.cursor = event_id
+        if time.monotonic() >= self._next_prune_at:
+            await asyncio.to_thread(_prune_expired_notification_outbox)
+            self._next_prune_at = (
+                time.monotonic() + _notification_outbox_api_prune_interval_seconds()
+            )
+        return len(rows)
+
+
+async def _notification_outbox_dispatch_loop() -> None:
+    dispatcher = _NotificationOutboxDispatcher()
+    initialized = False
+    while True:
+        try:
+            if not initialized:
+                await dispatcher.initialize()
+                initialized = True
+            await dispatcher.dispatch_once()
+            _record_notification_dispatch_success()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _record_notification_dispatch_failure()
+            print(f"[notifications] outbox dispatch error kind={type(exc).__name__}")
+        await asyncio.sleep(_notification_outbox_poll_seconds())
+
+
+def _rag_retention_poll_seconds() -> int:
+    """Keep expiry cleanup prompt without turning it into request-path work."""
+    return _bounded_env_int("TICKET_RAG_RETENTION_POLL_SECONDS", 300, 60, 86400)
+
+
+def _prune_expired_rag_data_safely() -> None:
+    """Run one bounded RAG-retention batch in an isolated database session."""
+    cleanup_db = SessionLocal()
+    try:
+        from .rag.snapshots import (
+            drain_pending_source_snapshot_purges,
+            prune_expired_rag_data,
+            purge_ineligible_snapshots,
+        )
+        from .rag.store_v2 import purge_ineligible_chunks
+
+        pruned = prune_expired_rag_data(cleanup_db)
+        ineligible = purge_ineligible_snapshots(cleanup_db)
+        ineligible_chunks = purge_ineligible_chunks(cleanup_db)
+        recovered = drain_pending_source_snapshot_purges(cleanup_db)
+        total = sum(pruned.values()) + ineligible + ineligible_chunks + recovered
+        if total:
+            print(f"[security] pruned_rag_derivative_rows={total}")
+    except Exception as exc:
+        cleanup_db.rollback()
+        print(f"[security] rag_retention_cleanup_failed kind={type(exc).__name__}")
+    finally:
+        cleanup_db.close()
+
+
+async def _rag_retention_cleanup_loop() -> None:
+    """Periodically expire derivative RAG data even while the API is idle."""
+    while True:
+        try:
+            await asyncio.to_thread(_prune_expired_rag_data_safely)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # The synchronous helper already isolates database failures.  Keep
+            # this guard for executor/runtime failures so a task cannot die
+            # permanently and leave plaintext evidence beyond its TTL.
+            print(f"[security] rag_retention_cleanup_failed kind={type(exc).__name__}")
+        await asyncio.sleep(_rag_retention_poll_seconds())
+
+
+async def _start_runtime_background_services() -> None:
+    """Start scheduler-owned work before creating the local API dispatcher."""
+    start_sync_worker()
+    global _notification_dispatch_task
+    global _notification_dispatch_expected
+    global _notification_dispatch_last_success_at
+    global _notification_dispatch_last_error_at
+    global _notification_dispatch_consecutive_failures
+    global _rag_retention_task
+    if process_role() in {"api", "all"}:
+        _notification_dispatch_expected = True
+        _notification_dispatch_last_success_at = None
+        _notification_dispatch_last_error_at = None
+        _notification_dispatch_consecutive_failures = 0
+        _notification_dispatch_task = asyncio.create_task(
+            _notification_outbox_dispatch_loop(), name="notification-outbox"
+        )
+        _rag_retention_task = asyncio.create_task(
+            _rag_retention_cleanup_loop(), name="rag-retention-cleanup"
+        )
 
 
 def _prune_ai_operational_data(db: Session) -> dict[str, int]:
-    """Apply bounded retention to high-volume AI audit/control tables."""
+    """Apply capped, independently committed retention batches at startup."""
     now = datetime.utcnow()
     metrics_days = _bounded_env_int("AI_METRICS_RETENTION_DAYS", 30, 1, 3650)
     artifact_days = _bounded_env_int("AI_ARTIFACT_RETENTION_DAYS", 90, 1, 3650)
-    counts = {
-        "usage_events": db.query(AIUsageEventRecord).filter(
-            AIUsageEventRecord.created_at < now - timedelta(days=metrics_days)
-        ).delete(synchronize_session=False),
-        "request_buckets": db.query(AIRequestBucketRecord).filter(
-            AIRequestBucketRecord.window_start < now - timedelta(days=2)
-        ).delete(synchronize_session=False),
-        "llm_calls": db.query(LLMCallRecord).filter(
-            LLMCallRecord.created_at < now - timedelta(days=metrics_days)
-        ).delete(synchronize_session=False),
-        "inactive_artifacts": db.query(AIArtifactRecord).filter(
-            AIArtifactRecord.active.is_(False),
-            AIArtifactRecord.created_at < now - timedelta(days=artifact_days),
-        ).delete(synchronize_session=False),
-    }
-    db.commit()
-    return {key: int(value or 0) for key, value in counts.items()}
+    batch_size = _bounded_env_int("AI_RETENTION_CLEANUP_BATCH_SIZE", 500, 10, 5000)
+    per_start_cap = _bounded_env_int(
+        "AI_RETENTION_CLEANUP_MAX_ROWS_PER_START", 5000, 10, 50000
+    )
+    specs = (
+        (
+            "usage_events", AIUsageEventRecord,
+            (AIUsageEventRecord.created_at < now - timedelta(days=metrics_days),),
+            (AIUsageEventRecord.created_at.asc(), AIUsageEventRecord.id.asc()),
+        ),
+        (
+            "request_buckets", AIRequestBucketRecord,
+            (AIRequestBucketRecord.window_start < now - timedelta(days=2),),
+            (
+                AIRequestBucketRecord.window_start.asc(),
+                AIRequestBucketRecord.actor_id.asc(),
+                AIRequestBucketRecord.window_kind.asc(),
+            ),
+        ),
+        (
+            "llm_calls", LLMCallRecord,
+            (LLMCallRecord.created_at < now - timedelta(days=metrics_days),),
+            (LLMCallRecord.created_at.asc(), LLMCallRecord.id.asc()),
+        ),
+        (
+            "inactive_artifacts", AIArtifactRecord,
+            (
+                AIArtifactRecord.active.is_(False),
+                AIArtifactRecord.created_at < now - timedelta(days=artifact_days),
+            ),
+            (AIArtifactRecord.created_at.asc(), AIArtifactRecord.id.asc()),
+        ),
+    )
+    counts = {name: 0 for name, *_ in specs}
+    # Reserve an equal budget for every retention class.  A permanently large
+    # metrics backlog must not indefinitely prevent inactive AI artifacts (or
+    # control rows) from being removed.  The sum remains bounded per startup.
+    per_table_cap = max(1, per_start_cap // len(specs))
+    for name, model, predicates, ordering in specs:
+        remaining = per_table_cap
+        try:
+            while remaining:
+                limit = min(batch_size, remaining)
+                rows = (
+                    db.query(model)
+                    .filter(*predicates)
+                    .order_by(*ordering)
+                    .limit(limit)
+                    .all()
+                )
+                if not rows:
+                    break
+                for row in rows:
+                    db.delete(row)
+                # Each small batch is durable independently, so a large historical
+                # backlog cannot turn startup into one long transaction.
+                db.commit()
+                deleted = len(rows)
+                counts[name] += deleted
+                remaining -= deleted
+                if deleted < limit:
+                    break
+        except Exception as exc:
+            # Keep the later retention classes and the API startup path alive.
+            db.rollback()
+            print(
+                "[security] ai_retention_cleanup_failed "
+                f"table={name} kind={type(exc).__name__}"
+            )
+    return counts
+
+
+def _prune_ai_operational_data_safely(db: Session) -> dict[str, int]:
+    """Keep nonessential retention maintenance from blocking API startup."""
+    try:
+        return _prune_ai_operational_data(db)
+    except Exception as exc:
+        db.rollback()
+        print(f"[security] ai_retention_cleanup_failed kind={type(exc).__name__}")
+        return {}
 
 
 async def startup():
@@ -953,9 +1521,35 @@ async def startup():
     settings_module.load_settings_into_env()
     cleanup_db = SessionLocal()
     try:
-        pruned_ai_rows = _prune_ai_operational_data(cleanup_db)
+        pruned_ai_rows = _prune_ai_operational_data_safely(cleanup_db)
         if sum(pruned_ai_rows.values()):
             print(f"[security] pruned_ai_operational_rows={sum(pruned_ai_rows.values())}")
+        from .rag.snapshots import (
+            drain_pending_source_snapshot_purges,
+            prune_expired_rag_data,
+            purge_ineligible_snapshots,
+        )
+        from .rag.store_v2 import purge_ineligible_chunks
+
+        try:
+            pruned_rag_rows = prune_expired_rag_data(cleanup_db)
+            ineligible_rag_rows = purge_ineligible_snapshots(cleanup_db)
+            ineligible_chunk_rows = purge_ineligible_chunks(cleanup_db)
+            recovered_rag_rows = drain_pending_source_snapshot_purges(cleanup_db)
+            total_rag_rows = (
+                sum(pruned_rag_rows.values())
+                + ineligible_rag_rows
+                + ineligible_chunk_rows
+                + recovered_rag_rows
+            )
+            if total_rag_rows:
+                print(f"[security] pruned_rag_derivative_rows={total_rag_rows}")
+        except Exception as exc:
+            # Retention never authorizes serving stale data; read-time expiry
+            # remains fail-closed, and a transient maintenance failure must
+            # not turn an otherwise healthy API restart into an outage.
+            cleanup_db.rollback()
+            print(f"[security] rag_retention_cleanup_failed kind={type(exc).__name__}")
         if settings_module.get_bool("DIRECTORY_PEOPLE_READ_ENABLED"):
             repaired_agent_profiles = (
                 directory_service.reconcile_embedded_agent_identities(cleanup_db)
@@ -984,11 +1578,61 @@ async def startup():
     global llm_mgr
     llm_mgr = LLMManager()
     engine.llm = llm_mgr
-    start_sync_worker()
+    global _notification_dispatch_task
+    global _notification_dispatch_expected
+    global _rag_retention_task
+    try:
+        # Let scheduler startup fail before creating an independent asyncio
+        # task. This avoids an orphan dispatcher if lifespan startup aborts.
+        await _start_runtime_background_services()
+    except Exception:
+        task = _notification_dispatch_task
+        _notification_dispatch_task = None
+        _notification_dispatch_expected = False
+        rag_task = _rag_retention_task
+        _rag_retention_task = None
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        if rag_task:
+            rag_task.cancel()
+            try:
+                await rag_task
+            except asyncio.CancelledError:
+                pass
+        stop_sync_worker(wait=False)
+        raise
 
 
 async def shutdown():
-    stop_sync_worker(wait=True)
+    global _notification_dispatch_task
+    global _notification_dispatch_expected
+    global _rag_retention_task
+    task = _notification_dispatch_task
+    _notification_dispatch_task = None
+    _notification_dispatch_expected = False
+    rag_task = _rag_retention_task
+    _rag_retention_task = None
+    if task:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    if rag_task:
+        rag_task.cancel()
+        try:
+            await rag_task
+        except asyncio.CancelledError:
+            pass
+    # Stop the scheduler before draining its derived-vector work.  Otherwise
+    # an in-flight sync job could schedule a new refresh after this drain and
+    # leave it unowned during process teardown.
+    stop_sync_worker(wait=False)
+    await ticket_vectors.stop_background_ticket_refreshes()
 
 
 # ── Health ───────────────────────────────────────────────────
@@ -1043,6 +1687,28 @@ async def health_ready(response: Response, db: Session = Depends(get_db)):
         # SQL, or other internal exception details.
         response.status_code = 503
         return {"status": "not_ready", "checks": {"database": "unavailable"}}
+    # A running API process owns one local dispatcher.  The task retries its
+    # own failures, so readiness must also detect a task that is alive but has
+    # never completed a healthy iteration (or has gone stale).
+    task = _notification_dispatch_task
+    dispatcher_unhealthy = (
+        _notification_dispatch_expected
+        and (
+            task is None
+            or task.done()
+            or _notification_dispatch_last_success_at is None
+            or (
+                time.monotonic() - _notification_dispatch_last_success_at
+                > _notification_outbox_stale_seconds()
+            )
+        )
+    )
+    if dispatcher_unhealthy:
+        response.status_code = 503
+        return {
+            "status": "not_ready",
+            "checks": {"database": "ok", "notification_dispatch": "unavailable"},
+        }
     return {"status": "ready", "checks": {"database": "ok"}}
 
 
@@ -3431,7 +4097,19 @@ async def download_ticket_attachment(
     if row.storage_status != "stored" or not row.blob_key:
         raise HTTPException(status_code=409, detail="Attachment copy is not ready")
     try:
-        content = AzureBlobAttachmentStore().download(row.blob_key)
+        # Read configuration once: the target check and the remote client must
+        # refer to the same immutable snapshot even while an administrator is
+        # rotating storage settings in another request.
+        storage_config = attachment_storage_config()
+        if not attachment_storage_target_matches(
+            storage_provider=row.storage_provider,
+            storage_account_identity=row.storage_account_identity,
+            storage_container=row.storage_container,
+            config=storage_config,
+        ):
+            raise AttachmentStorageError("attachment_storage_target_mismatch")
+        store = AzureBlobAttachmentStore(storage_config)
+        content = await asyncio.to_thread(store.download, row.blob_key)
     except AttachmentStorageError as exc:
         raise HTTPException(status_code=503, detail="Attachment storage is unavailable") from exc
     except Exception as exc:
@@ -3777,7 +4455,9 @@ def _schedule_ai_retry(
 ) -> bool:
     query = db.query(TicketRecord).filter(TicketRecord.id == ticket_id)
     if expected_claim_id:
-        query = query.filter(TicketRecord.ai_claim_id == expected_claim_id)
+        query = query.filter(_live_analysis_claim_fence(
+            ticket_id, expected_claim_id,
+        ))
     else:
         query = query.filter(or_(
             TicketRecord.ai_status.is_(None),
@@ -3826,7 +4506,9 @@ def _defer_ai_capacity(
     """Release a claim for quota recovery without consuming a failure attempt."""
     query = db.query(TicketRecord).filter(TicketRecord.id == ticket_id)
     if expected_claim_id:
-        query = query.filter(TicketRecord.ai_claim_id == expected_claim_id)
+        query = query.filter(_live_analysis_claim_fence(
+            ticket_id, expected_claim_id,
+        ))
     else:
         query = query.filter(or_(
             TicketRecord.ai_status.is_(None),
@@ -4191,6 +4873,29 @@ def _artifact_is_current(db: Session, ticket: TicketRecord, artifact: str) -> bo
     return query.first() is not None
 
 
+def _live_analysis_claim_fence(
+    ticket_id: str,
+    claim_id: str,
+    *,
+    now: Optional[datetime] = None,
+):
+    """Match only the current owner while its committed lease is still live.
+
+    A token alone is not ownership: once its expiry passes, a recovery worker
+    may claim the same ticket even before it commits a replacement token.
+    Owner-side renewal, verification, and terminal transitions share this
+    fence so an expired worker cannot revive or submit.
+    """
+    current_time = now or datetime.utcnow()
+    return and_(
+        TicketRecord.id == ticket_id,
+        TicketRecord.ai_claim_id == claim_id,
+        TicketRecord.ai_status == "running",
+        TicketRecord.ai_lease_expires_at.isnot(None),
+        TicketRecord.ai_lease_expires_at > current_time,
+    )
+
+
 def _claim_ticket_analysis(
     ticket: TicketRecord, db: Session, *, force: bool = False
 ) -> tuple[bool, str, str]:
@@ -4203,7 +4908,7 @@ def _claim_ticket_analysis(
         TicketRecord.ai_status.is_(None),
         TicketRecord.ai_status != "running",
         TicketRecord.ai_lease_expires_at.is_(None),
-        TicketRecord.ai_lease_expires_at < now,
+        TicketRecord.ai_lease_expires_at <= now,
     )
     query = db.query(TicketRecord).filter(TicketRecord.id == ticket.id, available)
     if not force:
@@ -4348,9 +5053,7 @@ def _ensure_analysis_input_current(
                 raise
             db.rollback()
             claimed_ticket = db.query(TicketRecord).filter(
-                TicketRecord.id == ticket.id,
-                TicketRecord.ai_claim_id == claim_id,
-                TicketRecord.ai_status == "running",
+                _live_analysis_claim_fence(ticket.id, claim_id),
             ).with_for_update().populate_existing().first()
             if claimed_ticket:
                 _release_analysis_claim_for_access_change(claimed_ticket, db)
@@ -4360,9 +5063,7 @@ def _ensure_analysis_input_current(
             ) from exc
 
     ticket = db.query(TicketRecord).filter(
-        TicketRecord.id == ticket.id,
-        TicketRecord.ai_claim_id == claim_id,
-        TicketRecord.ai_status == "running",
+        _live_analysis_claim_fence(ticket.id, claim_id),
     ).with_for_update().populate_existing().first()
     if not ticket:
         raise HTTPException(status_code=409, detail="analysis_claim_lost")
@@ -4395,12 +5096,11 @@ def _ensure_analysis_input_current(
 
 def _renew_analysis_lease(db: Session, ticket_id: str, claim_id: str) -> None:
     lease_seconds = _analysis_lease_seconds()
+    now = datetime.utcnow()
     changed = db.query(TicketRecord).filter(
-        TicketRecord.id == ticket_id,
-        TicketRecord.ai_claim_id == claim_id,
-        TicketRecord.ai_status == "running",
+        _live_analysis_claim_fence(ticket_id, claim_id, now=now),
     ).update({
-        TicketRecord.ai_lease_expires_at: datetime.utcnow() + timedelta(seconds=lease_seconds)
+        TicketRecord.ai_lease_expires_at: now + timedelta(seconds=lease_seconds)
     }, synchronize_session=False)
     if not changed:
         db.rollback()
@@ -4660,10 +5360,19 @@ async def _run_ticket_analysis(
                         "error": "content_filtered",
                     }]
                     filtered = db.query(TicketRecord).filter(
-                        TicketRecord.id == ticket.id,
-                        TicketRecord.ai_claim_id == claim_id,
+                        _live_analysis_claim_fence(ticket.id, claim_id),
                     ).with_for_update().first()
                     if filtered:
+                        earlier_failures = {
+                            error["step"] for error in errors
+                            if error["step"] != "triage"
+                        }
+                        earlier_errors = [
+                            error for error in errors
+                            if error["step"] in earlier_failures
+                        ]
+                        earlier_signature = _analysis_error_signature(earlier_errors)
+                        earlier_codes = {error["error"] for error in earlier_errors}
                         filtered.ai_status = (
                             "triage_completed" if filtered.ai_reasoning else "partial"
                         )
@@ -4675,41 +5384,62 @@ async def _run_ticket_analysis(
                         filtered.ai_attempts = 0
                         filtered.ai_requested_artifacts = None
                         filtered.ai_next_attempt_at = None
+                        # Route preprocessing can fail before a policy-filtered
+                        # triage result.  Its follow-up disposition must be
+                        # folded into this same live-claim transaction; doing
+                        # it after clearing the claim lets an old worker alter
+                        # a successor that recovered in the gap.
+                        if earlier_failures and earlier_codes != {"content_filtered"}:
+                            if earlier_failures.issubset(capacity_deferrals):
+                                filtered.ai_status = "queued"
+                                filtered.ai_requested_artifacts = ",".join(
+                                    sorted(earlier_failures)
+                                )
+                                filtered.ai_error = merge_terminal_ai_policy_errors(
+                                    filtered.ai_error,
+                                    "provider_capacity",
+                                )
+                                filtered.ai_next_attempt_at = datetime.utcnow() + timedelta(
+                                    seconds=max(
+                                        1,
+                                        min(
+                                            int(max(
+                                                capacity_deferrals[step]
+                                                for step in earlier_failures
+                                            )),
+                                            172_800,
+                                        ),
+                                    )
+                                )
+                            else:
+                                attempts = int(filtered.ai_attempts or 0) + 1
+                                max_attempts = _bounded_env_int(
+                                    "AI_ANALYSIS_MAX_ATTEMPTS", 3, 1, 10
+                                )
+                                filtered.ai_attempts = attempts
+                                filtered.ai_requested_artifacts = ",".join(
+                                    sorted(earlier_failures)
+                                )
+                                filtered.ai_error = merge_terminal_ai_policy_errors(
+                                    filtered.ai_error,
+                                    earlier_signature,
+                                )
+                                if (
+                                    earlier_codes.issubset({
+                                        "invalid_input", "provider_rejected",
+                                    })
+                                    or attempts >= max_attempts
+                                ):
+                                    filtered.ai_status = "dead_letter"
+                                    filtered.ai_next_attempt_at = None
+                                else:
+                                    filtered.ai_status = "queued"
+                                    filtered.ai_next_attempt_at = datetime.utcnow() + timedelta(
+                                        seconds=min(3600, 30 * (2 ** (attempts - 1)))
+                                    )
                         filtered.ai_claim_id = None
                         filtered.ai_lease_expires_at = None
                         db.commit()
-                    earlier_failures = {
-                        error["step"] for error in errors
-                        if error["step"] != "triage"
-                    }
-                    if earlier_failures:
-                        earlier_errors = [
-                            error for error in errors
-                            if error["step"] in earlier_failures
-                        ]
-                        earlier_signature = _analysis_error_signature(earlier_errors)
-                        earlier_codes = {error["error"] for error in earlier_errors}
-                        if earlier_codes == {"content_filtered"}:
-                            # The artifact-scoped terminal marker was persisted
-                            # above; never redispatch policy-filtered content.
-                            pass
-                        elif earlier_failures.issubset(capacity_deferrals):
-                            _defer_ai_capacity(
-                                db,
-                                ticket.id,
-                                earlier_failures,
-                                max(capacity_deferrals[step] for step in earlier_failures),
-                            )
-                        else:
-                            _schedule_ai_retry(
-                                db,
-                                ticket.id,
-                                earlier_failures,
-                                earlier_signature,
-                                terminal=earlier_codes.issubset({
-                                    "invalid_input", "provider_rejected",
-                                }),
-                            )
                 elif isinstance(exc, LLMCapacityError):
                     _defer_ai_capacity(
                         db,
@@ -4945,13 +5675,55 @@ async def _run_ticket_analysis(
         claim_id,
         analysis_actor_id=analysis_actor_id,
     )
+    failed_artifacts = {
+        error["step"] for error in errors if error["step"] in artifacts
+    }
+    policy_filtered_artifacts = {
+        error["step"]
+        for error in errors
+        if error["step"] in failed_artifacts
+        and error["error"] in {"content_filtered", "unsafe_output"}
+    }
+    policy_filter_only = bool(failed_artifacts) and (
+        failed_artifacts == policy_filtered_artifacts
+    )
+    errors_by_artifact = {
+        error["step"]: error["error"]
+        for error in errors
+        if error["step"] in failed_artifacts
+    }
+    terminal_artifacts = {
+        artifact for artifact, code in errors_by_artifact.items()
+        if code in {"invalid_input", "provider_rejected"}
+    }
+    capacity_artifacts = {
+        artifact for artifact in failed_artifacts
+        if artifact in capacity_deferrals
+    }
+    transient_artifacts = (
+        failed_artifacts
+        - policy_filtered_artifacts
+        - terminal_artifacts
+        - capacity_artifacts
+    )
+    retryable_artifacts = capacity_artifacts | transient_artifacts
     ticket.ai_source_hash = source_hash
     ticket.ai_pipeline_version = AI_PIPELINE_VERSION
     ticket.ai_model = _llm_cache_identity()
     complete = bool(ticket.ai_reasoning and ticket.summary and ticket.recommended_solution)
-    ticket.ai_status = (
-        "partial" if errors else "completed" if complete else "triage_completed"
-    )
+    if policy_filter_only:
+        # This is an owner-side terminal transition, so it must be included in
+        # the same live-claim transaction that publishes the pipeline result.
+        # A later id-only write would let an old worker erase a successor's
+        # claim after this lease has been released.
+        ticket.ai_status = "triage_completed" if ticket.ai_reasoning else "partial"
+        ticket.ai_attempts = 0
+        ticket.ai_requested_artifacts = None
+        ticket.ai_next_attempt_at = None
+    elif not retryable_artifacts and not terminal_artifacts:
+        ticket.ai_status = (
+            "partial" if errors else "completed" if complete else "triage_completed"
+        )
     error_signature = _analysis_error_signature(errors)
     ticket.ai_error = merge_terminal_ai_policy_errors(
         ticket.ai_error,
@@ -4964,6 +5736,74 @@ async def _run_ticket_analysis(
         AIArtifactRecord.active.is_(True),
         AIArtifactRecord.synthetic.is_(True),
     ).count() > 0
+
+    # Retry/capacity/dead-letter state is part of this owner-fenced terminal
+    # transition.  Once the claim is cleared, a recovered worker can claim,
+    # complete, and release the ticket before an old worker's follow-up write.
+    # Applying the complete disposition while this claim is still live avoids
+    # that old owner re-queuing or overwriting its successor.
+    if retryable_artifacts:
+        retry_requested: set[str] = set()
+        if capacity_artifacts:
+            retry_requested.update(capacity_artifacts)
+            ticket.ai_status = "queued"
+            ticket.ai_error = merge_terminal_ai_policy_errors(
+                ticket.ai_error,
+                "provider_capacity",
+            )
+            ticket.ai_next_attempt_at = datetime.utcnow() + timedelta(
+                seconds=max(
+                    1,
+                    min(
+                        int(max(
+                            capacity_deferrals[artifact]
+                            for artifact in capacity_artifacts
+                        )),
+                        172_800,
+                    ),
+                )
+            )
+        if transient_artifacts:
+            retry_requested.update(transient_artifacts)
+            transient_signature = _analysis_error_signature([
+                error for error in errors
+                if error["step"] in transient_artifacts
+            ])
+            attempts = int(ticket.ai_attempts or 0) + 1
+            max_attempts = _bounded_env_int("AI_ANALYSIS_MAX_ATTEMPTS", 3, 1, 10)
+            ticket.ai_attempts = attempts
+            ticket.ai_error = merge_terminal_ai_policy_errors(
+                ticket.ai_error,
+                transient_signature,
+            )
+            retry_at = datetime.utcnow() + timedelta(
+                seconds=min(3600, 30 * (2 ** (attempts - 1)))
+            )
+            if attempts >= max_attempts:
+                # This branch is normally unreachable for transient work
+                # because the historical helper dead-lettered it here. Keep
+                # the same bounded retry-budget behavior in the owner commit.
+                ticket.ai_status = "dead_letter"
+                ticket.ai_next_attempt_at = None
+            else:
+                ticket.ai_status = "queued"
+                ticket.ai_next_attempt_at = max(
+                    value for value in (ticket.ai_next_attempt_at, retry_at) if value
+                )
+        ticket.ai_requested_artifacts = ",".join(sorted(retry_requested))
+    elif terminal_artifacts:
+        terminal_signature = _analysis_error_signature([
+            error for error in errors
+            if error["step"] in terminal_artifacts
+        ])
+        ticket.ai_attempts = int(ticket.ai_attempts or 0) + 1
+        ticket.ai_error = merge_terminal_ai_policy_errors(
+            ticket.ai_error,
+            terminal_signature,
+        )
+        ticket.ai_requested_artifacts = ",".join(sorted(terminal_artifacts))
+        ticket.ai_status = "dead_letter"
+        ticket.ai_next_attempt_at = None
     ticket.ai_claim_id = None
     ticket.ai_lease_expires_at = None
     if not errors:
@@ -4972,96 +5812,6 @@ async def _run_ticket_analysis(
         ticket.ai_requested_artifacts = None
     db.commit()
     await emit("done", "done")
-
-    failed_artifacts = {
-        error["step"] for error in errors if error["step"] in artifacts
-    }
-    if failed_artifacts:
-        errors_by_artifact = {
-            error["step"]: error["error"]
-            for error in errors
-            if error["step"] in failed_artifacts
-        }
-        policy_filtered_artifacts = {
-            artifact for artifact, code in errors_by_artifact.items()
-            if code in {"content_filtered", "unsafe_output"}
-        }
-        terminal_artifacts = {
-            artifact for artifact, code in errors_by_artifact.items()
-            if code in {"invalid_input", "provider_rejected"}
-        }
-        capacity_artifacts = {
-            artifact for artifact in failed_artifacts
-            if artifact in capacity_deferrals
-        }
-        transient_artifacts = (
-            failed_artifacts
-            - policy_filtered_artifacts
-            - terminal_artifacts
-            - capacity_artifacts
-        )
-        retryable_artifacts = capacity_artifacts | transient_artifacts
-        if retryable_artifacts:
-            # Artifact outcomes are independent: terminal policy/validation
-            # failures remain recorded but are never included in a retry.
-            if capacity_artifacts:
-                _defer_ai_capacity(
-                    db,
-                    ticket.id,
-                    capacity_artifacts,
-                    max(
-                        capacity_deferrals[artifact]
-                        for artifact in capacity_artifacts
-                    ),
-                )
-            if transient_artifacts:
-                transient_signature = _analysis_error_signature([
-                    error for error in errors
-                    if error["step"] in transient_artifacts
-                ])
-                _schedule_ai_retry(
-                    db,
-                    ticket.id,
-                    transient_artifacts,
-                    transient_signature,
-                )
-        elif terminal_artifacts:
-            terminal_signature = _analysis_error_signature([
-                error for error in errors
-                if error["step"] in terminal_artifacts
-            ])
-            _schedule_ai_retry(
-                db,
-                ticket.id,
-                terminal_artifacts,
-                terminal_signature,
-                terminal=True,
-            )
-        elif failed_artifacts == policy_filtered_artifacts:
-            # A provider filter or deterministic advice-safety rejection is an
-            # intentional terminal outcome, not an unhealthy workflow or a
-            # reason to bypass policy with repeated provider calls.
-            # Keep any completed triage/routing useful and surface the bounded
-            # diagnostic on the ticket without adding it to AI attention.
-            filtered = db.query(TicketRecord).filter(
-                TicketRecord.id == ticket.id
-            ).with_for_update().first()
-            if filtered:
-                filtered.ai_status = (
-                    "triage_completed" if filtered.ai_reasoning else "partial"
-                )
-                filtered.ai_error = merge_terminal_ai_policy_errors(
-                    filtered.ai_error,
-                    error_signature,
-                    cleared_artifacts=successful_artifacts,
-                )
-                filtered.ai_attempts = 0
-                filtered.ai_requested_artifacts = None
-                filtered.ai_next_attempt_at = None
-                filtered.ai_claim_id = None
-                filtered.ai_lease_expires_at = None
-                db.commit()
-
     if errors and len(original_requested_artifacts) == 1:
         if failed_artifacts and failed_artifacts.issubset(capacity_deferrals):
             exc = LLMCapacityError(
@@ -5265,22 +6015,82 @@ def _delete_sso_state_cookie(resp: Response):
     )
 
 
+def _lock_auth_security_epoch(db: Session) -> AuthSecurityEpochRecord:
+    """Return the singleton epoch while holding its cross-replica write lock.
+
+    Fresh databases created by local demo/test bootstrap have the table but no
+    seed row, whereas migrated production databases receive it in migration
+    0056.  ``ON CONFLICT DO NOTHING`` makes that first-row race harmless on
+    both supported SQLite and PostgreSQL databases; the following no-op update
+    is the actual serialization boundary.
+    """
+    db.execute(text(
+        "INSERT INTO auth_security_epoch (singleton_id, epoch, updated_at) "
+        "VALUES (:singleton_id, 0, CURRENT_TIMESTAMP) "
+        "ON CONFLICT (singleton_id) DO NOTHING"
+    ), {"singleton_id": _AUTH_SECURITY_EPOCH_SINGLETON_ID})
+    matched = db.query(AuthSecurityEpochRecord).filter(
+        AuthSecurityEpochRecord.singleton_id == _AUTH_SECURITY_EPOCH_SINGLETON_ID
+    ).update(
+        {AuthSecurityEpochRecord.epoch: AuthSecurityEpochRecord.epoch},
+        synchronize_session=False,
+    )
+    if matched != 1:
+        raise RuntimeError("authentication security epoch is unavailable")
+    record = db.query(AuthSecurityEpochRecord).filter(
+        AuthSecurityEpochRecord.singleton_id == _AUTH_SECURITY_EPOCH_SINGLETON_ID
+    ).populate_existing().first()
+    try:
+        epoch = int(record.epoch) if record is not None else -1
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise RuntimeError("authentication security epoch is invalid") from exc
+    if epoch < 0 or epoch > _AUTH_SECURITY_EPOCH_MAX:
+        raise RuntimeError("authentication security epoch is invalid")
+    return record
+
+
+def _advance_user_auth_epoch(db: Session, user: UserRecord) -> int:
+    """Invalidate pre-recovery SSO states with the session-revocation write."""
+    record = _lock_auth_security_epoch(db)
+    current = int(record.epoch)
+    if current >= _AUTH_SECURITY_EPOCH_MAX:
+        raise RuntimeError("authentication security epoch is exhausted")
+    try:
+        user_minimum = int(user.auth_not_before_epoch)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise RuntimeError("user authentication security epoch is invalid") from exc
+    # A user lower bound may only have been issued by this singleton.  Do not
+    # overwrite corrupt data here: doing so could silently turn a fail-closed
+    # recovery boundary into a valid old SSO state.
+    if user_minimum < 0 or user_minimum > current:
+        raise RuntimeError("user authentication security epoch is invalid")
+    record.epoch = current + 1
+    record.updated_at = datetime.utcnow()
+    user.auth_not_before_epoch = record.epoch
+    return int(record.epoch)
+
+
 def _create_session(db: Session, user_id: str, request: Request) -> str:
     now = datetime.utcnow()
-    expired_tokens = [
-        token for token, in db.query(SessionRecord.token).filter(
+    expired_session_keys = [
+        token_hash for token_hash, in db.query(SessionRecord.token_hash).filter(
             SessionRecord.expires_at <= now
-        ).order_by(SessionRecord.expires_at, SessionRecord.token).limit(
+        ).order_by(SessionRecord.expires_at, SessionRecord.token_hash).limit(
             _SESSION_PRUNE_BATCH
         ).all()
     ]
-    if expired_tokens:
+    if expired_session_keys:
         db.query(SessionRecord).filter(
-            SessionRecord.token.in_(expired_tokens)
+            SessionRecord.token_hash.in_(expired_session_keys)
         ).delete(synchronize_session=False)
     token = secrets.token_urlsafe(32)
+    stored_token = (
+        token
+        if settings_module.session_storage_mode() == "compat"
+        else session_token_digest(token)
+    )
     session = SessionRecord(
-        token=token,
+        token_hash=stored_token,
         user_id=user_id,
         expires_at=now + timedelta(days=SESSION_TTL_DAYS),
         ip=request.client.host if request.client else None,
@@ -5299,9 +6109,23 @@ async def login(payload: LoginRequest, request: Request, db: Session = Depends(g
         UserRecord.email_key == email
     ).limit(2).all()
     user = matches[0] if len(matches) == 1 else None
-    if not user or not user.is_active:
+    if not user:
         # Burn the same PBKDF2 cost as a real verification so response
         # timing cannot be used to enumerate registered email addresses.
+        _verify_password(payload.password, None)
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    try:
+        # Account recovery writes (password replacement/deactivation) revoke
+        # sessions while holding this same user-row lock.  Take it before
+        # authenticating and issuing a cookie so a login that read an old
+        # password cannot commit a new session after the revocation.
+        user = _lock_user_record(db, user.id)
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+        _verify_password(payload.password, None)
+        raise HTTPException(status_code=401, detail="Invalid credentials") from exc
+    if not user.is_active:
         _verify_password(payload.password, None)
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if not _verify_password(payload.password, user.password_hash):
@@ -5321,7 +6145,7 @@ async def login(payload: LoginRequest, request: Request, db: Session = Depends(g
 async def logout(request: Request, db: Session = Depends(get_db)):
     token = request.cookies.get(SESSION_COOKIE)
     if token:
-        session = db.query(SessionRecord).filter(SessionRecord.token == token).first()
+        session = _session_for_browser_token(db, token)
         if session:
             db.delete(session)
             db.commit()
@@ -5403,19 +6227,66 @@ def _sso_group_access(identity: sso_service.OidcIdentity, provider_type: str) ->
     return None
 
 
+def _lock_active_sso_user(
+    db: Session,
+    user_id: str,
+    *,
+    authentication_epoch: Optional[int] = None,
+) -> UserRecord:
+    """Revalidate an SSO account inside the shared recovery boundary.
+
+    Password replacement and deactivation delete bearer sessions while holding
+    ``_lock_user_record``.  A callback also carries the durable global epoch
+    captured when its state was issued.  The two checks cover both commit
+    orders: recovery after this lock deletes the just-created session, while
+    recovery before this lock raises the account's minimum epoch and rejects
+    the older state.
+    """
+    try:
+        user = _lock_user_record(db, user_id)
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            raise PermissionError("account_deactivated") from exc
+        raise
+    if not user.is_active:
+        raise PermissionError("account_deactivated")
+    if authentication_epoch is not None:
+        try:
+            transaction_epoch = int(authentication_epoch)
+            minimum_epoch = int(user.auth_not_before_epoch)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise PermissionError("account_recovery_required") from exc
+        # Corrupt or out-of-contract epoch data must not relax a recovery
+        # boundary. A healthy migration/runtime only produces non-negative
+        # values, so failing closed here is both safer and diagnosable.
+        if (
+            transaction_epoch < 0
+            or minimum_epoch < 0
+            or transaction_epoch > _AUTH_SECURITY_EPOCH_MAX
+            or minimum_epoch > _AUTH_SECURITY_EPOCH_MAX
+            or transaction_epoch < minimum_epoch
+        ):
+            raise PermissionError("account_recovery_required")
+    return user
+
+
 def _resolve_sso_user(
     db: Session,
     identity: sso_service.OidcIdentity,
     provider_type: str,
+    *,
+    authentication_epoch: Optional[int] = None,
 ) -> tuple[UserRecord, SsoIdentityRecord]:
     linked = db.query(SsoIdentityRecord).filter(
         SsoIdentityRecord.issuer == identity.issuer,
         SsoIdentityRecord.subject == identity.subject,
     ).first()
     if linked:
-        user = db.query(UserRecord).filter(UserRecord.id == linked.user_id).first()
-        if not user or not user.is_active:
-            raise PermissionError("account_deactivated")
+        user = _lock_active_sso_user(
+            db,
+            linked.user_id,
+            authentication_epoch=authentication_epoch,
+        )
         linked.email_at_link = identity.email
         linked.last_login_at = datetime.utcnow()
         return user, linked
@@ -5429,12 +6300,32 @@ def _resolve_sso_user(
     if len(matching_users) > 1:
         raise PermissionError("identity_conflict")
     user = matching_users[0] if matching_users else None
-    if user and not user.is_active:
-        raise PermissionError("account_deactivated")
+    if user:
+        user = _lock_active_sso_user(
+            db,
+            user.id,
+            authentication_epoch=authentication_epoch,
+        )
+        # The account row may have changed its email between the lookup above
+        # and the shared lock acquisition.  Failing closed avoids binding a
+        # verified provider identity to an account that no longer owns that
+        # address; a fresh login will resolve the current owner.
+        if user.email_key != identity_email:
+            raise PermissionError("identity_conflict")
     if not user:
         if not settings_module.get_bool("SSO_AUTO_PROVISION", default=False):
             raise PermissionError("account_not_provisioned")
         import uuid as _uuid
+
+        if authentication_epoch is None:
+            new_user_epoch = int(_lock_auth_security_epoch(db).epoch)
+        else:
+            try:
+                new_user_epoch = int(authentication_epoch)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise PermissionError("account_recovery_required") from exc
+            if new_user_epoch < 0 or new_user_epoch > _AUTH_SECURITY_EPOCH_MAX:
+                raise PermissionError("account_recovery_required")
 
         user = UserRecord(
             id=f"u-{_uuid.uuid4().hex}",
@@ -5444,6 +6335,7 @@ def _resolve_sso_user(
             role="agent",
             is_active=True,
             password_hash="",
+            auth_not_before_epoch=new_user_epoch,
         )
         db.add(user)
         try:
@@ -5455,6 +6347,18 @@ def _resolve_sso_user(
                 UserRecord.is_active.is_(True),
             ).first()
             if not user:
+                raise PermissionError("identity_conflict")
+            # A concurrent administrator may have pre-provisioned this
+            # address after the authorization state was issued.  Treat that
+            # winner exactly like the ordinary existing-user path: otherwise
+            # a state predating its authentication lower bound could bind it
+            # through the unique-email retry branch.
+            user = _lock_active_sso_user(
+                db,
+                user.id,
+                authentication_epoch=authentication_epoch,
+            )
+            if user.email_key != identity_email:
                 raise PermissionError("identity_conflict")
 
     directory_service.ensure_local_person(db, user.id)
@@ -5486,38 +6390,148 @@ def _resolve_sso_user(
         ).first()
         if not raced_link:
             raise PermissionError("identity_conflict")
-        raced_user = db.query(UserRecord).filter(
-            UserRecord.id == raced_link.user_id,
-            UserRecord.is_active.is_(True),
-        ).first()
-        if not raced_user:
-            raise PermissionError("account_deactivated")
+        raced_user = _lock_active_sso_user(
+            db,
+            raced_link.user_id,
+            authentication_epoch=authentication_epoch,
+        )
         return raced_user, raced_link
     return user, linked
 
 
-@app.get("/auth/sso/login")
-async def sso_login(
-    next: str = Query("/", max_length=2048),
-    db: Session = Depends(get_db),
-):
-    next_path = sso_service.safe_next_path(next)
-    try:
-        config = sso_service.resolve_sso_config()
-        metadata = await sso_service.fetch_oidc_metadata(config)
-    except sso_service.SsoConfigurationError:
-        return _sso_failure_response("configuration_error", next_path)
-    except sso_service.SsoProtocolError:
-        return _sso_failure_response("provider_unavailable", next_path)
+def _sso_login_source_id(request: Request) -> str:
+    """Return a privacy-preserving, non-forwarded admission dimension.
 
-    state = secrets.token_urlsafe(32)
-    nonce = secrets.token_urlsafe(32)
-    code_verifier = secrets.token_urlsafe(64)
-    state_hash = hashlib.sha256(state.encode("ascii")).hexdigest()
-    now = datetime.utcnow()
-    db.query(SsoTransactionRecord).filter(
-        SsoTransactionRecord.expires_at <= now
-    ).delete(synchronize_session=False)
+    ``request.client`` is the direct ASGI peer.  It deliberately does not use
+    X-Forwarded-For: deployments that need the original client identity must
+    establish that at their trusted edge, rather than letting this public
+    endpoint turn a client-controlled header into a quota bypass or stored
+    identifier.
+    """
+    source = request.client.host if request.client and request.client.host else "unknown"
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    return f"sso-login-source:{digest}"
+
+
+class _SsoTransactionCapacityReached(Exception):
+    """Internal signal so capacity refusal is never charged as admission."""
+
+
+def _sso_capacity_reject_limit() -> int:
+    return _bounded_env_int("SSO_CAPACITY_REJECT_GLOBAL_PER_MINUTE", 120, 1, 10_000)
+
+
+def _sso_capacity_reject_breaker_open(db: Session, now: datetime) -> bool:
+    """Read the fixed-cardinality overload breaker before taking the epoch lock."""
+    window_start = now.replace(second=0, microsecond=0)
+    count = db.query(AIRequestBucketRecord.request_count).filter_by(
+        actor_id="sso-capacity-reject-global",
+        window_kind="sso_capacity_reject_global",
+        window_start=window_start,
+    ).scalar()
+    return int(count or 0) >= _sso_capacity_reject_limit()
+
+
+def _record_sso_capacity_rejection(db: Session, now: datetime) -> None:
+    """Persist only the fixed global overload signal after a real rejection."""
+    try:
+        _increment_request_bucket(
+            db,
+            "sso-capacity-reject-global",
+            "sso_capacity_reject_global",
+            now.replace(second=0, microsecond=0),
+        )
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail="SSO capacity protection is unavailable",
+        ) from exc
+
+
+def _reserve_sso_login_rate(db: Session, request: Request, now: datetime) -> None:
+    """Bound public SSO starts before they perform provider network I/O.
+
+    The global row is evaluated first, so arbitrary peers cannot create an
+    unbounded collection of source quota rows after the service is saturated.
+    This helper deliberately does not commit. The caller combines normal
+    quota reservation and active-state capacity in one transaction, so either
+    kind of rejected admission leaves no normal quota charge behind.
+    """
+    window_start = now.replace(second=0, microsecond=0)
+    reservations = (
+        (
+            "sso-login-global",
+            "sso_login_global",
+            _bounded_env_int("SSO_LOGIN_GLOBAL_PER_MINUTE", 60, 1, 10_000),
+        ),
+        (
+            _sso_login_source_id(request),
+            "sso_login_source",
+            _bounded_env_int("SSO_LOGIN_SOURCE_PER_MINUTE", 10, 1, 1_000),
+        ),
+    )
+    try:
+        for actor_id, window_kind, limit in reservations:
+            count = _increment_request_bucket(db, actor_id, window_kind, window_start)
+            if count > limit:
+                db.rollback()
+                raise HTTPException(
+                    status_code=429,
+                    detail="SSO sign-in is temporarily rate limited",
+                    headers={"Retry-After": str(int(_SSO_LOGIN_WINDOW.total_seconds()))},
+                )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail="SSO sign-in admission is unavailable",
+        ) from exc
+
+
+def _prune_expired_sso_transactions(db: Session, now: datetime) -> None:
+    """Delete a bounded page of expired state rows under the shared lock."""
+    expired = [
+        state_hash
+        for state_hash, in db.query(SsoTransactionRecord.state_hash).filter(
+            SsoTransactionRecord.expires_at <= now
+        ).order_by(SsoTransactionRecord.expires_at, SsoTransactionRecord.state_hash).limit(
+            _SSO_TRANSACTION_PRUNE_BATCH
+        ).all()
+    ]
+    if expired:
+        db.query(SsoTransactionRecord).filter(
+            SsoTransactionRecord.state_hash.in_(expired)
+        ).delete(synchronize_session=False)
+
+
+def _reserve_sso_transaction(
+    db: Session,
+    *,
+    state_hash: str,
+    nonce: str,
+    code_verifier: str,
+    next_path: str,
+    config: sso_service.SsoRuntimeConfig,
+    now: datetime,
+) -> None:
+    """Atomically reserve one bounded, single-use SSO browser transaction.
+
+    The authentication-epoch singleton is already the cross-replica lock for
+    SSO recovery.  Reusing it makes the count-and-insert capacity decision
+    serializable on both PostgreSQL and SQLite without a new global service.
+    """
+    authentication_epoch = _lock_auth_security_epoch(db).epoch
+    _prune_expired_sso_transactions(db, now)
+    active_limit = _bounded_env_int("SSO_ACTIVE_TRANSACTION_LIMIT", 2_000, 1, 100_000)
+    active_count = db.query(SsoTransactionRecord).filter(
+        SsoTransactionRecord.expires_at > now
+    ).count()
+    if active_count >= active_limit:
+        raise _SsoTransactionCapacityReached()
     db.add(SsoTransactionRecord(
         state_hash=state_hash,
         nonce=nonce,
@@ -5527,10 +6541,104 @@ async def sso_login(
         discovery_url=config.discovery_url,
         redirect_uri=config.redirect_uri,
         client_id=config.client_id,
+        auth_epoch=authentication_epoch,
         created_at=now,
         expires_at=now + timedelta(seconds=sso_service.SSO_TRANSACTION_TTL_SECONDS),
     ))
-    db.commit()
+
+
+def _reserve_sso_login_admission(
+    db: Session,
+    request: Request,
+    *,
+    state_hash: str,
+    nonce: str,
+    code_verifier: str,
+    next_path: str,
+    config: sso_service.SsoRuntimeConfig,
+    now: datetime,
+) -> None:
+    """Reserve rate quota and browser state atomically across API replicas."""
+    try:
+        if _sso_capacity_reject_breaker_open(db, now):
+            raise HTTPException(
+                status_code=429,
+                detail="Too many pending SSO sign-ins",
+                headers={"Retry-After": str(int(_SSO_LOGIN_WINDOW.total_seconds()))},
+            )
+        _reserve_sso_login_rate(db, request, now)
+        _reserve_sso_transaction(
+            db,
+            state_hash=state_hash,
+            nonce=nonce,
+            code_verifier=code_verifier,
+            next_path=next_path,
+            config=config,
+            now=now,
+        )
+        db.commit()
+    except _SsoTransactionCapacityReached:
+        db.rollback()
+        _record_sso_capacity_rejection(db, now)
+        raise HTTPException(
+            status_code=429,
+            detail="Too many pending SSO sign-ins",
+            headers={"Retry-After": str(sso_service.SSO_TRANSACTION_TTL_SECONDS)},
+        )
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail="SSO sign-in admission is unavailable",
+        ) from exc
+
+
+def _discard_sso_transaction(db: Session, state_hash: str) -> None:
+    """Release a pre-reserved state when provider discovery cannot proceed."""
+    try:
+        db.query(SsoTransactionRecord).filter(
+            SsoTransactionRecord.state_hash == state_hash
+        ).delete(synchronize_session=False)
+        db.commit()
+    except Exception:
+        db.rollback()
+
+
+@app.get("/auth/sso/login")
+async def sso_login(
+    request: Request,
+    next: str = Query("/", max_length=2048),
+    db: Session = Depends(get_db),
+):
+    next_path = sso_service.safe_next_path(next)
+    try:
+        config = sso_service.resolve_sso_config()
+    except sso_service.SsoConfigurationError:
+        return _sso_failure_response("configuration_error", next_path)
+
+    state = secrets.token_urlsafe(32)
+    nonce = secrets.token_urlsafe(32)
+    code_verifier = secrets.token_urlsafe(64)
+    state_hash = hashlib.sha256(state.encode("ascii")).hexdigest()
+    now = datetime.utcnow()
+    _reserve_sso_login_admission(
+        db,
+        request,
+        state_hash=state_hash,
+        nonce=nonce,
+        code_verifier=code_verifier,
+        next_path=next_path,
+        config=config,
+        now=now,
+    )
+    try:
+        metadata = await sso_service.fetch_oidc_metadata(config)
+    except sso_service.SsoProtocolError:
+        _discard_sso_transaction(db, state_hash)
+        return _sso_failure_response("provider_unavailable", next_path)
     url = sso_service.build_authorization_url(
         metadata,
         config,
@@ -5574,6 +6682,7 @@ async def sso_callback(
     transaction_client_id = transaction.client_id
     transaction_code_verifier = transaction.code_verifier
     transaction_nonce = transaction.nonce
+    transaction_auth_epoch = transaction.auth_epoch
     db.delete(transaction)
     db.commit()
 
@@ -5622,11 +6731,13 @@ async def sso_callback(
             db,
             identity,
             config.provider_type,
+            authentication_epoch=transaction_auth_epoch,
         )
     except PermissionError as exc:
         db.rollback()
         code_value = str(exc) if str(exc) in {
             "account_deactivated",
+            "account_recovery_required",
             "account_not_provisioned",
             "identity_conflict",
         } else "access_denied"
@@ -6317,6 +7428,9 @@ async def create_user(
     password = payload.password or secrets.token_urlsafe(12)
     if len(password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    # Pre-provisioned accounts must not accept an SSO state issued before the
+    # account existed.  Serialize their lower bound with recovery operations.
+    auth_not_before_epoch = int(_lock_auth_security_epoch(db).epoch)
     user = UserRecord(
         id=f"u-{_uuid.uuid4().hex}",
         name=payload.name,
@@ -6325,6 +7439,7 @@ async def create_user(
         title=payload.title,
         role=payload.role,
         password_hash=_hash_password(password),
+        auth_not_before_epoch=auth_not_before_epoch,
     )
     db.add(user)
     try:
@@ -6402,6 +7517,15 @@ async def update_user(
         if len(payload.password) < 8:
             raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
         user.password_hash = _hash_password(payload.password)
+    # Password replacement and deactivation are account-recovery boundaries:
+    # any previously issued bearer cookie must stop working in the same
+    # transaction as the identity change.  Role checks are fresh per request,
+    # so a role-only edit does not needlessly disconnect the target user.
+    if payload.password or payload.is_active is False:
+        _advance_user_auth_epoch(db, user)
+        db.query(SessionRecord).filter(
+            SessionRecord.user_id == user.id
+        ).delete(synchronize_session=False)
     try:
         db.commit()
     except IntegrityError as exc:
@@ -6433,6 +7557,10 @@ async def delete_user(
     _ensure_no_pending_change_approvals(db, user.id)
     # Soft-delete: deactivate instead of removing (preserves ticket history)
     user.is_active = False
+    _advance_user_auth_epoch(db, user)
+    db.query(SessionRecord).filter(
+        SessionRecord.user_id == user.id
+    ).delete(synchronize_session=False)
     db.commit()
     return {"status": "deactivated", "user_id": user_id}
 
@@ -6509,6 +7637,38 @@ async def purge_user(
             ChangeApprovalRecord.approver_id == user_id,
         ).update(
             {ChangeApprovalRecord.approver_id: None},
+            synchronize_session=False,
+        )
+
+        # The durable notification outbox deliberately has no user foreign
+        # key: short-lived events must remain independently replayable while
+        # account writes are in flight.  A permanent account purge is the
+        # exception, so remove even unexpired recipient payloads in this same
+        # transaction before the identity disappears.
+        db.query(NotificationOutboxRecord).filter(
+            NotificationOutboxRecord.recipient_user_id == user_id,
+        ).delete(synchronize_session=False)
+
+        # These operational tables intentionally permit non-user actors (for
+        # example provider and system-worker budgets), so they cannot carry a
+        # users foreign key.  Rows whose actor is this account are neither
+        # useful after a permanent purge nor safe to retain: a future account
+        # with the same identifier could inherit its request budget.
+        db.query(AIUsageEventRecord).filter(
+            AIUsageEventRecord.actor_id == user_id,
+        ).delete(synchronize_session=False)
+        db.query(AIRequestBucketRecord).filter(
+            AIRequestBucketRecord.actor_id == user_id,
+        ).delete(synchronize_session=False)
+
+        # Source review metadata is shown with the retained requirement
+        # source, but its reviewer column is deliberately an optional plain
+        # identifier rather than a foreign key.  Preserve the review state
+        # while removing the purged account's attribution.
+        db.query(RequirementSourceRecord).filter(
+            RequirementSourceRecord.context_reviewed_by == user_id,
+        ).update(
+            {RequirementSourceRecord.context_reviewed_by: None},
             synchronize_session=False,
         )
 
@@ -6821,7 +7981,17 @@ async def delete_kb_article(
             {"source_id": article_id},
         )
     db.delete(article)
-    db.commit()
+    # Keep v2 chunk removal and the durable snapshot-purge intent in the same
+    # transaction as article deletion.  ``delete_source_chunks`` commits that
+    # transaction before attempting the independently committed snapshot
+    # drain, so a process/error between them leaves an exact recovery intent
+    # rather than retaining derived KB evidence until TTL expiry.
+    from .rag.store_v2 import delete_source_chunks, store_ready as rag_v2_store_ready
+
+    if rag_v2_store_ready(db):
+        delete_source_chunks(db, "kb_article", article_id)
+    else:
+        db.commit()
     return {"status": "deleted"}
 
 
@@ -7867,138 +9037,6 @@ async def get_user_recognitions(
     return result
 
 
-# ── Freshworks embedded app ──────────────────────────────────
-
-def _embedded_auth_error(exc: Exception) -> HTTPException:
-    return HTTPException(status_code=401, detail="Freshworks embedded authentication failed")
-
-
-@app.post("/integrations/freshworks/bootstrap")
-def freshworks_bootstrap(
-    payload: FreshworksBootstrapRequest,
-    response: Response,
-    x_tickety_app_secret: Optional[str] = Header(None, alias="X-Tickety-App-Secret"),
-    db: Session = Depends(get_db),
-):
-    response.headers["Cache-Control"] = "no-store"
-    try:
-        verify_installation_secret(x_tickety_app_secret)
-        code, expires_at = issue_bootstrap_code(
-            db,
-            binding_id=payload.binding_id,
-            account_host=payload.account_host,
-            external_user_id=payload.external_user_id,
-            workspace_id=payload.workspace_id,
-            external_ticket_id=payload.external_ticket_id,
-            ticket_updated_at=payload.ticket_updated_at,
-            audience=payload.audience,
-        )
-    except (EmbeddedAuthError, BindingValidationError) as exc:
-        db.rollback()
-        raise _embedded_auth_error(exc) from exc
-    return {"code": code, "expires_at": expires_at}
-
-
-@app.post("/integrations/freshworks/session")
-def freshworks_session(
-    payload: FreshworksBootstrapRedeem,
-    response: Response,
-    x_tickety_app_secret: Optional[str] = Header(None, alias="X-Tickety-App-Secret"),
-    db: Session = Depends(get_db),
-):
-    response.headers["Cache-Control"] = "no-store"
-    try:
-        verify_installation_secret(x_tickety_app_secret)
-        token, session = redeem_bootstrap_code(
-            db, binding_id=payload.binding_id, code=payload.code
-        )
-    except EmbeddedAuthError as exc:
-        db.rollback()
-        raise _embedded_auth_error(exc) from exc
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "expires_at": session.expires_at,
-        "binding_id": session.binding_id,
-        "external_ticket_id": session.external_ticket_id,
-    }
-
-
-def _embedded_ticket_context(
-    db: Session, authorization: Optional[str], external_ticket_id: str
-):
-    try:
-        principal = authenticate_session(db, authorization)
-        require_ticket_scope(principal, external_ticket_id)
-    except EmbeddedAuthError as exc:
-        db.rollback()
-        raise _embedded_auth_error(exc) from exc
-    ticket = db.query(TicketRecord).filter(
-        TicketRecord.binding_id == principal.binding.id,
-        TicketRecord.external_source == "freshservice",
-        TicketRecord.external_id == external_ticket_id,
-    ).first()
-    if not ticket:
-        raise HTTPException(status_code=404, detail=f"Ticket has not been synchronized to {PRODUCT_NAME}")
-    return principal, ticket
-
-
-def _stored_json(value: Optional[str]):
-    if not value:
-        return None
-    try:
-        return json.loads(value)
-    except (TypeError, ValueError):
-        return None
-
-
-@app.get("/integrations/freshworks/tickets/{external_ticket_id}")
-def freshworks_ticket_context(
-    external_ticket_id: str,
-    response: Response,
-    authorization: Optional[str] = Header(None),
-    db: Session = Depends(get_db),
-):
-    response.headers["Cache-Control"] = "no-store"
-    if not external_ticket_id.isdigit():
-        raise HTTPException(status_code=404, detail="Ticket not found")
-    principal, ticket = _embedded_ticket_context(
-        db, authorization, external_ticket_id
-    )
-    capabilities = {
-        row.capability: row.status
-        for row in db.query(IntegrationCapabilityRecord).filter(
-            IntegrationCapabilityRecord.binding_id == principal.binding.id
-        ).all()
-    }
-    return {
-        "binding": {
-            "id": principal.binding.id,
-            "environment": principal.binding.environment,
-            "expires_at": principal.binding.expires_at,
-        },
-        "actor": {
-            "id": principal.external_user.external_id,
-            "name": principal.external_user.name,
-            "user_type": principal.external_user.user_type,
-            "identity_domain": "external_itsm",
-        },
-        "ticket": {
-            "id": ticket.id,
-            "external_id": ticket.external_id,
-            "subject": ticket.subject,
-            "summary": ticket.summary,
-            "status": ticket.status,
-            "priority": ticket.priority,
-            "assignee_id": ticket.assignee_id,
-            "external_assignee_id": ticket.external_assignee_id,
-            "updated_at": ticket.external_updated_at or ticket.updated_at,
-            "recommended_solution": _stored_json(ticket.recommended_solution),
-        },
-        "capabilities": capabilities,
-    }
-
-
 # ── Sync / Admin ─────────────────────────────────────────────
 
 def _binding_or_404(db: Session, binding_id: str) -> IntegrationBindingRecord:
@@ -8970,6 +10008,8 @@ def activate_integration_binding(
     binding = _binding_or_404(db, binding_id)
     try:
         binding = activate_binding(db, binding, actor_id=user.id)
+    except BindingConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except BindingValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return serialize_binding(binding)
@@ -9001,6 +10041,59 @@ def trigger_sync(
     adapter, effective_binding_id = _sync_adapter_for_binding(db, binding_id)
     result = sync_tickets_from_external(adapter, binding_id=effective_binding_id)
     return {"status": "completed", "result": result}
+
+
+@app.post("/admin/sync/attachments/{attachment_id}/requeue")
+def requeue_terminal_attachment_copy(
+    attachment_id: str,
+    db: Session = Depends(get_db),
+    user: UserRecord = Depends(require_protected_ai_role("admin")),
+):
+    """Explicitly restart one exhausted attachment copy with a fresh budget."""
+    attachment = db.query(ExternalAttachmentRecord).filter(
+        ExternalAttachmentRecord.id == attachment_id,
+    ).with_for_update().first()
+    if not attachment:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    if (
+        attachment.storage_status != "error"
+        or int(attachment.attempts or 0) < 5
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Only terminal attachment copy failures can be requeued",
+        )
+    if not attachment_storage_configured():
+        raise HTTPException(
+            status_code=409,
+            detail="Attachment storage is not configured",
+        )
+    if not attachment.source_url or not attachment.blob_key:
+        raise HTTPException(
+            status_code=409,
+            detail="Attachment source is unavailable for requeue",
+        )
+
+    old_value = f"error:{int(attachment.attempts or 0)}_attempts"
+    attachment.storage_status = "pending"
+    attachment.attempts = 0
+    attachment.last_error = None
+    attachment.last_attempted_at = None
+    attachment.next_attempt_at = None
+    attachment.updated_at = datetime.utcnow()
+    db.add(TicketAuditLogRecord(
+        ticket_id=attachment.ticket_id,
+        field="attachment_copy_requeue",
+        old_value=old_value,
+        new_value="pending:attempts_reset",
+        changed_by=user.name or user.id,
+    ))
+    db.commit()
+    return {
+        "action": "attachment_requeue",
+        "attachment_id": attachment.id,
+        "status": attachment.storage_status,
+    }
 
 
 @app.post("/admin/integrations/bindings/{binding_id}/automatic-ai/enable")
@@ -9802,25 +10895,29 @@ async def oauth_refresh(
     _reserve_ai_request(db, user.id, "itsm_oauth_refresh")
     from .integrations.registry import get_adapter as _ga
     ad = _ga()
+    expected_access_token = getattr(ad, "oauth_access_token", "")
+    expected_refresh_token = getattr(ad, "oauth_refresh_token", "")
+    if (
+        not isinstance(expected_access_token, str)
+        or not isinstance(expected_refresh_token, str)
+        or not expected_refresh_token
+    ):
+        raise HTTPException(409, "OAuth credentials changed; reconnect the integration")
     try:
         tokens = await ad.oauth_refresh()
     except Exception as e:
         print(f"[oauth] token refresh failed kind={type(e).__name__}")
         raise HTTPException(400, "OAuth token refresh failed") from e
 
-    access_token = tokens.get("access_token", "")
-    refresh_token = tokens.get("refresh_token", "")
-    try:
-        settings_module.update_settings(
-            {
-                "FRESHSERVICE_OAUTH_ACCESS_TOKEN": access_token,
-                "FRESHSERVICE_OAUTH_REFRESH_TOKEN": refresh_token,
-            },
-            actor_id=user.id,
+    usable, persisted_here = ad.accept_oauth_refresh_result(
+        expected_access_token, expected_refresh_token, tokens
+    )
+    if not usable:
+        raise HTTPException(503, "OAuth token persistence failed")
+    if not persisted_here:
+        raise HTTPException(
+            409, "OAuth credentials changed while refresh was in flight"
         )
-    except Exception as exc:
-        print(f"[oauth] token persistence failed kind={type(exc).__name__}")
-        raise HTTPException(503, "OAuth token persistence failed") from None
     return {"status": "refreshed", "expires_in": tokens.get("expires_in")}
 
 
@@ -10248,7 +11345,7 @@ def _ai_task_lifecycle(
             return "retry_scheduled"
         return "queued"
     if status == "running":
-        if not ticket.ai_lease_expires_at or ticket.ai_lease_expires_at < now:
+        if not ticket.ai_lease_expires_at or ticket.ai_lease_expires_at <= now:
             return "lease_expired"
         return "running"
     if status in {"completed", "triage_completed"}:
@@ -10398,7 +11495,7 @@ async def ai_task_status(
                 TicketRecord.ai_status == "running",
                 or_(
                     TicketRecord.ai_lease_expires_at.is_(None),
-                    TicketRecord.ai_lease_expires_at < now,
+                    TicketRecord.ai_lease_expires_at <= now,
                 ),
             ),
         ))
@@ -10907,7 +12004,7 @@ async def operational_status_diagnostics(
                     TicketRecord.ai_status == "running",
                     or_(
                         TicketRecord.ai_lease_expires_at.is_(None),
-                        TicketRecord.ai_lease_expires_at < now,
+                        TicketRecord.ai_lease_expires_at <= now,
                     ),
                 ),
             ),
@@ -12658,7 +13755,17 @@ async def _process_freshservice_webhook(
 
 
 @app.post("/webhooks/external")
-async def freshservice_webhook(request: Request):
+async def freshservice_webhook(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    # The unscoped endpoint exists only for an installed legacy deployment.
+    # Once an account binding is active, accepting the same signed delivery
+    # here would project it under ``legacy`` and bypass the tenant boundary.
+    # Reject before reading the body, resolving an adapter, claiming delivery,
+    # or issuing the authoritative provider refetch.
+    if get_active_binding(db, "freshservice") is not None:
+        raise HTTPException(status_code=404, detail="Integration binding not found")
     return await _process_freshservice_webhook(request)
 
 
@@ -12669,7 +13776,7 @@ async def freshservice_binding_webhook(
     db: Session = Depends(get_db),
 ):
     binding = _binding_or_404(db, binding_id)
-    if binding.provider != "freshservice" or binding.state != "active":
+    if normalize_provider(binding.provider) != "freshservice" or binding.state != "active":
         raise HTTPException(status_code=404, detail="Integration binding not found")
     if binding.expires_at and binding.expires_at <= datetime.utcnow():
         raise HTTPException(status_code=410, detail="Integration binding expired")
@@ -12765,11 +13872,10 @@ async def _check_resolution_and_award(ticket: TicketRecord, db: Optional[Session
         # Check recognitions
         new_recognitions = _check_recognitions(db, user, ticket)
 
-        db.commit()
-        db.refresh(user)
-        db.refresh(ticket)
-
-        # Build notification
+        # Persist the websocket event in this same transaction. The locked
+        # dispatch order becomes the client idempotency key; there is
+        # intentionally no immediate in-process send that could duplicate the
+        # subsequent replica dispatcher delivery.
         notification = PointsAwardedNotification(
             ticket_id=ticket.id,
             ticket_subject=ticket.subject,
@@ -12793,7 +13899,24 @@ async def _check_resolution_and_award(ticket: TicketRecord, db: Optional[Session
                 for r in new_recognitions
             ],
         )
-        await _broadcast_notification(notification.model_dump(mode="json"))
+        dispatch_order = _allocate_notification_dispatch_order(db)
+        outbox = NotificationOutboxRecord(
+            dispatch_order=dispatch_order,
+            recipient_user_id=user.id,
+            event_type=_NOTIFICATION_OUTBOX_EVENT_TYPE,
+            payload_json="{}",
+            dedupe_key=f"points_award:{ticket.id}",
+            expires_at=datetime.utcnow() + timedelta(
+                seconds=_notification_outbox_ttl_seconds()
+            ),
+        )
+        db.add(outbox)
+        db.flush()
+        # The commit-ordered dispatch key is also the browser idempotency key.
+        # Do not use the primary key: PostgreSQL allocates it before commit.
+        notification.event_id = dispatch_order
+        outbox.payload_json = _points_notification_payload(notification)
+        db.commit()
 
     except Exception as e:
         print(f"[award] error kind={type(e).__name__}")
@@ -15224,7 +16347,7 @@ def _websocket_user(ws: WebSocket) -> Optional[UserRecord]:
         token = ws.cookies.get(SESSION_COOKIE)
         if not token:
             return None
-        session = db.query(SessionRecord).filter(SessionRecord.token == token).first()
+        session = _session_for_browser_token(db, token)
         if not session or (session.expires_at and session.expires_at <= datetime.utcnow()):
             return None
         user = db.query(UserRecord).filter(UserRecord.id == session.user_id).first()
@@ -15263,6 +16386,108 @@ def _websocket_origin_allowed(ws: WebSocket) -> bool:
     return False
 
 
+def _notification_replay_cursor(ws: WebSocket) -> Optional[int]:
+    """Parse an optional browser cursor without accepting lossy/negative ids."""
+    raw = ws.query_params.get("cursor")
+    if raw is None or raw == "":
+        return 0
+    # Starlette's QueryParams supplies strings; the non-string branch only
+    # accommodates in-process ASGI test doubles with no query collection.
+    if not isinstance(raw, str):
+        return 0
+    # JavaScript Numbers exactly represent positive integers through this
+    # ceiling. Rejecting larger values avoids a rounded cursor silently
+    # skipping a durable event; the client will replay its bounded window.
+    if not re.fullmatch(r"(?:0|[1-9][0-9]{0,15})", raw):
+        return None
+    cursor = int(raw)
+    return cursor if cursor <= _NOTIFICATION_CURSOR_MAX else None
+
+
+async def _register_notification_subscriber_with_replay(
+    user_id: str, ws: WebSocket, cursor: int
+) -> tuple[bool, bool]:
+    """Register then replay behind the same send lock used by live fanout.
+
+    The lock is acquired *before* registration. A live dispatcher that sees
+    this socket while the database replay is in progress waits behind its
+    ordered backlog instead of overtaking it.
+    """
+    lock = asyncio.Lock()
+    await lock.acquire()
+    _notification_subscriber_send_locks[ws] = lock
+    registered = False
+    try:
+        if not _register_notification_subscriber(user_id, ws):
+            return False, False
+        registered = True
+        rows, has_more = await asyncio.to_thread(
+            _notification_outbox_replay_after,
+            user_id,
+            cursor,
+            _notification_outbox_replay_batch_size(),
+        )
+
+        async def advance_past_rejected_row(event_id: int) -> bool:
+            """Persist a verified DB cursor without exposing rejected bytes."""
+            if not 1 <= event_id <= _NOTIFICATION_CURSOR_MAX:
+                return False
+            failed = await _send_notification_to_subscriber(
+                (user_id, ws),
+                {"type": _NOTIFICATION_CURSOR_ADVANCE_TYPE, "cursor": event_id},
+                lock_is_held=True,
+            )
+            return failed is None
+
+        for event_id, payload_json in rows:
+            payload = _parse_points_notification(payload_json)
+            # The query is user-scoped, but preserve the payload contract as
+            # a defense in depth boundary before bytes reach this socket.
+            if payload is None or payload.get("user_id") != user_id:
+                # Do not let malformed legacy/corrupt rows occupy every
+                # bounded replay page forever. This control frame contains
+                # only the selected, safe dispatch cursor; rejected business
+                # payload bytes never reach the browser.
+                if not await advance_past_rejected_row(event_id):
+                    _remove_notification_subscriber(user_id, ws)
+                    registered = False
+                    return False, False
+                continue
+            # payload event_id is the durable dispatch order. Validate it
+            # matches the selected record, so corrupted payloads cannot move
+            # a browser cursor beyond the committed replay sequence.
+            if payload.get("event_id") != event_id:
+                if not await advance_past_rejected_row(event_id):
+                    _remove_notification_subscriber(user_id, ws)
+                    registered = False
+                    return False, False
+                continue
+            if await _send_notification_to_subscriber(
+                (user_id, ws), payload, lock_is_held=True
+            ):
+                _remove_notification_subscriber(user_id, ws)
+                registered = False
+                return False, False
+        if has_more:
+            # Do not loop unboundedly in a single upgrade. The browser has
+            # persisted every delivered event id, so a transient reconnect
+            # resumes at the next ordered page. Closing while this lock is
+            # held prevents a higher live event from crossing the page edge.
+            try:
+                await ws.close(code=1013)
+            except Exception:
+                pass
+            _remove_notification_subscriber(user_id, ws)
+            registered = False
+            return True, True
+        return True, False
+    finally:
+        if lock.locked():
+            lock.release()
+        if not registered:
+            _notification_subscriber_send_locks.pop(ws, None)
+
+
 @app.websocket("/ws/tickets/{ticket_id}/stream")
 async def ws_ticket_stream(ws: WebSocket, ticket_id: str):
     if not _websocket_origin_allowed(ws):
@@ -15280,14 +16505,22 @@ async def ws_ticket_stream(ws: WebSocket, ticket_id: str):
     try:
         ticket = db.query(TicketRecord).filter(TicketRecord.id == ticket_id).first()
         if not ticket:
-            await ws.send_json({"error": "Ticket not found"})
+            if not await _send_current_websocket_json(
+                ws, ws_user.id, {"error": "Ticket not found"}
+            ):
+                return
             await ws.close()
             return
         if ws_user:
             try:
                 _authorize_ticket_analysis(ws_user, ticket, db)
             except HTTPException:
-                await ws.send_json({"type": "error", "message": "Insufficient ticket analysis permission"})
+                if not await _send_current_websocket_json(
+                    ws,
+                    ws_user.id,
+                    {"type": "error", "message": "Insufficient ticket analysis permission"},
+                ):
+                    return
                 await ws.close(code=1008)
                 return
         _reserve_ai_request(db, ws_user.id if ws_user else "demo-websocket", "full_analysis")
@@ -15309,14 +16542,15 @@ async def ws_ticket_stream(ws: WebSocket, ticket_id: str):
                 "timeout_seconds": _analysis_pipeline_timeout_seconds(),
             }
 
-        await ws.send_json(progress_payload())
+        if not await _send_current_websocket_json(ws, ws_user.id, progress_payload()):
+            return
 
         async def report_progress(step_name: str, status: str):
             for item in steps:
                 if item["step"] == step_name:
                     item["status"] = status
                     break
-            await ws.send_json(progress_payload())
+            await _send_current_websocket_json(ws, ws_user.id, progress_payload())
 
         ticket, ws_user = _lock_authorized_ticket_analysis(db, ticket_id, ws_user)
         result = await _run_ticket_analysis(
@@ -15326,13 +16560,18 @@ async def ws_ticket_stream(ws: WebSocket, ticket_id: str):
             analysis_actor_id=ws_user.id,
         )
 
-        await ws.send_json({"type": "complete", "result": result})
+        if not await _send_current_websocket_json(
+            ws, ws_user.id, {"type": "complete", "result": result}
+        ):
+            return
         await ws.close()
     except WebSocketDisconnect:
         pass
     except Exception:
-        await ws.send_json({"type": "error", "message": "Analysis could not be completed"})
-        await ws.close()
+        if await _send_current_websocket_json(
+            ws, ws_user.id, {"type": "error", "message": "Analysis could not be completed"}
+        ):
+            await ws.close()
     finally:
         db.close()
 
@@ -15340,9 +16579,11 @@ async def ws_ticket_stream(ws: WebSocket, ticket_id: str):
 @app.websocket("/ws/notifications")
 async def ws_notifications(ws: WebSocket):
     ws_user = _websocket_user(ws)
+    replay_cursor = _notification_replay_cursor(ws)
     if (
         not _websocket_origin_allowed(ws)
         or not ws_user
+        or replay_cursor is None
         or (
             settings_module.is_demo_mode()
             and (ws_user.role or "").lower() != "admin"
@@ -15351,20 +16592,46 @@ async def ws_notifications(ws: WebSocket):
         await ws.close(code=1008)
         return
     await ws.accept()
-    _notification_subscribers.append((ws_user.id, ws))
+    registered, replay_has_more = await _register_notification_subscriber_with_replay(
+        ws_user.id, ws, replay_cursor
+    )
+    if not registered:
+        await ws.close(code=1008)
+        return
+    if replay_has_more:
+        return
     try:
         while True:
-            await ws.receive_text()
+            await asyncio.wait_for(
+                ws.receive_text(), timeout=_notification_idle_timeout_seconds()
+            )
+            # A client heartbeat cannot extend a session that was logged out,
+            # expired, or deactivated after the WebSocket handshake.
+            if not await asyncio.to_thread(
+                _notification_subscriber_authorized, (ws_user.id, ws)
+            ):
+                try:
+                    await ws.close(code=1008)
+                except Exception:
+                    pass
+                return
+            _touch_notification_subscriber(ws)
     except WebSocketDisconnect:
-        if (ws_user.id, ws) in _notification_subscribers:
-            _notification_subscribers.remove((ws_user.id, ws))
+        pass
+    except asyncio.TimeoutError:
+        try:
+            # Idle browsers may be background-throttled and miss client
+            # heartbeats, so use a transient code that preserves reconnect.
+            await ws.close(code=1013)
+        except Exception:
+            pass
     except Exception:
         try:
             await ws.close()
         except Exception:
             pass
-        if (ws_user.id, ws) in _notification_subscribers:
-            _notification_subscribers.remove((ws_user.id, ws))
+    finally:
+        _remove_notification_subscriber(ws_user.id, ws)
 
 
 app.include_router(create_requirements_router(

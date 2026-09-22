@@ -2,6 +2,63 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  name: {{ include "tickety.fullname" . }}-backend-ingress
+  labels:
+    {{- include "tickety.labels" . | nindent 4 }}
+spec:
+  # The API Service is an internal hop only.  Browser, ingress-controller, and
+  # Helm-test traffic terminates at the frontend Service; the frontend proxy is
+  # therefore the sole Pod caller allowed to reach the backend listener.
+  podSelector:
+    matchLabels:
+      {{- include "tickety.componentLabels" (dict "root" . "component" "backend") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "tickety.componentLabels" (dict "root" . "component" "frontend") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 8000
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "tickety.fullname" . }}-frontend-egress
+  labels:
+    {{- include "tickety.labels" . | nindent 4 }}
+spec:
+  # The frontend is a same-origin proxy, not a general network client.  It
+  # resolves the in-release API Service and connects only to that listener.
+  podSelector:
+    matchLabels:
+      {{- include "tickety.componentLabels" (dict "root" . "component" "frontend") | nindent 6 }}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "tickety.componentLabels" (dict "root" . "component" "backend") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 8000
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
   name: {{ include "tickety.fullname" . }}-backend-egress
   labels:
     {{- include "tickety.labels" . | nindent 4 }}
@@ -63,6 +120,42 @@ spec:
     {{- with .Values.networkPolicy.additionalEgress }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
+{{- if and .Values.backup.enabled .Values.postgresql.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "tickety.fullname" . }}-backup-egress
+  labels:
+    {{- include "tickety.labels" . | nindent 4 }}
+spec:
+  # Backups only resolve and connect to the in-release PostgreSQL Service.
+  # They cannot inherit runtime HTTPS or custom integration egress.
+  podSelector:
+    matchLabels:
+      {{- include "tickety.componentLabels" (dict "root" . "component" "backup") | nindent 6 }}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "tickety.componentLabels" (dict "root" . "component" "postgresql") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 5432
+{{- end }}
 {{- if .Values.postgresql.enabled }}
 ---
 apiVersion: networking.k8s.io/v1
@@ -94,5 +187,21 @@ spec:
       ports:
         - protocol: TCP
           port: 5432
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "tickety.fullname" . }}-postgresql-egress
+  labels:
+    {{- include "tickety.labels" . | nindent 4 }}
+spec:
+  # PostgreSQL is a server-only workload.  Deliberately declaring an empty
+  # egress list prevents a compromised database process from scanning the
+  # cluster or reaching cloud metadata while preserving all inbound clients.
+  podSelector:
+    matchLabels:
+      {{- include "tickety.componentLabels" (dict "root" . "component" "postgresql") | nindent 6 }}
+  policyTypes: [Egress]
+  egress: []
 {{- end }}
 {{- end }}

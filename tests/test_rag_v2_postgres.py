@@ -1,7 +1,11 @@
+import importlib
 import os
 import unittest
+import uuid
 from unittest.mock import patch
 
+from alembic.operations import Operations
+from alembic.runtime.migration import MigrationContext
 from sqlalchemy import text
 
 from app.backend import ticket_vectors
@@ -29,6 +33,7 @@ class RagV2PostgresIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.environment.start()
         self.db = SessionLocal()
         for table in (
+            "rag_context_snapshot_sources_v2",
             "rag_context_snapshots_v2",
             "rag_query_embedding_cache_v2",
             "ticket_search_chunks_v2",
@@ -101,6 +106,79 @@ class RagV2PostgresIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ix_ticket_search_chunks_v2_fts", indexes)
         self.assertIn("ix_ticket_search_chunks_v2_embedding", indexes)
 
+    def test_0058_migration_discards_non_array_manifests_and_is_retry_safe(self):
+        """Malformed legacy JSONB must be deleted, never abort the cutover.
+
+        The normal integration database is already at head, so construct the
+        small pre-0058 shape in an isolated schema and invoke the migration's
+        PostgreSQL operations directly.  This guards the production upgrade
+        path without downgrading the shared integration database.
+        """
+        migration = importlib.import_module(
+            "migrations.versions.0058_rag_snapshot_source_references"
+        )
+        schema = f"tickety_0058_fixture_{uuid.uuid4().hex}"
+        try:
+            with engine.begin() as connection:
+                connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+                connection.execute(text(f'SET LOCAL search_path TO "{schema}"'))
+                connection.execute(text("""
+                    CREATE TABLE rag_context_snapshots_v2 (
+                        id VARCHAR(36) PRIMARY KEY,
+                        chunk_manifest_json JSONB NOT NULL
+                    )
+                """))
+                connection.execute(text("""
+                    INSERT INTO rag_context_snapshots_v2 (id, chunk_manifest_json)
+                    VALUES
+                        ('valid', '[{"source_type":"ticket","source_id":"ticket-a"}]'::jsonb),
+                        ('object', '{"source_type":"ticket"}'::jsonb),
+                        ('scalar', '"not-an-array"'::jsonb),
+                        ('json-null', 'null'::jsonb),
+                        ('empty', '[]'::jsonb),
+                        ('unsupported', '[{"source_type":"unknown","source_id":"x"}]'::jsonb)
+                """))
+
+                def upgrade_once() -> None:
+                    context = MigrationContext.configure(connection)
+                    with Operations.context(context):
+                        migration.upgrade()
+
+                upgrade_once()
+                self.assertEqual(
+                    connection.execute(text("""
+                        SELECT id FROM rag_context_snapshots_v2 ORDER BY id
+                    """)).scalars().all(),
+                    ["valid"],
+                )
+                self.assertEqual(
+                    connection.execute(text("""
+                        SELECT snapshot_id, source_type, source_id
+                        FROM rag_context_snapshot_sources_v2
+                    """)).all(),
+                    [("valid", "ticket", "ticket-a")],
+                )
+
+                # Replaying after a partial deployment must remain safe and
+                # must not duplicate ownership references.
+                upgrade_once()
+                self.assertEqual(
+                    connection.execute(text("""
+                        SELECT COUNT(*) FROM rag_context_snapshot_sources_v2
+                    """)).scalar_one(),
+                    1,
+                )
+                indexes = set(connection.execute(text("""
+                    SELECT indexname
+                    FROM pg_indexes
+                    WHERE schemaname = current_schema()
+                      AND tablename = 'rag_context_snapshot_sources_v2'
+                """)).scalars())
+                self.assertIn("ix_rag_context_snapshot_sources_v2_source", indexes)
+        finally:
+            with engine.begin() as connection:
+                connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+
     async def test_authorization_precedes_limits_and_snapshot_invalidates(self):
         self.assertTrue(store_v2.replace_source_chunks(self.db, "ticket", "ticket-a"))
         self.assertTrue(store_v2.replace_source_chunks(self.db, "ticket", "ticket-b"))
@@ -162,6 +240,10 @@ class RagV2PostgresIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             store_v2.replace_source_chunks(self.db, "ticket", "ticket-a", force=True)
         )
+        self.assertEqual(self.db.execute(text("""
+            SELECT COUNT(*) FROM rag_context_snapshots_v2
+            WHERE id = :id
+        """), {"id": created["snapshot_id"]}).scalar_one(), 0)
         self.assertIsNone(snapshots.load_snapshot(
             self.db,
             created["snapshot_id"],
@@ -171,6 +253,43 @@ class RagV2PostgresIntegrationTests(unittest.IsolatedAsyncioTestCase):
             allowed_assignee_id="agent-a",
             embedding_identity=ticket_vectors._embedding_identity(),
         ))
+
+    async def test_source_removal_erases_linked_snapshot_evidence(self):
+        self.assertTrue(store_v2.replace_source_chunks(self.db, "ticket", "ticket-a"))
+        retrieval = await retrieval_v2.retrieve_ticket_context_v2(
+            "printer",
+            limit=10,
+            include_private_comments=False,
+            allowed_assignee_id="agent-a",
+        )
+        results = retrieval["results"]
+        context = [
+            {**item, "citation_id": f"S{index}"}
+            for index, item in enumerate(results, 1)
+        ]
+        created = snapshots.create_snapshot(
+            self.db,
+            actor_id="agent-a",
+            actor_role="agent",
+            include_private_comments=False,
+            allowed_assignee_id="agent-a",
+            query="printer",
+            embedding_identity=ticket_vectors._embedding_identity(),
+            packed_evidence=context,
+            citation_allowlist={item["citation_id"]: item for item in context},
+            retrieval_results=results,
+        )
+        self.assertIsNotNone(created)
+        self.assertGreater(self.db.execute(text("""
+            SELECT COUNT(*) FROM rag_context_snapshot_sources_v2
+            WHERE snapshot_id = :id AND source_type = 'ticket' AND source_id = 'ticket-a'
+        """), {"id": created["snapshot_id"]}).scalar_one(), 0)
+
+        self.assertGreater(store_v2.delete_ticket_chunks(self.db, "ticket-a"), 0)
+        self.assertEqual(self.db.execute(text("""
+            SELECT COUNT(*) FROM rag_context_snapshots_v2
+            WHERE id = :id
+        """), {"id": created["snapshot_id"]}).scalar_one(), 0)
 
 
 if __name__ == "__main__":

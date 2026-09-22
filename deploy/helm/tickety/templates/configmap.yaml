@@ -1,5 +1,16 @@
 {{- $frontendUrl := include "tickety.frontendUrl" . }}
 {{- $corsAllowOrigins := default $frontendUrl .Values.config.corsAllowOrigins }}
+{{- $sessionStorageMode := .Values.config.sessionStorageMode }}
+{{- $productionRelease := or (eq .Values.config.appMode "production") (eq .Values.config.deploymentClass "production") }}
+{{- if and $productionRelease (not (.Values.imageDigestPolicy.requireDigests | default false)) }}
+  {{- fail "production appMode or deploymentClass requires imageDigestPolicy.requireDigests=true" }}
+{{- end }}
+{{- if and $productionRelease .Values.existingSecret (not .Values.existingSecretRolloutToken) }}
+  {{- fail "production existingSecret requires an immutable existingSecretRolloutToken" }}
+{{- end }}
+{{- if eq $sessionStorageMode "auto" }}
+  {{- $sessionStorageMode = ternary "compat" "hashed" .Release.IsUpgrade }}
+{{- end }}
 {{- if and (eq .Values.config.appMode "production") (not (hasPrefix "https://" $frontendUrl)) }}
   {{- fail "production config requires an HTTPS config.frontendUrl or a TLS-enabled ingress" }}
 {{- end }}
@@ -21,10 +32,30 @@
 {{- if and .Values.config.sso.enabled (not .Values.existingSecret) (not (index .Values.secrets "SSO_CLIENT_SECRET")) }}
   {{- fail "secrets.SSO_CLIENT_SECRET or existingSecret is required when SSO is enabled" }}
 {{- end }}
+{{- $reservedExtraKeys := list "APP_MODE" "TICKETY_DEPLOYMENT_CLASS" "LOGIN_REQUIRED" "FRONTEND_URL" "CORS_ALLOW_ORIGINS" "COOKIE_SECURE" "COOKIE_SAMESITE" "SSO_ENABLED" "SSO_PROVIDER" "SSO_CLIENT_ID" "SSO_ENTRA_TENANT_ID" "SSO_OKTA_DOMAIN" "SSO_OKTA_AUTH_SERVER_ID" "SSO_DISCOVERY_URL" "SSO_REDIRECT_URI" "SSO_ALLOWED_DOMAINS" "SSO_ALLOWED_GROUP_IDS" "SSO_AUTO_PROVISION" "NOTIFICATION_OUTBOX_POLL_SECONDS" "NOTIFICATION_OUTBOX_BATCH_SIZE" "NOTIFICATION_OUTBOX_REPLAY_BATCH_SIZE" "NOTIFICATION_OUTBOX_RETENTION_SECONDS" "NOTIFICATION_OUTBOX_PRUNE_INTERVAL_SECONDS" "NOTIFICATION_OUTBOX_STALE_SECONDS" "NOTIFICATION_OUTBOX_PRUNE_BATCH_SIZE" "NOTIFICATION_OUTBOX_PRUNE_BATCHES_PER_RUN" "AI_RETENTION_CLEANUP_BATCH_SIZE" "AI_RETENTION_CLEANUP_MAX_ROWS_PER_START" "DATABASE_URL" "POSTGRES_PASSWORD" }}
+{{- $sensitiveExtraKeyPattern := "(?i)(^|_)(API_?KEY|KEYS?|SECRETS?|TOKENS?|PASSWORDS?|CREDENTIALS?|CONNECTION(_STRING)?|PRIVATE|CERT(IFICATE)?S?)(_|$)" }}
+{{- range $key, $_ := .Values.config.extra }}
+  {{- if or (has $key $reservedExtraKeys) (hasPrefix "TICKETY_SETTINGS_ENCRYPTION_" $key) (regexMatch $sensitiveExtraKeyPattern $key) }}
+    {{- fail (printf "config.extra.%s is reserved or may contain a credential; put credentials in secrets or existingSecret" $key) }}
+  {{- end }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: {{ include "tickety.configName" . }}
+  {{- if or .Values.existingSecret .Values.postgresql.enabled }}
+  annotations:
+    {{- if .Values.existingSecret }}
+    # Name only: deploy.sh reads this rendered value and binds workloads to the
+    # resourceVersion it observes without reading Secret data.
+    tickety.io/existing-secret-name: {{ .Values.existingSecret | quote }}
+    {{- end }}
+    {{- if .Values.postgresql.enabled }}
+    # This is a non-secret, resolved release reference. deploy.sh verifies it
+    # with the registry before an upgrade can drain current writers.
+    tickety.io/bundled-postgresql-image: {{ include "tickety.postgresqlImage" . | quote }}
+    {{- end }}
+  {{- end }}
   labels:
     {{- include "tickety.labels" . | nindent 4 }}
 data:
@@ -35,6 +66,7 @@ data:
   CORS_ALLOW_ORIGINS: {{ $corsAllowOrigins | quote }}
   COOKIE_SECURE: {{ .Values.config.cookieSecure | quote }}
   COOKIE_SAMESITE: {{ .Values.config.cookieSameSite | quote }}
+  SESSION_STORAGE_MODE: {{ $sessionStorageMode | quote }}
   SSO_ENABLED: {{ .Values.config.sso.enabled | quote }}
   SSO_PROVIDER: {{ .Values.config.sso.provider | quote }}
   SSO_CLIENT_ID: {{ .Values.config.sso.clientId | quote }}
@@ -59,6 +91,17 @@ data:
   TICKET_RAG_QUERY_CACHE_TTL_SECONDS: {{ .Values.config.ragV2.queryCacheTtlSeconds | quote }}
   TICKET_RAG_QUERY_CACHE_MAX_ROWS: {{ .Values.config.ragV2.queryCacheMaxRows | quote }}
   TICKET_RAG_SNAPSHOT_TTL_SECONDS: {{ .Values.config.ragV2.snapshotTtlSeconds | quote }}
+  TICKET_RAG_RETENTION_POLL_SECONDS: {{ .Values.config.ragV2.retentionPollSeconds | quote }}
+  NOTIFICATION_OUTBOX_POLL_SECONDS: {{ .Values.config.notificationOutboxPollSeconds | quote }}
+  NOTIFICATION_OUTBOX_BATCH_SIZE: {{ .Values.config.notificationOutboxBatchSize | quote }}
+  NOTIFICATION_OUTBOX_REPLAY_BATCH_SIZE: {{ .Values.config.notificationOutboxReplayBatchSize | quote }}
+  NOTIFICATION_OUTBOX_RETENTION_SECONDS: {{ .Values.config.notificationOutboxRetentionSeconds | quote }}
+  NOTIFICATION_OUTBOX_PRUNE_INTERVAL_SECONDS: {{ .Values.config.notificationOutboxPruneIntervalSeconds | quote }}
+  NOTIFICATION_OUTBOX_STALE_SECONDS: {{ .Values.config.notificationOutboxStaleSeconds | quote }}
+  NOTIFICATION_OUTBOX_PRUNE_BATCH_SIZE: {{ .Values.config.notificationOutboxPruneBatchSize | quote }}
+  NOTIFICATION_OUTBOX_PRUNE_BATCHES_PER_RUN: {{ .Values.config.notificationOutboxPruneBatchesPerRun | quote }}
+  AI_RETENTION_CLEANUP_BATCH_SIZE: {{ .Values.config.aiRetentionCleanupBatchSize | quote }}
+  AI_RETENTION_CLEANUP_MAX_ROWS_PER_START: {{ .Values.config.aiRetentionCleanupMaxRowsPerStart | quote }}
   {{- range $key, $value := .Values.config.extra }}
   {{ $key }}: {{ $value | quote }}
   {{- end }}

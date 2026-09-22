@@ -37,9 +37,7 @@ spec:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
-        {{- if .Values.existingSecret }}
-        tickety.io/existing-secret-rollout-token: {{ .Values.existingSecretRolloutToken | quote }}
-        {{- end }}
+        {{- include "tickety.existingSecretRolloutAnnotations" . | nindent 8 }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -50,6 +48,15 @@ spec:
         {{- end }}
     spec:
       automountServiceAccountToken: false
+      {{- if .Values.backend.topologySpread.enabled }}
+      topologySpreadConstraints:
+        - maxSkew: {{ .Values.backend.topologySpread.maxSkew }}
+          topologyKey: {{ .Values.backend.topologySpread.topologyKey | quote }}
+          whenUnsatisfiable: {{ .Values.backend.topologySpread.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              {{- include "tickety.componentLabels" (dict "root" . "component" "backend") | nindent 14 }}
+      {{- end }}
       terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
@@ -141,9 +148,7 @@ spec:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
-        {{- if .Values.existingSecret }}
-        tickety.io/existing-secret-rollout-token: {{ .Values.existingSecretRolloutToken | quote }}
-        {{- end }}
+        {{- include "tickety.existingSecretRolloutAnnotations" . | nindent 8 }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -154,7 +159,9 @@ spec:
         {{- end }}
     spec:
       automountServiceAccountToken: false
-      terminationGracePeriodSeconds: 120
+      # The process caps cooperative shutdown at 30s; leave Kubernetes enough
+      # headroom to complete termination without extending a node drain.
+      terminationGracePeriodSeconds: 45
       securityContext:
         runAsNonRoot: true
         fsGroup: 10001
@@ -175,6 +182,28 @@ spec:
           env:
             - name: TICKETY_PROCESS_ROLE
               value: worker
+            - name: WORKER_SHUTDOWN_DEADLINE_SECONDS
+              value: {{ .Values.worker.shutdownDeadlineSeconds | quote }}
+            - name: WORKER_HEALTHCHECK_MAX_AGE_SECONDS
+              value: {{ .Values.worker.healthcheckMaxAgeSeconds | quote }}
+          startupProbe:
+            exec:
+              command: ["python", "-m", "app.backend.worker", "--healthcheck"]
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30
+          readinessProbe:
+            exec:
+              command: ["python", "-m", "app.backend.worker", "--healthcheck"]
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command: ["python", "-m", "app.backend.worker", "--healthcheck"]
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
           resources:
             {{- toYaml .Values.worker.resources | nindent 12 }}
           securityContext:

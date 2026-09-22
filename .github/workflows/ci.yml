@@ -50,7 +50,7 @@ jobs:
           cache-dependency-path: app/frontend-next/package-lock.json
 
       - name: Install dependencies
-        run: npm install --global npm@12.0.2 && npm ci && npm ls --all
+        run: npm ci && npm ls --all
 
       - name: Audit production dependencies (high and critical)
         run: npm audit --omit=dev --audit-level=high
@@ -87,18 +87,46 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24.19.0
+          node-version: 24.11.0
           cache: npm
           cache-dependency-path: freshworks-app/package-lock.json
 
       - name: Install dependencies
-        run: npm install --global npm@12.0.2 && npm ci && npm ls --all
+        run: |
+          # Node 24.11.0 bundles npm 11.6.1, which matches FDK 10's npm 11
+          # support lane. Keep this exact assertion paired with the pinned Node.
+          npm --version | grep -Fx '11.6.1'
+          npm ci
+          npm ls --all
 
       - name: Audit dependencies (high and critical)
         run: npm audit --audit-level=high
 
-      - name: Unit tests
-        run: npm run fdk-unit-test
+      - name: Install supported Freshworks FDK
+        run: |
+          npm --version | grep -Eq '^11[.]'
+          # This is Freshworks' Node 24 distribution channel. The exact-version
+          # assertion below intentionally fails on upstream drift until the
+          # manifest and release gate have been reviewed together.
+          npm install --global https://cdn.freshdev.io/fdk/latest-v24.tgz
+          TICKETY_FDK_VERSION="$(fdk version)"
+          printf '%s\n' "$TICKETY_FDK_VERSION"
+          printf '%s\n' "$TICKETY_FDK_VERSION" | grep -Eq '(^|[^0-9])10[.]1[.]9([^0-9]|$)'
+
+      - name: Run Freshworks tests and record the FDK report
+        run: fdk unit-test
+
+      - name: Validate Freshworks app
+        run: |
+          fdk validate
+          git diff --exit-code -- manifest.json package.json
+
+      - name: Build and verify Freshworks package
+        run: |
+          rm -f dist/freshworks-app.zip
+          npm run fdk-package
+          test -f dist/freshworks-app.zip
+          bash scripts/verify-package.sh dist/freshworks-app.zip
 
   backend:
     name: Backend
@@ -166,6 +194,7 @@ jobs:
       TICKET_RAG_V2_WRITE_ENABLED: "true"
       TICKET_RAG_V2_READ_ENABLED: "true"
       TICKETY_RAG_PGVECTOR_TESTS: "true"
+      TICKETY_POSTGRES_INTEGRATION_TESTS: "true"
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -186,8 +215,8 @@ jobs:
       - name: Apply migrations
         run: alembic upgrade head
 
-      - name: Run pgvector integration tests
-        run: python -m unittest tests.test_rag_v2_postgres -v
+      - name: Run PostgreSQL integration tests
+        run: python -m unittest tests.test_rag_v2_postgres tests.test_notification_outbox_postgres -v
 
   deployment:
     name: Production deployment gate

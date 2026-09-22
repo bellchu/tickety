@@ -62,7 +62,7 @@ spec:
         - name: migrate
           image: @BACKEND_IMAGE@
           imagePullPolicy: IfNotPresent
-          command: ["alembic", "upgrade", "head"]
+          command: ["/bin/sh", "-ec", "python scripts/verify-settings-secret-encryption.py && alembic upgrade head"]
           envFrom:
             - secretRef: {name: tickety-secrets}
           resources:

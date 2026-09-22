@@ -36,16 +36,16 @@ Only one Freshservice binding may be active in a Tickety OPS Tower deployment. T
 
 Synced tickets, external user directory records, sync cursors, webhook delivery digests, and adapter caches are scoped by `binding_id`. External users have no foreign key or account mapping to Tickety OPS Tower users. The active binding selects its own canonical host and workspace configuration. Existing installations continue to use the `legacy` scope until a binding is activated.
 
-The capability probe performs only ticket, agent, and requester reads. Its manifest declares `integration.mode=read_only`; ticket creation, updates, replies, notes, attachments, and service-request creation are permanently unsupported. The Freshworks custom app provides sidebar/full-page placement and hashed, short-lived external sessions, then reads the synchronized Tickety OPS Tower projection. Those sessions never become Tickety OPS Tower user sessions and the package contains no mutation request template or write controls.
+The capability probe performs only ticket, agent, and requester reads. Its manifest declares `integration.mode=read_only`; ticket creation, updates, replies, notes, attachments, and service-request creation are permanently unsupported. The Freshworks sidebar/full-page package is currently a static hard-disabled notice: it loads neither the Freshworks client nor JavaScript, and it does not request or display the synchronized Tickety OPS Tower projection until a provider-authorized server-side viewer check is implemented. Freshworks UI context and Request Method secure parameters are not sufficient proof of viewer or ticket authorization.
 
 ## Suggested 14-day sequence
 
 - Days 1–2: deploy the isolated POC, create the binding, run validation, and confirm the capability evidence.
 - Days 3–5: activate read-only synchronization and verify tenant/workspace isolation.
 - Days 6–9: test webhook ingestion, retries, duplicate delivery handling, and expiry behavior.
-- Days 10–12: validate the Freshworks app/session flow, read-only OAuth allowlist, and provider-role permissions.
+- Days 10–12: validate the disabled Freshworks package, the read-only OAuth allowlist, and provider-role permissions; do not test or restore the retired embedded session flow.
 - Days 13–14: export evidence, suspend the trial binding, and decide whether to perform a clean production validation.
 
 ## Remaining implementation phases
 
-The in-product app and one-time session bootstrap are implemented. Future provider adapters must preserve the same one-way contract: import authoritative ITSM data and keep all Tickety OPS Tower intelligence local. See `freshworks-app/README.md` for installation and validation details.
+The in-product placement package is implemented but intentionally unavailable for data display. A future replacement must preserve the one-way contract, use per-user OAuth to verify requested ticket access with Freshservice server-side, and keep Tickety OPS Tower intelligence local. See `freshworks-app/README.md` for the required authorization boundary.

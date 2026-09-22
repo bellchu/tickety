@@ -29,17 +29,24 @@ spec:
       {{- include "tickety.componentLabels" (dict "root" . "component" "postgresql") | nindent 6 }}
   template:
     metadata:
+      annotations:
+        {{- include "tickety.existingSecretRolloutAnnotations" . | nindent 8 }}
       labels:
         {{- include "tickety.componentLabels" (dict "root" . "component" "postgresql") | nindent 8 }}
     spec:
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 30
       securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: postgresql
-          image: {{ printf "%s:%s" .Values.postgresql.image.repository .Values.postgresql.image.tag | quote }}
+          image: {{ include "tickety.postgresqlImage" . | quote }}
           imagePullPolicy: {{ .Values.postgresql.image.pullPolicy }}
           env:
             - name: POSTGRES_USER
@@ -68,6 +75,12 @@ spec:
             failureThreshold: 6
           resources:
             {{- toYaml .Values.postgresql.resources | nindent 12 }}
+          securityContext:
+            runAsUser: 999
+            runAsGroup: 999
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data

@@ -1,7 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
   "type": "object",
+  "additionalProperties": false,
   "properties": {
+    "nameOverride": { "type": "string", "maxLength": 63 },
+    "fullnameOverride": { "type": "string", "maxLength": 63 },
     "imagePullSecrets": {
       "type": "array",
       "items": {
@@ -9,39 +12,57 @@
         "required": ["name"],
         "properties": {
           "name": { "type": "string", "minLength": 1 }
-        }
+        },
+        "additionalProperties": false
       }
     },
     "existingSecret": { "type": "string" },
     "existingSecretRolloutToken": { "type": "string" },
+    "imageDigestPolicy": {
+      "type": "object",
+      "properties": {
+        "requireDigests": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
     "backend": {
       "type": "object",
-      "required": ["replicaCount", "image"],
+      "required": ["replicaCount", "topologySpread", "image", "resources"],
       "properties": {
         "replicaCount": { "type": "integer", "minimum": 1 },
-        "image": { "$ref": "#/definitions/image" }
-      }
+        "topologySpread": { "$ref": "#/definitions/topologySpread" },
+        "image": { "$ref": "#/definitions/image" },
+        "resources": { "$ref": "#/definitions/resourceRequirements" }
+      },
+      "additionalProperties": false
     },
     "worker": {
       "type": "object",
-      "required": ["enabled", "image"],
+      "required": ["enabled", "shutdownDeadlineSeconds", "healthcheckMaxAgeSeconds", "image", "resources"],
       "properties": {
         "enabled": { "type": "boolean" },
+        "shutdownDeadlineSeconds": { "type": "integer", "minimum": 5, "maximum": 30 },
+        "healthcheckMaxAgeSeconds": { "type": "integer", "minimum": 30, "maximum": 600 },
         "image": {
           "type": "object",
           "properties": {
             "repository": { "type": "string", "minLength": 1 },
             "tag": { "type": "string", "minLength": 1 },
+            "digest": { "$ref": "#/definitions/ociDigest" },
             "pullPolicy": { "$ref": "#/definitions/pullPolicy" }
-          }
-        }
-      }
+          },
+          "additionalProperties": false
+        },
+        "resources": { "$ref": "#/definitions/resourceRequirements" }
+      },
+      "additionalProperties": false
     },
     "frontend": {
       "type": "object",
-      "required": ["replicaCount", "image", "service"],
+      "required": ["replicaCount", "topologySpread", "image", "service", "resources"],
       "properties": {
         "replicaCount": { "type": "integer", "minimum": 1 },
+        "topologySpread": { "$ref": "#/definitions/topologySpread" },
         "image": { "$ref": "#/definitions/image" },
         "service": {
           "type": "object",
@@ -49,22 +70,26 @@
           "properties": {
             "type": { "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
             "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
-            "annotations": { "type": "object" }
-          }
-        }
-      }
+            "annotations": { "$ref": "#/definitions/stringMap" }
+          },
+          "additionalProperties": false
+        },
+        "resources": { "$ref": "#/definitions/resourceRequirements" }
+      },
+      "additionalProperties": false
     },
     "ingress": {
       "type": "object",
-      "required": ["enabled", "host", "path", "tls"],
+      "required": ["enabled", "className", "annotations", "host", "path", "tls"],
       "properties": {
         "enabled": { "type": "boolean" },
         "className": { "type": "string" },
-        "annotations": { "type": "object" },
+        "annotations": { "$ref": "#/definitions/stringMap" },
         "host": { "type": "string", "minLength": 1 },
         "path": { "type": "string", "pattern": "^/" },
         "tls": { "type": "array" }
-      }
+      },
+      "additionalProperties": false
     },
     "secrets": {
       "type": "object",
@@ -75,7 +100,7 @@
     },
     "config": {
       "type": "object",
-      "required": ["appMode", "deploymentClass", "loginRequired", "cookieSecure", "cookieSameSite", "sso", "ragV2", "extra"],
+      "required": ["appMode", "deploymentClass", "loginRequired", "frontendUrl", "corsAllowOrigins", "cookieSecure", "cookieSameSite", "sessionStorageMode", "notificationOutboxPollSeconds", "notificationOutboxBatchSize", "notificationOutboxReplayBatchSize", "notificationOutboxRetentionSeconds", "notificationOutboxPruneIntervalSeconds", "notificationOutboxStaleSeconds", "notificationOutboxPruneBatchSize", "notificationOutboxPruneBatchesPerRun", "aiRetentionCleanupBatchSize", "aiRetentionCleanupMaxRowsPerStart", "sso", "ragV2", "extra"],
       "properties": {
         "appMode": { "enum": ["demo", "production"] },
         "deploymentClass": { "enum": ["poc", "production"] },
@@ -84,6 +109,17 @@
         "corsAllowOrigins": { "type": "string" },
         "cookieSecure": { "type": "boolean" },
         "cookieSameSite": { "enum": ["lax", "strict", "none"] },
+        "sessionStorageMode": { "enum": ["auto", "compat", "hashed"] },
+        "notificationOutboxPollSeconds": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "notificationOutboxBatchSize": { "type": "integer", "minimum": 1, "maximum": 500 },
+        "notificationOutboxReplayBatchSize": { "type": "integer", "minimum": 1, "maximum": 500 },
+        "notificationOutboxRetentionSeconds": { "type": "integer", "minimum": 300, "maximum": 86400 },
+        "notificationOutboxPruneIntervalSeconds": { "type": "integer", "minimum": 60, "maximum": 86400 },
+        "notificationOutboxStaleSeconds": { "type": "integer", "minimum": 5, "maximum": 300 },
+        "notificationOutboxPruneBatchSize": { "type": "integer", "minimum": 100, "maximum": 10000 },
+        "notificationOutboxPruneBatchesPerRun": { "type": "integer", "minimum": 1, "maximum": 20 },
+        "aiRetentionCleanupBatchSize": { "type": "integer", "minimum": 10, "maximum": 5000 },
+        "aiRetentionCleanupMaxRowsPerStart": { "type": "integer", "minimum": 10, "maximum": 50000 },
         "sso": {
           "type": "object",
           "required": [
@@ -105,7 +141,8 @@
             "allowedDomains": { "type": "string" },
             "allowedGroupIds": { "type": "string" },
             "autoProvision": { "type": "boolean" }
-          }
+          },
+          "additionalProperties": false
         },
         "ragV2": {
           "type": "object",
@@ -114,7 +151,7 @@
             "readEnabled", "chunkTargetTokens", "chunkMaxTokens",
             "chunkOverlapTokens", "embedBatchSize", "embedLeaseSeconds",
             "workerPollSeconds", "queryCacheTtlSeconds", "queryCacheMaxRows",
-            "snapshotTtlSeconds"
+            "snapshotTtlSeconds", "retentionPollSeconds"
           ],
           "properties": {
             "scopeKey": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$" },
@@ -130,14 +167,17 @@
             "workerPollSeconds": { "type": "integer", "minimum": 1, "maximum": 60 },
             "queryCacheTtlSeconds": { "type": "integer", "minimum": 60, "maximum": 86400 },
             "queryCacheMaxRows": { "type": "integer", "minimum": 100, "maximum": 1000000 },
-            "snapshotTtlSeconds": { "type": "integer", "minimum": 60, "maximum": 86400 }
-          }
+            "snapshotTtlSeconds": { "type": "integer", "minimum": 60, "maximum": 86400 },
+            "retentionPollSeconds": { "type": "integer", "minimum": 60, "maximum": 86400 }
+          },
+          "additionalProperties": false
         },
         "extra": {
           "type": "object",
           "propertyNames": {
-            "not": {
-              "enum": [
+            "allOf": [
+              { "pattern": "^[A-Z][A-Z0-9_]*$" },
+              { "not": { "enum": [
                 "APP_MODE",
                 "TICKETY_DEPLOYMENT_CLASS",
                 "LOGIN_REQUIRED",
@@ -156,21 +196,34 @@
                 "SSO_ALLOWED_DOMAINS",
                 "SSO_ALLOWED_GROUP_IDS",
                 "SSO_AUTO_PROVISION",
+                "NOTIFICATION_OUTBOX_POLL_SECONDS",
+                "NOTIFICATION_OUTBOX_BATCH_SIZE",
+                "NOTIFICATION_OUTBOX_REPLAY_BATCH_SIZE",
+                "NOTIFICATION_OUTBOX_RETENTION_SECONDS",
+                "NOTIFICATION_OUTBOX_PRUNE_INTERVAL_SECONDS",
+                "NOTIFICATION_OUTBOX_STALE_SECONDS",
+                "NOTIFICATION_OUTBOX_PRUNE_BATCH_SIZE",
+                "NOTIFICATION_OUTBOX_PRUNE_BATCHES_PER_RUN",
+                "AI_RETENTION_CLEANUP_BATCH_SIZE",
+                "AI_RETENTION_CLEANUP_MAX_ROWS_PER_START",
                 "DATABASE_URL",
                 "POSTGRES_PASSWORD"
-              ]
-            }
+              ] } },
+              { "not": { "pattern": "^TICKETY_SETTINGS_ENCRYPTION_" } },
+              { "not": { "pattern": "(?i)(^|_)(API_?KEY|KEYS?|SECRETS?|TOKENS?|PASSWORDS?|CREDENTIALS?|CONNECTION(_STRING)?|PRIVATE|CERT(IFICATE)?S?)(_|$)" } }
+            ]
           },
           "additionalProperties": { "type": "string" }
         }
-      }
+      },
+      "additionalProperties": false
     },
     "postgresql": {
       "type": "object",
-      "required": ["enabled", "image", "auth", "externalDatabaseUrl", "persistence"],
+      "required": ["enabled", "image", "auth", "externalDatabaseUrl", "persistence", "resources"],
       "properties": {
         "enabled": { "type": "boolean" },
-        "image": { "$ref": "#/definitions/image" },
+        "image": { "$ref": "#/definitions/postgresqlImage" },
         "auth": {
           "type": "object",
           "required": ["username", "password", "database"],
@@ -178,7 +231,8 @@
             "username": { "type": "string", "minLength": 1 },
             "password": { "type": "string" },
             "database": { "type": "string", "minLength": 1 }
-          }
+          },
+          "additionalProperties": false
         },
         "externalDatabaseUrl": { "type": "string" },
         "persistence": {
@@ -188,9 +242,22 @@
             "enabled": { "type": "boolean" },
             "size": { "type": "string", "minLength": 1 },
             "storageClass": { "type": "string" }
-          }
-        }
-      }
+          },
+          "additionalProperties": false
+        },
+        "resources": { "$ref": "#/definitions/resourceRequirements" }
+      },
+      "additionalProperties": false
+    },
+    "migration": {
+      "type": "object",
+      "required": ["activeDeadlineSeconds", "backoffLimit", "resources"],
+      "properties": {
+        "activeDeadlineSeconds": { "type": "integer", "minimum": 60, "maximum": 3600 },
+        "backoffLimit": { "type": "integer", "minimum": 0, "maximum": 10 },
+        "resources": { "$ref": "#/definitions/resourceRequirements" }
+      },
+      "additionalProperties": false
     },
     "backup": {
       "type": "object",
@@ -201,7 +268,8 @@
         "activeDeadlineSeconds",
         "successfulJobsHistoryLimit",
         "failedJobsHistoryLimit",
-        "persistence"
+        "persistence",
+        "resources"
       ],
       "properties": {
         "enabled": { "type": "boolean" },
@@ -217,9 +285,12 @@
             "size": { "type": "string", "minLength": 1 },
             "storageClass": { "type": "string" },
             "existingClaim": { "type": "string" }
-          }
-        }
-      }
+          },
+          "additionalProperties": false
+        },
+        "resources": { "$ref": "#/definitions/resourceRequirements" }
+      },
+      "additionalProperties": false
     },
     "networkPolicy": {
       "type": "object",
@@ -228,8 +299,11 @@
         "enabled": { "type": "boolean" },
         "allowPublicHttpsEgress": { "type": "boolean" },
         "additionalEgress": { "type": "array" }
-      }
-    }
+      },
+      "additionalProperties": false
+    },
+    "podAnnotations": { "$ref": "#/definitions/stringMap" },
+    "podLabels": { "$ref": "#/definitions/stringMap" }
   },
   "allOf": [
     {
@@ -287,15 +361,69 @@
     }
   ],
   "definitions": {
+    "ociDigest": {
+      "type": "string",
+      "pattern": "^$|^sha256:[a-f0-9]{64}$"
+    },
     "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] },
     "image": {
       "type": "object",
       "required": ["repository", "tag", "pullPolicy"],
       "properties": {
         "repository": { "type": "string", "minLength": 1 },
-        "tag": { "type": "string", "minLength": 1 },
+        "tag": {
+          "type": "string",
+          "minLength": 1,
+          "not": { "pattern": "^[lL][aA][tT][eE][sS][tT]$" }
+        },
+        "digest": { "$ref": "#/definitions/ociDigest" },
         "pullPolicy": { "$ref": "#/definitions/pullPolicy" }
-      }
+      },
+      "additionalProperties": false
+    },
+    "topologySpread": {
+      "type": "object",
+      "required": ["enabled", "topologyKey", "maxSkew", "whenUnsatisfiable"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "topologyKey": { "type": "string", "minLength": 1 },
+        "maxSkew": { "type": "integer", "minimum": 1 },
+        "whenUnsatisfiable": { "enum": ["DoNotSchedule", "ScheduleAnyway"] }
+      },
+      "additionalProperties": false
+    },
+    "postgresqlImage": {
+      "type": "object",
+      "required": ["repository", "tag", "pullPolicy"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": {
+          "type": "string",
+          "minLength": 1,
+          "not": { "pattern": "^(latest|pg[0-9]+)$" }
+        },
+        "digest": { "$ref": "#/definitions/ociDigest" },
+        "pullPolicy": { "$ref": "#/definitions/pullPolicy" }
+      },
+      "additionalProperties": false
+    },
+    "quantityMap": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "type": "string", "minLength": 1 }
+    },
+    "resourceRequirements": {
+      "type": "object",
+      "required": ["requests", "limits"],
+      "properties": {
+        "requests": { "$ref": "#/definitions/quantityMap" },
+        "limits": { "$ref": "#/definitions/quantityMap" }
+      },
+      "additionalProperties": false
+    },
+    "stringMap": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
     }
   }
 }

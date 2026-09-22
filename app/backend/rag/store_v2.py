@@ -16,6 +16,11 @@ from .config import chunker_identity, dimensions, scope_key, write_enabled
 
 _PORTAL_SOURCE = "portal"
 _MAX_CHUNKS = {"ticket": 16, "comment": 8, "kb_article": 128}
+_DEFAULT_INELIGIBLE_PURGE_BATCH = 500
+# ``rag_v2_schema_meta.key`` is VARCHAR(80).  A hashed scope keeps one
+# independent recovery cursor per corpus without making an attacker-shaped
+# scope value part of a schema key.
+_INELIGIBLE_CHUNK_CURSOR_PREFIX = "chunk_purge:"
 
 
 @dataclass(frozen=True)
@@ -43,6 +48,30 @@ def _private_comment_indexing_enabled() -> bool:
     from ..ticket_vectors import private_comment_indexing_enabled
 
     return private_comment_indexing_enabled()
+
+
+def _bounded_purge_limit(value: int) -> int:
+    """Keep scheduled privacy maintenance independently bounded."""
+    return max(1, min(int(value), 5_000))
+
+
+def _ineligible_chunk_cursor_key(scope: str) -> str:
+    digest = hashlib.sha256(scope.encode("utf-8")).hexdigest()
+    return f"{_INELIGIBLE_CHUNK_CURSOR_PREFIX}{digest}"
+
+
+def _ineligible_chunk_cursor(value: Any) -> tuple[str, str, str] | None:
+    """Decode a cursor only when all ordering values are usable strings."""
+    try:
+        payload = json.loads(value) if isinstance(value, str) else {}
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    parts = tuple(payload.get(name) for name in ("source_type", "source_id", "chunk_id"))
+    if not all(isinstance(part, str) and part for part in parts):
+        return None
+    return parts  # type: ignore[return-value]
 
 
 def _revision(value: Any, fallback: str) -> str:
@@ -184,6 +213,7 @@ def store_ready(db: Session) -> bool:
     try:
         row = db.execute(text("""
             SELECT to_regclass('ticket_search_chunks_v2') AS relation,
+                   to_regclass('rag_context_snapshot_sources_v2') AS snapshot_sources_relation,
                    format_type(a.atttypid, a.atttypmod) AS embedding_type
             FROM pg_attribute AS a
             WHERE a.attrelid = to_regclass('ticket_search_chunks_v2')
@@ -193,6 +223,7 @@ def store_ready(db: Session) -> bool:
         return bool(
             row
             and row.relation
+            and row.snapshot_sources_relation
             and str(row.embedding_type or "") == f"vector({dimensions()})"
         )
     except Exception:
@@ -245,6 +276,44 @@ def _clear_index_error(db: Session, scope: str, source_type: str, source_id: str
     )
 
 
+def _commit_source_change_with_snapshot_purge_queue(
+    db: Session, sources: list[tuple[str, str]]
+) -> list[Any]:
+    """Commit source mutation and its durable snapshot-cleanup intent together."""
+    wanted = list(dict.fromkeys((str(kind), str(identifier)) for kind, identifier in sources))
+    intents: list[Any] = []
+    if wanted:
+        from .snapshots import queue_source_snapshot_purge
+
+        intents = queue_source_snapshot_purge(db, wanted)
+    db.commit()
+    return intents
+
+
+def _drain_source_snapshot_purge_queue(
+    db: Session, intents: list[Any]
+) -> None:
+    if not intents:
+        return
+    from .snapshots import (
+        clear_queued_source_snapshot_purge,
+        purge_all_snapshots_for_sources,
+    )
+
+    purge_all_snapshots_for_sources(
+        db, [(intent.source_type, intent.source_id) for intent in intents]
+    )
+    for intent in intents:
+        clear_queued_source_snapshot_purge(
+            db,
+            intent.source_type,
+            intent.source_id,
+            expected_value=intent.value,
+            commit=False,
+        )
+    db.commit()
+
+
 def replace_source_chunks(
     db: Session,
     source_type: str,
@@ -282,9 +351,15 @@ def replace_source_chunks(
                 "source_id": str(source_id),
             })
             _increment_generation(db, scope)
-            db.commit()
+            sources = _commit_source_change_with_snapshot_purge_queue(
+                db, [(source_type, str(source_id))]
+            )
+            _drain_source_snapshot_purge_queue(db, sources)
             return True
         db.rollback()
+        from .snapshots import purge_all_snapshots_for_sources
+
+        purge_all_snapshots_for_sources(db, [(source_type, str(source_id))])
         return False
 
     identity = chunker_identity()
@@ -309,7 +384,10 @@ def replace_source_chunks(
         _record_index_error(db, scope, source_type, str(source_id), "source_too_large")
         if existing:
             _increment_generation(db, scope)
-        db.commit()
+        sources = _commit_source_change_with_snapshot_purge_queue(
+            db, [(source_type, str(source_id))]
+        )
+        _drain_source_snapshot_purge_queue(db, sources)
         return False
 
     expected = [
@@ -402,7 +480,10 @@ def replace_source_chunks(
         ])
     _clear_index_error(db, scope, source_type, str(source_id))
     _increment_generation(db, scope)
-    db.commit()
+    sources = _commit_source_change_with_snapshot_purge_queue(
+        db, [(source_type, str(source_id))]
+    )
+    _drain_source_snapshot_purge_queue(db, sources)
     return True
 
 
@@ -423,7 +504,10 @@ def delete_source_chunks(db: Session, source_type: str, source_id: str) -> int:
     count = int(result.rowcount or 0)
     if count:
         _increment_generation(db, scope)
-    db.commit()
+    sources = _commit_source_change_with_snapshot_purge_queue(
+        db, [(source_type, str(source_id))]
+    )
+    _drain_source_snapshot_purge_queue(db, sources)
     return count
 
 
@@ -432,6 +516,15 @@ def delete_ticket_chunks(db: Session, ticket_id: str, *, ticket_only: bool = Fal
         return 0
     scope = scope_key()
     source_filter = "AND source_type = 'ticket'" if ticket_only else ""
+    source_rows = db.execute(text(f"""
+        SELECT DISTINCT source_type, source_id
+        FROM ticket_search_chunks_v2
+        WHERE scope_key = :scope_key
+          AND ticket_id = :ticket_id
+          {source_filter}
+    """), {"scope_key": scope, "ticket_id": str(ticket_id)}).all()
+    sources = [(str(row.source_type), str(row.source_id)) for row in source_rows]
+    sources.append(("ticket", str(ticket_id)))
     result = db.execute(text(f"""
         DELETE FROM ticket_search_chunks_v2
         WHERE scope_key = :scope_key
@@ -441,18 +534,86 @@ def delete_ticket_chunks(db: Session, ticket_id: str, *, ticket_only: bool = Fal
     count = int(result.rowcount or 0)
     if count:
         _increment_generation(db, scope)
-    db.commit()
+    sources = _commit_source_change_with_snapshot_purge_queue(db, sources)
+    _drain_source_snapshot_purge_queue(db, sources)
     return count
 
 
-def purge_ineligible_chunks(db: Session) -> int:
-    """Remove evidence that current authoritative policy no longer admits."""
+def purge_ineligible_chunks(
+    db: Session, *, max_rows: int = _DEFAULT_INELIGIBLE_PURGE_BATCH
+) -> int:
+    """Boundedly remove chunks whose current authoritative policy rejects.
+
+    This is a recovery sweep, not a request-path authorization decision.  A
+    durable per-scope cursor makes every invocation inspect at most
+    ``max_rows`` chunks and lets later retention polls eventually cover the
+    corpus.  The deletion itself repeats the authority predicates so a source
+    that becomes admissible after candidate selection is never removed.
+    """
     if not store_ready(db):
         return 0
     scope = scope_key()
-    result = db.execute(text("""
+    limit = _bounded_purge_limit(max_rows)
+    cursor_key = _ineligible_chunk_cursor_key(scope)
+    try:
+        # Locking the cursor makes replicas consume disjoint pages.  Cursor
+        # movement, deletion, and durable snapshot-purge intents commit as one
+        # transaction; a crash retries the same page without losing revocation
+        # work.
+        db.execute(text("""
+            INSERT INTO rag_v2_schema_meta (key, value)
+            VALUES (:key, '{}')
+            ON CONFLICT (key) DO NOTHING
+        """), {"key": cursor_key})
+        cursor_row = db.execute(text("""
+            SELECT value
+            FROM rag_v2_schema_meta
+            WHERE key = :key
+            FOR UPDATE
+        """), {"key": cursor_key}).one()
+        cursor = _ineligible_chunk_cursor(cursor_row.value)
+        if cursor is None:
+            candidates = db.execute(text("""
+                SELECT chunk_id, source_type, source_id
+                FROM ticket_search_chunks_v2
+                WHERE scope_key = :scope_key
+                ORDER BY source_type, source_id, chunk_id
+                LIMIT :limit
+            """), {"scope_key": scope, "limit": limit}).all()
+        else:
+            candidates = db.execute(text("""
+                SELECT chunk_id, source_type, source_id
+                FROM ticket_search_chunks_v2
+                WHERE scope_key = :scope_key
+                  AND (source_type, source_id, chunk_id) > (
+                      :cursor_source_type, :cursor_source_id, :cursor_chunk_id
+                  )
+                ORDER BY source_type, source_id, chunk_id
+                LIMIT :limit
+            """), {
+                "scope_key": scope,
+                "cursor_source_type": cursor[0],
+                "cursor_source_id": cursor[1],
+                "cursor_chunk_id": cursor[2],
+                "limit": limit,
+            }).all()
+        if not candidates:
+            # Begin a fresh bounded pass on the next periodic interval.  This
+            # also discovers inserts ordered before a cursor that was advanced
+            # while another writer was adding chunks.
+            db.execute(text("""
+                UPDATE rag_v2_schema_meta
+                SET value = '{}', updated_at = CURRENT_TIMESTAMP
+                WHERE key = :key
+            """), {"key": cursor_key})
+            db.commit()
+            return 0
+
+        candidate_ids = [str(row.chunk_id) for row in candidates]
+        rows = db.execute(text("""
         DELETE FROM ticket_search_chunks_v2 AS chunk
         WHERE chunk.scope_key = :scope_key
+          AND chunk.chunk_id = ANY(:candidate_ids)
           AND (
               (
                   chunk.source_type = 'ticket'
@@ -490,15 +651,35 @@ def purge_ineligible_chunks(db: Session) -> int:
                   )
               )
           )
+        RETURNING chunk.source_type, chunk.source_id
     """), {
         "scope_key": scope,
+        "candidate_ids": candidate_ids,
         "include_private_comments": _private_comment_indexing_enabled(),
-    })
-    count = int(result.rowcount or 0)
-    if count:
-        _increment_generation(db, scope)
-    db.commit()
-    return count
+    }).all()
+        count = len(rows)
+        if count:
+            _increment_generation(db, scope)
+        last_candidate = candidates[-1]
+        db.execute(text("""
+            UPDATE rag_v2_schema_meta
+            SET value = :value, updated_at = CURRENT_TIMESTAMP
+            WHERE key = :key
+        """), {
+            "key": cursor_key,
+            "value": json.dumps({
+                "source_type": str(last_candidate.source_type),
+                "source_id": str(last_candidate.source_id),
+                "chunk_id": str(last_candidate.chunk_id),
+            }, sort_keys=True, separators=(",", ":")),
+        })
+        sources = [(str(row.source_type), str(row.source_id)) for row in rows]
+        intents = _commit_source_change_with_snapshot_purge_queue(db, sources)
+        _drain_source_snapshot_purge_queue(db, intents)
+        return count
+    except Exception:
+        db.rollback()
+        raise
 
 
 def has_ticket_source(db: Session, ticket_id: str) -> bool:

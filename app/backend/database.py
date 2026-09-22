@@ -1,12 +1,14 @@
+import hashlib
 import os
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from sqlalchemy import (
-    create_engine, Column, String, Text, Integer, DateTime, Boolean, Float,
-    ForeignKey, UniqueConstraint, Index, CheckConstraint, text,
+    create_engine, Column, String, Text, Integer, BigInteger, DateTime, Boolean, Float,
+    ForeignKey, UniqueConstraint, Index, CheckConstraint, func, text,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.exc import IntegrityError
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -33,6 +35,16 @@ def _ticket_config_name_key(context) -> str:
 def normalize_user_email(value: object) -> str | None:
     normalized = str(value or "").strip().lower()
     return normalized or None
+
+
+def session_token_digest(token: str) -> str:
+    """Return the database-safe identity of an opaque browser session token.
+
+    Session cookies are bearer credentials.  Keeping only a one-way digest
+    makes a database export or read-only operational query insufficient to
+    impersonate a currently signed-in user.
+    """
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def _user_email_key(context) -> str | None:
@@ -263,6 +275,13 @@ class AIArtifactRecord(Base):
     active = Column(Boolean, nullable=False, default=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
+    # Startup retention only considers inactive rows and walks the oldest rows
+    # first.  Keep that bounded maintenance query index-backed as the audit
+    # history grows.
+    __table_args__ = (
+        Index("ix_ai_artifact_records_active_created_at_id", "active", "created_at", "id"),
+    )
+
 
 class UserRecord(Base):
     __tablename__ = "users"
@@ -284,6 +303,15 @@ class UserRecord(Base):
     password_hash = Column(String, nullable=True)
     is_active = Column(Boolean, default=True)
     last_login_at = Column(DateTime, nullable=True)
+    # A per-account lower bound for authentication transactions.  Recovery
+    # flows advance it while revoking sessions so an SSO state created before
+    # that boundary cannot mint a fresh bearer cookie after the recovery.
+    auth_not_before_epoch = Column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
 
     __table_args__ = (
         UniqueConstraint("email_key", name="uix_users_email_key"),
@@ -296,6 +324,28 @@ class UserRecord(Base):
             "email = lower(trim(email)) AND email_key = email)",
             name="ck_users_email_identity_canonical",
         ),
+    )
+
+
+class AuthSecurityEpochRecord(Base):
+    """Singleton, monotonic ordering source for authentication boundaries.
+
+    An SSO authorization request does not yet reveal which local user it will
+    authenticate, so it cannot snapshot a per-user revision.  This global
+    sequence gives state creation and later account recovery a durable common
+    order; callbacks compare their saved value only against the resolved
+    user's lower bound.
+    """
+
+    __tablename__ = "auth_security_epoch"
+
+    singleton_id = Column(Integer, primary_key=True)
+    epoch = Column(BigInteger, nullable=False, default=0, server_default=text("0"))
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        CheckConstraint("singleton_id = 1", name="ck_auth_security_epoch_singleton"),
+        CheckConstraint("epoch >= 0", name="ck_auth_security_epoch_nonnegative"),
     )
 
 
@@ -1049,6 +1099,17 @@ class IntegrationBindingRecord(Base):
             "ix_integration_binding_lookup",
             "provider", "environment", "state",
         ),
+        # A deployment has one authoritative account per provider.  This is a
+        # partial unique index rather than an application-only check so two
+        # administrators cannot race distinct validated bindings into active
+        # state on separate database sessions.
+        Index(
+            "ix_integration_bindings_one_active_provider",
+            func.lower(func.trim(provider)),
+            unique=True,
+            postgresql_where=text("state = 'active'"),
+            sqlite_where=text("state = 'active'"),
+        ),
     )
 
 
@@ -1261,6 +1322,12 @@ class ExternalAttachmentRecord(Base):
     declared_size = Column(Integer, nullable=True)
     source_url = Column(Text, nullable=True)
     blob_key = Column(Text, nullable=True)
+    # These non-secret target coordinates make a later remote deletion safe:
+    # a new storage configuration can never be mistaken for the account that
+    # received this particular private blob.
+    storage_provider = Column(String(64), nullable=True)
+    storage_account_identity = Column(String(255), nullable=True)
+    storage_container = Column(String(63), nullable=True)
     content_sha256 = Column(String(64), nullable=True, index=True)
     stored_size = Column(Integer, nullable=True)
     storage_status = Column(String(32), nullable=False, default="pending", index=True)
@@ -1268,6 +1335,20 @@ class ExternalAttachmentRecord(Base):
     last_error = Column(String(255), nullable=True)
     last_attempted_at = Column(DateTime, nullable=True)
     next_attempt_at = Column(DateTime, nullable=True, index=True)
+    # A copy is remote I/O, so its short ownership lease is independent of
+    # the binding-wide provider-sync lease.  The token fences a late worker
+    # from publishing after another process has recovered the row.
+    copy_lease_token = Column(String(36), nullable=True)
+    copy_lease_expires_at = Column(DateTime, nullable=True)
+    # Written and committed immediately before object-store I/O.  It is
+    # retained across an ambiguous upload failure so later retirement can
+    # safely remove an object which Azure may have accepted before the worker
+    # lost its lease or database connection.
+    copy_upload_blob_key = Column(Text, nullable=True)
+    copy_upload_storage_provider = Column(String(64), nullable=True)
+    copy_upload_storage_account_identity = Column(String(255), nullable=True)
+    copy_upload_storage_container = Column(String(63), nullable=True)
+    copy_upload_started_at = Column(DateTime, nullable=True)
     stored_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -1286,10 +1367,58 @@ class ExternalAttachmentRecord(Base):
             "ix_external_attachments_ticket_created_id",
             "ticket_id", "created_at", "id",
         ),
+        Index(
+            "ix_external_attachments_copy_ready",
+            "binding_id", "provider", "storage_status", "next_attempt_at",
+            "copy_lease_expires_at", "created_at", "id",
+        ),
         CheckConstraint(
             "owner_type IN ('ticket', 'conversation')",
             name="ck_external_attachment_owner_type",
         ),
+    )
+
+
+class AttachmentBlobDeletionRecord(Base):
+    """Durable, replayable intent to remove a superseded private blob.
+
+    The task is committed with the metadata retirement.  Provider I/O happens
+    only after a separate claim commit, so an Azure call can never be rolled
+    back with the database transaction that authorized it.
+    """
+
+    __tablename__ = "attachment_blob_deletions"
+
+    id = Column(String(36), primary_key=True)
+    attachment_id = Column(String(36), nullable=False, index=True)
+    blob_key = Column(Text, nullable=False)
+    storage_provider = Column(String(64), nullable=False)
+    storage_account_identity = Column(String(255), nullable=False)
+    storage_container = Column(String(63), nullable=False)
+    status = Column(String(32), nullable=False, default="pending", index=True)
+    attempts = Column(Integer, nullable=False, default=0)
+    last_error = Column(String(255), nullable=True)
+    next_attempt_at = Column(DateTime, nullable=True, index=True)
+    lease_token = Column(String(36), nullable=True)
+    lease_expires_at = Column(DateTime, nullable=True, index=True)
+    requested_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "attachment_id", "blob_key", "storage_provider",
+            "storage_account_identity", "storage_container",
+            name="uix_attachment_blob_deletion_identity",
+        ),
+        Index(
+            "ix_attachment_blob_deletions_ready",
+            "status", "next_attempt_at", "requested_at", "id",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'processing', 'deleted', 'failed', 'cancelled')",
+            name="ck_attachment_blob_deletion_status",
+        ),
+        CheckConstraint("attempts >= 0", name="ck_attachment_blob_deletion_attempts"),
     )
 
 
@@ -1394,7 +1523,12 @@ class SessionRecord(Base):
     """Login sessions — cookie-based auth."""
     __tablename__ = "sessions"
 
-    token = Column(String, primary_key=True)
+    # Keep the physical ``token`` column name for rolling-upgrade compatibility
+    # with legacy application replicas.  During the explicitly temporary
+    # ``compat`` rollout mode it can hold a legacy raw credential; ``hashed``
+    # mode writes SHA-256 digests only.  Do not narrow this legacy column: old
+    # deployments created it as an unbounded VARCHAR.
+    token_hash = Column("token", String(), primary_key=True)
     user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     expires_at = Column(
@@ -1445,6 +1579,10 @@ class SsoTransactionRecord(Base):
     discovery_url = Column(String(2048), nullable=False)
     redirect_uri = Column(String(2048), nullable=False)
     client_id = Column(String(512), nullable=False)
+    # Snapshot of AuthSecurityEpochRecord when the state was created.  It is
+    # deliberately separate from the OIDC nonce: this is local recovery
+    # evidence, not a provider protocol value.
+    auth_epoch = Column(BigInteger, nullable=False, default=0, server_default=text("0"))
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     expires_at = Column(DateTime, nullable=False, index=True)
 
@@ -1531,6 +1669,45 @@ class NotificationConfigRecord(Base):
     enabled = Column(Boolean, default=True)
     channels = Column(Text, default="in_app")  # comma-sep: in_app,email,webhook
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class NotificationOutboxRecord(Base):
+    """Durable, short-lived events independently observed by every API replica."""
+    __tablename__ = "notification_outbox"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # This is deliberately not the primary-key sequence.  PostgreSQL assigns
+    # primary-key sequence values before commit, so those values can be
+    # observed in a different order from committed transactions.  The
+    # producer allocates dispatch_order while holding the singleton sequence
+    # row below, making it a safe cursor for every API replica.
+    dispatch_order = Column(BigInteger, nullable=False)
+    recipient_user_id = Column(String, nullable=False)
+    event_type = Column(String(64), nullable=False)
+    payload_json = Column(Text, nullable=False)
+    dedupe_key = Column(String(255), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("dedupe_key", name="uq_notification_outbox_dedupe_key"),
+        UniqueConstraint("dispatch_order", name="uq_notification_outbox_dispatch_order"),
+        Index("ix_notification_outbox_dispatch_order", "dispatch_order"),
+        Index("ix_notification_outbox_recipient_id", "recipient_user_id", "id"),
+        # Reconnect replay predicates by recipient then advances the durable
+        # commit cursor; the older recipient/id index cannot satisfy that
+        # ordered range scan.
+        Index("ix_notification_outbox_recipient_dispatch_order", "recipient_user_id", "dispatch_order"),
+        Index("ix_notification_outbox_expires_at_id", "expires_at", "id"),
+    )
+
+
+class NotificationOutboxSequenceRecord(Base):
+    """The single transaction lock that orders committed outbox events."""
+    __tablename__ = "notification_outbox_sequence"
+
+    singleton_id = Column(Integer, primary_key=True)
+    next_dispatch_order = Column(BigInteger, nullable=False)
 
 
 class RequirementWorkspaceRecord(Base):
@@ -2416,6 +2593,62 @@ def _verify_demo_schema_before_bootstrap() -> None:
         ) from None
 
 
+def _ensure_notification_outbox_sequence() -> None:
+    """Seed and reconcile the demo-only outbox lock after metadata creates it.
+
+    Production obtains this row exclusively from migration 0046.  Unversioned
+    demo databases use ``create_all`` instead, which creates the relation but
+    cannot insert its singleton lock row.  Seed from the highest existing
+    dispatch order so a restarted demo never reuses an event id.  A prior
+    interrupted bootstrap can leave the singleton behind that high-water
+    mark; monotonically repair that case too before producers allocate again.
+    """
+    if not _sa_inspect(engine).has_table("notification_outbox_sequence"):
+        # Some lightweight bootstrap tests deliberately replace create_all;
+        # production never reaches this helper and a real demo create_all has
+        # already created the relation.
+        return
+    with engine.begin() as connection:
+        try:
+            # A concurrent demo process can take its statement snapshot before
+            # another process commits the singleton.  The nested transaction
+            # keeps that expected unique-key race from poisoning this outer
+            # bootstrap transaction.
+            with connection.begin_nested():
+                connection.execute(text(
+                    "INSERT INTO notification_outbox_sequence "
+                    "(singleton_id, next_dispatch_order) "
+                    "SELECT 1, COALESCE((SELECT MAX(dispatch_order) "
+                    "FROM notification_outbox), 0) "
+                    "WHERE NOT EXISTS ("
+                    "SELECT 1 FROM notification_outbox_sequence WHERE singleton_id = 1"
+                    ")"
+                ))
+        except IntegrityError:
+            # Do not hide an unrelated integrity error. It is harmless only
+            # when the competing process actually left the singleton behind.
+            seeded = connection.execute(text(
+                "SELECT 1 FROM notification_outbox_sequence WHERE singleton_id = 1"
+            )).scalar_one_or_none()
+            if seeded != 1:
+                raise
+        # Never lower an already valid counter.  This single conditional
+        # update takes the singleton row lock on PostgreSQL, so a concurrent
+        # allocator either commits before this repair (and is preserved) or
+        # observes the repaired high-water mark afterwards.  SQLite's
+        # write serialization provides the equivalent demo guarantee.
+        connection.execute(text(
+            "UPDATE notification_outbox_sequence "
+            "SET next_dispatch_order = ("
+            "SELECT COALESCE(MAX(dispatch_order), 0) FROM notification_outbox"
+            ") "
+            "WHERE singleton_id = 1 "
+            "AND next_dispatch_order < ("
+            "SELECT COALESCE(MAX(dispatch_order), 0) FROM notification_outbox"
+            ")"
+        ))
+
+
 def init_db():
     if (os.getenv("APP_MODE") or "production").strip().lower() == "production":
         # Production startup is verification-only. DDL belongs to the explicit
@@ -2427,6 +2660,7 @@ def init_db():
     # unversioned databases retain the established compatibility bootstrap.
     _verify_demo_schema_before_bootstrap()
     Base.metadata.create_all(bind=engine)
+    _ensure_notification_outbox_sequence()
     _ensure_columns()
     _ensure_ticket_search_documents()
 

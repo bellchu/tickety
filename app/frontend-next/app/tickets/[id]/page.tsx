@@ -248,7 +248,17 @@ function AgentActionPanel({ ticket }: { ticket: Ticket }) {
     setAssigneeId(ticket.assignee_id || "");
     setDueBy(toLocalDateTimeInput(ticket.due_by || ticket.resolution_due_at));
     setTags(ticket.tags || "");
-  }, [ticket]);
+    // Draft input is owned by one ticket. A detail-route transition reuses
+    // this panel, so retaining the previous reply/private-note choice would
+    // risk sending it to the next ticket.
+    setComment("");
+    setIsPrivate(false);
+    setSaveNotice(null);
+    setCommentNotice(null);
+    // Background refetches for the same ticket must not overwrite in-progress
+    // operator edits; only a different ticket is a draft ownership boundary.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ticket.id]);
 
   const meQuery = useQuery({ queryKey: ["auth-me"], queryFn: api.getAuthMe, retry: false });
   const canManageAssignment = canAccessProtectedIntelligence(meQuery.data);

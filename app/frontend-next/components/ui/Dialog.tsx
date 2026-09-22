@@ -4,6 +4,7 @@ import {
   type ReactNode,
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
 } from "react";
@@ -11,6 +12,7 @@ import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { Button, IconButton } from "./Button";
 import { cn } from "@/lib/utils";
+import { registerStandardDialog } from "@/lib/dialog-coordination";
 
 const focusableSelector = [
   "a[href]",
@@ -33,6 +35,8 @@ export interface DialogProps {
   dismissible?: boolean;
   initialFocusRef?: React.RefObject<HTMLElement | null>;
   role?: "dialog" | "alertdialog";
+  /** Engagement dialogs wait behind normal work dialogs to preserve one modal boundary. */
+  modalCategory?: "standard" | "engagement";
   className?: string;
 }
 
@@ -48,6 +52,7 @@ export function Dialog({
   dismissible = true,
   initialFocusRef,
   role = "dialog",
+  modalCategory = "standard",
   className,
 }: DialogProps) {
   const [mounted, setMounted] = useState(false);
@@ -113,6 +118,13 @@ export function Dialog({
       returnFocusRef.current?.focus();
     };
   }, [dismissible, initialFocusRef, open]);
+
+  // Register before paint so an engagement promotion arriving with a newly
+  // opened work dialog is deferred before two aria-modal surfaces are visible.
+  useLayoutEffect(() => {
+    if (!open || modalCategory !== "standard") return;
+    return registerStandardDialog();
+  }, [modalCategory, open]);
 
   if (!mounted || !open) return null;
 

@@ -571,6 +571,27 @@ async def _fetch_userinfo(endpoint: str, access_token: str) -> dict[str, Any]:
     return payload
 
 
+def _verified_addressable_email(source: dict[str, Any], label: str) -> str:
+    """Return a provider-verified address suitable for local-account binding.
+
+    OIDC's ``email`` and ``email_verified`` claims are optional.  An email-like
+    ``preferred_username`` is neither a verified address nor a stable account
+    identifier, so it can be display material but must never select a local
+    Tickety account.  In particular, treating a missing ``email_verified`` as
+    approval lets a valid token from a generic provider bind an arbitrary
+    pre-provisioned local email address.
+    """
+    value = source.get("email")
+    if not value:
+        return ""
+    if source.get("email_verified") is not True:
+        raise SsoProtocolError(f"OIDC {label} email is not verified")
+    email = str(value).strip().lower()
+    if not _EMAIL_RE.fullmatch(email):
+        raise SsoProtocolError(f"OIDC {label} email is invalid")
+    return email
+
+
 async def resolve_oidc_identity(
     token_payload: dict[str, Any],
     metadata: dict[str, Any],
@@ -593,27 +614,16 @@ async def resolve_oidc_identity(
         if str(userinfo.get("sub") or "").strip() != subject:
             raise SsoProtocolError("OIDC userinfo subject does not match id_token")
 
-    if userinfo.get("email") and userinfo.get("email_verified") is False:
-        raise SsoProtocolError("OIDC userinfo email is not verified")
-    if not userinfo.get("email") and claims.get("email") and claims.get("email_verified") is False:
-        raise SsoProtocolError("OIDC id_token email is not verified")
-
-    email_candidates = (
-        userinfo.get("email"),
-        claims.get("email"),
-        userinfo.get("preferred_username"),
-        claims.get("preferred_username"),
-    )
-    email = next(
-        (
-            str(value).strip().lower()
-            for value in email_candidates
-            if value and _EMAIL_RE.fullmatch(str(value).strip())
-        ),
-        "",
-    )
+    # Account linking and auto-provisioning require an explicitly verified
+    # email claim.  Do not use preferred_username as an email fallback: it is
+    # not a proof of mailbox ownership and is often mutable at the provider.
+    email = _verified_addressable_email(userinfo, "userinfo")
     if not email:
-        raise SsoProtocolError("OIDC provider did not return an addressable email claim")
+        email = _verified_addressable_email(claims, "id_token")
+    if not email:
+        raise SsoProtocolError(
+            "OIDC provider did not return a verified addressable email claim"
+        )
     name = str(
         userinfo.get("name")
         or claims.get("name")

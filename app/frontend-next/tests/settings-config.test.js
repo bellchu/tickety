@@ -71,3 +71,14 @@ test("taxonomy requests expose loading, retry, empty, mutation error, and confir
   assert.match(settings, /grid grid-cols-1 gap-4 sm:grid-cols-2/);
   assert.match(settings, /flex flex-col-reverse gap-2 xs:flex-row xs:justify-end/);
 });
+
+test("OAuth authorization reserves its popup in the click gesture and closes it on failure", () => {
+  assert.match(settings, /const authorizePopup = window\.open\("", "_blank", "popup,width=700,height=600"\)/);
+  assert.match(settings, /authorizePopup\.opener = null/);
+  assert.match(settings, /authorizePopup\.document\.body\.textContent = "Preparing secure authorization…"/);
+  assert.match(settings, /const authorizationUrl = safeExternalUrl\(result\.url\)/);
+  assert.match(settings, /authorizePopup\.location\.replace\(authorizationUrl\)/);
+  assert.match(settings, /onError: \(\) => \{\s*authorizePopup\.close\(\);/);
+  assert.match(settings, /Your browser blocked the authorization window/);
+  assert.doesNotMatch(settings, /window\.open\(res\.url/);
+});

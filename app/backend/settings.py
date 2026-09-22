@@ -2,13 +2,20 @@ import os
 import re
 import sys
 import threading
+import hmac
 import ipaddress
 import socket
 import uuid
+import base64
+import binascii
+import json
 from urllib.parse import urlparse
 from typing import Optional
 
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from dotenv import load_dotenv
+from sqlalchemy import text
 
 from .database import SessionLocal, SettingsRecord
 from .email_service import normalize_email_address, normalize_sender_name
@@ -48,6 +55,9 @@ _ALL_KEYS = [
     "CORS_ALLOW_ORIGINS",
     "COOKIE_SECURE",
     "COOKIE_SAMESITE",
+    # Session storage is deployment-owned so a rolling release can keep its
+    # immediately preceding API replicas interoperable.
+    "SESSION_STORAGE_MODE",
     "LLM_ALLOW_PRIVATE_ENDPOINTS",
     "LLM_ALLOW_INSECURE_ENDPOINTS",
     "LLM_ALLOWED_PROVIDER_HOSTS",
@@ -119,6 +129,8 @@ _ALL_KEYS = [
     "FRESHSERVICE_HISTORY_PAGES_PER_SYNC",
     "FRESHSERVICE_CONVERSATIONS_PER_SYNC",
     "FRESHSERVICE_ATTACHMENTS_PER_SYNC",
+    "ATTACHMENT_BLOB_DELETIONS_PER_SYNC",
+    "ATTACHMENT_BLOB_CLEANUP_INTERVAL_SECONDS",
     "ATTACHMENT_STORAGE_PROVIDER",
     "ATTACHMENT_MAX_BYTES",
     "AZURE_STORAGE_ACCOUNT_URL",
@@ -194,6 +206,9 @@ _READONLY_KEYS = {
     "DATABASE_URL",
     "NEXT_PUBLIC_API_URL",
     "NEXT_PUBLIC_WS_URL",
+    # This is selected by the deployment during a rolling release.  An
+    # application-level admin must not be able to reopen raw session writes.
+    "SESSION_STORAGE_MODE",
     "LLM_ALLOW_PRIVATE_ENDPOINTS",
     "LLM_ALLOW_INSECURE_ENDPOINTS",
     "LLM_ALLOWED_PROVIDER_HOSTS",
@@ -223,6 +238,7 @@ _PRODUCTION_ENV_ONLY_KEYS = (
     "CORS_ALLOW_ORIGINS",
     "COOKIE_SECURE",
     "COOKIE_SAMESITE",
+    "SESSION_STORAGE_MODE",
     "WEBHOOK_MAX_AGE_SECONDS",
     "LOGIN_REQUIRED",
     "DEFAULT_MODEL",
@@ -289,6 +305,8 @@ _PRODUCTION_ENV_ONLY_KEYS = (
     "FRESHSERVICE_HISTORY_PAGES_PER_SYNC",
     "FRESHSERVICE_CONVERSATIONS_PER_SYNC",
     "FRESHSERVICE_ATTACHMENTS_PER_SYNC",
+    "ATTACHMENT_BLOB_DELETIONS_PER_SYNC",
+    "ATTACHMENT_BLOB_CLEANUP_INTERVAL_SECONDS",
     "ATTACHMENT_STORAGE_PROVIDER",
     "ATTACHMENT_MAX_BYTES",
     "AZURE_STORAGE_ACCOUNT_URL",
@@ -350,6 +368,21 @@ _CLEARABLE_PORTAL_KEYS = _PRODUCTION_SSO_PORTAL_KEYS | {
     "SENDGRID_REPLY_TO_EMAIL",
 }
 _ADMIN_PORTAL_APPROVAL_PREFIX = "__ADMIN_PORTAL_APPROVED__:"
+_SETTINGS_ENCRYPTION_PREFIX = "enc:v1:"
+_SETTINGS_ENCRYPTION_AAD_PREFIX = b"tickety.settings.v1\x00"
+_SETTINGS_ENCRYPTION_KID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+# A durable, non-secret singleton used to serialize sensitive-settings writes
+# during a KID rotation.  It deliberately stays outside _ALL_KEYS, so it can
+# never become an application override or an administrator-visible setting.
+_SETTINGS_ENCRYPTION_FENCE_KEY = "__tickety_settings_encryption_active_kid__"
+
+
+class SettingsEncryptionError(RuntimeError):
+    """A persisted secret cannot be safely read or written."""
+
+
+class LegacySensitiveSettingError(SettingsEncryptionError):
+    """A legacy plaintext database secret requires an explicit migration."""
 
 _lock = threading.Lock()
 _loaded = False
@@ -511,6 +544,19 @@ def is_production_mode() -> bool:
     return app_mode() == "production"
 
 
+def session_storage_mode() -> str:
+    """Return the browser-session representation selected by deployment.
+
+    ``hashed`` is the secure standalone default.  ``compat`` is deliberately
+    opt-in for a mixed old/new API rollout: it retains the legacy raw session
+    representation until every legacy replica has been retired.
+    """
+    mode = (os.getenv("SESSION_STORAGE_MODE") or "hashed").strip().lower()
+    if mode not in {"hashed", "compat"}:
+        raise ValueError("SESSION_STORAGE_MODE must be either 'hashed' or 'compat'")
+    return mode
+
+
 def automation_enabled(key: str, legacy_alias: Optional[str] = None) -> bool:
     """Return whether an automatic AI workflow is explicitly enabled.
 
@@ -533,6 +579,194 @@ def _mask(value: Optional[str]) -> str:
     return "****"
 
 
+def _settings_encryption_keyring() -> tuple[str, dict[str, bytes]]:
+    """Load the deployment-owned AES-256-GCM keyring without defaults.
+
+    The keyring is deliberately an environment-only bootstrap boundary. It is
+    never persisted in ``SettingsRecord`` or synthesized by the application.
+    """
+    active_kid = (os.getenv("TICKETY_SETTINGS_ENCRYPTION_ACTIVE_KID") or "").strip()
+    serialized = (os.getenv("TICKETY_SETTINGS_ENCRYPTION_KEYS_JSON") or "").strip()
+    if not active_kid or not _SETTINGS_ENCRYPTION_KID_RE.fullmatch(active_kid):
+        raise SettingsEncryptionError("settings encryption active KID is missing or invalid")
+    try:
+        raw_keyring = json.loads(serialized)
+    except json.JSONDecodeError as exc:
+        raise SettingsEncryptionError("settings encryption keyring is missing or invalid") from exc
+    if not isinstance(raw_keyring, dict) or not raw_keyring:
+        raise SettingsEncryptionError("settings encryption keyring is missing or invalid")
+
+    keyring: dict[str, bytes] = {}
+    for kid, encoded_key in raw_keyring.items():
+        if not isinstance(kid, str) or not _SETTINGS_ENCRYPTION_KID_RE.fullmatch(kid):
+            raise SettingsEncryptionError("settings encryption keyring contains an invalid KID")
+        if not isinstance(encoded_key, str):
+            raise SettingsEncryptionError("settings encryption keyring contains an invalid key")
+        try:
+            key = base64.b64decode(encoded_key.encode("ascii"), validate=True)
+        except (UnicodeEncodeError, binascii.Error) as exc:
+            raise SettingsEncryptionError("settings encryption keyring contains an invalid key") from exc
+        if len(key) != 32:
+            raise SettingsEncryptionError("settings encryption keys must be exactly 32 bytes")
+        keyring[kid] = key
+    if active_kid not in keyring:
+        raise SettingsEncryptionError("settings encryption active KID is not in the keyring")
+    return active_kid, keyring
+
+
+def _lock_settings_encryption_fence(
+    db, active_kid: str, *, initial_kid: Optional[str] = None
+) -> str:
+    """Acquire the cross-process sensitive-settings write fence.
+
+    The sentinel ``UPDATE`` is intentional.  PostgreSQL retains a row lock
+    for the surrounding transaction; SQLite does not implement ``FOR UPDATE``
+    but its write transaction serializes competing settings writers.  Every
+    path that persists a sensitive setting must take this fence before it reads
+    or modifies a sensitive row.
+    """
+    seed_kid = initial_kid if initial_kid is not None else active_kid
+    if not _SETTINGS_ENCRYPTION_KID_RE.fullmatch(seed_kid):
+        raise SettingsEncryptionError("settings encryption durable fence is invalid")
+    db.execute(
+        text(
+            "INSERT INTO settings (key, value) VALUES (:key, :value) "
+            "ON CONFLICT (key) DO NOTHING"
+        ),
+        {"key": _SETTINGS_ENCRYPTION_FENCE_KEY, "value": seed_kid},
+    )
+    db.execute(
+        text("UPDATE settings SET value = value WHERE key = :key"),
+        {"key": _SETTINGS_ENCRYPTION_FENCE_KEY},
+    )
+    fence = (
+        db.query(SettingsRecord)
+        .filter(SettingsRecord.key == _SETTINGS_ENCRYPTION_FENCE_KEY)
+        .with_for_update()
+        .one()
+    )
+    durable_kid = fence.value
+    if (
+        not isinstance(durable_kid, str)
+        or not _SETTINGS_ENCRYPTION_KID_RE.fullmatch(durable_kid)
+    ):
+        raise SettingsEncryptionError("settings encryption durable fence is invalid")
+    return durable_kid
+
+
+def _verify_settings_encryption_fence(db, active_kid: str) -> None:
+    """Fail a read-only release preflight on a mismatched durable KID."""
+    fence = db.get(SettingsRecord, _SETTINGS_ENCRYPTION_FENCE_KEY)
+    if fence is None:
+        # A first fence-aware deployment must still be able to start with its
+        # established old active KID.  It may not use a missing marker to
+        # smuggle in a new active KID over existing old envelopes, however.
+        rows = db.query(SettingsRecord).filter(
+            SettingsRecord.key.in_(_SENSITIVE_KEYS)
+        ).all()
+        for row in rows:
+            value = row.value
+            if isinstance(value, str) and value.startswith(_SETTINGS_ENCRYPTION_PREFIX):
+                envelope_kid = value[len(_SETTINGS_ENCRYPTION_PREFIX):].partition(":")[0]
+                if envelope_kid != active_kid:
+                    raise SettingsEncryptionError(
+                        "settings encryption unfenced ciphertext does not match active KID"
+                    )
+        return
+    durable_kid = fence.value
+    if (
+        not isinstance(durable_kid, str)
+        or not _SETTINGS_ENCRYPTION_KID_RE.fullmatch(durable_kid)
+        or durable_kid != active_kid
+    ):
+        raise SettingsEncryptionError(
+            "settings encryption active KID does not match durable fence"
+        )
+    # The fence is a deployment-wide cipher generation, not merely a marker
+    # for future writes.  Accepting a database with mixed envelope KIDs would
+    # let startup and release preflight run while a retired writer's secret
+    # remained live.  Require every persisted sensitive value to belong to
+    # the same durable generation before a process can hydrate it.
+    _require_sensitive_rows_match_active_kid(db, active_kid)
+
+
+def _require_sensitive_rows_match_active_kid(db, active_kid: str) -> None:
+    """Do not let a normal write claim a new fence over old ciphertext."""
+    rows = db.query(SettingsRecord).filter(
+        SettingsRecord.key.in_(_SENSITIVE_KEYS)
+    ).all()
+    for row in rows:
+        value = row.value
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value.startswith(_SETTINGS_ENCRYPTION_PREFIX):
+            raise LegacySensitiveSettingError(
+                "legacy plaintext sensitive settings require explicit migration"
+            )
+        envelope_kid = value[len(_SETTINGS_ENCRYPTION_PREFIX):].partition(":")[0]
+        if envelope_kid != active_kid:
+            raise SettingsEncryptionError(
+                "persisted sensitive settings do not match the durable active KID"
+            )
+
+
+def _settings_encryption_aad(key: str) -> bytes:
+    return _SETTINGS_ENCRYPTION_AAD_PREFIX + key.encode("utf-8")
+
+
+def _encrypt_sensitive_setting(key: str, value: str) -> str:
+    active_kid, keyring = _settings_encryption_keyring()
+    # AESGCM.encrypt returns nonce-free bytes; retain a fresh nonce beside the
+    # ciphertext in a versioned, self-describing envelope.
+    nonce = os.urandom(12)
+    ciphertext = AESGCM(keyring[active_kid]).encrypt(
+        nonce, value.encode("utf-8"), _settings_encryption_aad(key)
+    )
+    encoded = base64.b64encode(nonce + ciphertext).decode("ascii")
+    return f"{_SETTINGS_ENCRYPTION_PREFIX}{active_kid}:{encoded}"
+
+
+def _decrypt_sensitive_setting(key: str, stored_value: Optional[str]) -> Optional[str]:
+    if stored_value is None:
+        return None
+    if not isinstance(stored_value, str) or not stored_value.startswith(_SETTINGS_ENCRYPTION_PREFIX):
+        raise LegacySensitiveSettingError(
+            f"persisted plaintext sensitive setting requires explicit migration: {key}"
+        )
+    remainder = stored_value[len(_SETTINGS_ENCRYPTION_PREFIX):]
+    kid, separator, encoded = remainder.partition(":")
+    if not separator or not _SETTINGS_ENCRYPTION_KID_RE.fullmatch(kid) or not encoded:
+        raise SettingsEncryptionError(f"persisted sensitive setting envelope is invalid: {key}")
+    _active_kid, keyring = _settings_encryption_keyring()
+    secret_key = keyring.get(kid)
+    if secret_key is None:
+        raise SettingsEncryptionError(f"persisted sensitive setting uses an unknown KID: {key}")
+    try:
+        payload = base64.b64decode(encoded.encode("ascii"), validate=True)
+    except (UnicodeEncodeError, binascii.Error) as exc:
+        raise SettingsEncryptionError(f"persisted sensitive setting ciphertext is invalid: {key}") from exc
+    if len(payload) < 12 + 16:
+        raise SettingsEncryptionError(f"persisted sensitive setting ciphertext is invalid: {key}")
+    try:
+        return AESGCM(secret_key).decrypt(
+            payload[:12], payload[12:], _settings_encryption_aad(key)
+        ).decode("utf-8")
+    except (InvalidTag, UnicodeDecodeError) as exc:
+        raise SettingsEncryptionError(f"persisted sensitive setting cannot be authenticated: {key}") from exc
+
+
+def _encode_db_override(key: str, value: Optional[str]) -> Optional[str]:
+    if key in _SENSITIVE_KEYS and value is not None:
+        return _encrypt_sensitive_setting(key, value)
+    return value
+
+
+def _decode_db_override(key: str, value: Optional[str]) -> Optional[str]:
+    if key in _SENSITIVE_KEYS:
+        return _decrypt_sensitive_setting(key, value)
+    return value
+
+
 def _read_db_overrides() -> dict:
     """Return settings overrides stored in DB (key -> value)."""
     db = SessionLocal()
@@ -540,11 +774,14 @@ def _read_db_overrides() -> dict:
         # SettingsRecord also carries bounded internal state. Never turn an
         # arbitrary or legacy row into a process environment variable.
         rows = db.query(SettingsRecord).filter(SettingsRecord.key.in_(_ALL_KEYS)).all()
-        return {r.key: r.value for r in rows}
     except Exception:
         return {}
     finally:
         db.close()
+    # Keep database availability compatibility, but never convert a keyring,
+    # envelope, authentication, or legacy-plaintext failure into an empty
+    # settings set. Doing so could silently run with an unintended secret.
+    return {r.key: _decode_db_override(r.key, r.value) for r in rows}
 
 
 def _read_portal_approved_keys() -> set[str]:
@@ -573,12 +810,21 @@ def _write_db_overrides(
 ):
     db = SessionLocal()
     try:
+        if any(key in _SENSITIVE_KEYS for key in updates):
+            active_kid, _keyring = _settings_encryption_keyring()
+            durable_kid = _lock_settings_encryption_fence(db, active_kid)
+            if durable_kid != active_kid:
+                raise SettingsEncryptionError(
+                    "settings encryption active KID does not match durable fence"
+                )
+            _require_sensitive_rows_match_active_kid(db, active_kid)
         for key, value in updates.items():
             existing = db.query(SettingsRecord).filter(SettingsRecord.key == key).first()
+            persisted_value = _encode_db_override(key, value)
             if existing:
-                existing.value = value
+                existing.value = persisted_value
             else:
-                db.add(SettingsRecord(key=key, value=value))
+                db.add(SettingsRecord(key=key, value=persisted_value))
         if actor_id:
             for key in sorted(approved_keys or set()):
                 marker_key = f"{_ADMIN_PORTAL_APPROVAL_PREFIX}{key}"
@@ -597,11 +843,227 @@ def _write_db_overrides(
         db.close()
 
 
+def persist_runtime_secret_updates(updates: dict[str, str]) -> None:
+    """Persist runtime-issued integration secrets through the shared cipher.
+
+    This intentionally accepts only recognized sensitive settings so provider
+    refresh code cannot bypass the at-rest encryption boundary.
+    """
+    if not updates or any(key not in _SENSITIVE_KEYS for key in updates):
+        raise ValueError("runtime secret persistence accepts sensitive settings only")
+    _write_db_overrides(updates)
+    for key, value in updates.items():
+        os.environ[key] = value
+
+
+def persist_runtime_oauth_tokens_if_current(
+    *,
+    expected_access_token: str,
+    expected_refresh_token: str,
+    access_token: str,
+    refresh_token: str,
+) -> bool:
+    """Atomically publish a refreshed OAuth pair only from its live parent.
+
+    A refresh token can rotate at the provider.  API and worker replicas retain
+    independent adapter instances, so an old instance must never overwrite a
+    newer pair merely because its remote request completed later.  The durable
+    durable access-and-refresh pair is the compare-and-swap version; values
+    are decrypted only inside this settings boundary and are neither logged
+    nor returned.  Both values matter because providers may reuse a refresh
+    token while issuing a new access token.
+
+    A missing durable pair may be bootstrapped once from a configured runtime
+    refresh token, including a recovery refresh where the local access token
+    has already been lost.  Once either row exists, incomplete pairs fail
+    closed, and a durable pair always requires both parent values to match.
+    """
+    if (
+        not isinstance(expected_access_token, str)
+        or not all(isinstance(value, str) and value for value in (
+            expected_refresh_token, access_token, refresh_token,
+        ))
+    ):
+        raise ValueError("runtime OAuth token persistence requires string tokens")
+
+    access_key = "FRESHSERVICE_OAUTH_ACCESS_TOKEN"
+    refresh_key = "FRESHSERVICE_OAUTH_REFRESH_TOKEN"
+    db = SessionLocal()
+    try:
+        active_kid, _keyring = _settings_encryption_keyring()
+        durable_kid = _lock_settings_encryption_fence(db, active_kid)
+        if durable_kid != active_kid:
+            raise SettingsEncryptionError(
+                "settings encryption active KID does not match durable fence"
+            )
+        _require_sensitive_rows_match_active_kid(db, active_kid)
+        rows = {
+            row.key: row
+            for row in db.query(SettingsRecord).filter(
+                SettingsRecord.key.in_((access_key, refresh_key))
+            ).with_for_update().all()
+        }
+        persisted_access = rows.get(access_key)
+        persisted_refresh = rows.get(refresh_key)
+        if persisted_access is not None or persisted_refresh is not None:
+            if persisted_access is None or persisted_refresh is None:
+                db.rollback()
+                return False
+            # An empty local access token has no durable pair version to
+            # compare.  It may bootstrap a wholly absent pair below, but must
+            # never replace an existing pair based only on a refresh token.
+            if not expected_access_token:
+                db.rollback()
+                return False
+            durable_access = _decode_db_override(access_key, persisted_access.value)
+            durable_refresh = _decode_db_override(refresh_key, persisted_refresh.value)
+            if (
+                not isinstance(durable_access, str)
+                or not isinstance(durable_refresh, str)
+                or not hmac.compare_digest(durable_access, expected_access_token)
+                or not hmac.compare_digest(durable_refresh, expected_refresh_token)
+            ):
+                db.rollback()
+                return False
+
+        encoded_access = _encode_db_override(access_key, access_token)
+        encoded_refresh = _encode_db_override(refresh_key, refresh_token)
+        if persisted_access is None:
+            db.add(SettingsRecord(key=access_key, value=encoded_access))
+        else:
+            persisted_access.value = encoded_access
+        if persisted_refresh is None:
+            db.add(SettingsRecord(key=refresh_key, value=encoded_refresh))
+        else:
+            persisted_refresh.value = encoded_refresh
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def reencrypt_persisted_sensitive_settings(
+    *,
+    allow_legacy_plaintext: bool = False,
+    from_kid: Optional[str] = None,
+) -> dict[str, int]:
+    """Re-encrypt sensitive rows under the active KID in one transaction.
+
+    Legacy plaintext requires an explicit operator opt-in. This makes a
+    plaintext-to-envelope migration visible and prevents accidental adoption
+    of an unreviewed old database.
+    """
+    active_kid, _keyring = _settings_encryption_keyring()
+    if from_kid is not None and (
+        not isinstance(from_kid, str)
+        or not _SETTINGS_ENCRYPTION_KID_RE.fullmatch(from_kid)
+    ):
+        raise SettingsEncryptionError("settings encryption previous KID is invalid")
+    db = SessionLocal()
+    migrated = 0
+    reencrypted = 0
+    try:
+        # A pre-fence database can only be adopted through an explicit KID
+        # assertion when it already contains secret envelopes.  Otherwise an
+        # operator could switch local active=new and silently claim old rows.
+        fence_existed = db.get(SettingsRecord, _SETTINGS_ENCRYPTION_FENCE_KEY) is not None
+        durable_kid = _lock_settings_encryption_fence(
+            db, active_kid, initial_kid=from_kid or active_kid
+        )
+        rows = (
+            db.query(SettingsRecord)
+            .filter(SettingsRecord.key.in_(_SENSITIVE_KEYS))
+            .with_for_update()
+            .all()
+        )
+        if not fence_existed and rows and from_kid is None:
+            raise SettingsEncryptionError(
+                "settings encryption bootstrap requires --from-kid for existing sensitive settings"
+            )
+        if durable_kid != active_kid:
+            if from_kid != durable_kid:
+                raise SettingsEncryptionError(
+                    "settings encryption rotation requires --from-kid matching the durable fence"
+                )
+            db.execute(
+                text("UPDATE settings SET value = :value WHERE key = :key"),
+                {"key": _SETTINGS_ENCRYPTION_FENCE_KEY, "value": active_kid},
+            )
+        elif from_kid is not None and from_kid != durable_kid:
+            raise SettingsEncryptionError(
+                "settings encryption --from-kid does not match the durable fence"
+            )
+
+        for row in rows:
+            value = row.value
+            if value is None:
+                continue
+            if value.startswith(_SETTINGS_ENCRYPTION_PREFIX):
+                plaintext = _decrypt_sensitive_setting(row.key, value)
+                envelope_kid = value[len(_SETTINGS_ENCRYPTION_PREFIX):].partition(":")[0]
+                if envelope_kid == active_kid:
+                    continue
+                reencrypted += 1
+            else:
+                if not allow_legacy_plaintext:
+                    raise LegacySensitiveSettingError(
+                        "legacy plaintext sensitive settings found; rerun with explicit migration approval"
+                    )
+                plaintext = value
+                migrated += 1
+            row.value = _encrypt_sensitive_setting(row.key, plaintext)
+        db.commit()
+        return {"migrated_plaintext": migrated, "reencrypted": reencrypted}
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def _validate_runtime_settings_encryption_fence() -> None:
+    """Reject an active-KID cutover bypass before runtime hydration.
+
+    Keep the historical startup fallback for a missing/unavailable settings
+    table: that state has no durable settings to decrypt.  Once the database
+    contains either a fence or any sensitive row, a process must prove its
+    local keyring agrees with the durable boundary before it can hydrate and
+    serve with those values.
+    """
+    db = SessionLocal()
+    try:
+        fence = db.get(SettingsRecord, _SETTINGS_ENCRYPTION_FENCE_KEY)
+        has_sensitive_rows = (
+            db.query(SettingsRecord.key)
+            .filter(SettingsRecord.key.in_(_SENSITIVE_KEYS))
+            .first()
+            is not None
+        )
+    except Exception:
+        return
+    finally:
+        db.close()
+    if fence is None and not has_sensitive_rows:
+        return
+    active_kid, _keyring = _settings_encryption_keyring()
+    # Re-open because the first session is deliberately closed before the
+    # keyring parse; no lock is required for this read-only startup check.
+    db = SessionLocal()
+    try:
+        _verify_settings_encryption_fence(db, active_kid)
+    finally:
+        db.close()
+
+
 def load_settings_into_env() -> bool:
     """At startup, hydrate os.environ with DB-stored overrides so every
     module that reads env once at import time still sees the saved values."""
     global _loaded
     with _lock:
+        _validate_runtime_settings_encryption_fence()
         overrides = _read_db_overrides()
         production = is_production_mode()
         # Only overrides carrying an approval marker written by an
@@ -798,10 +1260,10 @@ def update_settings(payload: dict, *, actor_id: Optional[str] = None) -> dict:
                     or parsed.password
                     or parsed.query
                     or parsed.fragment
-                    or not parsed.hostname.endswith(".blob.core.windows.net")
+                    or parsed.path not in {"", "/"}
                 ):
                     raise ValueError(
-                        "AZURE_STORAGE_ACCOUNT_URL must be an Azure Blob HTTPS account URL"
+                        "AZURE_STORAGE_ACCOUNT_URL must be an Azure Blob HTTPS endpoint URL"
                     )
                 new_val = new_val.rstrip("/")
             if key == "AZURE_STORAGE_CONTAINER" and new_val:
@@ -816,6 +1278,8 @@ def update_settings(payload: dict, *, actor_id: Optional[str] = None) -> dict:
                 "FRESHSERVICE_HISTORY_PAGES_PER_SYNC": (1, 5, int),
                 "FRESHSERVICE_CONVERSATIONS_PER_SYNC": (0, 5, int),
                 "FRESHSERVICE_ATTACHMENTS_PER_SYNC": (0, 20, int),
+                "ATTACHMENT_BLOB_DELETIONS_PER_SYNC": (0, 20, int),
+                "ATTACHMENT_BLOB_CLEANUP_INTERVAL_SECONDS": (30, 86_400, int),
                 "ATTACHMENT_MAX_BYTES": (1_048_576, 104_857_600, int),
             }
             if key in freshservice_numeric_bounds and new_val:
@@ -897,7 +1361,10 @@ def _reset_runtime(*, restart_scheduler: bool = True):
     if restart_scheduler:
         try:
             from . import sync_worker
-            sync_worker.stop_sync_worker()
+            # Settings reload is not an authorization to block an API process
+            # indefinitely behind an already-running scheduled job. Durable
+            # checkpoints make the next scheduler sweep safe to resume.
+            sync_worker.stop_sync_worker(wait=False)
             sync_worker.start_sync_worker()
         except Exception as e:
             print(f"[settings] restart sync worker error kind={type(e).__name__}")

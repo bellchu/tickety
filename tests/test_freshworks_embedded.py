@@ -1,3 +1,5 @@
+import hashlib
+import os
 import unittest
 from datetime import datetime, timedelta
 from unittest.mock import patch
@@ -8,16 +10,18 @@ from sqlalchemy.pool import StaticPool
 
 from app.backend.database import (
     Base,
+    ExternalUserRecord,
     IntegrationBindingRecord,
     IntegrationBootstrapRecord,
     IntegrationSessionRecord,
-    ExternalUserRecord,
     TicketRecord,
 )
 from app.backend.integrations import embedded
 
 
-class FreshworksEmbeddedSessionTests(unittest.TestCase):
+class FreshworksEmbeddedSessionRetirementTests(unittest.TestCase):
+    binding_id = "11111111-1111-4111-8111-111111111111"
+
     def setUp(self):
         self.engine = create_engine(
             "sqlite://",
@@ -28,7 +32,7 @@ class FreshworksEmbeddedSessionTests(unittest.TestCase):
         self.session_factory = sessionmaker(bind=self.engine)
         with self.session_factory() as db:
             db.add(IntegrationBindingRecord(
-                id="11111111-1111-4111-8111-111111111111",
+                id=self.binding_id,
                 provider="freshservice",
                 environment="trial",
                 state="active",
@@ -37,10 +41,9 @@ class FreshworksEmbeddedSessionTests(unittest.TestCase):
                 credential_reference="env://freshservice",
                 expires_at=datetime.utcnow() + timedelta(days=7),
             ))
-            db.flush()
             db.add(ExternalUserRecord(
                 id="external-user-99",
-                binding_id="11111111-1111-4111-8111-111111111111",
+                binding_id=self.binding_id,
                 provider="freshservice",
                 external_id="99",
                 user_type="agent",
@@ -50,7 +53,7 @@ class FreshworksEmbeddedSessionTests(unittest.TestCase):
             ))
             db.add(TicketRecord(
                 id="ticket-1",
-                binding_id="11111111-1111-4111-8111-111111111111",
+                binding_id=self.binding_id,
                 external_source="freshservice",
                 external_id="42",
                 external_workspace_id="10",
@@ -62,83 +65,81 @@ class FreshworksEmbeddedSessionTests(unittest.TestCase):
     def tearDown(self):
         self.engine.dispose()
 
-    def test_one_time_code_issues_hashed_ticket_scoped_session(self):
-        with self.session_factory() as db, patch.dict(
-            "os.environ", {"FRESHWORKS_APP_BOOTSTRAP_SECRET": "s" * 32}
-        ):
-            embedded.verify_installation_secret("s" * 32)
-            code, _expires_at = embedded.issue_bootstrap_code(
-                db,
-                binding_id="11111111-1111-4111-8111-111111111111",
-                account_host="https://trial-example.freshservice.com",
-                external_user_id="99",
-                workspace_id="10",
-                external_ticket_id="42",
-                ticket_updated_at=datetime.utcnow(),
-                audience="ticket_sidebar",
-            )
-            stored = db.query(IntegrationBootstrapRecord).one()
-            self.assertNotEqual(stored.code_hash, code)
-
-            token, session = embedded.redeem_bootstrap_code(
-                db,
-                binding_id="11111111-1111-4111-8111-111111111111",
-                code=code,
-            )
-            self.assertEqual(session.external_ticket_id, "42")
-            self.assertNotEqual(session.token_hash, token)
-            self.assertEqual(db.query(IntegrationSessionRecord).count(), 1)
-            with self.assertRaises(embedded.EmbeddedAuthError):
-                embedded.redeem_bootstrap_code(
+    def test_real_binding_agent_and_ticket_cannot_issue_a_legacy_bootstrap_code(self):
+        with self.session_factory() as db:
+            with self.assertRaisesRegex(
+                embedded.EmbeddedAuthError,
+                embedded.EMBEDDED_ACCESS_UNAVAILABLE_MESSAGE,
+            ):
+                embedded.issue_bootstrap_code(
                     db,
-                    binding_id="11111111-1111-4111-8111-111111111111",
-                    code=code,
+                    binding_id=self.binding_id,
+                    account_host="trial-example.freshservice.com",
+                    external_user_id="99",
+                    workspace_id="10",
+                    external_ticket_id="42",
+                    ticket_updated_at=datetime.utcnow(),
+                    audience="ticket_sidebar",
                 )
+            self.assertEqual(db.query(IntegrationBootstrapRecord).count(), 0)
+            self.assertEqual(db.query(IntegrationSessionRecord).count(), 0)
 
-            principal = embedded.authenticate_session(db, f"Bearer {token}")
-            self.assertEqual(principal.external_user.external_id, "99")
-            embedded.require_ticket_scope(principal, "42")
-            with self.assertRaises(embedded.EmbeddedAuthError):
-                embedded.require_ticket_scope(principal, "43")
-
-    def test_bootstrap_rejects_cross_workspace_context(self):
-        with self.session_factory() as db, self.assertRaises(embedded.EmbeddedAuthError):
-            embedded.issue_bootstrap_code(
-                db,
-                binding_id="11111111-1111-4111-8111-111111111111",
-                account_host="trial-example.freshservice.com",
+    def test_previously_issued_code_and_token_are_rejected_immediately(self):
+        with self.session_factory() as db:
+            db.add(IntegrationBootstrapRecord(
+                code_hash=hashlib.sha256(b"legacy-code").hexdigest(),
+                binding_id=self.binding_id,
                 external_user_id="99",
-                workspace_id="11",
-                external_ticket_id="42",
-                ticket_updated_at=None,
+                workspace_id="10",
                 audience="ticket_sidebar",
-            )
-
-    def test_bootstrap_does_not_require_or_issue_a_tickety_user_identity(self):
-        with self.session_factory() as db, patch.dict(
-            "os.environ", {"FRESHWORKS_APP_BOOTSTRAP_SECRET": "s" * 32}
-        ):
-            code, _ = embedded.issue_bootstrap_code(
-                db,
-                binding_id="11111111-1111-4111-8111-111111111111",
-                account_host="trial-example.freshservice.com",
+                context_json="{}",
+                expires_at=datetime.utcnow() + timedelta(minutes=1),
+            ))
+            db.add(IntegrationSessionRecord(
+                token_hash=hashlib.sha256(b"legacy-token").hexdigest(),
+                binding_id=self.binding_id,
                 external_user_id="99",
                 workspace_id="10",
                 external_ticket_id="42",
-                ticket_updated_at=None,
                 audience="ticket_sidebar",
-            )
-            _token, session = embedded.redeem_bootstrap_code(
-                db,
-                binding_id="11111111-1111-4111-8111-111111111111",
-                code=code,
-            )
-            self.assertFalse(hasattr(session, "user_id"))
+                expires_at=datetime.utcnow() + timedelta(minutes=10),
+            ))
+            db.commit()
 
-    def test_installation_secret_fails_closed(self):
-        with patch.dict("os.environ", {"FRESHWORKS_APP_BOOTSTRAP_SECRET": "short"}):
-            with self.assertRaises(embedded.EmbeddedAuthError):
-                embedded.verify_installation_secret("short")
+            with self.assertRaisesRegex(
+                embedded.EmbeddedAuthError,
+                embedded.EMBEDDED_ACCESS_UNAVAILABLE_MESSAGE,
+            ):
+                embedded.redeem_bootstrap_code(
+                    db, binding_id=self.binding_id, code="legacy-code"
+                )
+            with self.assertRaisesRegex(
+                embedded.EmbeddedAuthError,
+                embedded.EMBEDDED_ACCESS_UNAVAILABLE_MESSAGE,
+            ):
+                embedded.authenticate_session(db, "Bearer legacy-token")
+
+    def test_legacy_flow_cannot_be_reenabled_with_an_environment_flag(self):
+        with patch.dict(
+            os.environ,
+            {
+                "FRESHWORKS_EMBEDDED_ACCESS_ENABLED": "true",
+                "FRESHWORKS_APP_BOOTSTRAP_SECRET": "s" * 32,
+            },
+            clear=False,
+        ):
+            with self.assertRaisesRegex(
+                embedded.EmbeddedAuthError,
+                embedded.EMBEDDED_ACCESS_UNAVAILABLE_MESSAGE,
+            ):
+                embedded.verify_installation_secret(
+                    "ignored", binding_id=self.binding_id
+                )
+            with self.assertRaisesRegex(
+                embedded.EmbeddedAuthError,
+                embedded.EMBEDDED_ACCESS_UNAVAILABLE_MESSAGE,
+            ):
+                embedded.installation_secret_for_binding(self.binding_id)
 
 
 if __name__ == "__main__":

@@ -251,12 +251,13 @@ class FreshserviceReadOnlyContractTests(unittest.TestCase):
         client.get.assert_awaited_once()
         self.assertEqual(adapter.rate_limit_snapshot()["remaining"], 0)
 
-    def test_embedded_ticket_context_route_is_get_only(self):
-        methods = set()
-        for route in main.app.routes:
-            if getattr(route, "path", None) == "/integrations/freshworks/tickets/{external_ticket_id}":
-                methods.update(route.methods or set())
-        self.assertEqual(methods, {"GET"})
+    def test_retired_embedded_routes_are_not_public_or_registered(self):
+        self.assertFalse(main._is_public_http_path("/integrations/freshworks/bootstrap"))
+        self.assertFalse(main._is_public_http_path("/integrations/freshworks/tickets/42"))
+        self.assertFalse(any(
+            str(getattr(route, "path", "")).startswith("/integrations/freshworks/")
+            for route in main.app.routes
+        ))
 
     def test_production_ticket_lifecycle_is_disabled(self):
         with patch.object(main.settings_module, "is_production_mode", return_value=True):

@@ -3,7 +3,7 @@ import asyncio
 import threading
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from typing import Callable, Optional
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy import case, func, or_, text
@@ -22,6 +22,7 @@ from .ai_eligibility import (
 )
 from .ai_state import automatic_ai_policy_eligible_filter
 from .attachment_storage import attachment_storage_configured
+from .attachment_gc import collect_superseded_attachment_blobs
 from .integrations.sync import (
     AUTOMATIC_FETCH_DAYS,
     AUTOMATIC_AI_LOOKBACK_DAYS,
@@ -45,18 +46,40 @@ from . import directory_service
 
 _scheduler: Optional[BackgroundScheduler] = None
 _lock = threading.Lock()
+# This is deliberately process-local.  It closes admission immediately during
+# termination; database-backed leases/cursors remain the recovery contract for
+# work which was already running when the signal arrived.
+_admission_stopped = threading.Event()
+_admission_generation = 0
+_job_context = threading.local()
 
 _PROCESS_ROLE_ENV = "TICKETY_PROCESS_ROLE"
 _SCHEDULER_ENABLED_ENV = "TICKETY_SCHEDULER_ENABLED"
 _VALID_PROCESS_ROLES = {"api", "worker", "all"}
 
 
-def _refresh_admin_settings() -> None:
-    """Pick up portal-approved settings without restarting the worker."""
+def _refresh_admin_settings() -> bool:
+    """Pick up portal-approved settings without restarting the worker.
+
+    A transient settings-store read has historically meant "try again next
+    sweep" and may continue with the last known in-memory configuration.  An
+    authenticated sensitive setting is different: continuing after its
+    envelope can no longer be decrypted would silently use a stale credential.
+    Signal that condition to callers so externally side-effecting jobs fail
+    closed for this sweep.
+    """
     try:
         settings_module.refresh_settings_from_db()
+        return True
+    except settings_module.SettingsEncryptionError as exc:
+        print(
+            "[settings] worker refresh failed closed "
+            f"kind={type(exc).__name__}"
+        )
+        return False
     except Exception as exc:
-        print(f"[settings] worker refresh error kind={type(exc).__name__}")
+        print(f"[settings] worker refresh transient error kind={type(exc).__name__}")
+        return True
 
 
 def process_role() -> str:
@@ -105,6 +128,54 @@ def _bounded_interval(env_name: str, default: int, minimum: int, maximum: int) -
     return max(minimum, min(configured, maximum))
 
 
+def _admission_open() -> bool:
+    """Check both process shutdown and this callback's scheduler generation."""
+    generation = getattr(_job_context, "admission_generation", None)
+    return not _admission_stopped.is_set() and (
+        generation is None or generation == _admission_generation
+    )
+
+
+def _run_scheduled_job(
+    callback: Callable[[], None],
+    generation: int,
+    admission_allowed: Optional[Callable[[], bool]] = None,
+    on_completion: Optional[Callable[[], None]] = None,
+) -> None:
+    """Prevent callbacks from a nonblocking-replaced scheduler admitting work.
+
+    The completion hook is deliberately invoked by the scheduler's executor,
+    rather than a process-local timer.  A worker health probe can therefore
+    distinguish a live scheduler that finishes work from a surviving Python
+    PID whose scheduler or job executor has wedged.
+    """
+    if not _admission_open() or (admission_allowed and not admission_allowed()):
+        return
+    _job_context.admission_generation = generation
+    try:
+        if _admission_open() and (admission_allowed is None or admission_allowed()):
+            callback()
+    finally:
+        _job_context.admission_generation = None
+        # A callback queued by a scheduler that was stopped with wait=False
+        # can wake after a replacement scheduler has started and cleared the
+        # process-wide admission event.  It must not make the replacement look
+        # healthy: only the scheduler generation that actually owns this
+        # callback may publish a completion heartbeat.
+        if (
+            on_completion is not None
+            and not _admission_stopped.is_set()
+            and generation == _admission_generation
+        ):
+            try:
+                on_completion()
+            except Exception as exc:
+                # Health reporting must never take down scheduled work.  The
+                # probe will naturally become stale if its storage remains
+                # unavailable.
+                print(f"[sync_worker] heartbeat error kind={type(exc).__name__}")
+
+
 async def _process_ai_candidates(
     candidates: list[tuple[str, Optional[str]]],
 ) -> Optional[LLMCapacityError]:
@@ -130,7 +201,7 @@ async def _process_ai_candidates(
         requested_artifact: Optional[str],
     ) -> Optional[LLMCapacityError]:
         async with semaphore:
-            if stop.is_set():
+            if stop.is_set() or not _admission_open():
                 return None
             db = SessionLocal()
             try:
@@ -143,7 +214,7 @@ async def _process_ai_candidates(
                     ticket
                     and ticket.ai_status == "running"
                     and ticket.ai_lease_expires_at
-                    and ticket.ai_lease_expires_at >= now
+                    and ticket.ai_lease_expires_at > now
                 )
                 retry_due = bool(
                     ticket
@@ -175,6 +246,9 @@ async def _process_ai_candidates(
                 force = ticket.ai_status in {"queued", "running"}
                 db.commit()
                 db.refresh(ticket)
+                if not _admission_open():
+                    db.rollback()
+                    return None
                 await _auto_process(ticket, db, force=force)
                 return None
             except LLMCapacityError as exc:
@@ -247,6 +321,8 @@ def _backfill_escalation_risk(db) -> int:
 
 def _risk_backfill_job() -> None:
     """Run optional risk enrichment outside the newest-ticket AI lane."""
+    if not _admission_open():
+        return
     db = SessionLocal()
     try:
         _backfill_escalation_risk(db)
@@ -349,7 +425,7 @@ def _load_ai_sweep(
                 (TicketRecord.ai_status == "running")
                 & or_(
                     TicketRecord.ai_lease_expires_at.is_(None),
-                    TicketRecord.ai_lease_expires_at < sweep_now,
+                    TicketRecord.ai_lease_expires_at <= sweep_now,
                 )
             ),
         ),
@@ -536,7 +612,10 @@ def _auto_triage_job():
     independently, so the sweep size is a fairness bound rather than a hard
     provider-rate ceiling.
     """
-    _refresh_admin_settings()
+    if not _admission_open():
+        return
+    if not _refresh_admin_settings():
+        return
     db = None
     try:
         db = SessionLocal()
@@ -573,6 +652,9 @@ def _auto_triage_job():
                 "[auto-triage] recent lookback unavailable "
                 f"kind={type(exc).__name__}"
             )
+        if not _admission_open():
+            db.rollback()
+            return
         sweep = _load_ai_sweep(
             db,
             batch_size=batch_size,
@@ -599,6 +681,8 @@ def _auto_triage_job():
         # End the read-only selection transaction before long provider calls;
         # every candidate owns a separate short-lived session and claim.
         db.rollback()
+        if not _admission_open():
+            return
         capacity_error = asyncio.run(_process_ai_candidates(sweep.candidates))
         if capacity_error:
             print(
@@ -619,7 +703,10 @@ def _auto_triage_job():
 
 
 def _sync_job():
-    _refresh_admin_settings()
+    if not _admission_open():
+        return
+    if not _refresh_admin_settings():
+        return
     provider = configured_provider()
     if provider in ("standalone", "none", ""):
         # An activated binding is authoritative over the legacy provider env.
@@ -649,8 +736,36 @@ def _sync_job():
         print(f"[sync_worker] error kind={type(e).__name__}")
 
 
+def _attachment_blob_cleanup_job():
+    """Advance durable blob-retirement tasks independently of provider sync.
+
+    A paused provider, an invalid binding, or a Freshservice outage must not
+    retain already-authorized private blob deletions indefinitely.  The
+    collector owns its own short transactions and commits its lease before any
+    Azure call, so this scheduled callback never performs remote I/O inside a
+    sync transaction.
+    """
+    if not _admission_open():
+        return
+    if not _refresh_admin_settings():
+        return
+    try:
+        result = collect_superseded_attachment_blobs()
+        if result["deleted"] or result["failed"] or result["cancelled"]:
+            print(
+                "[attachments] blob cleanup "
+                f"deleted={result['deleted']} failed={result['failed']} "
+                f"cancelled={result['cancelled']}"
+            )
+    except Exception as exc:
+        print(f"[attachments] blob cleanup error kind={type(exc).__name__}")
+
+
 def _directory_sync_job():
-    _refresh_admin_settings()
+    if not _admission_open():
+        return
+    if not _refresh_admin_settings():
+        return
     if not settings_module.get_bool("DIRECTORY_SYNC_ENABLED"):
         return
     provider = configured_provider()
@@ -680,18 +795,40 @@ def _directory_sync_job():
         print(f"[directory_sync_worker] error kind={type(exc).__name__}")
 
 
-def start_sync_worker() -> bool:
+def _heartbeat_job() -> None:
+    """Prove the scheduler can dispatch a callback without business work.
+
+    Business intervals may be intentionally configured as high as one day. A
+    completion marker driven only by those jobs would either restart a healthy
+    low-frequency worker or wait a day to detect a wedged scheduler. This job
+    exists only when the caller supplied a completion hook.
+    """
+
+
+def start_sync_worker(
+    *,
+    admission_allowed: Optional[Callable[[], bool]] = None,
+    on_job_completion: Optional[Callable[[], None]] = None,
+) -> bool:
     """Start the process-local scheduler once when this role owns jobs."""
-    global _scheduler
+    global _scheduler, _admission_generation
     if not scheduler_enabled_for_process():
         return False
     with _lock:
         if _scheduler is not None:
             return False
+        if admission_allowed is not None and not admission_allowed():
+            return False
+        _admission_stopped.clear()
+        _admission_generation += 1
+        generation = _admission_generation
         sync_interval = _bounded_interval("SYNC_INTERVAL_SECONDS", 60, 10, 86_400)
         triage_interval = _bounded_interval("AUTO_TRIAGE_INTERVAL_SECONDS", 30, 10, 86_400)
         risk_interval = _bounded_interval(
             "AI_RISK_BACKFILL_INTERVAL_SECONDS", 60, 10, 86_400
+        )
+        attachment_cleanup_interval = _bounded_interval(
+            "ATTACHMENT_BLOB_CLEANUP_INTERVAL_SECONDS", 300, 30, 86_400
         )
         scheduler = BackgroundScheduler(daemon=True)
         job_defaults = {
@@ -700,8 +837,9 @@ def start_sync_worker() -> bool:
             "replace_existing": True,
         }
         scheduler.add_job(
-            _sync_job,
+            _run_scheduled_job,
             "interval",
+            args=(_sync_job, generation, admission_allowed, on_job_completion),
             seconds=sync_interval,
             id="sync_job",
             misfire_grace_time=sync_interval,
@@ -709,8 +847,24 @@ def start_sync_worker() -> bool:
             **job_defaults,
         )
         scheduler.add_job(
-            _auto_triage_job,
+            _run_scheduled_job,
             "interval",
+            args=(
+                _attachment_blob_cleanup_job,
+                generation,
+                admission_allowed,
+                on_job_completion,
+            ),
+            seconds=attachment_cleanup_interval,
+            id="attachment_blob_cleanup_job",
+            misfire_grace_time=attachment_cleanup_interval,
+            next_run_time=datetime.now(),
+            **job_defaults,
+        )
+        scheduler.add_job(
+            _run_scheduled_job,
+            "interval",
+            args=(_auto_triage_job, generation, admission_allowed, on_job_completion),
             seconds=triage_interval,
             id="auto_triage_job",
             misfire_grace_time=triage_interval,
@@ -718,14 +872,28 @@ def start_sync_worker() -> bool:
             **job_defaults,
         )
         scheduler.add_job(
-            _risk_backfill_job,
+            _run_scheduled_job,
             "interval",
+            args=(_risk_backfill_job, generation, admission_allowed, on_job_completion),
             seconds=risk_interval,
             id="risk_backfill_job",
             misfire_grace_time=risk_interval,
             next_run_time=datetime.now(),
             **job_defaults,
         )
+        if on_job_completion is not None:
+            # This must remain below worker_healthcheck's 30-second lower
+            # bound. It is a scheduler/executor liveness signal, not work.
+            scheduler.add_job(
+                _run_scheduled_job,
+                "interval",
+                args=(_heartbeat_job, generation, admission_allowed, on_job_completion),
+                seconds=10,
+                id="heartbeat_job",
+                misfire_grace_time=10,
+                next_run_time=datetime.now(),
+                **job_defaults,
+            )
         directory_interval = settings_module.get_int(
             "DIRECTORY_SYNC_INTERVAL_SECONDS",
             default=21_600,
@@ -734,8 +902,14 @@ def start_sync_worker() -> bool:
         )
         if settings_module.get_bool("DIRECTORY_SYNC_ENABLED"):
             scheduler.add_job(
-                _directory_sync_job,
+                _run_scheduled_job,
                 "interval",
+                args=(
+                    _directory_sync_job,
+                    generation,
+                    admission_allowed,
+                    on_job_completion,
+                ),
                 seconds=directory_interval,
                 id="directory_sync_job",
                 misfire_grace_time=directory_interval,
@@ -744,6 +918,10 @@ def start_sync_worker() -> bool:
             )
         try:
             scheduler.start()
+            if admission_allowed is not None and not admission_allowed():
+                _admission_stopped.set()
+                scheduler.shutdown(wait=False)
+                return False
         except Exception:
             try:
                 scheduler.shutdown(wait=False)
@@ -755,6 +933,7 @@ def start_sync_worker() -> bool:
             f"[sync_worker] started role={process_role()}, "
             f"sync every {sync_interval}s, auto-triage every {triage_interval}s, "
             f"risk backfill every {risk_interval}s, "
+            f"attachment cleanup every {attachment_cleanup_interval}s, "
             f"directory sync "
             f"{'every ' + str(directory_interval) + 's' if settings_module.get_bool('DIRECTORY_SYNC_ENABLED') else 'disabled'}"
         )
@@ -763,10 +942,18 @@ def start_sync_worker() -> bool:
 
 def stop_sync_worker(wait: bool = True) -> bool:
     """Stop the process-local scheduler once and optionally drain jobs."""
-    global _scheduler
+    global _scheduler, _admission_generation
     with _lock:
         if _scheduler is None:
             return False
+        # Set this before APScheduler is told to stop.  A callback already
+        # dequeued by its executor then sees the same no-new-work boundary as
+        # callbacks which have not yet started.
+        _admission_stopped.set()
+        # ``wait=False`` leaves old executor threads alive. Invalidating their
+        # generation means a rapid settings restart cannot reopen their work
+        # admission merely by clearing the process-wide event.
+        _admission_generation += 1
         scheduler = _scheduler
         _scheduler = None
         scheduler.shutdown(wait=wait)

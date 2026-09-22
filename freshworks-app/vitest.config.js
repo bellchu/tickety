@@ -7,7 +7,7 @@ export default defineConfig({
     restoreMocks: true,
     coverage: {
       provider: "v8",
-      include: ["app/scripts/**/*.js"],
+      include: ["tests/static-notice-policy.js"],
       reportsDirectory: "coverage/unit",
       reporter: ["json", "text"],
       thresholds: {

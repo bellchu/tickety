@@ -86,14 +86,14 @@ def load_ai_queue_metrics(
         count_if(and_(
             is_active,
             queue.ai_status == "running",
-            queue.ai_lease_expires_at >= now,
+            queue.ai_lease_expires_at > now,
         ), "running_active"),
         count_if(and_(
             is_active,
             queue.ai_status == "running",
             or_(
                 queue.ai_lease_expires_at.is_(None),
-                queue.ai_lease_expires_at < now,
+                queue.ai_lease_expires_at <= now,
             ),
         ), "lease_expired"),
         func.min(case((and_(

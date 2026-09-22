@@ -8,7 +8,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timedelta
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from sqlalchemy import text
 
@@ -29,6 +29,27 @@ _MAX_ATTEMPTS = 2
 _worker_lock = threading.Lock()
 _worker_thread: Optional[threading.Thread] = None
 _stop_event = threading.Event()
+
+
+def embedding_worker_running() -> bool:
+    """Return whether this process still owns a live embedding-loop thread."""
+    with _worker_lock:
+        return bool(
+            _worker_thread
+            and _worker_thread.is_alive()
+            and not _stop_event.is_set()
+        )
+
+
+def _report_progress(callback: Callable[[], None] | None) -> None:
+    """Publish bounded RAG work completion without risking worker admission."""
+    if callback is None or _stop_event.is_set():
+        return
+    try:
+        callback()
+    except Exception as exc:
+        # Health reporting must not terminate durable embedding recovery.
+        print(f"[rag-v2-worker] heartbeat error kind={type(exc).__name__}")
 
 
 async def _embed_texts(inputs: list[str]) -> list[list[float]]:
@@ -312,6 +333,8 @@ def _commit_failure(row: dict[str, Any], error_code: str) -> None:
 
 async def _embed_with_isolation(
     rows: list[dict[str, Any]],
+    *,
+    on_progress: Callable[[], None] | None = None,
 ) -> tuple[list[tuple[dict[str, Any], list[float]]], list[dict[str, Any]]]:
     try:
         vectors = await _embed_texts([
@@ -323,41 +346,78 @@ async def _embed_with_isolation(
             )
             for row in rows
         ])
+        _report_progress(on_progress)
         return list(zip(rows, vectors)), []
     except Exception:
+        # Each provider call has _embed_texts' bounded deadline. Renew only
+        # after it has returned, never on a timer that could mask a wedge.
+        _report_progress(on_progress)
         if len(rows) == 1:
             return [], rows
         midpoint = len(rows) // 2
         left, right = await asyncio.gather(
-            _embed_with_isolation(rows[:midpoint]),
-            _embed_with_isolation(rows[midpoint:]),
+            _embed_with_isolation(rows[:midpoint], on_progress=on_progress),
+            _embed_with_isolation(rows[midpoint:], on_progress=on_progress),
         )
         return [*left[0], *right[0]], [*left[1], *right[1]]
 
 
-async def process_once(owner: str | None = None) -> int:
+async def process_once(
+    owner: str | None = None,
+    *,
+    admission_allowed: Callable[[], bool] | None = None,
+    on_progress: Callable[[], None] | None = None,
+) -> int:
     from ..ticket_vectors import _embedding_identity
 
+    # The worker process sets this before it asks APScheduler to stop. Do not
+    # acquire a fresh durable lease after termination has begun; a lease that
+    # won a race is deliberately left to its normal expiry/recovery path.
+    if _stop_event.is_set() or (
+        admission_allowed is not None and not admission_allowed()
+    ):
+        return 0
     owner = owner or f"rag-worker-{uuid.uuid4()}"
     identity = _embedding_identity()
     rows = await asyncio.to_thread(_claim_batch, owner, identity)
+    _report_progress(on_progress)
+    if _stop_event.is_set() or (
+        admission_allowed is not None and not admission_allowed()
+    ):
+        return 0
     if not rows:
         return 0
-    successes, failures = await _embed_with_isolation(rows)
+    successes, failures = await _embed_with_isolation(rows, on_progress=on_progress)
     for row, vector in successes:
         try:
             await asyncio.to_thread(_commit_success, row, vector, identity)
+            _report_progress(on_progress)
         except Exception:
             await asyncio.to_thread(_commit_failure, row, "commit_failed")
+            _report_progress(on_progress)
     for row in failures:
         await asyncio.to_thread(_commit_failure, row, "provider_invalid_item")
+        _report_progress(on_progress)
     return len(rows)
 
 
-async def _run_loop(owner: str) -> None:
-    while not _stop_event.is_set():
+async def _run_loop(
+    owner: str,
+    admission_allowed: Callable[[], bool] | None = None,
+    on_progress: Callable[[], None] | None = None,
+) -> None:
+    # Startup grace is published only once the new thread entered its asyncio
+    # loop. Later renewals are tied to bounded DB/provider subwork.
+    _report_progress(on_progress)
+    while not _stop_event.is_set() and (
+        admission_allowed is None or admission_allowed()
+    ):
         try:
-            processed = await process_once(owner)
+            processed = await process_once(
+                owner,
+                admission_allowed=admission_allowed,
+                on_progress=on_progress,
+            )
         except Exception as exc:
             print(f"[rag-v2-worker] batch failed kind={type(exc).__name__}")
             processed = 0
@@ -365,7 +425,11 @@ async def _run_loop(owner: str) -> None:
             await asyncio.to_thread(_stop_event.wait, worker_poll_seconds())
 
 
-def start_embedding_worker() -> bool:
+def start_embedding_worker(
+    *,
+    admission_allowed: Callable[[], bool] | None = None,
+    on_progress: Callable[[], None] | None = None,
+) -> bool:
     global _worker_thread
     if not worker_enabled():
         return False
@@ -376,22 +440,46 @@ def start_embedding_worker() -> bool:
     with _worker_lock:
         if _worker_thread and _worker_thread.is_alive():
             return True
+        if admission_allowed is not None and not admission_allowed():
+            return False
         _stop_event.clear()
         owner = f"rag-worker-{uuid.uuid4()}"
         _worker_thread = threading.Thread(
-            target=lambda: asyncio.run(_run_loop(owner)),
+            target=lambda: asyncio.run(
+                _run_loop(owner, admission_allowed, on_progress)
+            ),
             name="rag-v2-embedding-worker",
             daemon=True,
         )
         _worker_thread.start()
+        if admission_allowed is not None and not admission_allowed():
+            _stop_event.set()
+            return False
         return True
 
 
-def stop_embedding_worker(wait: bool = True) -> None:
+def stop_embedding_worker(
+    wait: bool = True,
+    *,
+    timeout_seconds: float | None = None,
+) -> bool:
+    """Stop embedding admission and wait only for a bounded caller budget.
+
+    A blocked provider call cannot be safely interrupted from another thread.
+    Leaving its database lease intact makes a replacement process recover it
+    after normal lease expiry instead of risking a concurrent commit.
+    """
     global _worker_thread
     _stop_event.set()
     thread = _worker_thread
     if wait and thread and thread.is_alive():
-        thread.join(timeout=max(5, worker_poll_seconds() + 2))
+        timeout = (
+            max(0.0, float(timeout_seconds))
+            if timeout_seconds is not None
+            else max(5, worker_poll_seconds() + 2)
+        )
+        thread.join(timeout=timeout)
     if thread is None or not thread.is_alive():
         _worker_thread = None
+        return True
+    return False

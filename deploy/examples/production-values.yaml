@@ -9,10 +9,45 @@ config:
   corsAllowOrigins: https://tickety.example.com
   cookieSecure: true
   cookieSameSite: lax
+  # `auto` is raw-write compatible only during an upgrade; a new install gets
+  # hashed storage. Once no prior API Pod remains, set `hashed` explicitly to
+  # stop raw writes; legacy rows remain readable only until normal expiry.
+  sessionStorageMode: auto
 
 frontend:
+  # Two public proxies preserve service through one Pod/node disruption.
+  replicaCount: 2
+  topologySpread:
+    # Keep the public proxy replicas on separate nodes when capacity permits.
+    enabled: true
+  image:
+    # Replace both repository and tag before direct Helm production use. The
+    # tag must identify immutable build content (for example, a Git SHA).
+    # ./deploy.sh kubernetes overrides these two fields from --registry/--tag.
+    repository: registry.example.com/your-team/tickety/frontend
+    tag: REPLACE_WITH_GIT_SHA
+    # Replace with the manifest digest printed by the production deployer.
+    # This all-zero value is only a syntax-valid documentation placeholder.
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
   service:
     type: ClusterIP
+
+backend:
+  # Pair with the frontend replicas and the PDBs rendered by the chart.
+  replicaCount: 2
+  topologySpread:
+    # Avoid a single node taking both API replicas out of service.
+    enabled: true
+  image:
+    # Keep this paired with frontend.image.tag; never substitute `latest`.
+    repository: registry.example.com/your-team/tickety/backend
+    tag: REPLACE_WITH_GIT_SHA
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+
+# Production workload Pods must use repository@sha256 references. `deploy.sh`
+# provides real values after each pushed build.
+imageDigestPolicy:
+  requireDigests: true
 
 ingress:
   enabled: true
@@ -24,6 +59,9 @@ ingress:
 
 postgresql:
   enabled: true
+  image:
+    # Replace with the exact manifest digest of the bundled pgvector image.
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
   persistence:
     enabled: true
     size: 20Gi

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useLayoutEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { createTicketStreamWS } from "@/lib/ws";
 import type { TicketAnalysisResult, TriageStep } from "@/lib/types";
@@ -29,6 +29,10 @@ export function AIThinkingStream({ ticketId, hasExisting, recoveryState, onCompl
   const [error, setError] = useState("");
   const wsRef = useRef<ReturnType<typeof createTicketStreamWS> | null>(null);
   const watchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // A detail route changes its `ticketId` without necessarily unmounting this
+  // component. Keep an ownership generation so a late message from the old
+  // ticket can never paint analysis state into the newly selected ticket.
+  const streamGenerationRef = useRef(0);
   const queryClient = useQueryClient();
   const recoveryQueued = recoveryState === "queued";
 
@@ -49,36 +53,57 @@ export function AIThinkingStream({ ticketId, hasExisting, recoveryState, onCompl
     watchdogRef.current = setTimeout(onTimeout, 30_000);
   };
 
-  useEffect(() => {
-    return () => {
-      clearWatchdog();
-      wsRef.current?.disconnect();
-    };
-  }, []);
-
-  const finishWithError = (message: string) => {
-    setError(message);
-    setRunning(false);
+  useLayoutEffect(() => {
+    const generation = streamGenerationRef.current + 1;
+    streamGenerationRef.current = generation;
     clearWatchdog();
     wsRef.current?.disconnect();
     wsRef.current = null;
-  };
+    setSteps([]);
+    setRunning(false);
+    setResult(null);
+    setError("");
+
+    return () => {
+      // Effect cleanup only runs when this ticket leaves the tree (or the
+      // component unmounts). A stream started after the effect was installed
+      // still belongs to that departing ticket, so it must be invalidated and
+      // disconnected too. Leaving it alive would let an unmounted component
+      // retain a socket and receive late callbacks.
+      streamGenerationRef.current += 1;
+      clearWatchdog();
+      wsRef.current?.disconnect();
+      wsRef.current = null;
+    };
+  }, [ticketId]);
 
   const startTriage = async () => {
+    const generation = streamGenerationRef.current + 1;
+    streamGenerationRef.current = generation;
+    clearWatchdog();
+    wsRef.current?.disconnect();
     setRunning(true);
     setSteps([]);
     setResult(null);
     setError("");
     const ws = createTicketStreamWS(ticketId);
     wsRef.current = ws;
+    const isCurrentStream = () => (
+      streamGenerationRef.current === generation && wsRef.current === ws
+    );
     let settled = false;
     const fail = (message: string) => {
-      if (settled) return;
+      if (settled || !isCurrentStream()) return;
       settled = true;
-      finishWithError(message);
+      setError(message);
+      setRunning(false);
+      clearWatchdog();
+      ws.disconnect();
+      if (wsRef.current === ws) wsRef.current = null;
     };
     startHandshakeWatchdog(() => fail("The analysis stream could not start. Check your connection and try again."));
     ws.onMessage((data) => {
+      if (!isCurrentStream()) return;
       if (!data || typeof data !== "object") {
         fail("The analysis stream returned an unexpected message. Please try again.");
         return;
@@ -104,8 +129,8 @@ export function AIThinkingStream({ ticketId, hasExisting, recoveryState, onCompl
           s.status === "error" ? s : { ...s, status: "done" as const }
         )));
         setRunning(false);
-        wsRef.current?.disconnect();
-        wsRef.current = null;
+        ws.disconnect();
+        if (wsRef.current === ws) wsRef.current = null;
         onComplete?.(result);
         queryClient.invalidateQueries({ queryKey: ["ticket", ticketId] });
         queryClient.invalidateQueries({ queryKey: ["tickets"] });

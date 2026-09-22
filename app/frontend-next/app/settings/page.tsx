@@ -14,7 +14,7 @@ import {
   TicketStatusConfig,
   BuildInfo,
 } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, safeExternalUrl } from "@/lib/utils";
 import {
   Settings as SettingsIcon, Save, RefreshCw, CheckCircle2, AlertCircle,
   Users, Download, Zap, Plus, Trash2, ShieldCheck, Activity,
@@ -1284,8 +1284,56 @@ function FreshserviceOAuthSetup({
   productionSettingsReadOnly: boolean;
 }) {
   const { data: status } = useQuery({ queryKey: ["oauth-status"], queryFn: api.getOAuthStatus, refetchInterval: 30000 });
-  const authMut = useMutation({ mutationFn: api.getOAuthAuthorizeUrl, onSuccess: (res) => window.open(res.url, "_blank", "width=700,height=600,noopener,noreferrer") });
+  const [authorizeWindowError, setAuthorizeWindowError] = useState<string | null>(null);
+  const authMut = useMutation({ mutationFn: api.getOAuthAuthorizeUrl });
   const configured = keyReady("FRESHSERVICE_OAUTH_CLIENT_ID") && keyReady("FRESHSERVICE_OAUTH_CLIENT_SECRET") && Boolean(form.FRESHSERVICE_OAUTH_REDIRECT_URI?.trim());
+
+  const startAuthorization = () => {
+    // The new window must be created in this click handler. Opening it after
+    // the asynchronous URL request returns is treated as a popup by modern
+    // browsers and is commonly blocked.
+    const authorizePopup = window.open("", "_blank", "popup,width=700,height=600");
+    setAuthorizeWindowError(null);
+    authMut.reset();
+    if (!authorizePopup) {
+      setAuthorizeWindowError("Your browser blocked the authorization window. Allow pop-ups for this site and try again.");
+      return;
+    }
+
+    try {
+      // Do not give the provider page a handle back to this administration tab.
+      authorizePopup.opener = null;
+      authorizePopup.document.title = "Tickety authorization";
+      authorizePopup.document.body.textContent = "Preparing secure authorization…";
+    } catch {
+      // A browser may limit access to a just-created auxiliary window. The
+      // navigation below still has a same-origin about:blank target to use.
+    }
+
+    authMut.mutate(undefined, {
+      onSuccess: (result) => {
+        const authorizationUrl = safeExternalUrl(result.url);
+        if (!authorizationUrl || authorizePopup.closed) {
+          authorizePopup.close();
+          setAuthorizeWindowError(
+            authorizationUrl
+              ? "The authorization window was closed before the provider could be opened. Try again."
+              : "The authorization service returned an unsafe URL. No provider page was opened."
+          );
+          return;
+        }
+        try {
+          authorizePopup.location.replace(authorizationUrl);
+        } catch {
+          authorizePopup.close();
+          setAuthorizeWindowError("The authorization window could not be opened safely. Try again.");
+        }
+      },
+      onError: () => {
+        authorizePopup.close();
+      },
+    });
+  };
 
   return (
     <div className="space-y-4">
@@ -1319,7 +1367,7 @@ function FreshserviceOAuthSetup({
         )}
         <button
           type="button"
-          onClick={() => authMut.mutate()}
+          onClick={startAuthorization}
           disabled={authMut.isPending || !configured}
           className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded bg-clay-500 text-linen-50 text-sm font-medium hover:bg-clay-600 disabled:opacity-50"
         >
@@ -1330,6 +1378,11 @@ function FreshserviceOAuthSetup({
       {authMut.isError && (
         <div className="rounded border border-rust-400/30 bg-rust-400/10 p-3 text-sm text-rust-600">
           {authMut.error instanceof Error ? authMut.error.message : "Failed to get authorization URL"}
+        </div>
+      )}
+      {authorizeWindowError && (
+        <div role="alert" className="rounded border border-rust-400/30 bg-rust-400/10 p-3 text-sm text-rust-600">
+          {authorizeWindowError}
         </div>
       )}
     </div>

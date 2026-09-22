@@ -1,10 +1,15 @@
 import asyncio
+import base64
 import io
+import json
 import os
 import socket
+import tempfile
+import threading
 import unittest
 from contextlib import redirect_stdout
-from unittest.mock import MagicMock, patch
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -12,6 +17,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.backend import llm_manager, main, settings, ticket_vectors, worker
 from app.backend.database import Base, SettingsRecord
+from app.backend.integrations.freshservice import FreshserviceAdapter
 
 
 class SettingsSecurityTests(unittest.TestCase):
@@ -26,6 +32,700 @@ class SettingsSecurityTests(unittest.TestCase):
 
     def tearDown(self):
         self.environment.stop()
+
+    @staticmethod
+    def _keyring_environment(*, active_kid="current", keys=None):
+        keys = keys or {active_kid: bytes(range(32))}
+        return {
+            "TICKETY_SETTINGS_ENCRYPTION_ACTIVE_KID": active_kid,
+            "TICKETY_SETTINGS_ENCRYPTION_KEYS_JSON": json.dumps({
+                kid: base64.b64encode(key).decode("ascii")
+                for kid, key in keys.items()
+            }),
+        }
+
+    def test_sensitive_database_values_are_aead_encrypted_and_readable(self):
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine)
+        try:
+            with (
+                patch.object(settings, "SessionLocal", session_factory),
+                patch.dict(os.environ, self._keyring_environment(), clear=False),
+            ):
+                settings._write_db_overrides({"CUSTOM_API_KEY": "secret-at-rest"})
+                with session_factory() as db:
+                    stored = db.get(SettingsRecord, "CUSTOM_API_KEY").value
+                self.assertTrue(stored.startswith("enc:v1:current:"))
+                self.assertNotIn("secret-at-rest", stored)
+                self.assertEqual(
+                    settings._read_db_overrides()["CUSTOM_API_KEY"], "secret-at-rest"
+                )
+        finally:
+            engine.dispose()
+
+    def test_freshservice_oauth_writer_encrypts_tokens_and_reload_decrypts_them(self):
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine)
+        access_token = "access-token-that-must-never-reach-the-settings-row"
+        refresh_token = "refresh-token-that-must-never-reach-the-settings-row"
+        try:
+            with (
+                patch.object(settings, "SessionLocal", session_factory),
+                patch.dict(os.environ, self._keyring_environment(), clear=False),
+            ):
+                # Constructing the adapter is irrelevant to persistence and
+                # may depend on unrelated provider configuration. Exercise
+                # the production writer itself against the real database.
+                FreshserviceAdapter.__new__(FreshserviceAdapter)._persist_oauth_tokens(
+                    access_token, refresh_token
+                )
+
+                with session_factory() as db:
+                    stored_tokens = {
+                        key: db.get(SettingsRecord, key).value
+                        for key in (
+                            "FRESHSERVICE_OAUTH_ACCESS_TOKEN",
+                            "FRESHSERVICE_OAUTH_REFRESH_TOKEN",
+                        )
+                    }
+                for stored in stored_tokens.values():
+                    self.assertTrue(stored.startswith("enc:v1:current:"))
+                    self.assertNotIn(access_token, stored)
+                    self.assertNotIn(refresh_token, stored)
+
+                # A process restart starts without runtime OAuth values and
+                # must hydrate only authenticated plaintext from the envelope.
+                os.environ.pop("FRESHSERVICE_OAUTH_ACCESS_TOKEN", None)
+                os.environ.pop("FRESHSERVICE_OAUTH_REFRESH_TOKEN", None)
+                self.assertTrue(settings.load_settings_into_env())
+                self.assertEqual(os.environ["FRESHSERVICE_OAUTH_ACCESS_TOKEN"], access_token)
+                self.assertEqual(os.environ["FRESHSERVICE_OAUTH_REFRESH_TOKEN"], refresh_token)
+        finally:
+            engine.dispose()
+
+    def test_oauth_refresh_compare_and_swap_fences_old_adapter_and_bootstraps_once(self):
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine)
+
+        def adapter(access_token, refresh_token, refreshed):
+            instance = FreshserviceAdapter.__new__(FreshserviceAdapter)
+            instance.oauth_client_id = "client"
+            instance.oauth_client_secret = "secret"
+            instance.oauth_redirect_uri = "https://tickety.example/oauth/callback"
+            instance.oauth_access_token = access_token
+            instance.oauth_refresh_token = refresh_token
+            instance.oauth_refresh = AsyncMock(return_value=refreshed)
+            return instance
+
+        old_refresh = "old-refresh-token"
+        first = adapter(
+            "old-access-token",
+            old_refresh,
+            {"access_token": "winning-access-token", "refresh_token": "winning-refresh-token"},
+        )
+        stale = adapter(
+            "old-access-token",
+            old_refresh,
+            {"access_token": "stale-access-token", "refresh_token": "stale-refresh-token"},
+        )
+        try:
+            with (
+                patch.object(settings, "SessionLocal", session_factory),
+                patch.dict(os.environ, self._keyring_environment(), clear=False),
+            ):
+                # No durable pair exists yet: exactly one refresh may adopt
+                # the configured runtime token as its initial CAS parent.
+                self.assertTrue(asyncio.run(first._refresh_oauth_access_token()))
+                self.assertTrue(asyncio.run(stale._refresh_oauth_access_token()))
+                self.assertEqual(stale.oauth_access_token, "winning-access-token")
+                self.assertEqual(stale.oauth_refresh_token, "winning-refresh-token")
+
+                with session_factory() as db:
+                    durable = {
+                        key: settings._decode_db_override(key, db.get(SettingsRecord, key).value)
+                        for key in (
+                            "FRESHSERVICE_OAUTH_ACCESS_TOKEN",
+                            "FRESHSERVICE_OAUTH_REFRESH_TOKEN",
+                        )
+                    }
+                self.assertEqual(durable, {
+                    "FRESHSERVICE_OAUTH_ACCESS_TOKEN": "winning-access-token",
+                    "FRESHSERVICE_OAUTH_REFRESH_TOKEN": "winning-refresh-token",
+                })
+
+                # OAuth providers may leave a refresh token unchanged.  The
+                # access token is therefore also part of the durable CAS
+                # parent; a response from the same older pair cannot replace
+                # the first refreshed access token.
+                settings._write_db_overrides({
+                    "FRESHSERVICE_OAUTH_ACCESS_TOKEN": "same-refresh-parent-access",
+                    "FRESHSERVICE_OAUTH_REFRESH_TOKEN": "same-refresh-parent-token",
+                })
+                self.assertTrue(settings.persist_runtime_oauth_tokens_if_current(
+                    expected_access_token="same-refresh-parent-access",
+                    expected_refresh_token="same-refresh-parent-token",
+                    access_token="same-refresh-winner-access",
+                    refresh_token="same-refresh-parent-token",
+                ))
+                self.assertFalse(settings.persist_runtime_oauth_tokens_if_current(
+                    expected_access_token="same-refresh-parent-access",
+                    expected_refresh_token="same-refresh-parent-token",
+                    access_token="same-refresh-stale-access",
+                    refresh_token="same-refresh-parent-token",
+                ))
+                with session_factory() as db:
+                    self.assertEqual(
+                        settings._decode_db_override(
+                            "FRESHSERVICE_OAUTH_ACCESS_TOKEN",
+                            db.get(SettingsRecord, "FRESHSERVICE_OAUTH_ACCESS_TOKEN").value,
+                        ),
+                        "same-refresh-winner-access",
+                    )
+
+                # An explicit new authorization is intentionally unconditional.
+                # A delayed adapter with the prior refresh token must reload the
+                # new pair instead of replacing it with its stale provider reply.
+                settings._write_db_overrides({
+                    "FRESHSERVICE_OAUTH_ACCESS_TOKEN": "new-authorization-access",
+                    "FRESHSERVICE_OAUTH_REFRESH_TOKEN": "new-authorization-refresh",
+                })
+                stale.oauth_access_token = "old-access-token"
+                stale.oauth_refresh_token = old_refresh
+                stale.oauth_refresh = AsyncMock(return_value={
+                    "access_token": "late-access-token",
+                    "refresh_token": "late-refresh-token",
+                })
+                self.assertTrue(asyncio.run(stale._refresh_oauth_access_token()))
+                self.assertEqual(stale.oauth_access_token, "new-authorization-access")
+                self.assertEqual(stale.oauth_refresh_token, "new-authorization-refresh")
+        finally:
+            engine.dispose()
+
+    def test_oauth_refresh_can_recover_a_missing_access_token_without_overwriting_a_pair(self):
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine)
+
+        def adapter(access_token, response):
+            instance = FreshserviceAdapter.__new__(FreshserviceAdapter)
+            instance.oauth_client_id = "client"
+            instance.oauth_client_secret = "secret"
+            instance.oauth_redirect_uri = "https://tickety.example/oauth/callback"
+            instance.oauth_access_token = access_token
+            instance.oauth_refresh_token = "recovery-refresh-token"
+            instance.oauth_refresh = AsyncMock(return_value=response)
+            return instance
+
+        try:
+            with (
+                patch.object(settings, "SessionLocal", session_factory),
+                patch.dict(os.environ, self._keyring_environment(), clear=False),
+            ):
+                # The legacy refresh path intentionally accepted a refresh
+                # token without a local access token.  A missing durable pair
+                # can still be recovered once, but it is not a wildcard CAS.
+                recovering = adapter("", {
+                    "access_token": "recovered-access-token",
+                    "refresh_token": "recovered-refresh-token",
+                })
+                self.assertTrue(asyncio.run(recovering._refresh_oauth_access_token()))
+                self.assertEqual(recovering.oauth_access_token, "recovered-access-token")
+
+                settings._write_db_overrides({
+                    "FRESHSERVICE_OAUTH_ACCESS_TOKEN": "durable-winner-access",
+                    "FRESHSERVICE_OAUTH_REFRESH_TOKEN": "durable-winner-refresh",
+                })
+                stale_recovery = adapter("", {
+                    "access_token": "late-recovery-access",
+                    "refresh_token": "late-recovery-refresh",
+                })
+                self.assertTrue(asyncio.run(stale_recovery._refresh_oauth_access_token()))
+                self.assertEqual(stale_recovery.oauth_access_token, "durable-winner-access")
+                self.assertEqual(stale_recovery.oauth_refresh_token, "durable-winner-refresh")
+                with session_factory() as db:
+                    self.assertEqual(
+                        settings._decode_db_override(
+                            "FRESHSERVICE_OAUTH_ACCESS_TOKEN",
+                            db.get(SettingsRecord, "FRESHSERVICE_OAUTH_ACCESS_TOKEN").value,
+                        ),
+                        "durable-winner-access",
+                    )
+        finally:
+            engine.dispose()
+
+    def test_oauth_cas_fails_closed_for_incomplete_durable_pair_without_writing(self):
+        access_key = "FRESHSERVICE_OAUTH_ACCESS_TOKEN"
+        refresh_key = "FRESHSERVICE_OAUTH_REFRESH_TOKEN"
+        expected_access = "old-access-token"
+        expected_refresh = "old-refresh-token"
+        for only_key, only_value, missing_key in (
+            (access_key, expected_access, refresh_key),
+            (refresh_key, expected_refresh, access_key),
+        ):
+            with self.subTest(persisted=only_key):
+                engine = create_engine(
+                    "sqlite://",
+                    connect_args={"check_same_thread": False},
+                    poolclass=StaticPool,
+                )
+                Base.metadata.create_all(engine)
+                session_factory = sessionmaker(bind=engine)
+                try:
+                    with (
+                        patch.object(settings, "SessionLocal", session_factory),
+                        patch.dict(os.environ, self._keyring_environment(), clear=False),
+                    ):
+                        with session_factory.begin() as db:
+                            db.add(SettingsRecord(
+                                key=only_key,
+                                value=settings._encode_db_override(only_key, only_value),
+                            ))
+
+                        self.assertFalse(settings.persist_runtime_oauth_tokens_if_current(
+                            expected_access_token=expected_access,
+                            expected_refresh_token=expected_refresh,
+                            access_token="new-access-token",
+                            refresh_token="new-refresh-token",
+                        ))
+
+                        with session_factory() as db:
+                            persisted = db.get(SettingsRecord, only_key)
+                            self.assertIsNotNone(persisted)
+                            self.assertEqual(
+                                settings._decode_db_override(only_key, persisted.value),
+                                only_value,
+                            )
+                            self.assertIsNone(db.get(SettingsRecord, missing_key))
+                            # The CAS rolls back its attempted fence too: an
+                            # incomplete durable pair cannot be adopted.
+                            self.assertIsNone(db.get(
+                                SettingsRecord, settings._SETTINGS_ENCRYPTION_FENCE_KEY
+                            ))
+                finally:
+                    engine.dispose()
+
+    def test_oauth_cas_cannot_claim_a_new_fence_over_an_unrelated_old_envelope(self):
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine)
+        old_key = b"o" * 32
+        new_key = b"n" * 32
+        try:
+            with patch.object(settings, "SessionLocal", session_factory):
+                with patch.dict(
+                    os.environ,
+                    self._keyring_environment(
+                        active_kid="old", keys={"old": old_key, "new": new_key}
+                    ),
+                    clear=False,
+                ):
+                    old_envelope = settings._encrypt_sensitive_setting(
+                        "CUSTOM_API_KEY", "unrelated-old-secret"
+                    )
+                with session_factory.begin() as db:
+                    db.add(SettingsRecord(key="CUSTOM_API_KEY", value=old_envelope))
+                with patch.dict(
+                    os.environ,
+                    self._keyring_environment(
+                        active_kid="new", keys={"old": old_key, "new": new_key}
+                    ),
+                    clear=False,
+                ):
+                    with self.assertRaises(settings.SettingsEncryptionError):
+                        settings.persist_runtime_oauth_tokens_if_current(
+                            expected_access_token="runtime-access",
+                            expected_refresh_token="runtime-refresh",
+                            access_token="new-access",
+                            refresh_token="new-refresh",
+                        )
+                with session_factory() as db:
+                    self.assertIsNone(
+                        db.get(SettingsRecord, settings._SETTINGS_ENCRYPTION_FENCE_KEY)
+                    )
+                    self.assertIsNone(
+                        db.get(SettingsRecord, "FRESHSERVICE_OAUTH_ACCESS_TOKEN")
+                    )
+        finally:
+            engine.dispose()
+
+    def test_sensitive_envelope_rejects_tampering_and_cross_key_swaps(self):
+        environment = self._keyring_environment()
+        with patch.dict(os.environ, environment, clear=False):
+            encrypted = settings._encrypt_sensitive_setting("CUSTOM_API_KEY", "secret")
+            with self.assertRaises(settings.SettingsEncryptionError):
+                settings._decrypt_sensitive_setting("FRESHSERVICE_API_KEY", encrypted)
+            tampered = encrypted[:-1] + ("A" if encrypted[-1] != "A" else "B")
+            with self.assertRaises(settings.SettingsEncryptionError):
+                settings._decrypt_sensitive_setting("CUSTOM_API_KEY", tampered)
+            unknown_kid = encrypted.replace("enc:v1:current:", "enc:v1:retired:", 1)
+            with self.assertRaises(settings.SettingsEncryptionError):
+                settings._decrypt_sensitive_setting("CUSTOM_API_KEY", unknown_kid)
+
+    def test_sensitive_database_values_reject_missing_keyring_and_legacy_plaintext(self):
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine)
+        try:
+            with (
+                patch.object(settings, "SessionLocal", session_factory),
+                patch.dict(os.environ, {
+                    "TICKETY_SETTINGS_ENCRYPTION_ACTIVE_KID": "",
+                    "TICKETY_SETTINGS_ENCRYPTION_KEYS_JSON": "",
+                }, clear=False),
+            ):
+                with self.assertRaises(settings.SettingsEncryptionError):
+                    settings._write_db_overrides({"CUSTOM_API_KEY": "secret"})
+                with session_factory.begin() as db:
+                    db.add(SettingsRecord(key="CUSTOM_API_KEY", value="legacy-plaintext"))
+                with patch.dict(os.environ, self._keyring_environment(), clear=False):
+                    with self.assertRaises(settings.LegacySensitiveSettingError):
+                        settings._read_db_overrides()
+        finally:
+            engine.dispose()
+
+    def test_explicit_legacy_migration_and_kid_rotation_are_transactional(self):
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine)
+        old_key = b"o" * 32
+        new_key = b"n" * 32
+        try:
+            with (
+                patch.object(settings, "SessionLocal", session_factory),
+                patch.dict(
+                    os.environ,
+                    self._keyring_environment(active_kid="old", keys={"old": old_key, "new": new_key}),
+                    clear=False,
+                ),
+            ):
+                with session_factory.begin() as db:
+                    db.add(SettingsRecord(key="CUSTOM_API_KEY", value="legacy-plaintext"))
+                with self.assertRaises(settings.LegacySensitiveSettingError):
+                    settings.reencrypt_persisted_sensitive_settings(from_kid="old")
+                self.assertEqual(
+                    settings.reencrypt_persisted_sensitive_settings(
+                        allow_legacy_plaintext=True, from_kid="old"
+                    ),
+                    {"migrated_plaintext": 1, "reencrypted": 0},
+                )
+                with patch.dict(
+                    os.environ,
+                    self._keyring_environment(active_kid="new", keys={"old": old_key, "new": new_key}),
+                    clear=False,
+                ):
+                    self.assertEqual(
+                        settings.reencrypt_persisted_sensitive_settings(from_kid="old"),
+                        {"migrated_plaintext": 0, "reencrypted": 1},
+                    )
+                    self.assertEqual(
+                        settings._read_db_overrides()["CUSTOM_API_KEY"], "legacy-plaintext"
+                    )
+        finally:
+            engine.dispose()
+
+    def test_sensitive_writes_require_the_durable_active_kid_and_rotation_confirms_from_kid(self):
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine)
+        old_key = b"o" * 32
+        new_key = b"n" * 32
+        try:
+            with patch.object(settings, "SessionLocal", session_factory):
+                with patch.dict(
+                    os.environ,
+                    self._keyring_environment(
+                        active_kid="old", keys={"old": old_key, "new": new_key}
+                    ),
+                    clear=False,
+                ):
+                    settings._write_db_overrides({"CUSTOM_API_KEY": "before-rotation"})
+
+                with patch.dict(
+                    os.environ,
+                    self._keyring_environment(
+                        active_kid="new", keys={"old": old_key, "new": new_key}
+                    ),
+                    clear=False,
+                ):
+                    with self.assertRaises(settings.SettingsEncryptionError):
+                        settings._write_db_overrides({"CUSTOM_API_KEY": "unsafe-new-write"})
+                    with self.assertRaises(settings.SettingsEncryptionError):
+                        settings.reencrypt_persisted_sensitive_settings()
+                    with self.assertRaises(settings.SettingsEncryptionError):
+                        settings.reencrypt_persisted_sensitive_settings(from_kid="wrong")
+                    self.assertEqual(
+                        settings.reencrypt_persisted_sensitive_settings(from_kid="old"),
+                        {"migrated_plaintext": 0, "reencrypted": 1},
+                    )
+                    settings._write_db_overrides({"CUSTOM_API_KEY": "after-rotation"})
+
+                with patch.dict(
+                    os.environ,
+                    self._keyring_environment(
+                        active_kid="old", keys={"old": old_key, "new": new_key}
+                    ),
+                    clear=False,
+                ):
+                    with self.assertRaises(settings.SettingsEncryptionError):
+                        settings._write_db_overrides({"CUSTOM_API_KEY": "stale-writer"})
+
+                with session_factory() as db:
+                    fence = db.get(SettingsRecord, settings._SETTINGS_ENCRYPTION_FENCE_KEY)
+                    stored = db.get(SettingsRecord, "CUSTOM_API_KEY").value
+                self.assertEqual(fence.value, "new")
+                self.assertTrue(stored.startswith("enc:v1:new:"))
+        finally:
+            engine.dispose()
+
+    def test_unfenced_existing_ciphertext_cannot_be_claimed_by_a_new_active_kid(self):
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine)
+        old_key = b"o" * 32
+        new_key = b"n" * 32
+        try:
+            with patch.object(settings, "SessionLocal", session_factory):
+                with patch.dict(
+                    os.environ,
+                    self._keyring_environment(
+                        active_kid="old", keys={"old": old_key, "new": new_key}
+                    ),
+                    clear=False,
+                ):
+                    old_envelope = settings._encrypt_sensitive_setting(
+                        "CUSTOM_API_KEY", "pre-fence-secret"
+                    )
+                with session_factory.begin() as db:
+                    db.add(SettingsRecord(key="CUSTOM_API_KEY", value=old_envelope))
+
+                with patch.dict(
+                    os.environ,
+                    self._keyring_environment(
+                        active_kid="new", keys={"old": old_key, "new": new_key}
+                    ),
+                    clear=False,
+                ):
+                    with self.assertRaises(settings.SettingsEncryptionError):
+                        settings._write_db_overrides({"CUSTOM_API_KEY": "unsafe-new-write"})
+                    with self.assertRaises(settings.SettingsEncryptionError):
+                        settings.reencrypt_persisted_sensitive_settings()
+                    with session_factory() as db:
+                        self.assertIsNone(
+                            db.get(SettingsRecord, settings._SETTINGS_ENCRYPTION_FENCE_KEY)
+                        )
+                        self.assertEqual(
+                            db.get(SettingsRecord, "CUSTOM_API_KEY").value, old_envelope
+                        )
+                    self.assertEqual(
+                        settings.reencrypt_persisted_sensitive_settings(from_kid="old"),
+                        {"migrated_plaintext": 0, "reencrypted": 1},
+                    )
+        finally:
+            engine.dispose()
+
+    def test_runtime_hydration_rejects_a_durable_fence_with_a_different_active_kid(self):
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine)
+        old_key = b"o" * 32
+        new_key = b"n" * 32
+        try:
+            with patch.object(settings, "SessionLocal", session_factory):
+                with patch.dict(
+                    os.environ,
+                    self._keyring_environment(
+                        active_kid="old", keys={"old": old_key, "new": new_key}
+                    ),
+                    clear=False,
+                ):
+                    settings._write_db_overrides({"CUSTOM_API_KEY": "old-secret"})
+                with patch.dict(
+                    os.environ,
+                    self._keyring_environment(
+                        active_kid="new", keys={"old": old_key, "new": new_key}
+                    ),
+                    clear=False,
+                ):
+                    with self.assertRaises(settings.SettingsEncryptionError):
+                        settings.load_settings_into_env()
+        finally:
+            engine.dispose()
+
+    def test_runtime_hydration_rejects_mixed_envelope_kids_behind_one_fence(self):
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine)
+        old_key = b"o" * 32
+        new_key = b"n" * 32
+        try:
+            with patch.object(settings, "SessionLocal", session_factory):
+                with patch.dict(
+                    os.environ,
+                    self._keyring_environment(
+                        active_kid="old", keys={"old": old_key, "new": new_key}
+                    ),
+                    clear=False,
+                ):
+                    settings._write_db_overrides({"CUSTOM_API_KEY": "old-secret"})
+                with patch.dict(
+                    os.environ,
+                    self._keyring_environment(
+                        active_kid="new", keys={"old": old_key, "new": new_key}
+                    ),
+                    clear=False,
+                ):
+                    new_envelope = settings._encrypt_sensitive_setting(
+                        "FRESHSERVICE_API_KEY", "new-secret"
+                    )
+                # Simulates an interrupted or pre-fence writer that left a
+                # valid envelope from another generation.  Both keyring
+                # entries are present, so decryptability alone is insufficient.
+                with session_factory.begin() as db:
+                    db.add(SettingsRecord(
+                        key="FRESHSERVICE_API_KEY", value=new_envelope
+                    ))
+                with patch.dict(
+                    os.environ,
+                    self._keyring_environment(
+                        active_kid="old", keys={"old": old_key, "new": new_key}
+                    ),
+                    clear=False,
+                ):
+                    with self.assertRaises(settings.SettingsEncryptionError):
+                        settings.load_settings_into_env()
+        finally:
+            engine.dispose()
+
+    def test_sqlite_rotation_fence_blocks_then_rejects_an_interleaved_stale_writer(self):
+        old_key = b"o" * 32
+        new_key = b"n" * 32
+        entered_rotation = threading.Event()
+        release_rotation = threading.Event()
+        writer_finished = threading.Event()
+        rotation_error = []
+        writer_error = []
+        original_keyring = settings._settings_encryption_keyring
+        original_encrypt = settings._encrypt_sensitive_setting
+
+        with tempfile.TemporaryDirectory() as directory:
+            database_url = f"sqlite:///{Path(directory) / 'rotation.db'}"
+            engine = create_engine(
+                database_url,
+                connect_args={"check_same_thread": False, "timeout": 5},
+            )
+            Base.metadata.create_all(engine)
+            session_factory = sessionmaker(bind=engine)
+            try:
+                with patch.object(settings, "SessionLocal", session_factory):
+                    with patch.dict(
+                        os.environ,
+                        self._keyring_environment(
+                            active_kid="old", keys={"old": old_key, "new": new_key}
+                        ),
+                        clear=False,
+                    ):
+                        settings._write_db_overrides({"CUSTOM_API_KEY": "original-token"})
+
+                    def thread_keyring():
+                        if threading.current_thread().name == "stale-settings-writer":
+                            return "old", {"old": old_key, "new": new_key}
+                        return "new", {"old": old_key, "new": new_key}
+
+                    def pausing_encrypt(key, value):
+                        if threading.current_thread().name == "settings-rotation":
+                            entered_rotation.set()
+                            self.assertTrue(release_rotation.wait(5))
+                        return original_encrypt(key, value)
+
+                    def rotate():
+                        try:
+                            settings.reencrypt_persisted_sensitive_settings(from_kid="old")
+                        except BaseException as exc:  # surfaced below in this test thread
+                            rotation_error.append(exc)
+
+                    def stale_write():
+                        try:
+                            settings._write_db_overrides({"CUSTOM_API_KEY": "stale-token"})
+                        except BaseException as exc:  # expected fail-closed result
+                            writer_error.append(exc)
+                        finally:
+                            writer_finished.set()
+
+                    with (
+                        patch.object(settings, "_settings_encryption_keyring", side_effect=thread_keyring),
+                        patch.object(settings, "_encrypt_sensitive_setting", side_effect=pausing_encrypt),
+                    ):
+                        rotation_thread = threading.Thread(target=rotate, name="settings-rotation")
+                        rotation_thread.start()
+                        self.assertTrue(entered_rotation.wait(5))
+                        writer_thread = threading.Thread(
+                            target=stale_write, name="stale-settings-writer"
+                        )
+                        writer_thread.start()
+                        self.assertFalse(writer_finished.wait(0.2))
+                        release_rotation.set()
+                        rotation_thread.join(5)
+                        writer_thread.join(5)
+
+                    self.assertFalse(rotation_thread.is_alive())
+                    self.assertFalse(writer_thread.is_alive())
+                    self.assertEqual(rotation_error, [])
+                    self.assertEqual(len(writer_error), 1)
+                    self.assertIsInstance(writer_error[0], settings.SettingsEncryptionError)
+                    with session_factory() as db:
+                        fence = db.get(SettingsRecord, settings._SETTINGS_ENCRYPTION_FENCE_KEY)
+                        stored = db.get(SettingsRecord, "CUSTOM_API_KEY").value
+                    self.assertEqual(fence.value, "new")
+                    self.assertTrue(stored.startswith("enc:v1:new:"))
+            finally:
+                engine.dispose()
 
     def test_invalid_nonempty_app_mode_fails_closed(self):
         with (
@@ -499,6 +1199,22 @@ class SettingsSecurityTests(unittest.TestCase):
             self.assertEqual(os.environ["FRESHSERVICE_DOMAIN"], "support.example.com")
             write_overrides.assert_not_called()
 
+    def test_settings_portal_cannot_change_deployment_owned_session_storage_mode(self):
+        with (
+            patch.dict(os.environ, {
+                "APP_MODE": "production",
+                "SESSION_STORAGE_MODE": "hashed",
+            }, clear=False),
+            patch.object(settings, "_write_db_overrides") as write_overrides,
+        ):
+            settings.update_settings(
+                {"SESSION_STORAGE_MODE": "compat"},
+                actor_id="global-admin",
+            )
+
+            self.assertEqual(os.environ["SESSION_STORAGE_MODE"], "hashed")
+            write_overrides.assert_not_called()
+
     def test_production_admin_can_save_provider_secret_without_portal_flag(self):
         with (
             patch.dict(os.environ, {
@@ -531,7 +1247,10 @@ class SettingsSecurityTests(unittest.TestCase):
         Base.metadata.create_all(engine)
         session_factory = sessionmaker(bind=engine)
         try:
-            with patch.object(settings, "SessionLocal", session_factory):
+            with (
+                patch.object(settings, "SessionLocal", session_factory),
+                patch.dict(os.environ, self._keyring_environment(), clear=False),
+            ):
                 settings._write_db_overrides(
                     {"CUSTOM_API_KEY": "secret-value"},
                     actor_id="global-admin",
@@ -765,7 +1484,11 @@ class SettingsSecurityTests(unittest.TestCase):
                 side_effect=lambda db: order.append(("purge", db)) or 0,
             ),
             patch.object(worker, "process_role", return_value="worker"),
-            patch.object(worker, "start_sync_worker", side_effect=lambda: order.append(("start", None)) or False),
+            patch.object(
+                worker,
+                "start_sync_worker",
+                side_effect=lambda **_kwargs: order.append(("start", None)) or False,
+            ),
         ):
             self.assertEqual(worker.run(), 1)
 

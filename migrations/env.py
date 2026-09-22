@@ -26,6 +26,7 @@ target_metadata = Base.metadata
 # `compare_to` becomes non-null and ordinary drift detection resumes.
 RAW_MIGRATION_MANAGED_TABLES = frozenset({
     "rag_context_snapshots_v2",
+    "rag_context_snapshot_sources_v2",
     "rag_corpus_generations_v2",
     "rag_query_embedding_cache_v2",
     "rag_v2_schema_meta",

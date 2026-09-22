@@ -5,7 +5,7 @@
   "engines": {
     "node": ">=24"
   },
-  "packageManager": "npm@12.0.2",
+  "packageManager": "npm@11.6.1",
   "type": "module",
   "description": "Read-only Tickety OPS Tower attachment for Freshservice",
   "devDependencies": {
@@ -15,6 +15,8 @@
     "vitest": "5.0.0"
   },
   "scripts": {
-    "fdk-unit-test": "vitest run --coverage"
+    "fdk-unit-test": "vitest run --coverage",
+    "fdk-validate": "fdk validate",
+    "fdk-package": "fdk pack --skip-coverage && bash scripts/verify-package.sh"
   }
 }

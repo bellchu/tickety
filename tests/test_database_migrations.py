@@ -65,6 +65,206 @@ class DatabaseMigrationTests(unittest.TestCase):
         finally:
             engine.dispose()
 
+    def test_head_auth_epoch_cutover_revokes_legacy_browser_sessions(self):
+        command.upgrade(self.config, "0049")
+        engine = create_engine(self.url)
+        try:
+            with engine.begin() as connection:
+                connection.execute(text(
+                    "INSERT INTO users (id, name, role, is_active) "
+                    "VALUES ('legacy-session-user', 'Legacy Session User', 'agent', 1)"
+                ))
+                connection.execute(text(
+                    "INSERT INTO sessions (token, user_id, expires_at) "
+                    "VALUES ('legacy-browser-token', 'legacy-session-user', CURRENT_TIMESTAMP)"
+                ))
+            command.upgrade(self.config, "head")
+            with engine.connect() as connection:
+                self.assertEqual(connection.execute(text(
+                    "SELECT count(*) FROM sessions WHERE user_id = 'legacy-session-user'"
+                )).scalar_one(), 0)
+                self.assertEqual(connection.execute(text(
+                    "SELECT auth_not_before_epoch FROM users "
+                    "WHERE id = 'legacy-session-user'"
+                )).scalar_one(), 1)
+                self.assertEqual(self._current_revision(engine), self.expected_head)
+        finally:
+            engine.dispose()
+
+    def test_notification_outbox_existing_table_requires_named_constraint_and_indexes(self):
+        command.upgrade(self.config, "0045")
+        engine = create_engine(self.url)
+        try:
+            with engine.begin() as connection:
+                connection.execute(text(
+                    "CREATE TABLE notification_outbox ("
+                    "id INTEGER PRIMARY KEY, dispatch_order BIGINT NOT NULL, recipient_user_id VARCHAR NOT NULL, "
+                    "event_type VARCHAR(64) NOT NULL, payload_json TEXT NOT NULL, "
+                    "dedupe_key VARCHAR(255) NOT NULL, created_at DATETIME NOT NULL, "
+                    "expires_at DATETIME NOT NULL)"
+                ))
+            with self.assertRaisesRegex(RuntimeError, "dedupe constraint is incompatible"):
+                command.upgrade(self.config, "head")
+        finally:
+            engine.dispose()
+
+    def test_notification_outbox_existing_table_requires_id_primary_key(self):
+        command.upgrade(self.config, "0045")
+        engine = create_engine(self.url)
+        try:
+            with engine.begin() as connection:
+                connection.execute(text(
+                    "CREATE TABLE notification_outbox ("
+                    "id INTEGER NOT NULL, dispatch_order BIGINT NOT NULL, recipient_user_id VARCHAR NOT NULL, "
+                    "event_type VARCHAR(64) NOT NULL, payload_json TEXT NOT NULL, "
+                    "dedupe_key VARCHAR(255) NOT NULL, created_at DATETIME NOT NULL, "
+                    "expires_at DATETIME NOT NULL, "
+                    "CONSTRAINT uq_notification_outbox_dedupe_key UNIQUE (dedupe_key), "
+                    "CONSTRAINT uq_notification_outbox_dispatch_order UNIQUE (dispatch_order), "
+                    "PRIMARY KEY (recipient_user_id, id))"
+                ))
+                connection.execute(text(
+                    "CREATE INDEX ix_notification_outbox_dispatch_order "
+                    "ON notification_outbox (dispatch_order)"
+                ))
+                connection.execute(text(
+                    "CREATE INDEX ix_notification_outbox_recipient_id "
+                    "ON notification_outbox (recipient_user_id, id)"
+                ))
+                connection.execute(text(
+                    "CREATE INDEX ix_notification_outbox_expires_at_id "
+                    "ON notification_outbox (expires_at, id)"
+                ))
+            with self.assertRaisesRegex(RuntimeError, "outbox primary key is incompatible"):
+                command.upgrade(self.config, "head")
+        finally:
+            engine.dispose()
+
+    def test_notification_outbox_existing_table_requires_both_named_indexes(self):
+        command.upgrade(self.config, "0045")
+        engine = create_engine(self.url)
+        try:
+            with engine.begin() as connection:
+                connection.execute(text(
+                    "CREATE TABLE notification_outbox ("
+                    "id INTEGER PRIMARY KEY, dispatch_order BIGINT NOT NULL, recipient_user_id VARCHAR NOT NULL, "
+                    "event_type VARCHAR(64) NOT NULL, payload_json TEXT NOT NULL, "
+                    "dedupe_key VARCHAR(255) NOT NULL, created_at DATETIME NOT NULL, "
+                    "expires_at DATETIME NOT NULL, "
+                    "CONSTRAINT uq_notification_outbox_dedupe_key UNIQUE (dedupe_key), "
+                    "CONSTRAINT uq_notification_outbox_dispatch_order UNIQUE (dispatch_order))"
+                ))
+            with self.assertRaisesRegex(RuntimeError, "outbox indexes are incompatible"):
+                command.upgrade(self.config, "head")
+        finally:
+            engine.dispose()
+
+    def test_notification_outbox_existing_compatible_table_is_adopted(self):
+        command.upgrade(self.config, "0045")
+        engine = create_engine(self.url)
+        try:
+            with engine.begin() as connection:
+                connection.execute(text(
+                    "CREATE TABLE notification_outbox ("
+                    "id INTEGER PRIMARY KEY, dispatch_order BIGINT NOT NULL, recipient_user_id VARCHAR NOT NULL, "
+                    "event_type VARCHAR(64) NOT NULL, payload_json TEXT NOT NULL, "
+                    "dedupe_key VARCHAR(255) NOT NULL, created_at DATETIME NOT NULL, "
+                    "expires_at DATETIME NOT NULL, "
+                    "CONSTRAINT uq_notification_outbox_dedupe_key UNIQUE (dedupe_key), "
+                    "CONSTRAINT uq_notification_outbox_dispatch_order UNIQUE (dispatch_order))"
+                ))
+                connection.execute(text(
+                    "CREATE INDEX ix_notification_outbox_dispatch_order "
+                    "ON notification_outbox (dispatch_order)"
+                ))
+                connection.execute(text(
+                    "CREATE INDEX ix_notification_outbox_recipient_id "
+                    "ON notification_outbox (recipient_user_id, id)"
+                ))
+                connection.execute(text(
+                    "CREATE INDEX ix_notification_outbox_expires_at_id "
+                    "ON notification_outbox (expires_at, id)"
+                ))
+                connection.execute(text(
+                    "INSERT INTO notification_outbox "
+                    "(id, dispatch_order, recipient_user_id, event_type, payload_json, "
+                    "dedupe_key, created_at, expires_at) VALUES "
+                    "(9, 7, 'u', 'points_awarded', '{}', 'existing', "
+                    "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                ))
+            command.upgrade(self.config, "head")
+            self.assertEqual(self._current_revision(engine), self.expected_head)
+            with engine.connect() as connection:
+                self.assertEqual(connection.execute(text(
+                    "SELECT next_dispatch_order FROM notification_outbox_sequence "
+                    "WHERE singleton_id = 1"
+                )).scalar_one(), 7)
+        finally:
+            engine.dispose()
+
+    def test_notification_outbox_upgrade_repairs_existing_sequence_behind_high_water(self):
+        command.upgrade(self.config, "0045")
+        engine = create_engine(self.url)
+        try:
+            with engine.begin() as connection:
+                connection.execute(text(
+                    "CREATE TABLE notification_outbox ("
+                    "id INTEGER PRIMARY KEY, dispatch_order BIGINT NOT NULL, recipient_user_id VARCHAR NOT NULL, "
+                    "event_type VARCHAR(64) NOT NULL, payload_json TEXT NOT NULL, "
+                    "dedupe_key VARCHAR(255) NOT NULL, created_at DATETIME NOT NULL, "
+                    "expires_at DATETIME NOT NULL, "
+                    "CONSTRAINT uq_notification_outbox_dedupe_key UNIQUE (dedupe_key), "
+                    "CONSTRAINT uq_notification_outbox_dispatch_order UNIQUE (dispatch_order))"
+                ))
+                for name, columns in (
+                    ("ix_notification_outbox_dispatch_order", "dispatch_order"),
+                    ("ix_notification_outbox_recipient_id", "recipient_user_id, id"),
+                    ("ix_notification_outbox_expires_at_id", "expires_at, id"),
+                ):
+                    connection.execute(text(
+                        f"CREATE INDEX {name} ON notification_outbox ({columns})"
+                    ))
+                connection.execute(text(
+                    "INSERT INTO notification_outbox "
+                    "(id, dispatch_order, recipient_user_id, event_type, payload_json, dedupe_key, created_at, expires_at) "
+                    "VALUES (1, 9, 'u', 'points_awarded', '{}', 'existing', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                ))
+                connection.execute(text(
+                    "CREATE TABLE notification_outbox_sequence "
+                    "(singleton_id INTEGER PRIMARY KEY, next_dispatch_order BIGINT NOT NULL)"
+                ))
+                connection.execute(text(
+                    "INSERT INTO notification_outbox_sequence (singleton_id, next_dispatch_order) VALUES (1, 2)"
+                ))
+            command.upgrade(self.config, "head")
+            with engine.connect() as connection:
+                self.assertEqual(connection.execute(text(
+                    "SELECT next_dispatch_order FROM notification_outbox_sequence WHERE singleton_id = 1"
+                )).scalar_one(), 9)
+        finally:
+            engine.dispose()
+
+    def test_notification_outbox_recovery_migration_repairs_a_preexisting_0048_database(self):
+        command.upgrade(self.config, "0048")
+        engine = create_engine(self.url)
+        try:
+            with engine.begin() as connection:
+                connection.execute(text(
+                    "INSERT INTO notification_outbox "
+                    "(dispatch_order, recipient_user_id, event_type, payload_json, dedupe_key, created_at, expires_at) "
+                    "VALUES (12, 'u', 'points_awarded', '{}', 'pre-0049', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                ))
+                connection.execute(text(
+                    "UPDATE notification_outbox_sequence SET next_dispatch_order = 3 WHERE singleton_id = 1"
+                ))
+            command.upgrade(self.config, "head")
+            with engine.connect() as connection:
+                self.assertEqual(connection.execute(text(
+                    "SELECT next_dispatch_order FROM notification_outbox_sequence WHERE singleton_id = 1"
+                )).scalar_one(), 12)
+        finally:
+            engine.dispose()
+
     def test_fresh_database_upgrades_to_head_without_metadata_drift(self):
         command.upgrade(self.config, "head")
         engine = create_engine(self.url)
@@ -81,11 +281,52 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("external_ticket_context", inspector.get_table_names())
             self.assertIn("sso_identities", inspector.get_table_names())
             self.assertIn("sso_transactions", inspector.get_table_names())
+            self.assertIn("auth_security_epoch", inspector.get_table_names())
             self.assertIn("external_groups", inspector.get_table_names())
             self.assertIn("external_group_memberships", inspector.get_table_names())
             self.assertIn("user_external_identity_links", inspector.get_table_names())
             self.assertIn("agent_ticket_state", inspector.get_table_names())
             self.assertIn("intelligence_studies", inspector.get_table_names())
+            self.assertIn("notification_outbox", inspector.get_table_names())
+            outbox_columns = {
+                column["name"] for column in inspector.get_columns("notification_outbox")
+            }
+            self.assertEqual(outbox_columns, {
+                "id", "dispatch_order", "recipient_user_id", "event_type", "payload_json",
+                "dedupe_key", "created_at", "expires_at",
+            })
+            outbox_constraints = {
+                constraint["name"]
+                for constraint in inspector.get_unique_constraints("notification_outbox")
+            }
+            self.assertIn("uq_notification_outbox_dedupe_key", outbox_constraints)
+            self.assertIn("uq_notification_outbox_dispatch_order", outbox_constraints)
+            outbox_indexes = {
+                index["name"]: index
+                for index in inspector.get_indexes("notification_outbox")
+            }
+            self.assertEqual(
+                outbox_indexes["ix_notification_outbox_expires_at_id"]["column_names"],
+                ["expires_at", "id"],
+            )
+            self.assertEqual(
+                outbox_indexes["ix_notification_outbox_recipient_dispatch_order"]["column_names"],
+                ["recipient_user_id", "dispatch_order"],
+            )
+            self.assertNotIn("ix_notification_outbox_expires_at", outbox_indexes)
+            artifact_indexes = {
+                index["name"]: index
+                for index in inspector.get_indexes("ai_artifact_records")
+            }
+            self.assertEqual(
+                artifact_indexes["ix_ai_artifact_records_active_created_at_id"]["column_names"],
+                ["active", "created_at", "id"],
+            )
+            sequence_columns = {
+                column["name"]
+                for column in inspector.get_columns("notification_outbox_sequence")
+            }
+            self.assertEqual(sequence_columns, {"singleton_id", "next_dispatch_order"})
             ticket_columns = {
                 column["name"] for column in inspector.get_columns("tickets")
             }
@@ -159,6 +400,165 @@ class DatabaseMigrationTests(unittest.TestCase):
         finally:
             engine.dispose()
 
+    def test_sso_auth_epoch_upgrade_cuts_over_legacy_states_and_sessions(self):
+        command.upgrade(self.config, "0055")
+        engine = create_engine(self.url)
+        try:
+            with engine.begin() as connection:
+                connection.execute(text(
+                    "INSERT INTO users (id, name, role, is_active) "
+                    "VALUES ('epoch-user', 'Epoch User', 'agent', 1)"
+                ))
+                connection.execute(text(
+                    "INSERT INTO sso_transactions "
+                    "(state_hash, nonce, code_verifier, next_path, provider, discovery_url, "
+                    "redirect_uri, client_id, created_at, expires_at) VALUES "
+                    "('epoch-state', 'nonce', 'verifier', '/', 'oidc', "
+                    "'https://issuer.example/.well-known/openid-configuration', "
+                    "'https://tickety.example/api/auth/sso/callback', 'client', "
+                    "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                ))
+                connection.execute(text(
+                    "INSERT INTO sessions (token, user_id, expires_at) "
+                    "VALUES ('epoch-session', 'epoch-user', CURRENT_TIMESTAMP)"
+                ))
+
+            command.upgrade(self.config, "head")
+
+            inspector = inspect(engine)
+            self.assertIn("auth_not_before_epoch", {
+                column["name"] for column in inspector.get_columns("users")
+            })
+            self.assertIn("auth_epoch", {
+                column["name"] for column in inspector.get_columns("sso_transactions")
+            })
+            with engine.begin() as connection:
+                self.assertEqual(connection.execute(text(
+                    "SELECT auth_not_before_epoch FROM users WHERE id = 'epoch-user'"
+                )).scalar_one(), 1)
+                self.assertEqual(connection.execute(text(
+                    "SELECT count(*) FROM sso_transactions WHERE state_hash = 'epoch-state'"
+                )).scalar_one(), 0)
+                self.assertEqual(connection.execute(text(
+                    "SELECT count(*) FROM sessions WHERE token = 'epoch-session'"
+                )).scalar_one(), 0)
+                self.assertEqual(connection.execute(text(
+                    "SELECT singleton_id, epoch FROM auth_security_epoch"
+                )).all(), [(1, 1)])
+
+                # These defaults retain schema compatibility only.  The
+                # deployment gate must keep legacy API replicas stopped, so
+                # they cannot be used to mint authentication after cutover.
+                connection.execute(text(
+                    "INSERT INTO users (id, name, role, is_active) "
+                    "VALUES ('epoch-new-user', 'Epoch New User', 'agent', 1)"
+                ))
+                connection.execute(text(
+                    "INSERT INTO sso_transactions "
+                    "(state_hash, nonce, code_verifier, next_path, provider, discovery_url, "
+                    "redirect_uri, client_id, created_at, expires_at) VALUES "
+                    "('epoch-new-state', 'nonce', 'verifier', '/', 'oidc', "
+                    "'https://issuer.example/.well-known/openid-configuration', "
+                    "'https://tickety.example/api/auth/sso/callback', 'client', "
+                    "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                ))
+                self.assertEqual(connection.execute(text(
+                    "SELECT auth_not_before_epoch FROM users WHERE id = 'epoch-new-user'"
+                )).scalar_one(), 0)
+                self.assertEqual(connection.execute(text(
+                    "SELECT auth_epoch FROM sso_transactions WHERE state_hash = 'epoch-new-state'"
+                )).scalar_one(), 0)
+        finally:
+            engine.dispose()
+
+    def test_sso_auth_epoch_adopts_current_orm_bootstrap_and_seeds_once(self):
+        command.upgrade(self.config, "0055")
+        engine = create_engine(self.url)
+        try:
+            with patch.object(database, "engine", engine):
+                Base.metadata.create_all(bind=engine)
+
+            command.upgrade(self.config, "head")
+
+            with engine.connect() as connection:
+                self.assertEqual(connection.execute(text(
+                    "SELECT singleton_id, epoch FROM auth_security_epoch"
+                )).all(), [(1, 1)])
+                self.assertEqual(self._current_revision(engine), self.expected_head)
+        finally:
+            engine.dispose()
+
+    def test_sso_auth_epoch_rejects_an_unfenced_preexisting_singleton_table(self):
+        command.upgrade(self.config, "0055")
+        engine = create_engine(self.url)
+        try:
+            with engine.begin() as connection:
+                connection.execute(text(
+                    "CREATE TABLE auth_security_epoch ("
+                    "singleton_id INTEGER PRIMARY KEY, epoch BIGINT NOT NULL DEFAULT 0, "
+                    "updated_at DATETIME NOT NULL)"
+                ))
+
+            with self.assertRaisesRegex(RuntimeError, "authentication security epoch"):
+                command.upgrade(self.config, "head")
+        finally:
+            engine.dispose()
+
+    def test_sso_auth_epoch_rejects_an_out_of_range_singleton_epoch(self):
+        command.upgrade(self.config, "0055")
+        engine = create_engine(self.url)
+        try:
+            with patch.object(database, "engine", engine):
+                Base.metadata.create_all(bind=engine)
+            with engine.begin() as connection:
+                connection.execute(text(
+                    "INSERT INTO auth_security_epoch (singleton_id, epoch, updated_at) "
+                    "VALUES (1, 9223372036854775807, CURRENT_TIMESTAMP)"
+                ))
+
+            with self.assertRaisesRegex(RuntimeError, "authentication security epoch is exhausted"):
+                command.upgrade(self.config, "head")
+        finally:
+            engine.dispose()
+
+    def test_sso_auth_epoch_rejects_an_invalid_existing_user_lower_bound(self):
+        command.upgrade(self.config, "0055")
+        engine = create_engine(self.url)
+        try:
+            with engine.begin() as connection:
+                connection.execute(text(
+                    "ALTER TABLE users ADD COLUMN auth_not_before_epoch "
+                    "BIGINT NOT NULL DEFAULT 0"
+                ))
+                connection.execute(text(
+                    "INSERT INTO users (id, name, role, is_active, auth_not_before_epoch) "
+                    "VALUES ('invalid-epoch-user', 'Invalid Epoch', 'agent', 1, -1)"
+                ))
+
+            with self.assertRaisesRegex(RuntimeError, "user authentication epoch lower bound"):
+                command.upgrade(self.config, "head")
+        finally:
+            engine.dispose()
+
+    def test_sso_auth_epoch_rejects_a_user_lower_bound_ahead_of_singleton(self):
+        command.upgrade(self.config, "0055")
+        engine = create_engine(self.url)
+        try:
+            with engine.begin() as connection:
+                connection.execute(text(
+                    "ALTER TABLE users ADD COLUMN auth_not_before_epoch "
+                    "BIGINT NOT NULL DEFAULT 0"
+                ))
+                connection.execute(text(
+                    "INSERT INTO users (id, name, role, is_active, auth_not_before_epoch) "
+                    "VALUES ('ahead-epoch-user', 'Ahead Epoch', 'agent', 1, 1)"
+                ))
+
+            with self.assertRaisesRegex(RuntimeError, "user authentication epoch lower bound"):
+                command.upgrade(self.config, "head")
+        finally:
+            engine.dispose()
+
     def test_session_retention_migration_expires_legacy_rows_and_indexes_hot_queries(self):
         command.upgrade(self.config, "0034")
         engine = create_engine(self.url)
@@ -197,11 +597,22 @@ class DatabaseMigrationTests(unittest.TestCase):
             )
             self.assertFalse(service_created_column["nullable"])
             with engine.connect() as connection:
-                expires_at = connection.execute(text(
-                    "SELECT expires_at FROM sessions "
-                    "WHERE token = 'legacy-never-expiring'"
-                )).scalar_one()
-                self.assertIsNotNone(expires_at)
+                self.assertEqual(
+                    connection.execute(text("SELECT count(*) FROM sessions")).scalar_one(),
+                    0,
+                )
+                session_columns = {
+                    column["name"] for column in inspector.get_columns("sessions")
+                }
+                self.assertEqual(
+                    session_columns,
+                    {"token", "user_id", "created_at", "expires_at", "ip", "user_agent"},
+                )
+                token_column = next(
+                    column for column in inspector.get_columns("sessions")
+                    if column["name"] == "token"
+                )
+                self.assertIsNone(token_column["type"].length)
                 service_created_at = connection.execute(text(
                     "SELECT created_at FROM service_requests "
                     "WHERE id = 'legacy-service-request'"
@@ -248,6 +659,253 @@ class DatabaseMigrationTests(unittest.TestCase):
                 }
                 self.assertTrue(names.issubset(actual), table_name)
             self.assertEqual(self._current_revision(engine), self.expected_head)
+        finally:
+            engine.dispose()
+
+    def test_attachment_blob_cleanup_migration_has_durable_target_queue(self):
+        command.upgrade(self.config, "0049")
+        engine = create_engine(self.url)
+        try:
+            command.upgrade(self.config, "head")
+            inspector = inspect(engine)
+            attachment_columns = {
+                column["name"] for column in inspector.get_columns("external_attachments")
+            }
+            self.assertTrue({
+                "storage_provider",
+                "storage_account_identity",
+                "storage_container",
+            }.issubset(attachment_columns))
+            queue_columns = {
+                column["name"] for column in inspector.get_columns("attachment_blob_deletions")
+            }
+            self.assertTrue({
+                "id", "attachment_id", "blob_key", "storage_provider",
+                "storage_account_identity", "storage_container", "status",
+                "attempts", "next_attempt_at", "lease_token", "lease_expires_at",
+                "requested_at", "completed_at",
+            }.issubset(queue_columns))
+            queue_indexes = {index["name"] for index in inspector.get_indexes("attachment_blob_deletions")}
+            self.assertIn("ix_attachment_blob_deletions_ready", queue_indexes)
+            queue_constraints = {
+                constraint["name"]: constraint
+                for constraint in inspector.get_unique_constraints("attachment_blob_deletions")
+            }
+            self.assertEqual(
+                queue_constraints["uix_attachment_blob_deletion_identity"]["column_names"],
+                [
+                    "attachment_id", "blob_key", "storage_provider",
+                    "storage_account_identity", "storage_container",
+                ],
+            )
+        finally:
+            engine.dispose()
+
+    def test_active_integration_binding_migration_rejects_preexisting_double_active(self):
+        command.upgrade(self.config, "0054")
+        engine = create_engine(self.url)
+        try:
+            with engine.begin() as connection:
+                connection.execute(text(
+                    "INSERT INTO integration_bindings "
+                    "(id, provider, environment, state, canonical_account_host, workspace_ids, "
+                    "credential_reference, capability_version, created_at, updated_at) VALUES "
+                    "('active-a', 'freshservice', 'production', 'active', "
+                    "'first.freshservice.com', '[]', 'env://freshservice', 1, "
+                    "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP), "
+                    "('active-b', 'FreshService', 'production', 'active', "
+                    "'second.freshservice.com', '[]', 'env://freshservice', 1, "
+                    "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                ))
+            with self.assertRaisesRegex(RuntimeError, "multiple active integration bindings"):
+                command.upgrade(self.config, "head")
+        finally:
+            engine.dispose()
+
+    def test_active_integration_binding_migration_creates_partial_unique_index(self):
+        command.upgrade(self.config, "0054")
+        command.upgrade(self.config, "head")
+        engine = create_engine(self.url)
+        try:
+            # SQLAlchemy intentionally cannot reflect SQLite expression indexes.
+            # Inspect the DDL so this test verifies the canonical expression,
+            # not merely the index name.
+            with engine.connect() as connection:
+                index_sql = connection.execute(text(
+                    "SELECT sql FROM sqlite_master WHERE type = 'index' "
+                    "AND name = 'ix_integration_bindings_one_active_provider'"
+                )).scalar_one()
+            self.assertIn("UNIQUE INDEX", index_sql.upper())
+            self.assertIn("lower(trim(provider))", index_sql)
+            self.assertIn("WHERE state = 'active'", index_sql)
+            with engine.begin() as connection:
+                connection.execute(text(
+                    "INSERT INTO integration_bindings "
+                    "(id, provider, environment, state, canonical_account_host, workspace_ids, "
+                    "credential_reference, capability_version, created_at, updated_at) VALUES "
+                    "('draft-a', 'freshservice', 'production', 'draft', "
+                    "'draft-a.freshservice.com', '[]', 'env://freshservice', 1, "
+                    "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP), "
+                    "('draft-b', 'freshservice', 'production', 'draft', "
+                    "'draft-b.freshservice.com', '[]', 'env://freshservice', 1, "
+                    "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP), "
+                    "('active-a', 'freshservice', 'production', 'active', "
+                    "'active-a.freshservice.com', '[]', 'env://freshservice', 1, "
+                    "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                ))
+                with self.assertRaises(IntegrityError):
+                    connection.execute(text(
+                        "INSERT INTO integration_bindings "
+                        "(id, provider, environment, state, canonical_account_host, workspace_ids, "
+                        "credential_reference, capability_version, created_at, updated_at) VALUES "
+                        "('active-b', 'FreshService', 'production', 'active', "
+                        "'active-b.freshservice.com', '[]', 'env://freshservice', 1, "
+                        "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                    ))
+        finally:
+            engine.dispose()
+
+    def test_active_integration_binding_migration_normalizes_legacy_provider_case(self):
+        command.upgrade(self.config, "0056")
+        engine = create_engine(self.url)
+        try:
+            with engine.begin() as connection:
+                connection.execute(text(
+                    "INSERT INTO integration_bindings "
+                    "(id, provider, environment, state, canonical_account_host, workspace_ids, "
+                    "credential_reference, capability_version, created_at, updated_at) VALUES "
+                    "('mixed-provider', ' FreshService ', 'production', 'active', "
+                    "'mixed.freshservice.com', '[]', 'env://freshservice', 1, "
+                    "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                ))
+            command.upgrade(self.config, "head")
+            with engine.begin() as connection:
+                self.assertEqual(connection.execute(text(
+                    "SELECT provider FROM integration_bindings WHERE id = 'mixed-provider'"
+                )).scalar_one(), "freshservice")
+                with self.assertRaises(IntegrityError):
+                    connection.execute(text(
+                        "INSERT INTO integration_bindings "
+                        "(id, provider, environment, state, canonical_account_host, workspace_ids, "
+                        "credential_reference, capability_version, created_at, updated_at) VALUES "
+                        "('case-collision', 'FRESHSERVICE', 'production', 'active', "
+                        "'collision.freshservice.com', '[]', 'env://freshservice', 1, "
+                        "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                    ))
+        finally:
+            engine.dispose()
+
+    def test_active_integration_binding_migration_rejects_null_provider_without_advancing(self):
+        """A corrupt pre-0057 nullable provider must not be mistaken for no row."""
+        command.upgrade(self.config, "0056")
+        engine = create_engine(self.url)
+        try:
+            with engine.begin() as connection:
+                # The real 0056 schema is NOT NULL. Rebuild just this table to
+                # model an externally-corrupted legacy database, then prove the
+                # 0057 preflight rejects the NULL before it attempts an index
+                # replacement or marks the revision applied.
+                connection.execute(text(
+                    "ALTER TABLE integration_bindings RENAME TO legacy_integration_bindings"
+                ))
+                connection.execute(text(
+                    "DROP INDEX ix_integration_bindings_one_active_provider"
+                ))
+                connection.execute(text(
+                    "CREATE TABLE integration_bindings ("
+                    "id VARCHAR(36) NOT NULL PRIMARY KEY, provider VARCHAR(64), "
+                    "environment VARCHAR(16) NOT NULL, state VARCHAR(16) NOT NULL, "
+                    "canonical_account_host VARCHAR(255) NOT NULL, installation_id VARCHAR(255))"
+                ))
+                connection.execute(text(
+                    "INSERT INTO integration_bindings "
+                    "(id, provider, environment, state, canonical_account_host, installation_id) "
+                    "VALUES ('null-provider', NULL, 'production', 'draft', "
+                    "'null.freshservice.com', NULL)"
+                ))
+            with self.assertRaisesRegex(RuntimeError, "provider is empty"):
+                command.upgrade(self.config, "head")
+            self.assertEqual(self._current_revision(engine), "0056")
+            with engine.connect() as connection:
+                self.assertIsNone(connection.execute(text(
+                    "SELECT provider FROM integration_bindings WHERE id = 'null-provider'"
+                )).scalar_one())
+        finally:
+            engine.dispose()
+
+    def test_active_integration_binding_migration_checks_named_index_before_normalizing(self):
+        command.upgrade(self.config, "0056")
+        engine = create_engine(self.url)
+        try:
+            with engine.begin() as connection:
+                connection.execute(text(
+                    "INSERT INTO integration_bindings "
+                    "(id, provider, environment, state, canonical_account_host, workspace_ids, "
+                    "credential_reference, capability_version, created_at, updated_at) VALUES "
+                    "('unchanged-on-index-error', ' FreshService ', 'production', 'active', "
+                    "'unchanged.freshservice.com', '[]', 'env://freshservice', 1, "
+                    "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                ))
+                connection.execute(text(
+                    "DROP INDEX ix_integration_bindings_one_active_provider"
+                ))
+                connection.execute(text(
+                    "CREATE INDEX ix_integration_bindings_one_active_provider "
+                    "ON integration_bindings (environment)"
+                ))
+            with self.assertRaisesRegex(RuntimeError, "index is incompatible"):
+                command.upgrade(self.config, "head")
+            self.assertEqual(self._current_revision(engine), "0056")
+            with engine.connect() as connection:
+                self.assertEqual(connection.execute(text(
+                    "SELECT provider FROM integration_bindings "
+                    "WHERE id = 'unchanged-on-index-error'"
+                )).scalar_one(), " FreshService ")
+        finally:
+            engine.dispose()
+
+    def test_attachment_blob_cleanup_rejects_incomplete_precreated_queue(self):
+        command.upgrade(self.config, "0049")
+        engine = create_engine(self.url)
+        try:
+            with engine.begin() as connection:
+                connection.execute(text(
+                    "CREATE TABLE attachment_blob_deletions "
+                    "(id VARCHAR(36) PRIMARY KEY, attachment_id VARCHAR(36) NOT NULL)"
+                ))
+            with self.assertRaisesRegex(RuntimeError, "attachment blob cleanup schema is incompatible"):
+                command.upgrade(self.config, "head")
+        finally:
+            engine.dispose()
+
+    def test_attachment_blob_cleanup_adopts_current_orm_queue_from_legacy_demo_bootstrap(self):
+        """A historical ``create_all`` must not strand a database before 0051.
+
+        Old demo startup could create current ORM relations before an operator
+        later ran Alembic.  The forward-only remote-delete queue may be adopted
+        only when that ORM-created representation has the complete durable
+        claim contract.
+        """
+        command.upgrade(self.config, "0049")
+        engine = create_engine(self.url)
+        try:
+            with patch.object(database, "engine", engine):
+                Base.metadata.create_all(bind=engine)
+
+            command.upgrade(self.config, "head")
+
+            inspector = inspect(engine)
+            self.assertEqual(self._current_revision(engine), self.expected_head)
+            self.assertIn("attachment_blob_deletions", inspector.get_table_names())
+            self.assertIn(
+                "uix_attachment_blob_deletion_identity",
+                {
+                    constraint["name"]
+                    for constraint in inspector.get_unique_constraints(
+                        "attachment_blob_deletions"
+                    )
+                },
+            )
         finally:
             engine.dispose()
 
@@ -372,13 +1030,15 @@ class DatabaseMigrationTests(unittest.TestCase):
         try:
             now = datetime.utcnow()
             with Session(engine) as db:
-                user = database.UserRecord(
-                    id="local-agent",
-                    name="Local Agent",
-                    email="local@example.com",
-                    role="agent",
-                    is_active=True,
-                )
+                # This fixture intentionally exercises the pre-0056 schema;
+                # use its historical row shape rather than the current ORM,
+                # whose auth-epoch column is not introduced until the target
+                # migration later in this test.
+                db.execute(text(
+                    "INSERT INTO users (id, name, email, email_key, role, is_active) "
+                    "VALUES ('local-agent', 'Local Agent', 'local@example.com', "
+                    "'local@example.com', 'agent', 1)"
+                ))
                 remote_agent = database.ExternalUserRecord(
                     id="remote-agent",
                     binding_id="binding-one",
@@ -403,22 +1063,22 @@ class DatabaseMigrationTests(unittest.TestCase):
                     profile_json="{}",
                     fetched_at=now,
                 )
-                db.add_all([user, remote_agent, requester])
+                db.add_all([remote_agent, requester])
                 db.flush()
                 db.add_all([
                     database.UserExternalIdentityLinkRecord(
-                        user_id=user.id,
+                        user_id="local-agent",
                         external_user_id=remote_agent.id,
                         binding_id=remote_agent.binding_id,
                         provider=remote_agent.provider,
-                        created_by=user.id,
+                        created_by="local-agent",
                         created_at=now,
                         updated_at=now,
                     ),
                     database.AgentResolverTeamMappingRecord(
-                        user_id=user.id,
+                        user_id="local-agent",
                         resolver_group="SERVICE_DESK",
-                        created_by=user.id,
+                        created_by="local-agent",
                         created_at=now,
                         updated_at=now,
                     ),

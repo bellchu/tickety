@@ -9,6 +9,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.backend import main
+from app.backend.ai_status import load_ai_queue_metrics
 from app.backend.database import (
     Base,
     LLMCallRecord,
@@ -47,12 +48,12 @@ class AIStatusPageApiTests(unittest.TestCase):
                     is_active=True,
                 ),
                 SessionRecord(
-                    token="status-admin-session",
+                    token_hash=main.session_token_digest("status-admin-session"),
                     user_id="status-admin",
                     expires_at=self.now + timedelta(hours=1),
                 ),
                 SessionRecord(
-                    token="status-agent-session",
+                    token_hash=main.session_token_digest("status-agent-session"),
                     user_id="status-agent",
                     expires_at=self.now + timedelta(hours=1),
                 ),
@@ -262,6 +263,28 @@ class AIStatusPageApiTests(unittest.TestCase):
             [feature["enabled"] for feature in payload["automation"]],
             [True, False, False, False, False],
         )
+
+    def test_lease_expiring_at_claim_boundary_is_reported_expired(self):
+        ticket = TicketRecord(
+            id="lease-boundary",
+            subject="Lease boundary",
+            ai_status="running",
+            ai_lease_expires_at=self.now,
+        )
+        self.assertEqual(
+            main._ai_task_lifecycle(ticket, self.now),
+            "lease_expired",
+        )
+        with self.session_factory() as db:
+            db.add(ticket)
+            db.commit()
+            metrics = load_ai_queue_metrics(
+                db,
+                self.now,
+                operator_cleared_error="operator_retry_queue_cleared",
+            )
+        self.assertEqual(metrics.running_active, 1)
+        self.assertEqual(metrics.lease_expired, 2)
 
     def test_successful_legacy_sync_counts_as_an_active_source(self):
         with self.session_factory() as db:

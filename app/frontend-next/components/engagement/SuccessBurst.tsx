@@ -17,7 +17,7 @@ export function SuccessBurst({ notification, onClose }: Props) {
         animate={{ opacity: 1, y: 0, scale: 1 }}
         exit={{ opacity: 0, y: -20, scale: 0.9 }}
         transition={{ type: "spring", stiffness: 300, damping: 25 }}
-        className="fixed inset-x-4 bottom-4 z-50 sm:inset-x-auto sm:bottom-6 sm:right-6"
+        className="w-full sm:w-auto"
       >
         <div className="card-surface relative w-full max-w-sm p-4 pr-10 shadow-lg sm:min-w-[280px]">
           <button
@@ -32,7 +32,7 @@ export function SuccessBurst({ notification, onClose }: Props) {
             <div className="w-10 h-10 rounded-xl bg-linen-300 flex items-center justify-center flex-shrink-0">
               <CheckCircle2 className="w-5 h-5 text-ink-600" />
             </div>
-            <div className="min-w-0">
+            <div role="status" aria-live="polite" aria-atomic="true" className="min-w-0">
               <p className="text-sm font-semibold text-ink-700">
                 +{notification.points_earned} Impact Points
               </p>

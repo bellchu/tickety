@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { LogOut } from "lucide-react";
 import { Button, type ButtonSize, type ButtonVariant } from "@/components/ui/Button";
 import { api, queryClient } from "@/lib/api";
+import { useEngagementStore } from "@/lib/engagement-state";
 
 export function LogoutButton({
   className,
@@ -32,6 +33,7 @@ export function LogoutButton({
       // Logout is a user-isolation boundary. Remove every cached response
       // before navigating so the next session cannot see prior user data.
       queryClient.clear();
+      useEngagementStore.getState().resetForUser(null);
       onNavigate?.();
       router.replace("/login");
       router.refresh();

@@ -7,6 +7,14 @@ const {
   webSocketProxyErrorKind,
 } = require("../lib/ws-proxy-security");
 
+test("WebSocket server preserves the HTTP proxy's runtime backend fallback", () => {
+  const server = require("node:fs").readFileSync(
+    require("node:path").join(__dirname, "..", "server.js"),
+    "utf8",
+  );
+  assert.match(server, /process\.env\.BACKEND_URL \|\| process\.env\.NEXT_PUBLIC_API_URL \|\| "http:\/\/localhost:8000"/);
+});
+
 test("WebSocket handler forwards only ws paths with original auth headers", () => {
   const calls = [];
   const proxy = {

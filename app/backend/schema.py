@@ -891,6 +891,11 @@ class Recognition(BaseModel):
 
 
 class PointsAwardedNotification(BaseModel):
+    # Assigned by the durable realtime outbox. Optional keeps direct legacy
+    # callers and previously persisted payloads compatible during rollout.
+    # Browser reconnect cursors use JavaScript safe integers. Do not issue an
+    # id that a client could render but could not persist without rounding.
+    event_id: Optional[int] = Field(default=None, ge=1, le=9_007_199_254_740_991)
     ticket_id: str
     ticket_subject: str
     user_id: str
@@ -1289,21 +1294,6 @@ class IntegrationBindingCreate(StrictWriteModel):
 
 class IntegrationBindingSuspend(StrictWriteModel):
     reason: str = Field(..., min_length=1, max_length=200)
-
-
-class FreshworksBootstrapRequest(StrictWriteModel):
-    binding_id: str = Field(..., min_length=36, max_length=36)
-    account_host: str = Field(..., min_length=1, max_length=255)
-    external_user_id: str = Field(..., min_length=1, max_length=255)
-    workspace_id: Optional[str] = Field(None, max_length=255)
-    external_ticket_id: Optional[str] = Field(None, pattern=r"^[0-9]+$", max_length=255)
-    ticket_updated_at: Optional[datetime] = None
-    audience: Literal["ticket_sidebar", "full_page_app"]
-
-
-class FreshworksBootstrapRedeem(StrictWriteModel):
-    binding_id: str = Field(..., min_length=36, max_length=36)
-    code: str = Field(..., min_length=32, max_length=255)
 
 
 class TicketCreate(StrictWriteModel):

@@ -9,9 +9,11 @@ from datetime import datetime
 from typing import Any, Awaitable, Callable, Optional
 
 from sqlalchemy import func, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from .database import KbArticleRecord, SessionLocal, TicketCommentRecord, TicketRecord
+from .llm_manager import LLMCapacityError
 from .privacy import configured_secret_values, redact_text
 
 
@@ -34,6 +36,18 @@ to_tsvector(
 )
 """
 _KEYWORD_QUERY_SQL = "plainto_tsquery('simple'::regconfig, :keyword_query)"
+_BACKGROUND_REFRESH_TASKS: dict[str, asyncio.Task[int]] = {}
+
+
+def _background_refresh_retry_delay_seconds() -> float:
+    try:
+        configured = float(
+            os.getenv("TICKET_VECTOR_BACKGROUND_REFRESH_RETRY_DELAY_SECONDS", "0.25")
+            or "0.25"
+        )
+    except ValueError:
+        configured = 0.25
+    return max(0.0, min(configured, 10.0))
 
 
 def _candidate_pool_limits(limit: int) -> tuple[int, int]:
@@ -823,12 +837,80 @@ async def _refresh_ticket_by_id(ticket_id: str, force: bool = False) -> int:
         db.close()
 
 
+async def _run_background_ticket_refresh(ticket_id: str, force: bool) -> int:
+    """Run one derived-document refresh, retrying only a transient DB/network fault.
+
+    Ticket evidence is derived data: a bounded, one-time retry is enough to
+    cover a short provider/database interruption without turning an update
+    request into an unbounded background workload.
+    """
+    for attempt in range(2):
+        try:
+            return await _refresh_ticket_by_id(ticket_id, force=force)
+        except asyncio.CancelledError:
+            raise
+        except (
+            asyncio.TimeoutError,
+            ConnectionError,
+            OperationalError,
+            LLMCapacityError,
+        ):
+            if attempt:
+                raise
+            await asyncio.sleep(_background_refresh_retry_delay_seconds())
+    raise AssertionError("unreachable")
+
+
+def _consume_background_ticket_refresh(task: asyncio.Task[int], ticket_id: str) -> None:
+    """Remove completed work and observe failures so asyncio never logs them late."""
+    if _BACKGROUND_REFRESH_TASKS.get(ticket_id) is task:
+        _BACKGROUND_REFRESH_TASKS.pop(ticket_id, None)
+    if task.cancelled():
+        return
+    try:
+        task.result()
+    except Exception as exc:
+        # This refresh is best-effort derived data. Keep failure visible while
+        # consuming it at the scheduler boundary rather than producing an
+        # unhandled-task warning after the originating request has completed.
+        print(
+            "[vectors] background_ticket_refresh_error "
+            f"ticket_id={ticket_id} kind={type(exc).__name__}"
+        )
+
+
+def _schedule_background_ticket_refresh(ticket_id: str, force: bool) -> bool:
+    """Schedule at most one outstanding refresh for each ticket in this process."""
+    existing = _BACKGROUND_REFRESH_TASKS.get(ticket_id)
+    if existing and not existing.done():
+        return True
+    if existing:
+        _BACKGROUND_REFRESH_TASKS.pop(ticket_id, None)
+    task = asyncio.create_task(
+        _run_background_ticket_refresh(ticket_id, force),
+        name=f"ticket-vector-refresh:{ticket_id}",
+    )
+    _BACKGROUND_REFRESH_TASKS[ticket_id] = task
+    task.add_done_callback(lambda completed: _consume_background_ticket_refresh(completed, ticket_id))
+    return True
+
+
+async def stop_background_ticket_refreshes() -> None:
+    """Cancel and drain every process-local refresh before the app shuts down."""
+    tasks = list(_BACKGROUND_REFRESH_TASKS.values())
+    _BACKGROUND_REFRESH_TASKS.clear()
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 def refresh_ticket_documents_background(db: Session, ticket: TicketRecord, force: bool = False) -> int:
     try:
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(refresh_ticket_documents(db, ticket, force=force))
-    loop.create_task(_refresh_ticket_by_id(ticket.id, force=force))
+    _schedule_background_ticket_refresh(str(ticket.id), force)
     return 0
 
 

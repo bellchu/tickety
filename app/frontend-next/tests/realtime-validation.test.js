@@ -4,6 +4,7 @@ const test = require("node:test");
 
 
 const {
+  isNotificationCursorAdvance,
   isPointsNotification,
   isTicketAnalysisResult,
   isTriageProgressMessage,
@@ -126,9 +127,22 @@ test("triage messages require valid progress and complete result structures", ()
 
 test("notifications require all rendered fields and complete recognition records", () => {
   assert.equal(isPointsNotification(notification()), true);
+  assert.equal(isPointsNotification(notification({ event_id: 42 })), true);
+  assert.equal(isPointsNotification(notification({ event_id: 0 })), false);
+  assert.equal(isPointsNotification(notification({ event_id: 1.5 })), false);
+  assert.equal(isPointsNotification(notification({ event_id: -1 })), false);
+  assert.equal(isPointsNotification(notification({ event_id: 9_007_199_254_740_992 })), false);
   assert.equal(isPointsNotification(notification({ user_name: undefined })), false);
   assert.equal(isPointsNotification(notification({ recognitions_unlocked: [null] })), false);
   assert.equal(isPointsNotification(notification({ recognitions_unlocked: [{ id: 1 }] })), false);
+});
+
+test("replay cursor advancement accepts only the bounded control protocol", () => {
+  assert.equal(isNotificationCursorAdvance({ type: "notification_cursor_advance", cursor: 42 }), true);
+  assert.equal(isNotificationCursorAdvance({ type: "notification_cursor_advance", cursor: 0 }), false);
+  assert.equal(isNotificationCursorAdvance({ type: "notification_cursor_advance", cursor: 9_007_199_254_740_992 }), false);
+  assert.equal(isNotificationCursorAdvance({ type: "notification_cursor_advance", cursor: 42, payload: "untrusted" }), false);
+  assert.equal(isNotificationCursorAdvance({ type: "points_awarded", cursor: 42 }), false);
 });
 
 test("watchdog uses bounded backend timeout plus a recovery margin", () => {

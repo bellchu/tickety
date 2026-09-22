@@ -3,11 +3,24 @@ fullnameOverride: ""
 
 imagePullSecrets: []
 
+# The production installer enables this gate and supplies registry manifest
+# digests. Local/evaluation chart renders can retain tag references.
+imageDigestPolicy:
+  requireDigests: false
+
 backend:
   replicaCount: 1
+  topologySpread:
+    enabled: false
+    topologyKey: kubernetes.io/hostname
+    maxSkew: 1
+    whenUnsatisfiable: DoNotSchedule
   image:
     repository: tickety-backend
-    tag: latest
+    # `dev` is only for a local/evaluation chart render. Production values must
+    # supply a build-specific tag (the repository deployer does this for you).
+    tag: dev
+    digest: ""
     pullPolicy: IfNotPresent
   resources:
     requests:
@@ -19,6 +32,15 @@ backend:
 
 worker:
   enabled: true
+  # Admission closes immediately on SIGTERM. This is deliberately below the
+  # worker Pod's 45-second termination grace, leaving Kubernetes headroom.
+  shutdownDeadlineSeconds: 20
+  # A heartbeat is written only after a scheduled callback completes. Kubernetes
+  # restarts a worker whose scheduler or executor stops making progress.
+  healthcheckMaxAgeSeconds: 120
+  # The worker always runs the backend image that the migration Job verifies.
+  # Repository/tag overrides must exactly match backend.image and otherwise
+  # fail rendering, so an independently-versioned worker cannot outrun schema.
   image: {}
   resources:
     requests:
@@ -30,9 +52,17 @@ worker:
 
 frontend:
   replicaCount: 1
+  topologySpread:
+    enabled: false
+    topologyKey: kubernetes.io/hostname
+    maxSkew: 1
+    whenUnsatisfiable: DoNotSchedule
   image:
     repository: tickety-frontend
-    tag: latest
+    # Keep the chart usable for local evaluation without making a floating tag
+    # appear to be a production-safe default.
+    tag: dev
+    digest: ""
     pullPolicy: IfNotPresent
   service:
     type: ClusterIP
@@ -55,26 +85,42 @@ ingress:
   tls: []
 
 # Use an existing Secret instead of having the chart manage one. It must contain
-# DATABASE_URL and, when postgresql.enabled=true, POSTGRES_PASSWORD.
+# DATABASE_URL, TICKETY_SETTINGS_ENCRYPTION_ACTIVE_KID,
+# TICKETY_SETTINGS_ENCRYPTION_KEYS_JSON, and, when postgresql.enabled=true,
+# POSTGRES_PASSWORD. The chart cannot safely inspect externally managed Secret
+# data during an install or dry-run; the migration Job fails closed if either
+# settings-encryption key is absent or invalid.
 existingSecret: ""
 # For a Secret managed outside Helm, change this non-secret token after each
 # credential rotation to roll backend and worker Pods. The chart never reads or
 # hashes the external Secret.
 existingSecretRolloutToken: ""
 
-# Sensitive application settings are written to the chart-managed Secret.
+# Sensitive application settings are written to the chart-managed Secret. When
+# existingSecret is empty, both TICKETY_SETTINGS_ENCRYPTION_ACTIVE_KID and
+# TICKETY_SETTINGS_ENCRYPTION_KEYS_JSON are required here at render time so the
+# migration preflight never starts without its deployment-owned keyring. Supply
+# them through an uncommitted secret values source; production should normally
+# use existingSecret from a secret manager instead.
 # A stable, alphanumeric PostgreSQL password is generated on first install when
 # postgresql.auth.password is empty and is reused on subsequent upgrades.
 secrets: {}
 
 config:
-  appMode: production
-  deploymentClass: production
+  # The bare chart is an evaluation baseline. Production values and deploy.sh
+  # select production explicitly, which then makes digest pinning mandatory.
+  appMode: demo
+  deploymentClass: poc
   loginRequired: true
   frontendUrl: https://tickety.example.com
   corsAllowOrigins: https://tickety.example.com
   cookieSecure: true
   cookieSameSite: lax
+  # `auto` selects raw-write compatibility only for a Helm upgrade, where a
+  # legacy API Pod can overlap. New Helm installs select `hashed`. After a
+  # bridge upgrade, explicitly set `hashed` to stop raw writes; existing
+  # bounded legacy sessions remain readable only until their normal expiry.
+  sessionStorageMode: auto
   sso:
     enabled: false
     # Presets: entra or okta. Use oidc plus discoveryUrl for another public
@@ -104,13 +150,38 @@ config:
     queryCacheTtlSeconds: 2700
     queryCacheMaxRows: 50000
     snapshotTtlSeconds: 86400
+    # API/all processes independently run one bounded expiry batch at this
+    # interval. This deployment-owned setting is intentionally not editable
+    # through the administrator settings store.
+    retentionPollSeconds: 300
+  # Non-secret realtime outbox controls. Each API replica polls the shared
+  # database independently, then delivers only to its own authenticated WS clients.
+  notificationOutboxPollSeconds: 1
+  notificationOutboxBatchSize: 100
+  notificationOutboxReplayBatchSize: 100
+  notificationOutboxRetentionSeconds: 3600
+  notificationOutboxPruneIntervalSeconds: 300
+  notificationOutboxStaleSeconds: 30
+  notificationOutboxPruneBatchSize: 5000
+  notificationOutboxPruneBatchesPerRun: 4
+  aiRetentionCleanupBatchSize: 500
+  aiRetentionCleanupMaxRowsPerStart: 5000
+  # Escape-hatch settings are rendered into a public ConfigMap. Sensitive or
+  # reserved names (for example *_SECRET, *_TOKEN, *_KEY, credentials, and the
+  # settings-encryption keyring) are rejected by both schema and template.
+  # Put every credential in secrets or the externally managed existingSecret.
   extra: {}
 
 postgresql:
   enabled: true
   image:
     repository: pgvector/pgvector
-    tag: pg16
+    # Keep the database image aligned with the verified Compose/dev image.
+    # Never use a floating major-only or `latest` tag for persistent storage.
+    tag: 0.8.6-pg16
+    # Required when production digest policy is enabled and this bundled
+    # PostgreSQL StatefulSet (or its backup CronJob) is rendered.
+    digest: ""
     pullPolicy: IfNotPresent
   auth:
     username: tickety

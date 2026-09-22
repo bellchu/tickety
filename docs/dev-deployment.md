@@ -23,7 +23,9 @@ image. Existing secrets remain in `tickety-secrets` and never enter Git or
 command output.
 
 Each release builds unique backend and frontend images, creates and validates a
-custom-format PostgreSQL backup, runs `alembic upgrade head` as a bounded Job,
+custom-format PostgreSQL backup, validates the deployment-owned settings
+encryption keyring and every persisted sensitive envelope, then runs `alembic
+upgrade head` as a bounded Job,
 records prior image tags, rolls out only Tickety's three deployments, and checks
 the public readiness, backend SHA, frontend build manifest, ingress hostname,
 and Cloudflared service. It explicitly restores one replica for each Tickety

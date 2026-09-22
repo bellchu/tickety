@@ -22,7 +22,7 @@ services:
     build:
       context: .
       target: backend
-    command: ["alembic", "upgrade", "head"]
+    command: ["/bin/sh", "-ec", "python scripts/verify-settings-secret-encryption.py && alembic upgrade head"]
     env_file:
       - path: .env
         required: false
@@ -48,7 +48,6 @@ services:
     environment:
       APP_MODE: ${APP_MODE:-production}
       TICKETY_DEPLOYMENT_CLASS: ${TICKETY_DEPLOYMENT_CLASS:-production}
-      FRESHWORKS_APP_BOOTSTRAP_SECRET: ${FRESHWORKS_APP_BOOTSTRAP_SECRET:-}
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
       TICKETY_PROCESS_ROLE: api
       TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED: ${TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED:-false}
@@ -90,7 +89,10 @@ services:
       migrate:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "python", "-c", "import os; os.kill(1, 0)"]
+      # A live PID is not evidence that APScheduler is still completing work.
+      # The worker's in-process watchdog exits on this same stale heartbeat,
+      # allowing Compose restart policy to recover durable leases.
+      test: ["CMD", "python", "-m", "app.backend.worker", "--healthcheck"]
       interval: 30s
       timeout: 5s
       retries: 3

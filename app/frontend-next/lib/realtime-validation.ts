@@ -49,6 +49,10 @@ function isInteger(value: unknown): value is number {
   return isFiniteNumber(value) && Number.isInteger(value);
 }
 
+function isSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value);
+}
+
 function isNullableString(value: unknown): value is string | null {
   return typeof value === "string" || value === null;
 }
@@ -183,7 +187,8 @@ function isRecognition(value: unknown): value is Recognition {
 
 export function isPointsNotification(value: unknown): value is PointsNotification {
   if (!isRecord(value)) return false;
-  return typeof value.ticket_id === "string"
+  return (value.event_id === undefined || (isSafeInteger(value.event_id) && value.event_id >= 1))
+    && typeof value.ticket_id === "string"
     && typeof value.ticket_subject === "string"
     && typeof value.user_id === "string"
     && typeof value.user_name === "string"
@@ -194,6 +199,16 @@ export function isPointsNotification(value: unknown): value is PointsNotificatio
     && isFiniteNumber(value.new_momentum)
     && Array.isArray(value.recognitions_unlocked)
     && value.recognitions_unlocked.every(isRecognition);
+}
+
+/** A replay-only protocol frame; it never contains business notification data. */
+export function isNotificationCursorAdvance(value: unknown): value is { type: "notification_cursor_advance"; cursor: number } {
+  if (!isRecord(value)) return false;
+  const keys = Object.keys(value);
+  return keys.length === 2
+    && value.type === "notification_cursor_advance"
+    && isSafeInteger(value.cursor)
+    && value.cursor >= 1;
 }
 
 export function triageWatchdogDelayMs(timeoutSeconds: unknown): number {

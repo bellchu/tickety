@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -10,6 +10,7 @@ import {
   ArrowRight,
   ArrowUpRight,
   BellRing,
+  CalendarClock,
   Check,
   ChevronRight,
   Circle,
@@ -30,6 +31,7 @@ import type {
   AgentWorkspaceFolder,
   AgentWorkspaceScope,
   AgentWorkspaceTicket,
+  AgentTicketStateUpdate,
 } from "@/lib/types";
 import {
   cn,
@@ -45,7 +47,7 @@ import {
 import { FreshserviceConversationThread } from "@/components/ticket/FreshserviceConversationThread";
 import { TicketPriorityIndicator } from "@/components/ticket/TicketPriorityIndicator";
 import { TicketSentimentSubtitle } from "@/components/ticket/TicketSentimentSubtitle";
-import { Alert, Badge, Button, EmptyState, ErrorState, IconButton, Skeleton } from "@/components/ui";
+import { Alert, Badge, Button, Dialog, EmptyState, ErrorState, IconButton, Skeleton } from "@/components/ui";
 import { PageFrame } from "@/components/layout/PageLayout";
 
 const MY_FOLDERS: Array<{
@@ -75,6 +77,22 @@ const TEAM_FOLDERS: Array<{ id: AgentWorkspaceFolder; label: string }> = [
 ];
 
 const AGENT_TICKET_PAGE_SIZE = 25;
+const MARK_SEEN_RETRY_DELAYS_MS = [1_000, 3_000, 10_000] as const;
+
+type AgentStateAction = "star" | "follow_up" | "clear_follow_up";
+
+interface AgentStateRequest {
+  ticketId: string;
+  update: AgentTicketStateUpdate;
+  action: AgentStateAction;
+}
+
+interface AgentStateFeedback {
+  variant: "success" | "danger";
+  action: AgentStateAction;
+  message: string;
+  request?: AgentStateRequest;
+}
 
 function activeDeadline(ticket: AgentWorkspaceTicket) {
   if (ticket.needs_reply) {
@@ -83,11 +101,28 @@ function activeDeadline(ticket: AgentWorkspaceTicket) {
   return ticket.resolution_due_at || ticket.due_by || ticket.external_due_by;
 }
 
-function tomorrowAtNine() {
+function localDateTimeAt(daysAhead: number, hour: number, minute = 0) {
+  const value = new Date();
+  value.setDate(value.getDate() + daysAhead);
+  value.setHours(hour, minute, 0, 0);
+  return value.toISOString();
+}
+
+function inTwoHours() {
+  return new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
+}
+
+function nextWorkdayAtNine() {
   const value = new Date();
   value.setDate(value.getDate() + 1);
+  while (value.getDay() === 0 || value.getDay() === 6) value.setDate(value.getDate() + 1);
   value.setHours(9, 0, 0, 0);
   return value.toISOString();
+}
+
+function toLocalDateTimeValue(value: Date) {
+  const offset = value.getTimezoneOffset() * 60_000;
+  return new Date(value.getTime() - offset).toISOString().slice(0, 16);
 }
 
 function folderLabel(folder: AgentWorkspaceFolder, scope: AgentWorkspaceScope) {
@@ -104,8 +139,15 @@ export function AgentWorkspace() {
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [copied, setCopied] = useState<"reply" | "link" | null>(null);
+  const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
+  const [followUpTicket, setFollowUpTicket] = useState<AgentWorkspaceTicket | null>(null);
+  const [stateFeedback, setStateFeedback] = useState<AgentStateFeedback | null>(null);
   const markedSeen = useRef(new Set<string>());
   const markingSeen = useRef(new Set<string>());
+  const markSeenRetryAttempts = useRef(new Map<string, number>());
+  const markSeenRetryTimers = useRef(new Map<string, number>());
+  const markSeenMounted = useRef(true);
+  const copyFeedbackTimer = useRef<ReturnType<typeof setTimeout> | number | null>(null);
 
   const scope: AgentWorkspaceScope = searchParams.get("scope") === "team" ? "team" : "mine";
   const rawFolder = searchParams.get("folder") as AgentWorkspaceFolder | null;
@@ -208,29 +250,71 @@ export function AgentWorkspace() {
     mutationFn: ({
       ticketId,
       update,
-    }: {
-      ticketId: string;
-      update: Parameters<typeof api.updateAgentTicketState>[1];
-    }) => api.updateAgentTicketState(ticketId, update),
-    onSuccess: () => {
+    }: AgentStateRequest) => api.updateAgentTicketState(ticketId, update),
+    onSuccess: (_result, request) => {
+      const successMessages: Record<AgentStateAction, string> = {
+        star: "Ticket priority was saved.",
+        follow_up: "Follow-up reminder was scheduled.",
+        clear_follow_up: "Follow-up reminder was cleared.",
+      };
+      setStateFeedback({ variant: "success", action: request.action, message: successMessages[request.action] });
       void queryClient.invalidateQueries({ queryKey: ["agent-workspace"] });
+    },
+    onError: (error, request) => {
+      const fallback = request.action === "star"
+        ? "The ticket priority could not be saved."
+        : "The follow-up reminder could not be saved.";
+      setStateFeedback({
+        variant: "danger",
+        action: request.action,
+        message: error instanceof Error ? error.message : fallback,
+        request,
+      });
     },
   });
 
-  useEffect(() => {
-    if (!selected?.is_unread || markedSeen.current.has(selected.id) || markingSeen.current.has(selected.id)) return;
-    const ticketId = selected.id;
+  const updateTicketState = (request: AgentStateRequest) => {
+    setStateFeedback(null);
+    stateMutation.mutate(request);
+  };
+
+  const markTicketSeen = useCallback(function markTicketSeen(ticketId: string) {
+    if (markedSeen.current.has(ticketId) || markingSeen.current.has(ticketId)) return;
     markingSeen.current.add(ticketId);
     void api.updateAgentTicketState(ticketId, { mark_seen: true })
       .then(() => {
         markedSeen.current.add(ticketId);
+        markSeenRetryAttempts.current.delete(ticketId);
         void queryClient.invalidateQueries({ queryKey: ["agent-workspace"] });
       })
-      .catch(() => undefined)
+      .catch(() => {
+        if (!markSeenMounted.current) return;
+        const attempt = markSeenRetryAttempts.current.get(ticketId) ?? 0;
+        const delay = MARK_SEEN_RETRY_DELAYS_MS[attempt];
+        if (delay == null) return;
+        markSeenRetryAttempts.current.set(ticketId, attempt + 1);
+        const retryTimer = window.setTimeout(() => {
+          markSeenRetryTimers.current.delete(ticketId);
+          markTicketSeen(ticketId);
+        }, delay);
+        markSeenRetryTimers.current.set(ticketId, retryTimer);
+      })
       .finally(() => markingSeen.current.delete(ticketId));
-    // The query client is stable for the mounted workspace.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected?.id, selected?.is_unread]);
+  }, [queryClient]);
+
+  useEffect(() => {
+    if (selected?.is_unread) markTicketSeen(selected.id);
+  }, [markTicketSeen, selected?.id, selected?.is_unread]);
+
+  useEffect(() => {
+    markSeenMounted.current = true;
+    const retryTimers = markSeenRetryTimers.current;
+    return () => {
+      markSeenMounted.current = false;
+      for (const timer of retryTimers.values()) window.clearTimeout(timer);
+      retryTimers.clear();
+    };
+  }, []);
 
   const selectMyFolder = (nextFolder: AgentWorkspaceFolder) => {
     replaceParams({ scope: "mine", team: null, folder: nextFolder, ticket: null });
@@ -245,10 +329,26 @@ export function AgentWorkspace() {
   const nextTicket = selectedIndex >= 0 ? tickets[selectedIndex + 1] : undefined;
 
   const copyText = async (value: string, kind: "reply" | "link") => {
-    await navigator.clipboard.writeText(value);
-    setCopied(kind);
-    window.setTimeout(() => setCopied(null), 1800);
+    if (copyFeedbackTimer.current) clearTimeout(copyFeedbackTimer.current);
+    setCopied(null);
+    setCopyFeedback(null);
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(kind);
+      setCopyFeedback(kind === "link" ? "Ticket link copied." : "Suggested response copied.");
+    } catch {
+      setCopyFeedback("Copy failed. Select and copy the text manually.");
+    }
+    copyFeedbackTimer.current = window.setTimeout(() => {
+      setCopied(null);
+      setCopyFeedback(null);
+      copyFeedbackTimer.current = null;
+    }, 2800);
   };
+
+  useEffect(() => () => {
+    if (copyFeedbackTimer.current) clearTimeout(copyFeedbackTimer.current);
+  }, []);
 
   return (
     <PageFrame width="wide" className="space-y-4">
@@ -289,6 +389,16 @@ export function AgentWorkspace() {
           Local assignments still appear in My Inbox. Ask an administrator to link your Freshservice agent identity to unlock authoritative personal and team queues.
         </Alert>
       ) : null}
+
+      {stateFeedback && (
+        <Alert
+          variant={stateFeedback.variant}
+          title={stateFeedback.variant === "success" ? "Ticket state saved" : "Ticket state was not saved"}
+          action={stateFeedback.variant === "danger" && stateFeedback.request ? <Button size="sm" variant="secondary" onClick={() => updateTicketState(stateFeedback.request!)} pending={stateMutation.isPending} pendingLabel="Retrying…">Retry</Button> : <Button size="sm" variant="ghost" onClick={() => setStateFeedback(null)}>Dismiss</Button>}
+        >
+          {stateFeedback.message}
+        </Alert>
+      )}
 
       <section className="grid min-h-[680px] overflow-hidden rounded-2xl border border-linen-400 bg-linen-50 shadow-sm lg:h-[calc(100vh-9rem)] lg:grid-cols-[14rem_22rem_minmax(0,1fr)]" aria-label="Agent ticket workspace">
         <aside className="min-w-0 border-b border-linen-400 bg-linen-100 lg:overflow-y-auto lg:border-b-0 lg:border-r" aria-label="Mailbox folders">
@@ -386,7 +496,7 @@ export function AgentWorkspace() {
             ) : (
               <div>
                 <div className="divide-y divide-linen-300">
-                  {tickets.map((ticket) => <TicketRow key={ticket.id} ticket={ticket} selected={ticket.id === selected?.id} onSelect={() => replaceParams({ ticket: ticket.id })} onStar={() => stateMutation.mutate({ ticketId: ticket.id, update: { starred: !ticket.is_starred } })} />)}
+                  {tickets.map((ticket) => <TicketRow key={ticket.id} ticket={ticket} selected={ticket.id === selected?.id} onSelect={() => replaceParams({ ticket: ticket.id })} onStar={() => updateTicketState({ ticketId: ticket.id, update: { starred: !ticket.is_starred }, action: "star" })} />)}
                 </div>
                 {ticketsQuery.isFetchNextPageError && (
                   <div className="border-t border-linen-300 p-3"><Alert variant="danger" title="More tickets could not be loaded" action={<Button size="sm" variant="secondary" onClick={() => void ticketsQuery.fetchNextPage()}>Retry</Button>}>The tickets already shown remain available.</Alert></div>
@@ -406,10 +516,11 @@ export function AgentWorkspace() {
             <TicketReadingPane
               ticket={selected}
               copied={copied}
+              copyFeedback={copyFeedback}
               onCopy={copyText}
-              onStar={() => stateMutation.mutate({ ticketId: selected.id, update: { starred: !selected.is_starred } })}
-              onFollowUp={() => stateMutation.mutate({ ticketId: selected.id, update: { follow_up_at: tomorrowAtNine() } })}
-              onClearFollowUp={() => stateMutation.mutate({ ticketId: selected.id, update: { clear_follow_up: true } })}
+              onStar={() => updateTicketState({ ticketId: selected.id, update: { starred: !selected.is_starred }, action: "star" })}
+              onOpenFollowUp={() => setFollowUpTicket(selected)}
+              onClearFollowUp={() => updateTicketState({ ticketId: selected.id, update: { clear_follow_up: true }, action: "clear_follow_up" })}
               pending={stateMutation.isPending}
             />
           ) : deepLinkedTicketQuery.isLoading ? (
@@ -421,6 +532,18 @@ export function AgentWorkspace() {
           )}
         </section>
       </section>
+      <FollowUpDialog
+        key={followUpTicket?.id || "follow-up-closed"}
+        open={Boolean(followUpTicket)}
+        ticket={followUpTicket}
+        pending={stateMutation.isPending}
+        onOpenChange={(open) => { if (!open) setFollowUpTicket(null); }}
+        onSchedule={(followUpAt) => {
+          if (!followUpTicket) return;
+          updateTicketState({ ticketId: followUpTicket.id, update: { follow_up_at: followUpAt }, action: "follow_up" });
+          setFollowUpTicket(null);
+        }}
+      />
     </PageFrame>
   );
 }
@@ -452,12 +575,13 @@ function TicketRow({ ticket, selected, onSelect, onStar }: { ticket: AgentWorksp
   );
 }
 
-function TicketReadingPane({ ticket, copied, onCopy, onStar, onFollowUp, onClearFollowUp, pending }: {
+function TicketReadingPane({ ticket, copied, copyFeedback, onCopy, onStar, onOpenFollowUp, onClearFollowUp, pending }: {
   ticket: AgentWorkspaceTicket;
   copied: "reply" | "link" | null;
-  onCopy: (value: string, kind: "reply" | "link") => void;
+  copyFeedback: string | null;
+  onCopy: (value: string, kind: "reply" | "link") => Promise<void>;
   onStar: () => void;
-  onFollowUp: () => void;
+  onOpenFollowUp: () => void;
   onClearFollowUp: () => void;
   pending: boolean;
 }) {
@@ -500,10 +624,13 @@ function TicketReadingPane({ ticket, copied, onCopy, onStar, onFollowUp, onClear
       </section>
 
       <div className="flex flex-wrap gap-2">
-        <Button size="sm" variant="secondary" leadingIcon={<AlarmClock className="h-3.5 w-3.5" />} pending={pending} pendingLabel="Saving…" onClick={ticket.follow_up_at ? onClearFollowUp : onFollowUp}>{ticket.follow_up_at ? "Clear follow-up" : "Follow up tomorrow"}</Button>
-        <Button size="sm" variant="ghost" leadingIcon={copied === "link" ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />} onClick={() => onCopy(`${window.location.origin}${ticketHref}`, "link")}>{copied === "link" ? "Link copied" : "Copy link"}</Button>
+        <Button size="sm" variant="secondary" leadingIcon={<AlarmClock className="h-3.5 w-3.5" />} pending={pending} pendingLabel="Saving…" onClick={ticket.follow_up_at ? onClearFollowUp : onOpenFollowUp}>{ticket.follow_up_at ? "Clear follow-up" : "Schedule follow-up"}</Button>
+        <Button size="sm" variant="ghost" leadingIcon={copied === "link" ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />} onClick={() => void onCopy(`${window.location.origin}${ticketHref}`, "link")}>{copied === "link" ? "Link copied" : "Copy link"}</Button>
         <Link href={ticketHref} className="inline-flex min-h-8 items-center gap-1.5 rounded-md px-3 text-xs font-semibold text-semantic-primary hover:bg-white">Full workbench <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" /></Link>
         {sourceUrl && <a href={sourceUrl} target="_blank" rel="noopener noreferrer" className="inline-flex min-h-8 items-center gap-1.5 rounded-md px-3 text-xs font-semibold text-ink-500 hover:bg-white">Freshservice <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" /></a>}
+      </div>
+      <div aria-live="polite" className="min-h-5 text-xs">
+        {copyFeedback && <span role={copyFeedback.startsWith("Copy failed") ? "alert" : undefined} className={copyFeedback.startsWith("Copy failed") ? "text-semantic-danger" : "text-semantic-success"}>{copyFeedback}</span>}
       </div>
 
       {ticket.follow_up_at && <Alert variant="info" title="Follow-up scheduled">This ticket will appear in Follow up at {formatOperationalTimestamp(ticket.follow_up_at)}.</Alert>}
@@ -517,7 +644,7 @@ function TicketReadingPane({ ticket, copied, onCopy, onStar, onFollowUp, onClear
         <section className="rounded-xl border border-linen-300 bg-white p-4" aria-labelledby="suggested-reply-title">
           <div className="flex items-center justify-between gap-2">
             <div><p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-semantic-primary">Draft accelerator</p><h3 id="suggested-reply-title" className="mt-0.5 text-sm font-semibold text-ink-700">Suggested response</h3></div>
-            <Button size="sm" variant="ghost" leadingIcon={copied === "reply" ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />} onClick={() => onCopy(ticket.suggested_response || "", "reply")}>{copied === "reply" ? "Copied" : "Copy draft"}</Button>
+            <Button size="sm" variant="ghost" leadingIcon={copied === "reply" ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />} onClick={() => void onCopy(ticket.suggested_response || "", "reply")}>{copied === "reply" ? "Copied" : "Copy draft"}</Button>
           </div>
           <p className="mt-3 whitespace-pre-wrap text-xs leading-5 text-ink-600">{ticket.suggested_response}</p>
           <p className="mt-3 text-[10px] text-ink-400">Review before using. Replies remain managed in Freshservice.</p>
@@ -528,5 +655,55 @@ function TicketReadingPane({ ticket, copied, onCopy, onStar, onFollowUp, onClear
         <section className="rounded-xl border border-linen-300 bg-white p-4"><p className="text-sm leading-6 text-ink-600">{ticket.description}</p></section>
       )}
     </div>
+  );
+}
+
+function FollowUpDialog({ open, ticket, pending, onOpenChange, onSchedule }: {
+  open: boolean;
+  ticket: AgentWorkspaceTicket | null;
+  pending: boolean;
+  onOpenChange: (open: boolean) => void;
+  onSchedule: (followUpAt: string) => void;
+}) {
+  const [customValue, setCustomValue] = useState(() => toLocalDateTimeValue(new Date(Date.now() + 24 * 60 * 60 * 1000)));
+  const [customError, setCustomError] = useState("");
+  const scheduleCustom = () => {
+    const parsed = new Date(customValue);
+    if (!customValue || Number.isNaN(parsed.getTime()) || parsed.getTime() <= Date.now()) {
+      setCustomError("Choose a future local date and time.");
+      return;
+    }
+    onSchedule(parsed.toISOString());
+  };
+  const presets = [
+    { label: "In 2 hours", value: inTwoHours },
+    { label: "Tomorrow, 9:00 AM", value: () => localDateTimeAt(1, 9) },
+    { label: "Next workday, 9:00 AM", value: nextWorkdayAtNine },
+  ];
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title="Schedule follow-up"
+      description={ticket ? `Choose when “${ticket.subject}” should return to your Follow up queue. Times use your local time zone.` : "Choose when this ticket should return to your Follow up queue."}
+      dismissible={!pending}
+      closeOnBackdrop={!pending}
+      footer={<Button variant="secondary" onClick={() => onOpenChange(false)} disabled={pending}>Cancel</Button>}
+    >
+      <div className="space-y-5">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-ink-400">Quick schedule</p>
+          <div className="mt-2 grid gap-2 sm:grid-cols-3">
+            {presets.map((preset) => <Button key={preset.label} size="sm" variant="secondary" leadingIcon={<CalendarClock className="h-3.5 w-3.5" />} pending={pending} pendingLabel="Saving…" onClick={() => onSchedule(preset.value())}>{preset.label}</Button>)}
+          </div>
+        </div>
+        <div className="border-t border-linen-300 pt-5">
+          <label className="block text-sm font-medium text-ink-700">Custom local time<input type="datetime-local" className="input-base mt-2 w-full" value={customValue} onChange={(event) => { setCustomValue(event.target.value); setCustomError(""); }} min={toLocalDateTimeValue(new Date())} disabled={pending} /></label>
+          {customError && <p className="mt-2 text-xs text-semantic-danger">{customError}</p>}
+          <Button className="mt-3" size="sm" onClick={scheduleCustom} pending={pending} pendingLabel="Saving…">Schedule custom time</Button>
+        </div>
+      </div>
+    </Dialog>
   );
 }

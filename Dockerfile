@@ -28,6 +28,13 @@ RUN python -m pip install --no-cache-dir --upgrade \
 COPY --chown=tickety:tickety app/backend/ ./app/backend/
 COPY --chown=tickety:tickety migrations/ ./migrations/
 COPY --chown=tickety:tickety alembic.ini ./
+# The migration Job runs this read-only gate before advancing a release whose
+# settings reader rejects legacy plaintext or unauthenticated ciphertext.
+COPY --chown=tickety:tickety scripts/verify-settings-secret-encryption.py ./scripts/verify-settings-secret-encryption.py
+# Operators perform legacy-value conversion explicitly, before the strict
+# preflight is enabled. Keep that audited migration entry point in the same
+# release image as the gate rather than requiring an ad-hoc host checkout.
+COPY --chown=tickety:tickety scripts/reencrypt-settings-secrets.py ./scripts/reencrypt-settings-secrets.py
 
 EXPOSE 8000
 USER 10001:10001

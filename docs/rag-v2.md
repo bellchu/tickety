@@ -39,11 +39,20 @@ deployment-owned and must never be copied from an HTTP request.
 | `TICKET_RAG_EMBED_BATCH_SIZE` | `32` | Maximum provider batch size |
 | `TICKET_RAG_QUERY_CACHE_TTL_SECONDS` | `2700` | Hash-keyed query-vector TTL |
 | `TICKET_RAG_SNAPSHOT_TTL_SECONDS` | `86400` | Maximum context snapshot lifetime |
+| `TICKET_RAG_RETENTION_POLL_SECONDS` | `300` | API/all-process interval for one bounded expired snapshot/cache cleanup batch (60–86400) |
 
 Chunk defaults are `cl100k_base`, target 450 tokens, maximum 600, and overlap
 at most 50. Changing the tokenizer or these values changes the chunker identity
 and requires a controlled reindex. Changing the embedding dimension requires a
 new schema version; never alter an indexed vector dimension in place.
+
+The retention poll setting is deployment-owned configuration, not an
+administrator-overridable setting. Every `api` or `all` process runs an isolated,
+bounded cleanup batch at that interval; a failed batch rolls back and is retried
+on the next interval without taking the API offline. Expiry remains fail-closed
+at read time. Revision 0058 additionally records each snapshot's authoritative
+sources in an indexed relation, so source revocation deletes linked evidence
+without parsing stored evidence JSON.
 
 ## Rollout
 

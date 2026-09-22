@@ -494,6 +494,8 @@ export interface TriageResult {
 }
 
 export interface PointsNotification {
+  /** Optional durable-outbox identity. Older notification servers omit it. */
+  event_id?: number;
   ticket_id: string;
   ticket_subject: string;
   user_id: string;

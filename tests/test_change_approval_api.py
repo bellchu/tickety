@@ -38,9 +38,9 @@ class ChangeApprovalApiTests(unittest.TestCase):
                 UserRecord(id="admin", name="Admin", role="admin", is_active=True),
                 UserRecord(id="agent", name="Assigned Agent", role="agent", is_active=True),
                 UserRecord(id="other-agent", name="Other Agent", role="agent", is_active=True),
-                SessionRecord(token="admin-session", user_id="admin"),
-                SessionRecord(token="agent-session", user_id="agent"),
-                SessionRecord(token="other-session", user_id="other-agent"),
+                SessionRecord(token_hash=main.session_token_digest("admin-session"), user_id="admin"),
+                SessionRecord(token_hash=main.session_token_digest("agent-session"), user_id="agent"),
+                SessionRecord(token_hash=main.session_token_digest("other-session"), user_id="other-agent"),
                 ChangeRecord(
                     id="change-1",
                     title="Rotate service certificates",
@@ -253,7 +253,9 @@ class ChangeApprovalApiTests(unittest.TestCase):
         self.assertEqual(decided.status_code, 200, decided.text)
         self.assertEqual(deactivated.status_code, 200, deactivated.text)
         with self.session_factory() as db:
-            self.assertFalse(db.get(UserRecord, "agent").is_active)
+            user = db.get(UserRecord, "agent")
+            self.assertFalse(user.is_active)
+            self.assertEqual(user.auth_not_before_epoch, 1)
 
     def test_concurrent_approval_add_and_deactivation_preserve_invariant(self):
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:

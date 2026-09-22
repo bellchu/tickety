@@ -15,7 +15,7 @@ from typing import Any, List, Optional
 
 import httpx
 
-from ..database import SessionLocal, SettingsRecord
+from .. import settings as settings_module
 from ..schema import ExternalAttachment, ExternalConversation, ExternalTicket, WebhookEvent
 from .base import BaseITSMAdapter
 
@@ -233,43 +233,92 @@ class FreshserviceAdapter(BaseITSMAdapter):
         updates = {"FRESHSERVICE_OAUTH_ACCESS_TOKEN": access_token}
         if refresh_token:
             updates["FRESHSERVICE_OAUTH_REFRESH_TOKEN"] = refresh_token
-        db = SessionLocal()
         try:
-            for key, value in updates.items():
-                row = db.query(SettingsRecord).filter(SettingsRecord.key == key).first()
-                if row:
-                    row.value = value
-                else:
-                    db.add(SettingsRecord(key=key, value=value))
-            db.commit()
-            for key, value in updates.items():
-                os.environ[key] = value
+            settings_module.persist_runtime_secret_updates(updates)
         except Exception as exc:
-            db.rollback()
             print(
                 "[External] failed to persist refreshed OAuth token "
                 f"kind={type(exc).__name__}"
             )
             raise RuntimeError("OAuth token persistence failed") from exc
-        finally:
-            db.close()
+
+    def _reload_durable_oauth_tokens(self) -> bool:
+        """Adopt the winning durable pair after a cross-replica CAS loss."""
+        try:
+            overrides = settings_module._read_db_overrides()
+            access_token = overrides.get("FRESHSERVICE_OAUTH_ACCESS_TOKEN")
+            refresh_token = overrides.get("FRESHSERVICE_OAUTH_REFRESH_TOKEN")
+        except Exception as exc:
+            print(
+                "[External] failed to reload durable OAuth token "
+                f"kind={type(exc).__name__}"
+            )
+            return False
+        if not isinstance(access_token, str) or not access_token or not isinstance(
+            refresh_token, str
+        ) or not refresh_token:
+            return False
+        self.oauth_access_token = access_token
+        self.oauth_refresh_token = refresh_token
+        return True
+
+    def accept_oauth_refresh_result(
+        self,
+        expected_access_token: str,
+        expected_refresh_token: str,
+        token_data: dict,
+    ) -> tuple[bool, bool]:
+        """Publish one provider refresh result without replacing a newer pair.
+
+        Returns ``(usable, persisted_here)``.  A request path may safely retry
+        with a reloaded winner, but an administrative refresh must not report a
+        stale provider response as the current durable credential lifetime.
+        """
+        access_token = token_data.get("access_token")
+        refresh_token = token_data.get("refresh_token") or expected_refresh_token
+        if (
+            not isinstance(expected_access_token, str)
+            or not all(isinstance(value, str) and value for value in (
+                expected_refresh_token, access_token, refresh_token,
+            ))
+        ):
+            return False, False
+        try:
+            persisted = settings_module.persist_runtime_oauth_tokens_if_current(
+                expected_access_token=expected_access_token,
+                expected_refresh_token=expected_refresh_token,
+                access_token=access_token,
+                refresh_token=refresh_token,
+            )
+        except Exception as exc:
+            print(
+                "[External] failed to persist refreshed OAuth token "
+                f"kind={type(exc).__name__}"
+            )
+            return False, False
+        if persisted:
+            self.oauth_access_token = access_token
+            self.oauth_refresh_token = refresh_token
+            return True, True
+        # A competing refresh or new admin authorization won.  Never retry an
+        # old pair over it; use the durable winner for the caller's safe retry.
+        return self._reload_durable_oauth_tokens(), False
 
     async def _refresh_oauth_access_token(self) -> bool:
         if not (self.oauth_configured and self.oauth_refresh_token):
             return False
+        expected_access_token = self.oauth_access_token
+        expected_refresh_token = self.oauth_refresh_token
         try:
             token_data = await self.oauth_refresh()
         except Exception as exc:
             print(f"[External] OAuth refresh failed kind={type(exc).__name__}")
             return False
-        access_token = token_data.get("access_token")
-        if not access_token:
-            return False
-        refresh_token = token_data.get("refresh_token") or self.oauth_refresh_token
-        self.oauth_access_token = access_token
-        self.oauth_refresh_token = refresh_token
-        self._persist_oauth_tokens(access_token, refresh_token)
-        return True
+        usable, _persisted_here = self.accept_oauth_refresh_result(
+            expected_access_token,
+            expected_refresh_token, token_data
+        )
+        return usable
 
     def map_priority(self, external_priority) -> str:
         try:

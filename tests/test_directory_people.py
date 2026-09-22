@@ -1,14 +1,16 @@
 import asyncio
 import os
 import unittest
-from datetime import datetime
-from unittest.mock import AsyncMock, patch
+from contextlib import nullcontext
+from datetime import datetime, timedelta
+from unittest.mock import AsyncMock, Mock, patch
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.backend import directory_service
+from app.backend.integrations import sync
 from app.backend.database import (
     AgentResolverTeamMappingRecord,
     Base,
@@ -17,6 +19,7 @@ from app.backend.database import (
     DirectoryPersonRecord,
     DirectoryPersonResolverTeamMappingRecord,
     DirectorySyncRunRecord,
+    DirectorySyncStateRecord,
     ExternalUserRecord,
     UserExternalIdentityLinkRecord,
     UserRecord,
@@ -350,6 +353,116 @@ class DirectoryPeopleTests(unittest.TestCase):
             run = db.get(DirectorySyncRunRecord, run_id)
             self.assertEqual(run.status, "success")
             self.assertIsNotNone(run.finished_at)
+
+    def test_taken_over_directory_lease_fences_stale_projection_before_commit(self):
+        """A stale owner cannot flush rows after a successor takes its lease."""
+        with patch.object(directory_service, "SessionLocal", self.session_factory):
+            old_run = directory_service._acquire_directory_sync_lease(
+                binding_id="binding-one", provider="freshservice", lease_seconds=300
+            )
+        self.assertIsNotNone(old_run)
+        successor_run = "successor-run"
+        with self.session_factory() as successor_db:
+            state = successor_db.query(DirectorySyncStateRecord).filter_by(
+                binding_id="binding-one", provider="freshservice"
+            ).one()
+            state.current_run_id = successor_run
+            state.lease_expires_at = datetime.utcnow() + timedelta(minutes=5)
+            successor_db.commit()
+
+        with self.session_factory() as stale_db:
+            stale_db.add(DirectoryPersonRecord(
+                id="stale-owner-person", state="active", version=1,
+            ))
+            self.assertFalse(directory_service._fence_directory_sync_write(
+                stale_db,
+                binding_id="binding-one",
+                provider="freshservice",
+                run_id=old_run,
+                lease_seconds=300,
+            ))
+            stale_db.rollback()
+
+        with self.session_factory() as verify_db:
+            self.assertIsNone(verify_db.get(DirectoryPersonRecord, "stale-owner-person"))
+            state = verify_db.query(DirectorySyncStateRecord).filter_by(
+                binding_id="binding-one", provider="freshservice"
+            ).one()
+            self.assertEqual(state.current_run_id, successor_run)
+
+    def test_write_fence_is_compare_and_set_not_a_stale_owner_read(self):
+        """A takeover between a read and publish must make the fence fail.
+
+        The fake query represents the database's conditional update reporting
+        zero rows after another worker has replaced the lease.  A read-then-
+        mutate fence would incorrectly approve the stale snapshot instead.
+        """
+        class Query:
+            def filter(self, *_conditions):
+                return self
+
+            def update(self, _values, **_kwargs):
+                return 0
+
+        class Database:
+            no_autoflush = nullcontext()
+
+            def query(self, _model):
+                return Query()
+
+        self.assertFalse(directory_service._fence_directory_sync_write(
+            Database(),
+            binding_id="binding-one",
+            provider="freshservice",
+            run_id="stale-run",
+            lease_seconds=300,
+        ))
+
+    def test_directory_sync_reports_lost_ownership_without_projection(self):
+        adapter = type("Adapter", (), {"provider_name": "freshservice"})()
+        with (
+            patch.object(directory_service, "SessionLocal", self.session_factory),
+            patch.object(
+                directory_service,
+                "async_sync_external_users",
+                new=AsyncMock(
+                    side_effect=directory_service.ExternalDirectorySyncOwnershipLost()
+                ),
+            ),
+            patch.object(directory_service, "ensure_directory_projection") as projection,
+        ):
+            result = asyncio.run(directory_service.run_directory_sync(
+                adapter, binding_id="binding-one"
+            ))
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["reason"], "directory_sync_ownership_lost")
+        projection.assert_not_called()
+
+    def test_takeover_after_remote_fetch_cannot_import_stale_directory_rows(self):
+        """The post-fetch renewal fences a delayed owner before its DB phase."""
+        class Adapter:
+            provider_name = "freshservice"
+
+            async def fetch_agents(self):
+                return [{"id": "late-agent", "name": "Late Agent"}]
+
+            async def fetch_groups(self):
+                return []
+
+        checkpoint = Mock(side_effect=[True, False])
+        with patch.object(sync, "SessionLocal", self.session_factory):
+            with self.assertRaises(sync.ExternalDirectorySyncOwnershipLost):
+                asyncio.run(sync.async_sync_external_users(
+                    Adapter(),
+                    binding_id="binding-one",
+                    ownership_checkpoint=checkpoint,
+                ))
+        with self.session_factory() as db:
+            self.assertIsNone(db.query(ExternalUserRecord).filter_by(
+                binding_id="binding-one",
+                provider="freshservice",
+                external_id="late-agent",
+            ).first())
 
     def test_partial_directory_sync_does_not_promote_projection(self):
         adapter = type("Adapter", (), {"provider_name": "freshservice"})()

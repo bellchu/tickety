@@ -11,6 +11,8 @@ spec:
   ttlSecondsAfterFinished: 3600
   template:
     metadata:
+      annotations:
+        {{- include "tickety.existingSecretRolloutAnnotations" . | nindent 8 }}
       labels:
         {{- include "tickety.componentLabels" (dict "root" . "component" "migration") | nindent 8 }}
     spec:
@@ -27,7 +29,10 @@ spec:
         - name: migrate
           image: {{ include "tickety.backendImage" . | quote }}
           imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
-          command: ["alembic", "upgrade", "head"]
+          # Do not advance the release into a runtime that fails on legacy
+          # plaintext settings. The gate is read-only and authenticates each
+          # persisted sensitive envelope with the deployment-owned keyring.
+          command: ["/bin/sh", "-ec", "python scripts/verify-settings-secret-encryption.py && alembic upgrade head"]
           envFrom:
             - configMapRef:
                 name: {{ include "tickety.configName" . }}

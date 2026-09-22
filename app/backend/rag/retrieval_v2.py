@@ -32,6 +32,7 @@ _AUTHORITY_PRIORITY = {
 _RRF_K = 60
 _NON_KB_POOL = 40
 _KB_POOL = 16
+_CACHE_MAINTENANCE_BATCH = 500
 
 _AUTH_PREDICATE = """
 AND (
@@ -174,10 +175,12 @@ def _cache_put(scope: str, digest: str, identity: str, embedding: list[float]) -
             "embedding": _vector_literal(embedding),
             "expires_at": expires_at,
         })
-        db.execute(text(
-            "DELETE FROM rag_query_embedding_cache_v2 "
-            "WHERE expires_at <= CURRENT_TIMESTAMP"
-        ))
+        # The snapshot module owns all expiry cleanup.  Keep writes bounded as
+        # well: a stale-cache backlog must not turn one query miss into an
+        # unbounded delete or lock hold.
+        from .snapshots import _prune_expired_rag_data
+
+        _prune_expired_rag_data(db, _CACHE_MAINTENANCE_BATCH)
         db.execute(text("""
             DELETE FROM rag_query_embedding_cache_v2 AS cache
             WHERE (cache.scope_key, cache.query_hash, cache.embedding_identity, cache.dimensions)
@@ -186,8 +189,12 @@ def _cache_put(scope: str, digest: str, identity: str, embedding: list[float]) -
                       FROM rag_query_embedding_cache_v2
                       ORDER BY last_accessed_at DESC
                       OFFSET :max_rows
+                      LIMIT :limit
                   )
-        """), {"max_rows": query_cache_max_rows()})
+        """), {
+            "max_rows": query_cache_max_rows(),
+            "limit": _CACHE_MAINTENANCE_BATCH,
+        })
         db.commit()
     except Exception:
         db.rollback()

@@ -16,6 +16,7 @@ export function TierPromotionModal({ notification, onClose }: Props) {
       onOpenChange={(open) => { if (!open) onClose(); }}
       title={`Tier ${notification.new_tier} achieved`}
       description={`Congratulations, ${notification.user_name}. Your support impact has reached a new tier.`}
+      modalCategory="engagement"
       footer={<Button onClick={onClose}>Continue</Button>}
     >
       <div className="py-3 text-center">

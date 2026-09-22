@@ -12,14 +12,18 @@ https://tickety.example.com/api/auth/sso/callback
 ```
 
 `FRONTEND_URL` must be the matching HTTPS origin, without a path. Apply database
-migration `0011` before enabling SSO.
+migration `0056` (or the current Alembic `head`) before enabling SSO. That
+security cutover intentionally invalidates existing browser sessions and
+in-progress SSO authorization states, so use `./deploy.sh kubernetes` for the
+upgrade: it drains every old API Pod before migration and starts new Pods only
+afterward. Users must authenticate again after the cutover.
 
 ## Configure from Tickety OPS Tower Settings
 
 The preferred workflow is **Settings → Access → Security & Authentication**.
 An authenticated Tickety OPS Tower administrator can select Entra or Okta, enter the
 provider values, group allowlist, and client secret, then enable SSO. These
-values are stored as administrator-approved settings and reload after a restart;
+values are stored as administrator-approved, AES-256-GCM encrypted settings and reload after a restart;
 `TICKETY_ADMIN_SETTINGS_PORTAL_ENABLED` is not required for SSO configuration.
 Secrets are masked on every settings response and are never returned to the
 browser. Runtime mode, `FRONTEND_URL`, login enforcement, cookies, CORS, and the
@@ -112,7 +116,9 @@ SSO_AUTO_PROVISION=false
 
 - Keep `SSO_AUTO_PROVISION=false` when Tickety OPS Tower access should be pre-approved.
   Create the local user with the same email first; the first verified SSO login
-  links that user to the provider's immutable issuer and subject.
+  links that user to the provider's immutable issuer and subject. Tickety
+  requires an explicit boolean `email_verified: true` alongside the selected
+  OIDC `email` claim; it never uses `preferred_username` to bind an account.
 - With auto-provisioning enabled, a new SSO identity creates an active local
   user with the `agent` role. Identity-provider claims never grant Tickety OPS Tower
   administrator or supervisor roles.
@@ -124,8 +130,10 @@ SSO_AUTO_PROVISION=false
   must match. Entra group-overage tokens are rejected; keep the recommended
   “groups assigned to the application” claim mode so the IT agents group is
   emitted without requiring Microsoft Graph permissions.
-- Later email/name changes do not change the account binding. Deactivating the
-  local Tickety OPS Tower user blocks SSO access.
+- Later email/name changes do not change the account binding. Password
+  replacement and deactivation revoke local sessions and invalidate any SSO
+  authorization state created before that recovery boundary; reactivating an
+  account never revives that older state.
 - The login page makes the configured provider the primary action and keeps
   local password login behind a secondary choice. After SSO, users return to
   the protected page they originally requested. Tickety OPS Tower sign-out ends the local

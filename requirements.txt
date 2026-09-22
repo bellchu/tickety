@@ -12,6 +12,7 @@ psycopg2-binary
 apscheduler
 httpx
 pyjwt[crypto]>=2.13,<3
+cryptography>=46,<51
 websockets
 tiktoken>=0.14.0,<1
 

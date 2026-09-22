@@ -4,6 +4,7 @@ import os
 import asyncio
 import unicodedata
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Collection, List, Optional
 
@@ -12,11 +13,13 @@ from sqlalchemy.orm import Session
 
 from ..database import (
     AIArtifactRecord,
+    AttachmentBlobDeletionRecord,
     ExternalActivityRecord,
     ExternalAttachmentRecord,
     ExternalConversationRecord,
     ExternalGroupMembershipRecord,
     ExternalGroupRecord,
+    DirectorySyncStateRecord,
     ExternalTicketContextRecord,
     ExternalUserRecord,
     ProblemTicketLinkRecord,
@@ -30,9 +33,14 @@ from ..schema import ExternalAttachment, ExternalConversation, ExternalTicket, W
 from ..portable_keys import portable_ascii_lower
 from ..attachment_storage import (
     AzureBlobAttachmentStore,
-    attachment_max_bytes,
+    attachment_storage_config,
     attachment_storage_configured,
+    attachment_max_bytes,
     safe_blob_name,
+)
+from ..attachment_gc import (
+    enqueue_attachment_blob_deletion,
+    enqueue_retired_attachment_blob_deletion,
 )
 # Refresh existing evidence documents without promoting un-indexed provider text.
 from ..ticket_vectors import refresh_ticket_documents_if_indexed
@@ -51,6 +59,10 @@ from ..ai_eligibility import (
 )
 from .. import settings as settings_module
 from .registry import get_adapter
+
+
+class ExternalDirectorySyncOwnershipLost(RuntimeError):
+    """A directory-sync lease was replaced before this phase could publish."""
 
 
 def _enabled_analysis_artifacts(*, downstream_only: bool = False) -> set[str]:
@@ -2013,6 +2025,72 @@ def _claim_freshservice_run(
     return token if claimed == 1 else None
 
 
+def _queue_freshservice_manual_recent_sync(
+    db: Session,
+    adapter,
+    binding_id: str,
+    *,
+    days: int,
+    now: Optional[datetime] = None,
+) -> bool:
+    """Atomically reprioritize Freshservice's recent lane when it is idle.
+
+    A manual request does not own a provider run itself: it writes a durable
+    priority cursor, then the normal claim-owning worker performs the bounded
+    sweep.  That write must never reset a cursor underneath a live scheduler
+    lease.  Lock and re-read the row for PostgreSQL, then retain the same
+    lease predicate on the update for SQLite and any claim that races before
+    the lock is acquired.
+    """
+    current = now or datetime.utcnow()
+    stale_before = current - timedelta(
+        seconds=freshservice_sync_limits()["lease_seconds"]
+    )
+    state = db.query(SyncStateRecord).filter(
+        SyncStateRecord.binding_id == binding_id,
+        SyncStateRecord.provider == adapter.provider_name,
+    ).with_for_update().one_or_none()
+    if state is None:
+        raise RuntimeError("Freshservice sync state disappeared")
+
+    # This is the ownership recheck after acquiring the row lock.  Do not
+    # queue/reset any page field if the scheduler still owns a live run.
+    if (
+        state.run_token is not None
+        and state.run_started_at is not None
+        and state.run_started_at >= stale_before
+    ):
+        db.rollback()
+        return False
+
+    changed = db.query(SyncStateRecord).filter(
+        SyncStateRecord.id == state.id,
+        or_(
+            SyncStateRecord.run_token.is_(None),
+            SyncStateRecord.run_started_at.is_(None),
+            SyncStateRecord.run_started_at < stale_before,
+        ),
+    ).update(
+        {
+            SyncStateRecord.recent_since_at: current - timedelta(days=days),
+            SyncStateRecord.recent_cycle_started_at: current,
+            SyncStateRecord.recent_page: 1,
+            SyncStateRecord.recent_workspace_index: 0,
+            SyncStateRecord.last_status: "queued",
+            SyncStateRecord.last_error: None,
+        },
+        synchronize_session=False,
+    )
+    if changed != 1:
+        # A concurrent claimant won before our lock/predicate became
+        # effective.  Roll back stale ORM state and let its durable cursor
+        # continue unchanged.
+        db.rollback()
+        return False
+    db.commit()
+    return True
+
+
 class _FreshserviceRunClaimLost(RuntimeError):
     pass
 
@@ -2023,13 +2101,24 @@ def _require_freshservice_run_owner(
     token: str,
     *,
     renew: bool,
+    lease_seconds: int,
 ) -> SyncStateRecord:
-    """Verify claim ownership and optionally renew it before remote work."""
+    """Fence an unexpired claim and optionally renew it before remote work.
+
+    A matching token alone is not enough: after its lease window elapsed, an
+    interrupted owner must yield to crash recovery even if a successor has
+    not yet written its replacement token.  Keep the same boundary as the
+    claim predicate so an owner at the exact boundary remains live while an
+    older owner cannot revive itself.
+    """
+    stale_before = datetime.utcnow() - timedelta(seconds=lease_seconds)
     if renew:
         with db.no_autoflush:
             changed = db.query(SyncStateRecord).filter(
                 SyncStateRecord.id == state.id,
                 SyncStateRecord.run_token == token,
+                SyncStateRecord.run_started_at.isnot(None),
+                SyncStateRecord.run_started_at >= stale_before,
             ).update(
                 {SyncStateRecord.run_started_at: datetime.utcnow()},
                 synchronize_session=False,
@@ -2044,6 +2133,8 @@ def _require_freshservice_run_owner(
         owned = db.query(SyncStateRecord.id).filter(
             SyncStateRecord.id == state.id,
             SyncStateRecord.run_token == token,
+            SyncStateRecord.run_started_at.isnot(None),
+            SyncStateRecord.run_started_at >= stale_before,
         ).scalar()
     if owned is None:
         db.rollback()
@@ -2351,7 +2442,14 @@ def _hydrate_freshservice_conversations(
                 raise RuntimeError("Freshservice sync state disappeared") from exc
             break
         if _capture_freshservice_budget(state, adapter):
-            db.commit()
+            # The derived-document refresh above can perform provider-backed
+            # embedding work after the projection checkpoint.  If that work
+            # outlives this run's lease, do not let the old owner publish a
+            # throttle cursor onto a successor's run state.
+            if claim_checkpoint is not None:
+                state = claim_checkpoint(True)
+            else:
+                db.commit()
             break
     return hydrated, errors, state
 
@@ -2413,12 +2511,44 @@ def _upsert_attachment_metadata(
         row.file_name = attachment.name
         row.content_type = attachment.content_type
         row.declared_size = attachment.size
-        row.blob_key = row.blob_key or blob_key
+        # A retired identity can reappear in a later provider snapshot.  Give
+        # its new copy a fresh immutable key before the old-key deletion task
+        # runs; otherwise an in-flight collector could erase the resurrection.
+        resurrected = row.storage_status == "superseded"
+        row.blob_key = (
+            f"{blob_key}.revived-{uuid.uuid4().hex}"
+            if resurrected
+            else (row.blob_key or blob_key)
+        )
         row.updated_at = datetime.utcnow()
         if row.storage_status != "stored":
             url_changed = row.source_url != attachment.download_url
             row.source_url = attachment.download_url
-            if storage_ready and (row.storage_status == "waiting_storage" or url_changed):
+            terminal_copy_failure = (
+                row.storage_status == "error" and int(row.attempts or 0) >= 5
+            )
+            # A terminal copy failure is deliberately sticky. Provider URLs can
+            # rotate during ordinary metadata hydration, but only an explicit
+            # audited administrator action may start a fresh copy budget.
+            if resurrected:
+                # The old deletion task addresses the prior immutable key.
+                # A provider identity that reappears gets a fresh copy even
+                # while storage is temporarily disabled.
+                row.storage_status = "pending" if storage_ready else "waiting_storage"
+                row.attempts = 0
+                row.last_error = None
+                row.next_attempt_at = None
+                row.content_sha256 = None
+                row.stored_size = None
+                row.stored_at = None
+                row.storage_provider = None
+                row.storage_account_identity = None
+                row.storage_container = None
+            elif (
+                storage_ready
+                and not terminal_copy_failure
+                and (row.storage_status == "waiting_storage" or url_changed)
+            ):
                 row.storage_status = "pending"
                 row.attempts = 0
                 row.last_error = None
@@ -2464,6 +2594,469 @@ def _upsert_attachment_metadata(
             stale.last_error = None
             stale.next_attempt_at = None
             stale.updated_at = datetime.utcnow()
+            _enqueue_potentially_uploaded_blob_deletion(db, stale)
+            enqueue_attachment_blob_deletion(db, stale)
+            _clear_copy_upload_provenance(stale)
+
+
+_ATTACHMENT_COPY_ELIGIBLE_STATUSES = ("pending", "waiting_storage", "error")
+
+
+def attachment_copy_lease_seconds() -> int:
+    """Bound one copy claim independently from the binding-wide sync lease.
+
+    The default leaves room for Freshservice's bounded download and Azure
+    upload.  A deployment that raises remote-operation timeouts must raise
+    this lease accordingly; a lease that expires during I/O deliberately
+    fences the late owner rather than allowing it to publish.
+    """
+    return _bounded_sync_setting(
+        "ATTACHMENT_COPY_LEASE_SECONDS", 900, 420, 3_600
+    )
+
+
+@dataclass(frozen=True)
+class _AttachmentCopyClaim:
+    id: str
+    token: str
+    source_url: Optional[str]
+    blob_key: Optional[str]
+    declared_size: Optional[int]
+    content_type: Optional[str]
+
+
+def _attachment_copy_attempt_blob_key(claim: _AttachmentCopyClaim) -> str:
+    """Return the immutable remote name for one fenced copy attempt.
+
+    ``blob_key`` is the attachment's logical/current key while it is pending.
+    It cannot safely also be the remote write target: a worker can be blocked
+    in Azure past its lease, a replacement can publish, and then the old
+    ``overwrite=True`` request would corrupt the replacement bytes.  Keep the
+    database-compatible logical key until publication, but bind every Azure
+    request to a token-derived immutable candidate object.
+    """
+    suffix = f".copy-{claim.token}"
+    return f"{(claim.blob_key or '')[:1024 - len(suffix)]}{suffix}"
+
+
+def _attachment_copy_ready_filter(now: datetime):
+    return (
+        ExternalAttachmentRecord.storage_status.in_(
+            _ATTACHMENT_COPY_ELIGIBLE_STATUSES
+        ),
+        ExternalAttachmentRecord.attempts < 5,
+        or_(
+            ExternalAttachmentRecord.next_attempt_at.is_(None),
+            ExternalAttachmentRecord.next_attempt_at <= now,
+        ),
+        or_(
+            ExternalAttachmentRecord.copy_lease_expires_at.is_(None),
+            ExternalAttachmentRecord.copy_lease_expires_at <= now,
+        ),
+    )
+
+
+def _claim_next_attachment_copy(
+    db: Session,
+    *,
+    binding_id: str,
+    provider: str,
+    now: datetime,
+) -> Optional[_AttachmentCopyClaim]:
+    """Durably fence one copy before any provider or blob-store I/O."""
+    ready = _attachment_copy_ready_filter(now)
+    candidate = db.query(ExternalAttachmentRecord.id).filter(
+        ExternalAttachmentRecord.binding_id == binding_id,
+        ExternalAttachmentRecord.provider == provider,
+        *ready,
+    ).order_by(
+        ExternalAttachmentRecord.created_at.asc(),
+        ExternalAttachmentRecord.id.asc(),
+    ).first()
+    if candidate is None:
+        return None
+
+    attachment_id = candidate[0]
+    token = str(uuid.uuid4())
+    claimed = db.query(ExternalAttachmentRecord).filter(
+        ExternalAttachmentRecord.id == attachment_id,
+        ExternalAttachmentRecord.binding_id == binding_id,
+        ExternalAttachmentRecord.provider == provider,
+        *_attachment_copy_ready_filter(now),
+    ).update({
+        ExternalAttachmentRecord.copy_lease_token: token,
+        ExternalAttachmentRecord.copy_lease_expires_at: (
+            now + timedelta(seconds=attachment_copy_lease_seconds())
+        ),
+        ExternalAttachmentRecord.last_attempted_at: now,
+        # Preserve the existing attempt semantics: a process crash after a
+        # durable claim consumes a bounded attempt rather than retrying remote
+        # side effects forever.  Non-I/O aborts below explicitly undo it.
+        ExternalAttachmentRecord.attempts: ExternalAttachmentRecord.attempts + 1,
+    }, synchronize_session=False)
+    if claimed != 1:
+        db.rollback()
+        return None
+    db.commit()
+
+    # Reload after the conditional update so the immutable claim snapshot is
+    # built from the durable row state rather than an identity-map remnant.
+    row = db.query(ExternalAttachmentRecord).populate_existing().filter(
+        ExternalAttachmentRecord.id == attachment_id,
+        ExternalAttachmentRecord.copy_lease_token == token,
+    ).one_or_none()
+    if row is None:
+        db.rollback()
+        return None
+    return _AttachmentCopyClaim(
+        id=row.id,
+        token=token,
+        source_url=row.source_url,
+        blob_key=row.blob_key,
+        declared_size=row.declared_size,
+        content_type=row.content_type,
+    )
+
+
+def _copy_snapshot_matches(
+    row: ExternalAttachmentRecord,
+    claim: _AttachmentCopyClaim,
+) -> bool:
+    return bool(
+        row.storage_status in _ATTACHMENT_COPY_ELIGIBLE_STATUSES
+        and row.source_url == claim.source_url
+        and row.blob_key == claim.blob_key
+        and row.declared_size == claim.declared_size
+        and row.content_type == claim.content_type
+    )
+
+
+def _clear_copy_upload_provenance(row: ExternalAttachmentRecord) -> None:
+    row.copy_upload_blob_key = None
+    row.copy_upload_storage_provider = None
+    row.copy_upload_storage_account_identity = None
+    row.copy_upload_storage_container = None
+    row.copy_upload_started_at = None
+
+
+def _enqueue_potentially_uploaded_blob_deletion(
+    db: Session,
+    row: ExternalAttachmentRecord,
+) -> bool:
+    """Queue a pre-recorded upload target only when the row is retired.
+
+    This evidence is committed immediately before Azure I/O, so it covers an
+    accepted upload whose caller later loses its lease or result transaction.
+    Download and validation failures never create it.
+    """
+    if not row.copy_upload_started_at:
+        return False
+    return enqueue_retired_attachment_blob_deletion(
+        db,
+        attachment_id=row.id,
+        blob_key=row.copy_upload_blob_key or "",
+        storage_provider=row.copy_upload_storage_provider or "",
+        storage_account_identity=(row.copy_upload_storage_account_identity or ""),
+        storage_container=row.copy_upload_storage_container or "",
+    )
+
+
+def _defer_potentially_uploaded_blob_deletion(
+    db: Session,
+    row: ExternalAttachmentRecord,
+    *,
+    now: datetime,
+) -> bool:
+    """Retain an expired owner's candidate until its bounded I/O window ends.
+
+    A replacement must preserve the former owner's pre-I/O evidence for crash
+    recovery before replacing ``copy_upload_*`` with its own candidate.  Do
+    not let the collector race a request which was already in flight: the copy
+    lease is the documented upper bound for provider/blob I/O, so defer this
+    candidate for one full bounded copy window.  Its name is immutable, hence
+    this deferral can never delay or overwrite the replacement's final blob.
+    """
+    blob_key = row.copy_upload_blob_key or ""
+    provider = row.copy_upload_storage_provider or ""
+    account_identity = row.copy_upload_storage_account_identity or ""
+    container = row.copy_upload_storage_container or ""
+    if not _enqueue_potentially_uploaded_blob_deletion(db, row):
+        return False
+    task = db.query(AttachmentBlobDeletionRecord).filter(
+        AttachmentBlobDeletionRecord.attachment_id == row.id,
+        AttachmentBlobDeletionRecord.blob_key == blob_key,
+        AttachmentBlobDeletionRecord.storage_provider == provider,
+        AttachmentBlobDeletionRecord.storage_account_identity == account_identity,
+        AttachmentBlobDeletionRecord.storage_container == container,
+        AttachmentBlobDeletionRecord.status.in_(("pending", "processing")),
+    ).with_for_update().one_or_none()
+    if task is not None:
+        # The task can have been queued by an earlier ambiguous result.  Move
+        # its earliest destructive attempt forward again when a successor
+        # observes the same still-ambiguous remote operation.
+        task.status = "pending"
+        task.lease_token = None
+        task.lease_expires_at = None
+        task.next_attempt_at = now + timedelta(seconds=attachment_copy_lease_seconds())
+    return True
+
+
+def _mark_attachment_copy_upload_started(
+    db: Session,
+    claim: _AttachmentCopyClaim,
+    storage_config,
+) -> bool:
+    """Commit the exact target before the first object-store side effect."""
+    now = datetime.utcnow()
+    row = db.query(ExternalAttachmentRecord).populate_existing().filter(
+        ExternalAttachmentRecord.id == claim.id,
+        ExternalAttachmentRecord.copy_lease_token == claim.token,
+        ExternalAttachmentRecord.copy_lease_expires_at > now,
+    ).with_for_update().one_or_none()
+    if row is None:
+        db.rollback()
+        return False
+    if not _copy_snapshot_matches(row, claim):
+        row.copy_lease_token = None
+        row.copy_lease_expires_at = None
+        row.attempts = max(0, int(row.attempts or 0) - 1)
+        row.updated_at = now
+        db.commit()
+        return False
+
+    upload_blob_key = _attachment_copy_attempt_blob_key(claim)
+    existing_target = (
+        row.copy_upload_blob_key,
+        row.copy_upload_storage_provider,
+        row.copy_upload_storage_account_identity,
+        row.copy_upload_storage_container,
+    )
+    requested_target = (
+        upload_blob_key,
+        storage_config.provider,
+        storage_config.account_identity,
+        storage_config.container,
+    )
+    if row.copy_upload_started_at and existing_target != requested_target:
+        # Preserve the former owner's pre-I/O evidence before overwriting it.
+        # Both candidates are token-derived immutable keys; unlike the old
+        # shared deterministic path, an expired worker can never overwrite
+        # the replacement's final object when it eventually returns.
+        _defer_potentially_uploaded_blob_deletion(db, row, now=now)
+        _clear_copy_upload_provenance(row)
+
+    row.copy_upload_blob_key = upload_blob_key
+    row.copy_upload_storage_provider = storage_config.provider
+    row.copy_upload_storage_account_identity = storage_config.account_identity
+    row.copy_upload_storage_container = storage_config.container
+    row.copy_upload_started_at = now
+    row.updated_at = now
+    db.commit()
+    return True
+
+
+def _release_attachment_copy_claim(
+    db: Session,
+    claim: _AttachmentCopyClaim,
+    *,
+    undo_attempt: bool,
+) -> bool:
+    """Release only the current owner; a successor token is never disturbed."""
+    row = db.query(ExternalAttachmentRecord).filter(
+        ExternalAttachmentRecord.id == claim.id,
+        ExternalAttachmentRecord.copy_lease_token == claim.token,
+    ).with_for_update().one_or_none()
+    if row is None:
+        db.rollback()
+        return False
+    row.copy_lease_token = None
+    row.copy_lease_expires_at = None
+    if undo_attempt:
+        row.attempts = max(0, int(row.attempts or 0) - 1)
+    row.updated_at = datetime.utcnow()
+    db.commit()
+    return True
+
+
+def _complete_attachment_copy(
+    db: Session,
+    claim: _AttachmentCopyClaim,
+    content: bytes,
+    storage_config,
+) -> str:
+    """Publish one remote result only if this owner and metadata still match.
+
+    ``retired`` records an upload that raced with provider retirement so the
+    ordinary blob-GC queue can remove it.  A late/changed owner never publishes
+    bytes as the current attachment; if its immutable key was replaced, it
+    queues that already-uploaded old key for the same collector.
+    """
+    now = datetime.utcnow()
+    # The claim query loaded this row before remote I/O.  Reload it so a
+    # provider update or a successor's fenced claim cannot be hidden by the
+    # session identity map when deciding what to publish or collect.
+    row = db.query(ExternalAttachmentRecord).populate_existing().filter(
+        ExternalAttachmentRecord.id == claim.id,
+        ExternalAttachmentRecord.copy_lease_token == claim.token,
+        ExternalAttachmentRecord.copy_lease_expires_at > now,
+    ).with_for_update().one_or_none()
+    if row is None:
+        db.rollback()
+        return "fenced"
+    upload_blob_key = (
+        row.copy_upload_blob_key
+        if row.copy_upload_started_at
+        else claim.blob_key
+    )
+    if _copy_snapshot_matches(row, claim):
+        row.content_sha256 = hashlib.sha256(content).hexdigest()
+        row.stored_size = len(content)
+        row.storage_status = "stored"
+        row.stored_at = now
+        row.storage_provider = storage_config.provider
+        row.storage_account_identity = storage_config.account_identity
+        row.storage_container = storage_config.container
+        # Publish the exact immutable candidate that Azure received, only
+        # while this attempt still owns the live database lease.
+        row.blob_key = upload_blob_key
+        row.last_error = None
+        row.next_attempt_at = None
+        row.source_url = None
+        row.copy_lease_token = None
+        row.copy_lease_expires_at = None
+        _clear_copy_upload_provenance(row)
+        row.updated_at = now
+        db.commit()
+        return "stored"
+
+    if row.storage_status == "superseded" and row.blob_key == claim.blob_key:
+        # The old object is real but must never become visible after a provider
+        # replacement won.  Preserve target provenance and queue its removal
+        # in this same short transaction rather than leaving an orphan.
+        row.content_sha256 = hashlib.sha256(content).hexdigest()
+        row.stored_size = len(content)
+        row.stored_at = now
+        row.storage_provider = storage_config.provider
+        row.storage_account_identity = storage_config.account_identity
+        row.storage_container = storage_config.container
+        row.blob_key = upload_blob_key
+        row.copy_lease_token = None
+        row.copy_lease_expires_at = None
+        _clear_copy_upload_provenance(row)
+        row.updated_at = now
+        enqueue_attachment_blob_deletion(db, row)
+        db.commit()
+        return "retired"
+
+    # Metadata changed while the remote request was active.  Do not turn a
+    # stale response into a terminal copy failure for the replacement source.
+    if row.blob_key != claim.blob_key and upload_blob_key:
+        # A resurrection deliberately moves the live row to a fresh immutable
+        # key.  The old worker has nevertheless completed an upload to its
+        # snapshot key, so persist deletion intent with the exact target that
+        # received those bytes.  The shared collector rechecks all live rows
+        # before it can perform the destructive remote operation.
+        enqueue_retired_attachment_blob_deletion(
+            db,
+            attachment_id=claim.id,
+            blob_key=upload_blob_key,
+            storage_provider=storage_config.provider,
+            storage_account_identity=storage_config.account_identity,
+            storage_container=storage_config.container,
+        )
+    row.copy_lease_token = None
+    row.copy_lease_expires_at = None
+    _clear_copy_upload_provenance(row)
+    row.attempts = max(0, int(row.attempts or 0) - 1)
+    row.updated_at = now
+    db.commit()
+    return "discarded"
+
+
+def _finalize_uploaded_attachment_copy_after_binding_claim_lost(
+    db: Session,
+    claim: _AttachmentCopyClaim,
+    content: bytes,
+    storage_config,
+) -> str:
+    """Durably account for an upload after the binding-wide lease is lost.
+
+    The remote write has already happened, so releasing the row alone would
+    orphan an object.  The row-copy token and fresh lease remain the fence for
+    this short transaction: they allow a matching snapshot to publish, queue a
+    retired or replaced snapshot for target-bound GC, and leave any successor
+    owner completely untouched.
+    """
+    return _complete_attachment_copy(db, claim, content, storage_config)
+
+
+def _record_attachment_copy_failure(
+    db: Session,
+    claim: _AttachmentCopyClaim,
+    exc: Exception,
+    stage: str,
+) -> bool:
+    """Persist failure/backoff only while this owner still fences the row."""
+    now = datetime.utcnow()
+    row = db.query(ExternalAttachmentRecord).filter(
+        ExternalAttachmentRecord.id == claim.id,
+        ExternalAttachmentRecord.copy_lease_token == claim.token,
+        ExternalAttachmentRecord.copy_lease_expires_at > now,
+    ).with_for_update().one_or_none()
+    if row is None:
+        db.rollback()
+        return False
+    if not _copy_snapshot_matches(row, claim):
+        # The remote call may have timed out after accepting bytes while
+        # provider metadata retired or replaced this snapshot.  Preserve the
+        # pre-I/O target intent; a live-row guard keeps it non-destructive
+        # until the retirement is unambiguous.
+        _enqueue_potentially_uploaded_blob_deletion(db, row)
+        row.copy_lease_token = None
+        row.copy_lease_expires_at = None
+        row.attempts = max(0, int(row.attempts or 0) - 1)
+        row.updated_at = now
+        db.commit()
+        return False
+
+    status_code = getattr(exc, "status_code", None) or getattr(
+        getattr(exc, "response", None), "status_code", None
+    )
+    error_code = getattr(exc, "error_code", None)
+    if hasattr(error_code, "value"):
+        error_code = error_code.value
+    detail_parts = ["attachment_copy_failed", stage, type(exc).__name__]
+    if status_code is not None:
+        detail_parts.append(f"http_{status_code}")
+    if error_code:
+        safe_error_code = "".join(
+            char for char in str(error_code)
+            if char.isalnum() or char in ("_", "-")
+        )[:80]
+        if safe_error_code:
+            detail_parts.append(safe_error_code)
+    error_detail = ":".join(detail_parts)[:255]
+    row.storage_status = "error"
+    row.last_error = error_detail
+    row.copy_lease_token = None
+    row.copy_lease_expires_at = None
+    if row.attempts < 5:
+        delay_seconds = min(6 * 60 * 60, 60 * (2 ** (row.attempts - 1)))
+        row.next_attempt_at = now + timedelta(seconds=delay_seconds)
+    else:
+        row.next_attempt_at = None
+    if stage == "upload":
+        # The upload call may have timed out after Azure accepted bytes.  Keep
+        # the exact target in the durable queue now; the collector's live-row
+        # guard defers it until this attachment is actually superseded.
+        _enqueue_potentially_uploaded_blob_deletion(db, row)
+    row.updated_at = now
+    db.commit()
+    print(
+        "[sync] Freshservice attachment copy failed "
+        f"detail={error_detail}"
+    )
+    return True
 
 
 def _sync_freshservice_attachment_backlog(
@@ -2476,107 +3069,104 @@ def _sync_freshservice_attachment_backlog(
         Callable[[bool], SyncStateRecord]
     ] = None,
 ) -> tuple[int, int]:
-    if limit <= 0 or not attachment_storage_configured():
+    # Capture provenance before constructing the store.  Tests and alternate
+    # storage implementations need only implement upload(), while production
+    # still records the exact configured target that receives these bytes.
+    storage_config = attachment_storage_config()
+    if limit <= 0 or not storage_config.configured:
         return 0, 0
-    store = AzureBlobAttachmentStore()
+    # The client must use the same snapshot whose identity is committed before
+    # remote I/O.  Re-reading mutable environment-backed settings here could
+    # otherwise upload to a different endpoint than the recorded provenance.
+    store = AzureBlobAttachmentStore(storage_config)
     max_bytes = attachment_max_bytes()
-    rows = db.query(ExternalAttachmentRecord).filter(
-        ExternalAttachmentRecord.binding_id == binding_id,
-        ExternalAttachmentRecord.provider == adapter.provider_name,
-        ExternalAttachmentRecord.storage_status.in_((
-            "pending", "waiting_storage", "error",
-        )),
-        ExternalAttachmentRecord.attempts < 5,
-        or_(
-            ExternalAttachmentRecord.next_attempt_at.is_(None),
-            ExternalAttachmentRecord.next_attempt_at <= datetime.utcnow(),
-        ),
-    ).order_by(
-        ExternalAttachmentRecord.created_at.asc(),
-        ExternalAttachmentRecord.id.asc(),
-    ).limit(limit).all()
     stored = 0
     errors = 0
-    for row in rows:
-        if claim_checkpoint is not None:
-            claim_checkpoint(True)
-        row.last_attempted_at = datetime.utcnow()
-        row.attempts = int(row.attempts or 0) + 1
+    for _ in range(limit):
+        claim = _claim_next_attachment_copy(
+            db,
+            binding_id=binding_id,
+            provider=adapter.provider_name,
+            now=datetime.utcnow(),
+        )
+        if claim is None:
+            break
+        remote_upload_completed = False
         stage = "validate"
         try:
-            if not row.source_url or not row.blob_key:
+            if claim_checkpoint is not None:
+                claim_checkpoint(True)
+            if not claim.source_url or not claim.blob_key:
                 raise ValueError("attachment_source_unavailable")
-            if row.declared_size is not None and row.declared_size > max_bytes:
+            if claim.declared_size is not None and claim.declared_size > max_bytes:
                 raise ValueError("attachment_too_large")
             stage = "download"
             content = asyncio.run(
-                adapter.download_attachment(row.source_url, max_bytes)
+                adapter.download_attachment(claim.source_url, max_bytes)
             )
             if claim_checkpoint is not None:
-                # Download time consumes the prior lease. Renew again before
-                # the independent blob upload so a replacement owner cannot
-                # overlap this second remote side effect.
                 claim_checkpoint(True)
             stage = "validate"
-            if row.declared_size is not None and len(content) != row.declared_size:
+            if claim.declared_size is not None and len(content) != claim.declared_size:
                 raise ValueError("attachment_size_mismatch")
             stage = "upload"
-            store.upload(row.blob_key, content, row.content_type)
+            if not _mark_attachment_copy_upload_started(
+                db, claim, storage_config,
+            ):
+                continue
+            # The committed provenance and the remote write must name the
+            # same token-derived candidate.  Never issue Azure I/O against
+            # the logical row key shared by an expired successor claim.
+            store.upload(
+                _attachment_copy_attempt_blob_key(claim),
+                content,
+                claim.content_type,
+            )
+            remote_upload_completed = True
             if claim_checkpoint is not None:
                 claim_checkpoint(False)
-            row.content_sha256 = hashlib.sha256(content).hexdigest()
-            row.stored_size = len(content)
-            row.storage_status = "stored"
-            row.stored_at = datetime.utcnow()
-            row.last_error = None
-            row.next_attempt_at = None
-            # Provider attachment URLs may be signed or otherwise sensitive.
-            # They are needed only until the private copy is durable.
-            row.source_url = None
-            stored += 1
-        except _FreshserviceRunClaimLost:
-            db.rollback()
+            outcome = _complete_attachment_copy(db, claim, content, storage_config)
+            if outcome == "stored":
+                stored += 1
+        except _FreshserviceRunClaimLost as claim_lost:
+            # The binding-wide owner changed.  Before the remote write, undo
+            # this claim as usual.  Afterwards, the durable row-copy token is
+            # still the only safe fence: finalize the already-uploaded result
+            # so it is either published for the unchanged snapshot or queued
+            # for target-bound cleanup without touching a successor owner.
+            if remote_upload_completed:
+                try:
+                    _finalize_uploaded_attachment_copy_after_binding_claim_lost(
+                        db, claim, content, storage_config,
+                    )
+                except Exception as finalize_exc:
+                    # A flush/commit failure here is itself ambiguous: Azure
+                    # already accepted the bytes, but no terminal row state is
+                    # trustworthy.  Restore the pre-I/O provenance, record
+                    # target-bound cleanup if this token still owns the row,
+                    # then preserve the original binding-lease signal.
+                    db.rollback()
+                    try:
+                        _record_attachment_copy_failure(
+                            db, claim, finalize_exc, "upload",
+                        )
+                    except Exception:
+                        db.rollback()
+                    raise claim_lost from finalize_exc
+            else:
+                _release_attachment_copy_claim(db, claim, undo_attempt=True)
             raise
         except Exception as exc:
+            # A commit failure after Azure accepted the object leaves this
+            # session unusable until rolled back.  Reloading lets the failure
+            # recorder preserve the pre-upload provenance and durable GC
+            # intent instead of treating the remote write as nonexistent.
+            db.rollback()
             if hasattr(exc, "retry_after"):
+                _release_attachment_copy_claim(db, claim, undo_attempt=True)
                 raise
-            status_code = getattr(exc, "status_code", None) or getattr(
-                getattr(exc, "response", None), "status_code", None
-            )
-            error_code = getattr(exc, "error_code", None)
-            if hasattr(error_code, "value"):
-                error_code = error_code.value
-            detail_parts = [
-                "attachment_copy_failed",
-                stage,
-                type(exc).__name__,
-            ]
-            if status_code is not None:
-                detail_parts.append(f"http_{status_code}")
-            if error_code:
-                safe_error_code = "".join(
-                    char for char in str(error_code)
-                    if char.isalnum() or char in ("_", "-")
-                )[:80]
-                if safe_error_code:
-                    detail_parts.append(safe_error_code)
-            error_detail = ":".join(detail_parts)[:255]
-            row.storage_status = "error"
-            row.last_error = error_detail
-            if row.attempts < 5:
-                delay_seconds = min(6 * 60 * 60, 60 * (2 ** (row.attempts - 1)))
-                row.next_attempt_at = datetime.utcnow() + timedelta(
-                    seconds=delay_seconds
-                )
-            else:
-                row.next_attempt_at = None
-            errors += 1
-            print(
-                "[sync] Freshservice attachment copy failed "
-                f"detail={error_detail}"
-            )
-        row.updated_at = datetime.utcnow()
-        db.commit()
+            if _record_attachment_copy_failure(db, claim, exc, stage):
+                errors += 1
     return stored, errors
 
 
@@ -2647,6 +3237,7 @@ def _sync_freshservice_tickets(adapter, *, binding_id: str) -> dict:
                 state,
                 token,
                 renew=renew,
+                lease_seconds=limits["lease_seconds"],
             )
             return state
 
@@ -3011,7 +3602,11 @@ def _sync_freshservice_tickets(adapter, *, binding_id: str) -> dict:
         if state is not None and token is not None:
             try:
                 state = _require_freshservice_run_owner(
-                    db, state, token, renew=False
+                    db,
+                    state,
+                    token,
+                    renew=False,
+                    lease_seconds=limits["lease_seconds"],
                 )
             except _FreshserviceRunClaimLost:
                 result["deferred"] = 1
@@ -3036,7 +3631,11 @@ def _sync_freshservice_tickets(adapter, *, binding_id: str) -> dict:
         if state is not None and token is not None:
             try:
                 state = _require_freshservice_run_owner(
-                    db, state, token, renew=False
+                    db,
+                    state,
+                    token,
+                    renew=False,
+                    lease_seconds=limits["lease_seconds"],
                 )
             except _FreshserviceRunClaimLost:
                 result["deferred"] = 1
@@ -3250,23 +3849,14 @@ def fetch_tickets_by_days(
         # remaining pages resume in the dedicated worker.
         db: Session = SessionLocal()
         try:
-            state = _ensure_sync_state(db, adapter, binding_id)
-            active_lease = bool(
-                state.run_token
-                and state.run_started_at
-                and state.run_started_at
-                > datetime.utcnow()
-                - timedelta(seconds=freshservice_sync_limits()["lease_seconds"])
+            _ensure_sync_state(db, adapter, binding_id)
+            _queue_freshservice_manual_recent_sync(
+                db,
+                adapter,
+                binding_id,
+                days=days,
+                now=datetime.utcnow().replace(microsecond=0),
             )
-            if not active_lease:
-                now = datetime.utcnow().replace(microsecond=0)
-                state.recent_since_at = now - timedelta(days=days)
-                state.recent_cycle_started_at = now
-                state.recent_page = 1
-                state.recent_workspace_index = 0
-                state.last_status = "queued"
-                state.last_error = None
-                db.commit()
         finally:
             db.close()
         batch = sync_tickets_from_external(adapter, binding_id=binding_id)
@@ -3591,6 +4181,7 @@ def _import_external_users(
     *,
     binding_id: str = "legacy",
     authoritative_user_types: Optional[Collection[str]] = None,
+    ownership_write_guard: Optional[Callable[[Session], bool]] = None,
 ) -> dict:
     """Store provider users only in the external directory security domain."""
     db: Session = SessionLocal()
@@ -3695,7 +4286,16 @@ def _import_external_users(
                     record.fetched_at = now
                     record.updated_at = now
                     result["deactivated"] += 1
+        # Fence ownership in this same transaction as the projection. A
+        # separate preflight leaves a stale owner able to commit after takeover.
+        if ownership_write_guard is not None and not ownership_write_guard(db):
+            raise ExternalDirectorySyncOwnershipLost(
+                "directory sync lease was replaced before user import"
+            )
         db.commit()
+    except ExternalDirectorySyncOwnershipLost:
+        db.rollback()
+        raise
     except Exception as exc:
         print(f"[external-users] fatal error kind={type(exc).__name__}")
         db.rollback()
@@ -3731,6 +4331,8 @@ def _external_user_fetch_error_detail(user_type: str, exc: Exception) -> str:
 
 async def _fetch_external_user_partitions(
     adapter,
+    *,
+    ownership_checkpoint: Optional[Callable[[], bool]] = None,
 ) -> tuple[list[dict[str, Any]], set[str], list[str]]:
     """Fetch independently authoritative provider identity partitions.
 
@@ -3750,8 +4352,16 @@ async def _fetch_external_user_partitions(
     authoritative_types: set[str] = set()
     error_details: list[str] = []
     for user_type, fetcher in fetchers:
+        if ownership_checkpoint is not None and not ownership_checkpoint():
+            raise ExternalDirectorySyncOwnershipLost(
+                "directory sync lease was replaced before user fetch"
+            )
         try:
             partition = await fetcher()
+            if ownership_checkpoint is not None and not ownership_checkpoint():
+                raise ExternalDirectorySyncOwnershipLost(
+                    "directory sync lease was replaced after user fetch"
+                )
             if not isinstance(partition, list) or not all(
                 isinstance(user, dict) for user in partition
             ):
@@ -3762,6 +4372,8 @@ async def _fetch_external_user_partitions(
                 {**user, "user_type": user_type} for user in partition
             )
             authoritative_types.add(user_type)
+        except ExternalDirectorySyncOwnershipLost:
+            raise
         except Exception as exc:
             print(
                 f"[external-users] {user_type} fetch failed "
@@ -3814,6 +4426,7 @@ def _import_external_groups(
     raw_users: list[dict[str, Any]],
     *,
     binding_id: str = "legacy",
+    ownership_write_guard: Optional[Callable[[Session], bool]] = None,
 ) -> dict[str, int]:
     """Persist groups and authoritative member/observer relations.
 
@@ -3969,7 +4582,14 @@ def _import_external_groups(
                 updated_at=now,
             ))
         result["memberships"] = len(desired_membership_keys)
+        if ownership_write_guard is not None and not ownership_write_guard(db):
+            raise ExternalDirectorySyncOwnershipLost(
+                "directory sync lease was replaced before group import"
+            )
         db.commit()
+    except ExternalDirectorySyncOwnershipLost:
+        db.rollback()
+        raise
     except Exception as exc:
         print(f"[external-groups] sync failed kind={type(exc).__name__}")
         db.rollback()
@@ -3983,11 +4603,15 @@ async def async_sync_external_users(
     adapter=None,
     *,
     binding_id: str = "legacy",
+    ownership_checkpoint: Optional[Callable[[], bool]] = None,
+    ownership_write_guard: Optional[Callable[[Session], bool]] = None,
 ) -> dict:
     """Refresh external profiles without creating or updating Tickety OPS Tower users."""
     adapter = adapter or get_adapter()
     raw_users, authoritative_types, fetch_errors = (
-        await _fetch_external_user_partitions(adapter)
+        await _fetch_external_user_partitions(
+            adapter, ownership_checkpoint=ownership_checkpoint
+        )
     )
     if not authoritative_types:
         result = _empty_external_user_sync_result()
@@ -3999,12 +4623,23 @@ async def async_sync_external_users(
         raw_users,
         binding_id=binding_id,
         authoritative_user_types=authoritative_types,
+        ownership_write_guard=ownership_write_guard,
     )
     result["errors"] += len(fetch_errors)
     for detail in fetch_errors:
         _limited_append(result["error_details"], detail)
     try:
+        if ownership_checkpoint is not None and not ownership_checkpoint():
+            raise ExternalDirectorySyncOwnershipLost(
+                "directory sync lease was replaced before group fetch"
+            )
         raw_groups = await adapter.fetch_groups()
+        if ownership_checkpoint is not None and not ownership_checkpoint():
+            raise ExternalDirectorySyncOwnershipLost(
+                "directory sync lease was replaced after group fetch"
+            )
+    except ExternalDirectorySyncOwnershipLost:
+        raise
     except Exception as exc:
         print(f"[external-groups] fetch failed kind={type(exc).__name__}")
         raw_groups = []
@@ -4014,7 +4649,11 @@ async def async_sync_external_users(
             f"external_group_fetch_failed:{type(exc).__name__}",
         )
     group_result = _import_external_groups(
-        adapter, raw_groups, raw_users, binding_id=binding_id
+        adapter,
+        raw_groups,
+        raw_users,
+        binding_id=binding_id,
+        ownership_write_guard=ownership_write_guard,
     )
     for key, value in group_result.items():
         result[key] = result.get(key, 0) + value

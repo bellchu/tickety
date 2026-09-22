@@ -1,14 +1,12 @@
 # Tickety OPS Tower for Freshservice
 
-This read-only Freshworks custom app renders in `service_ticket.ticket_sidebar` and `common.full_page_app`. It uses Freshworks Data Method for UI context and Request Method for every Tickety OPS Tower API call; the secure installation secret is never read by browser code.
+This package retains the Freshservice sidebar and full-page placements, but it intentionally does not retrieve or display Tickety OPS Tower ticket intelligence. It presents an availability notice while a provider-authorized, server-side viewer authorization design is implemented.
 
 ## Prerequisites
 
-- An isolated Tickety OPS Tower deployment with `APP_MODE=production` and `TICKETY_DEPLOYMENT_CLASS=poc`.
-- An active Freshservice trial binding and synchronized external user directory.
-- A public HTTPS Tickety OPS Tower API hostname.
-- A random `FRESHWORKS_APP_BOOTSTRAP_SECRET` of at least 32 characters. Configure the same value as the app's secure `bootstrap_secret` installation parameter.
-- Freshworks CLI 10.1.9 and Node.js 24.11.x.
+- Freshworks CLI 10.1.9 and Node.js 24.11.x. Install the official Freshworks
+  CLI before running the commands below; do not substitute the unrelated npm
+  package named `fdk`.
 
 ## Local validation
 
@@ -16,29 +14,35 @@ From this directory:
 
 ```sh
 npm install
-fdk validate
 fdk unit-test
+fdk validate
 fdk run
 ```
 
-During installation, provide the Tickety OPS Tower API hostname without `https://`, the UUID returned by the binding API, and the bootstrap secret. Select the same Freshservice account and workspace represented by the binding.
+This disabled package has no installation parameters and no Tickety OPS Tower request template. It can be installed only to communicate the availability state; it is not a ticket-viewing integration.
 
 After exercising both the full-page and ticket-sidebar locations in the local
 simulator, stop `fdk run` and package the app:
 
 ```sh
-fdk pack
+npm run fdk-package
 ```
 
 The installable artifact is written to `dist/freshworks-app.zip`. For a private
 custom-app build that is not being submitted to the public Marketplace,
-`fdk pack --skip-coverage` may be used when a signed-in Freshservice simulation
-tenant is unavailable; `fdk validate` and `fdk unit-test` must still pass.
+`npm run fdk-package` uses `fdk pack --skip-coverage` and then inspects the
+generated archive to ensure it contains no retired request template or
+browser-side authorization context. The retired package is a static HTML/CSS/SVG
+notice: it loads neither the Freshworks app client nor JavaScript. The package
+gate accepts only that fixed runtime asset set and the exact FDK packaging
+metadata required for this app, and rejects executable markup or extra files.
+Run `fdk unit-test` immediately before packaging: it invokes the same
+`fdk-unit-test` script, then records the FDK report and hash that `fdk pack`
+requires. `npm run fdk-unit-test` remains useful for fast local feedback, but
+does not substitute for that FDK lifecycle step.
 
 ## Security state
 
-Bootstrap codes are single use and expire after 90 seconds. Embedded bearer sessions expire after 10 minutes and are scoped to one binding, provider agent, workspace, and ticket. Tickety OPS Tower stores only SHA-256 token digests. The provider agent remains an external identity and is never converted into a Tickety OPS Tower login or role.
+Freshworks Data Method values describe the browser UI but are not a server-verifiable assertion of the current user or ticket. Freshworks Request Method keeps secure installation parameters out of browser code, but it does not add that missing authorization proof. Tickety OPS Tower therefore removed the bootstrap, session, and ticket-context endpoints; previously issued embedded tokens are rejected and the package contains no API request template, installation secret, Freshworks client loader, or executable browser code.
 
-The app package declares only bootstrap, session redemption, and ticket-context request templates. There is no mutation template or UI control. Tickety OPS Tower's Freshservice adapter likewise has no create, update, reply, note, attachment, or delete method.
-
-Use a dedicated view-only Freshservice integration agent. OAuth is constrained to `freshservice.tickets.view freshservice.agents.manage freshservice.requesters.view`; Freshservice requires the agent scope for listing agents, so the integration agent's provider role must independently deny agent and ticket mutations.
+Do not re-enable the previous flow with an environment setting. A future implementation must use a per-user Freshservice OAuth authorization to make a server-side provider call for the requested ticket, fail closed on any denial or ambiguous provider result, and return local projection data only after that check succeeds. The existing Freshservice adapter remains read-only: it has no create, update, reply, note, attachment, or delete method.

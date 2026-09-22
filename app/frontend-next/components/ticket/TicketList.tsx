@@ -44,8 +44,8 @@ import {
   ticketLastCommunicationAt,
 } from "@/lib/ticket-display";
 
-const SAVED_VIEWS_KEY = "tickety.ticket-queue.views.v1";
-const COLUMN_WIDTHS_KEY = "tickety.ticket-queue.column-widths.v3";
+const SAVED_VIEWS_KEY = "tickety.ticket-queue.views.v2";
+const COLUMN_WIDTHS_KEY = "tickety.ticket-queue.column-widths.v4";
 const PAGE_SIZES = [10, 25, 50, 100];
 const EMPTY_TICKETS: Ticket[] = [];
 const TABLE_COLUMN_KEYS = ["ticket", "requester", "priority", "routing", "status", "created", "lastContact"] as const;
@@ -88,6 +88,10 @@ interface SavedView {
   sort: TicketListSort;
   limit: number;
   builtIn?: boolean;
+}
+
+function userScopedStorageKey(prefix: string, userId: string | undefined) {
+  return userId ? `${prefix}.${encodeURIComponent(userId)}` : null;
 }
 
 function ResizableColumnHeader({
@@ -224,6 +228,11 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
   const [moreFiltersOpen, setMoreFiltersOpen] = useState(false);
   const [bulkNotice, setBulkNotice] = useState<{ variant: "success" | "danger"; message: string } | null>(null);
   const [columnWidths, setColumnWidths] = useState<TableColumnWidths>(DEFAULT_COLUMN_WIDTHS);
+  const [hydratedPreferenceScope, setHydratedPreferenceScope] = useState<string | null>(null);
+  const meQuery = useQuery({ queryKey: ["auth-me"], queryFn: api.getAuthMe, retry: false });
+  const preferenceUserId = meQuery.data?.id;
+  const savedViewsStorageKey = userScopedStorageKey(SAVED_VIEWS_KEY, preferenceUserId);
+  const columnWidthsStorageKey = userScopedStorageKey(COLUMN_WIDTHS_KEY, preferenceUserId);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -234,38 +243,36 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
   }, [searchInput]);
 
   useEffect(() => {
+    setCustomViews([]);
+    setColumnWidths(DEFAULT_COLUMN_WIDTHS);
+    setHydratedPreferenceScope(null);
+    if (!savedViewsStorageKey || !columnWidthsStorageKey) return;
+
     try {
-      const stored = window.localStorage.getItem(SAVED_VIEWS_KEY);
-      if (!stored) return;
-      const parsed = JSON.parse(stored);
-      if (Array.isArray(parsed)) {
-        const validSorts = new Set(SORT_OPTIONS.map((option) => option.value));
-        const normalized = parsed.flatMap((view, index): SavedView[] => {
-          if (!view || typeof view.id !== "string" || typeof view.name !== "string") return [];
-          const safeText = (value: unknown, maxLength: number) => typeof value === "string" ? value.slice(0, maxLength) : "";
-          return [{
-            id: safeText(view.id, 80) || `saved-import-${index}`,
-            name: safeText(view.name, 60) || "Saved view",
-            status: safeText(view.status, 100),
-            priority: safeText(view.priority, 100),
-            assigneeId: safeText(view.assigneeId, 255),
-            category: safeText(view.category, 100),
-            sort: validSorts.has(view.sort) ? view.sort : "newest",
-            limit: PAGE_SIZES.includes(view.limit) ? view.limit : 10,
-          }];
-        });
-        setCustomViews(normalized.slice(0, 20));
-      }
+      const stored = window.localStorage.getItem(savedViewsStorageKey);
+      const parsed = stored ? JSON.parse(stored) : [];
+      const validSorts = new Set(SORT_OPTIONS.map((option) => option.value));
+      const normalized = Array.isArray(parsed) ? parsed.flatMap((view, index): SavedView[] => {
+        if (!view || typeof view.id !== "string" || typeof view.name !== "string") return [];
+        const safeText = (value: unknown, maxLength: number) => typeof value === "string" ? value.slice(0, maxLength) : "";
+        return [{
+          id: safeText(view.id, 80) || `saved-import-${index}`,
+          name: safeText(view.name, 60) || "Saved view",
+          status: safeText(view.status, 100),
+          priority: safeText(view.priority, 100),
+          assigneeId: safeText(view.assigneeId, 255),
+          category: safeText(view.category, 100),
+          sort: validSorts.has(view.sort) ? view.sort : "newest",
+          limit: PAGE_SIZES.includes(view.limit) ? view.limit : 10,
+        }];
+      }) : [];
+      setCustomViews(normalized.slice(0, 20));
     } catch {
       // A corrupt or unavailable local store should not block the queue.
     }
-  }, []);
-
-  useEffect(() => {
     try {
-      const stored = window.localStorage.getItem(COLUMN_WIDTHS_KEY);
-      if (!stored) return;
-      const parsed = JSON.parse(stored) as Partial<Record<TableColumnKey, unknown>>;
+      const stored = window.localStorage.getItem(columnWidthsStorageKey);
+      const parsed = stored ? JSON.parse(stored) as Partial<Record<TableColumnKey, unknown>> : {};
       const restored = { ...DEFAULT_COLUMN_WIDTHS };
       for (const column of TABLE_COLUMN_KEYS) {
         const value = parsed[column];
@@ -280,15 +287,17 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
     } catch {
       // Invalid or unavailable browser storage should not block the queue.
     }
-  }, []);
+    setHydratedPreferenceScope(preferenceUserId ?? null);
+  }, [columnWidthsStorageKey, preferenceUserId, savedViewsStorageKey]);
 
   useEffect(() => {
+    if (!columnWidthsStorageKey || hydratedPreferenceScope !== preferenceUserId) return;
     try {
-      window.localStorage.setItem(COLUMN_WIDTHS_KEY, JSON.stringify(columnWidths));
+      window.localStorage.setItem(columnWidthsStorageKey, JSON.stringify(columnWidths));
     } catch {
       // Resizing still works for this session when storage is unavailable.
     }
-  }, [columnWidths]);
+  }, [columnWidths, columnWidthsStorageKey, hydratedPreferenceScope, preferenceUserId]);
 
   const resizeColumn = (column: TableColumnKey, width: number) => {
     setColumnWidths((current) => ({
@@ -332,7 +341,6 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
     queryFn: () => api.getTicketsPage({ status, priority, assigneeId, category, search, sort, limit, offset }),
     placeholderData: (previous) => previous,
   });
-  const meQuery = useQuery({ queryKey: ["auth-me"], queryFn: api.getAuthMe, retry: false });
   const canBulk = !meQuery.isError && canCreateTickets(meQuery.data);
   const categoriesQuery = useQuery({ queryKey: queryKeys.ticketCategories, queryFn: api.getCategories, retry: false });
   const usersQuery = useQuery({ queryKey: ["users", "ticket-options"], queryFn: () => api.getUsersPage({ limit: 200 }), enabled: canBulk, retry: false });
@@ -428,14 +436,18 @@ export function TicketList({ onCreate }: { onCreate?: () => void }) {
     setActiveViewId(view.id);
     setViewName("");
     setSaveDialogOpen(false);
-    try { window.localStorage.setItem(SAVED_VIEWS_KEY, JSON.stringify(next)); } catch { /* non-blocking */ }
+    if (savedViewsStorageKey && hydratedPreferenceScope === preferenceUserId) {
+      try { window.localStorage.setItem(savedViewsStorageKey, JSON.stringify(next)); } catch { /* non-blocking */ }
+    }
   };
 
   const deleteView = (id: string) => {
     const next = customViews.filter((view) => view.id !== id);
     setCustomViews(next);
     if (activeViewId === id) setActiveViewId("");
-    try { window.localStorage.setItem(SAVED_VIEWS_KEY, JSON.stringify(next)); } catch { /* non-blocking */ }
+    if (savedViewsStorageKey && hydratedPreferenceScope === preferenceUserId) {
+      try { window.localStorage.setItem(savedViewsStorageKey, JSON.stringify(next)); } catch { /* non-blocking */ }
+    }
   };
 
   const clearFilters = () => {

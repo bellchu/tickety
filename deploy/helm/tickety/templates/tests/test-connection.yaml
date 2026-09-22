@@ -17,7 +17,7 @@ spec:
       type: RuntimeDefault
   containers:
     - name: healthcheck
-      image: {{ printf "%s:%s" .Values.frontend.image.repository (.Values.frontend.image.tag | default .Chart.AppVersion) | quote }}
+      image: {{ include "tickety.frontendImage" . | quote }}
       imagePullPolicy: {{ .Values.frontend.image.pullPolicy }}
       command:
         - node

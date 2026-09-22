@@ -29,6 +29,7 @@ from app.backend.database import (
     ExternalConversationRecord,
     ExternalUserRecord,
     IntelligenceStudyRecord,
+    IntegrationBindingRecord,
     KbArticleRecord,
     ProblemRecord,
     ProblemTicketLinkRecord,
@@ -167,6 +168,100 @@ class RequestBodyLimitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload, {})
 
 
+class NotificationWebSocketResourceSafetyTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.previous_subscribers = list(main._notification_subscribers)
+        self.previous_activity = dict(main._notification_subscriber_activity)
+        self.previous_locks = dict(main._notification_subscriber_send_locks)
+        main._notification_subscribers.clear()
+        main._notification_subscriber_activity.clear()
+        main._notification_subscriber_send_locks.clear()
+        # Resource-limit tests use socket doubles without browser cookies;
+        # session revocation is verified separately with real sessions.
+        self.subscriber_authorization = patch.object(
+            main, "_notification_subscriber_authorized", return_value=True
+        )
+        self.subscriber_authorization.start()
+
+    def tearDown(self):
+        self.subscriber_authorization.stop()
+        main._notification_subscribers[:] = self.previous_subscribers
+        main._notification_subscriber_activity.clear()
+        main._notification_subscriber_activity.update(self.previous_activity)
+        main._notification_subscriber_send_locks.clear()
+        main._notification_subscriber_send_locks.update(self.previous_locks)
+
+    async def test_registration_enforces_total_and_per_user_limits(self):
+        with patch.dict(os.environ, {
+            "NOTIFICATION_WS_MAX_SUBSCRIBERS": "2",
+            "NOTIFICATION_WS_MAX_SUBSCRIBERS_PER_USER": "1",
+        }, clear=False):
+            first = MagicMock()
+            second = MagicMock()
+            third = MagicMock()
+            self.assertTrue(main._register_notification_subscriber("user-a", first))
+            self.assertFalse(main._register_notification_subscriber("user-a", second))
+            self.assertTrue(main._register_notification_subscriber("user-b", second))
+            self.assertFalse(main._register_notification_subscriber("user-c", third))
+
+        self.assertEqual(
+            main._notification_subscribers,
+            [("user-a", first), ("user-b", second)],
+        )
+
+    async def test_fanout_starts_recipient_deliveries_concurrently_and_prunes_failure(self):
+        both_started = asyncio.Event()
+        release = asyncio.Event()
+        started = []
+
+        class SlowSocket:
+            async def send_json(self, _notification):
+                started.append(self)
+                if len(started) == 2:
+                    both_started.set()
+                await release.wait()
+
+        first = SlowSocket()
+        second = SlowSocket()
+        failed = MagicMock()
+        failed.send_json = AsyncMock(side_effect=RuntimeError("closed"))
+        for socket in (first, second, failed):
+            self.assertTrue(main._register_notification_subscriber("user-a", socket))
+
+        broadcast = asyncio.create_task(main._broadcast_notification({"user_id": "user-a"}))
+        await asyncio.wait_for(both_started.wait(), timeout=1)
+        self.assertEqual(set(started), {first, second})
+        release.set()
+        await broadcast
+
+        self.assertNotIn(("user-a", failed), main._notification_subscribers)
+        self.assertNotIn(failed, main._notification_subscriber_activity)
+
+    async def test_idle_notification_socket_closes_transiently_and_cleans_up(self):
+        socket = MagicMock()
+        socket.accept = AsyncMock()
+        socket.receive_text = AsyncMock(side_effect=asyncio.TimeoutError())
+        socket.close = AsyncMock()
+        user = UserRecord(id="notification-user", name="User", role="admin", is_active=True)
+
+        with (
+            patch.object(main, "_websocket_user", return_value=user),
+            patch.object(main, "_websocket_origin_allowed", return_value=True),
+            patch.object(main.settings_module, "is_demo_mode", return_value=False),
+            # This is an idle-socket resource test, not a database replay
+            # test. Keep the real registration/cleanup path while isolating
+            # the newly durable replay query from this intentionally
+            # schema-free WebSocket double.
+            patch.object(main, "_notification_outbox_replay_after", return_value=([], False)),
+        ):
+            await main.ws_notifications(socket)
+
+        socket.accept.assert_awaited_once()
+        socket.close.assert_awaited_once_with(code=1013)
+        self.assertEqual(main._notification_subscribers, [])
+        self.assertEqual(main._notification_subscriber_activity, {})
+
+
 class ProtectedAIRouteTests(unittest.TestCase):
     def setUp(self):
         self.engine = create_engine(
@@ -184,12 +279,12 @@ class ProtectedAIRouteTests(unittest.TestCase):
                 id="real-agent", name="Real Agent", role="agent", is_active=True
             ))
             db.add(SessionRecord(
-                token="real-session",
+                token_hash=main.session_token_digest("real-session"),
                 user_id="real-admin",
                 expires_at=datetime.utcnow() + timedelta(hours=1),
             ))
             db.add(SessionRecord(
-                token="agent-session",
+                token_hash=main.session_token_digest("agent-session"),
                 user_id="real-agent",
                 expires_at=datetime.utcnow() + timedelta(hours=1),
             ))
@@ -522,6 +617,10 @@ class ProtectedAIRouteTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 1008)
 
     def test_demo_user_password_changes_are_rejected_but_creation_is_allowed(self):
+        with self.session_factory() as db:
+            epoch = main._lock_auth_security_epoch(db)
+            epoch.epoch = 3
+            db.commit()
         self.client.cookies.set(main.SESSION_COOKIE, "real-session")
         with patch.dict(os.environ, {"APP_MODE": "demo"}, clear=False):
             update = self.client.patch(
@@ -542,6 +641,9 @@ class ProtectedAIRouteTests(unittest.TestCase):
             update.json(), {"detail": "Password changes are disabled in demo mode"}
         )
         self.assertEqual(create.status_code, 201, create.text)
+        with self.session_factory() as db:
+            created = db.query(UserRecord).filter_by(email_key="initial@example.test").one()
+            self.assertEqual(created.auth_not_before_epoch, 3)
 
 class ProductionAIRouteAuthorizationTests(unittest.TestCase):
     def setUp(self):
@@ -616,17 +718,17 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
                     problem_id="problem-scope", ticket_id="unassigned-ticket"
                 ),
                 SessionRecord(
-                    token="prod-admin-session",
+                    token_hash=main.session_token_digest("prod-admin-session"),
                     user_id="prod-admin",
                     expires_at=datetime.utcnow() + timedelta(hours=1),
                 ),
                 SessionRecord(
-                    token="prod-agent-session",
+                    token_hash=main.session_token_digest("prod-agent-session"),
                     user_id="prod-agent",
                     expires_at=datetime.utcnow() + timedelta(hours=1),
                 ),
                 SessionRecord(
-                    token="legacy-role-session",
+                    token_hash=main.session_token_digest("legacy-role-session"),
                     user_id="legacy-role",
                     expires_at=datetime.utcnow() + timedelta(hours=1),
                 ),
@@ -784,6 +886,15 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
             headers={"Origin": "https://attacker.example"},
         )
         self.assertEqual(response.status_code, 403)
+
+    def test_production_cookie_mutation_without_origin_evidence_is_rejected(self):
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
+        response = self.client.post(
+            "/admin/llm/refresh-models",
+            headers={"Sec-Fetch-Site": ""},
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json(), {"detail": "Invalid request origin"})
 
     def test_public_logout_still_rejects_cross_origin_write(self):
         self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
@@ -959,7 +1070,7 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
         expired_token = "expired-session-to-prune"
         with self.session_factory() as db:
             db.add(SessionRecord(
-                token=expired_token,
+                token_hash=main.session_token_digest(expired_token),
                 user_id="prod-agent",
                 expires_at=datetime.utcnow() - timedelta(days=1),
             ))
@@ -970,10 +1081,91 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
             request.headers = {"user-agent": "test"}
             new_token = main._create_session(db, "prod-agent", request)
 
-            self.assertIsNone(db.get(SessionRecord, expired_token))
-            created = db.get(SessionRecord, new_token)
+            self.assertIsNone(db.get(SessionRecord, main.session_token_digest(expired_token)))
+            created = db.get(SessionRecord, main.session_token_digest(new_token))
             self.assertIsNotNone(created.expires_at)
             self.assertGreater(created.expires_at, datetime.utcnow())
+            self.assertEqual(created.token_hash, main.session_token_digest(new_token))
+            self.assertNotEqual(created.token_hash, new_token)
+
+    def test_login_rechecks_password_after_taking_account_recovery_lock(self):
+        """A password reset winning before the row lock must reject old credentials.
+
+        This models the login's initial lookup becoming stale while an account
+        recovery transaction is in flight.  The locked re-read is the shared
+        serialization point with session revocation.
+        """
+        with self.session_factory() as db:
+            user = db.get(UserRecord, "prod-agent")
+            user.email = user.email_key = "locked-agent@example.com"
+            user.password_hash = main._hash_password("old-password")
+            db.commit()
+
+        original_lock = main._lock_user_record
+
+        def reset_before_locked_read(db, user_id):
+            user = db.get(UserRecord, user_id)
+            user.password_hash = main._hash_password("replacement-password")
+            db.flush()
+            return original_lock(db, user_id)
+
+        with patch.object(main, "_lock_user_record", side_effect=reset_before_locked_read):
+            response = self.client.post(
+                "/auth/login",
+                headers={"Origin": "https://tickety.example"},
+                json={
+                    "email": "locked-agent@example.com",
+                    "password": "old-password",
+                },
+            )
+
+        self.assertEqual(response.status_code, 401, response.text)
+        with self.session_factory() as db:
+            self.assertEqual(
+                db.query(SessionRecord).filter_by(user_id="prod-agent").count(), 1
+            )
+
+    def test_password_reset_revokes_every_target_session(self):
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
+        response = self.client.patch(
+            "/users/prod-agent",
+            headers={"Origin": "https://tickety.example"},
+            json={"password": "replacement-password"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        with self.session_factory() as db:
+            self.assertEqual(
+                db.query(SessionRecord).filter_by(user_id="prod-agent").count(), 0
+            )
+            self.assertEqual(db.get(UserRecord, "prod-agent").auth_not_before_epoch, 1)
+
+        self.client.cookies.clear()
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-agent-session")
+        self.assertEqual(self.client.get("/auth/me").status_code, 401)
+
+    def test_deactivate_then_reactivate_does_not_restore_old_session(self):
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
+        disabled = self.client.patch(
+            "/users/prod-agent",
+            headers={"Origin": "https://tickety.example"},
+            json={"is_active": False},
+        )
+        self.assertEqual(disabled.status_code, 200, disabled.text)
+        reactivated = self.client.patch(
+            "/users/prod-agent",
+            headers={"Origin": "https://tickety.example"},
+            json={"is_active": True},
+        )
+        self.assertEqual(reactivated.status_code, 200, reactivated.text)
+        with self.session_factory() as db:
+            self.assertEqual(
+                db.query(SessionRecord).filter_by(user_id="prod-agent").count(), 0
+            )
+            self.assertEqual(db.get(UserRecord, "prod-agent").auth_not_before_epoch, 1)
+
+        self.client.cookies.clear()
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-agent-session")
+        self.assertEqual(self.client.get("/auth/me").status_code, 401)
 
     def test_legacy_survey_id_response_route_is_fail_closed(self):
         survey_id = "survey-id-not-for-rate-limit-storage"
@@ -3086,6 +3278,9 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
             "refresh_token": "rotated-refresh",
             "expires_in": 3600,
         })
+        adapter.oauth_refresh_token = "previous-refresh"
+        adapter.oauth_access_token = "previous-access"
+        adapter.accept_oauth_refresh_result = MagicMock(return_value=(True, True))
         headers = {"Origin": "https://tickety.example"}
         with (
             patch.object(main, "_reserve_ai_request") as reserve,
@@ -3580,15 +3775,13 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
             "access_token": access_token,
             "refresh_token": refresh_token,
         })
+        adapter.oauth_refresh_token = "previous-refresh"
+        adapter.oauth_access_token = "previous-access"
+        adapter.accept_oauth_refresh_result = MagicMock(return_value=(False, False))
         output = io.StringIO()
         with (
             patch("app.backend.integrations.registry.get_adapter", return_value=adapter),
             patch.object(main, "_reserve_ai_request"),
-            patch.object(
-                main.settings_module,
-                "update_settings",
-                side_effect=RuntimeError(f"database rejected {access_token}"),
-            ),
             redirect_stdout(output),
         ):
             oauth = self.client.post(
@@ -3612,6 +3805,65 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
         combined = output.getvalue() + oauth.text + settings.text
         self.assertNotIn(access_token, combined)
         self.assertNotIn(refresh_token, combined)
+
+    def test_manual_oauth_refresh_recovers_when_only_refresh_token_remains(self):
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
+        adapter = MagicMock()
+        adapter.oauth_access_token = ""
+        adapter.oauth_refresh_token = "recovery-refresh-token"
+        adapter.oauth_refresh = AsyncMock(return_value={
+            "access_token": "recovered-access-token",
+            "refresh_token": "recovered-refresh-token",
+            "expires_in": 3600,
+        })
+        adapter.accept_oauth_refresh_result = MagicMock(return_value=(True, True))
+        with (
+            patch("app.backend.integrations.registry.get_adapter", return_value=adapter),
+            patch.object(main, "_reserve_ai_request"),
+        ):
+            response = self.client.post(
+                "/oauth/refresh",
+                headers={"Origin": "https://tickety.example"},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), {"status": "refreshed", "expires_in": 3600})
+        adapter.accept_oauth_refresh_result.assert_called_once_with(
+            "", "recovery-refresh-token", {
+                "access_token": "recovered-access-token",
+                "refresh_token": "recovered-refresh-token",
+                "expires_in": 3600,
+            }
+        )
+
+    def test_manual_oauth_refresh_conflict_does_not_report_stale_expiry(self):
+        self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
+        adapter = MagicMock()
+        adapter.oauth_refresh_token = "old-refresh-token"
+        adapter.oauth_access_token = "old-access-token"
+        adapter.oauth_refresh = AsyncMock(return_value={
+            "access_token": "old-response-access",
+            "refresh_token": "old-response-refresh",
+            "expires_in": 3600,
+        })
+        # Another replica or a newly authorized administrator won the CAS and
+        # this adapter safely reloaded it.  The endpoint must not describe the
+        # old provider response as the durable credential's expiry.
+        adapter.accept_oauth_refresh_result = MagicMock(return_value=(True, False))
+        with (
+            patch("app.backend.integrations.registry.get_adapter", return_value=adapter),
+            patch.object(main, "_reserve_ai_request"),
+        ):
+            response = self.client.post(
+                "/oauth/refresh",
+                headers={"Origin": "https://tickety.example"},
+            )
+
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json(), {
+            "detail": "OAuth credentials changed while refresh was in flight"
+        })
+        self.assertNotIn("expires_in", response.json())
 
     def test_signed_webhook_delivery_is_accepted_once(self):
         raw_body = b'{"ticket":{"id":123},"event":"ticket_updated"}'
@@ -3646,6 +3898,48 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
         self.assertEqual(replay.status_code, 409, replay.text)
         self.assertEqual(replay.json(), {"detail": "Duplicate webhook delivery"})
         auto_process.assert_not_awaited()
+
+    def test_legacy_webhook_fails_closed_when_a_binding_is_active(self):
+        """A signed legacy delivery must not create a second tenant projection."""
+        raw_body = b'{"ticket":{"id":124},"event":"ticket_updated"}'
+        timestamp = str(int(time.time()))
+        secret = "configured-webhook-secret"
+        signature = base64.b64encode(
+            hmac.new(
+                secret.encode(), timestamp.encode() + b"." + raw_body,
+                hashlib.sha256,
+            ).digest()
+        ).decode()
+        with self.session_factory() as db:
+            db.add(IntegrationBindingRecord(
+                id="active-freshservice-binding",
+                provider="FreshService",
+                environment="production",
+                state="active",
+                canonical_account_host="bound-account.freshservice.com",
+                workspace_ids="[]",
+            ))
+            db.commit()
+
+        with (
+            patch.dict(os.environ, {"WEBHOOK_SECRET": secret}, clear=False),
+            patch.object(main, "handle_webhook_event") as handle,
+            patch.object(main, "get_adapter") as adapter,
+        ):
+            response = self.client.post(
+                "/webhooks/external",
+                content=raw_body,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Freshservice-Webhook-Timestamp": timestamp,
+                    "X-Freshservice-Webhook-Signature": signature,
+                },
+            )
+
+        self.assertEqual(response.status_code, 404, response.text)
+        self.assertEqual(response.json(), {"detail": "Integration binding not found"})
+        adapter.assert_not_called()
+        handle.assert_not_called()
 
     def test_failed_webhook_processing_releases_claim_for_provider_retry(self):
         raw_body = b'{"ticket":{"id":456},"event":"ticket_updated"}'
@@ -4157,7 +4451,7 @@ class ProductionAIRouteAuthorizationTests(unittest.TestCase):
 
     def test_notification_websocket_rejects_expired_session(self):
         with self.session_factory() as db:
-            session = db.get(SessionRecord, "prod-admin-session")
+            session = db.get(SessionRecord, main.session_token_digest("prod-admin-session"))
             session.expires_at = datetime.utcnow() - timedelta(seconds=1)
             db.commit()
         self.client.cookies.set(main.SESSION_COOKIE, "prod-admin-session")
@@ -4360,19 +4654,18 @@ class LLMInterfaceContractTests(unittest.TestCase):
             self.assertIsNone(adapter.parse_webhook(payload, {}, raw_body=b"{}"))
 
     def test_oauth_token_persistence_is_independent_of_webhook_headers(self):
-        db = MagicMock()
-        db.query.return_value.filter.return_value.first.return_value = None
         with (
             patch.dict(os.environ, {}, clear=False),
             patch(
-                "app.backend.integrations.freshservice.SessionLocal", return_value=db
-            ),
+                "app.backend.integrations.freshservice.settings_module.persist_runtime_secret_updates"
+            ) as persist,
         ):
             FreshserviceAdapter()._persist_oauth_tokens("access", "refresh")
 
-        self.assertEqual(db.add.call_count, 2)
-        db.commit.assert_called_once()
-        db.close.assert_called_once()
+        persist.assert_called_once_with({
+            "FRESHSERVICE_OAUTH_ACCESS_TOKEN": "access",
+            "FRESHSERVICE_OAUTH_REFRESH_TOKEN": "refresh",
+        })
 
     def test_webhook_rejects_stale_timestamp_and_accepts_fresh_signed_body(self):
         payload = {"ticket": {"id": 123}}

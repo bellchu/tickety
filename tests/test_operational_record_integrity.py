@@ -22,6 +22,7 @@ from app.backend.database import (
     ChangeRecord,
     ChangeTicketLinkRecord,
     KbArticleRecord,
+    NotificationOutboxSequenceRecord,
     ProblemRecord,
     ProblemTicketLinkRecord,
     ProjectRecord,
@@ -55,6 +56,9 @@ class OperationalRecordIntegrityTests(unittest.TestCase):
         self.session_factory = sessionmaker(bind=self.engine)
         with self.session_factory() as db:
             db.add_all([
+                NotificationOutboxSequenceRecord(
+                    singleton_id=1, next_dispatch_order=0
+                ),
                 UserRecord(id="admin", name="Admin", role="admin", is_active=True),
                 UserRecord(id="owner", name="Owner", role="agent", is_active=True),
                 UserRecord(
@@ -69,7 +73,7 @@ class OperationalRecordIntegrityTests(unittest.TestCase):
                     role="agent",
                     is_active=False,
                 ),
-                SessionRecord(token="admin-session", user_id="admin"),
+                SessionRecord(token_hash=main.session_token_digest("admin-session"), user_id="admin"),
                 ProjectRecord(
                     id="project-1",
                     name="Project One",
@@ -1009,6 +1013,9 @@ class OperationalRecordIntegrityTests(unittest.TestCase):
             Base.metadata.create_all(engine)
             with session_factory() as db:
                 db.add_all([
+                    NotificationOutboxSequenceRecord(
+                        singleton_id=1, next_dispatch_order=0
+                    ),
                     UserRecord(
                         id="award-agent",
                         name="Award Agent",

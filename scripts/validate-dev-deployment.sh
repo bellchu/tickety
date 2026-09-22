@@ -22,7 +22,7 @@ grep -Fq 'local dev must exactly match origin/dev' "$ROOT_DIR/scripts/deploy-dev
 grep -Fq 'name: tickety-secrets' "$DEV_DIR/backup-job.yaml.tpl"
 grep -Fq 'name: tickety-secrets' "$DEV_DIR/migration-job.yaml.tpl"
 grep -Fq 'pg_restore --list' "$DEV_DIR/backup-job.yaml.tpl"
-grep -Fq 'alembic", "upgrade", "head' "$DEV_DIR/migration-job.yaml.tpl"
+grep -Fq 'python scripts/verify-settings-secret-encryption.py && alembic upgrade head' "$DEV_DIR/migration-job.yaml.tpl"
 grep -Fq 'ensure-coredns-prefer-udp.py' "$DEV_DIR/remote-release.sh"
 grep -Fq 'dnsConfig' "$DEV_DIR/remote-release.sh"
 grep -Fq '"edns0"' "$DEV_DIR/remote-release.sh"

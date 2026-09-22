@@ -73,10 +73,17 @@ function initials(name?: string) {
 
 export function Sidebar({
   open = false,
+  inactive = false,
   onClose,
+  onNavigate,
 }: {
   open?: boolean;
+  /** Applied only while the narrow-screen drawer is visually closed. */
+  inactive?: boolean;
+  /** Explicit dismissal returns focus to the invoking Menu control. */
   onClose?: () => void;
+  /** Navigation closes the drawer without overriding the destination's focus. */
+  onNavigate?: () => void;
 }) {
   const pathname = usePathname();
   const { data: me } = useQuery({ queryKey: ["auth-me"], queryFn: api.getAuthMe, retry: false });
@@ -98,7 +105,9 @@ export function Sidebar({
     <aside
       id="app-navigation"
       aria-label="Application navigation"
+      aria-hidden={inactive || undefined}
       aria-modal={open ? "true" : undefined}
+      inert={inactive || undefined}
       role={open ? "dialog" : undefined}
       className={cn(
         "fixed inset-y-0 left-0 z-50 flex w-[var(--app-sidebar-width)] flex-col overflow-hidden border-r border-white/10 bg-[#010D1B] text-white shadow-2xl transition-transform duration-200 ease-out after:absolute after:inset-y-0 after:right-0 after:w-px after:[background:var(--brand-accent)] lg:translate-x-0 lg:shadow-none",
@@ -106,7 +115,7 @@ export function Sidebar({
       )}
     >
       <div className="relative z-10 flex h-20 items-center justify-between border-b border-white/10 px-4">
-        <Link href="/" className="-ml-0.5 rounded-md focus:outline-none focus:ring-2 focus:ring-clay-300" onClick={onClose}>
+        <Link href="/" className="-ml-0.5 rounded-md focus:outline-none focus:ring-2 focus:ring-clay-300" onClick={onNavigate}>
           <TicketyLogo inverse layout="stacked" size="md" />
         </Link>
         <button
@@ -145,7 +154,7 @@ export function Sidebar({
                       key={item.label}
                       href={item.href}
                       aria-current={active ? "page" : undefined}
-                      onClick={onClose}
+                      onClick={onNavigate}
                       className={cn(
                         "group flex min-h-11 items-center gap-3 rounded-md px-3 py-1.5 text-[13px] transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#2563EB] lg:min-h-9",
                         active
@@ -167,7 +176,7 @@ export function Sidebar({
       <div className="relative z-10 space-y-1 border-t border-white/10 bg-[#021123] p-3">
         {showLogin && (
           <LoginLink
-            onNavigate={onClose}
+            onNavigate={onNavigate}
             className="mb-1 w-full border-white/15 bg-white/[0.06] text-white hover:border-white/25 hover:bg-white/10 focus-visible:ring-[#2563EB] focus-visible:ring-offset-[#010D1B]"
           />
         )}
@@ -179,7 +188,7 @@ export function Sidebar({
               {canAccessAdmin && (
                 <Link
                   href="/settings/status"
-                  onClick={onClose}
+                  onClick={onNavigate}
                   aria-current={pathname.startsWith("/settings/status") ? "page" : undefined}
                   className={cn(
                     "group flex min-h-10 items-center gap-3 rounded-md px-3 py-2 text-[13px] transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#2563EB]",
@@ -194,7 +203,7 @@ export function Sidebar({
               )}
               <Link
                 href="/settings"
-                onClick={onClose}
+                onClick={onNavigate}
                 aria-current={pathname === "/settings" ? "page" : undefined}
                 className={cn(
                   "group flex min-h-10 items-center gap-3 rounded-md px-3 py-2 text-[13px] transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#2563EB]",
@@ -216,7 +225,7 @@ export function Sidebar({
           </div>
           <Link
             href="/profile"
-            onClick={onClose}
+            onClick={onNavigate}
             aria-current={pathname.startsWith("/profile") ? "page" : undefined}
             className={cn(
               "group flex min-h-14 items-center gap-3 rounded-md px-2.5 py-2 text-[13px] transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#2563EB]",
@@ -242,7 +251,7 @@ export function Sidebar({
 
           {showLogout && (
             <LogoutButton
-              onNavigate={onClose}
+              onNavigate={onNavigate}
               variant="ghost"
               size="sm"
               errorClassName="text-red-300"

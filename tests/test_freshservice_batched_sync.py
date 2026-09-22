@@ -2,7 +2,7 @@ import os
 import unittest
 from datetime import datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -510,13 +510,106 @@ class FreshserviceBatchedSyncTests(unittest.TestCase):
         self.assertEqual(result["deferred"], 1)
         self.assertEqual(adapter.calls, [])
 
+    def test_manual_recent_cursor_does_not_reset_a_live_scheduler_lease(self):
+        claimed_at = datetime.utcnow()
+        with self.session_factory() as db:
+            db.add(SyncStateRecord(
+                binding_id="legacy",
+                provider="freshservice",
+                run_token="scheduler-owner",
+                run_started_at=claimed_at,
+                recent_since_at=claimed_at - timedelta(days=3),
+                recent_cycle_started_at=claimed_at,
+                recent_page=9,
+                recent_workspace_index=2,
+                last_status="running",
+            ))
+            db.commit()
+
+        adapter = _BatchedFreshserviceAdapter([], [])
+        with self.session_factory() as db:
+            self.assertFalse(sync._queue_freshservice_manual_recent_sync(
+                db, adapter, "legacy", days=14, now=claimed_at
+            ))
+
+        with self.session_factory() as db:
+            state = db.query(SyncStateRecord).one()
+            self.assertEqual(state.run_token, "scheduler-owner")
+            self.assertEqual(state.recent_page, 9)
+            self.assertEqual(state.recent_workspace_index, 2)
+            self.assertEqual(state.last_status, "running")
+
+    def test_manual_freshservice_entrypoint_preserves_live_scheduler_cursor(self):
+        claimed_at = datetime.utcnow()
+        with self.session_factory() as db:
+            db.add(SyncStateRecord(
+                binding_id="legacy",
+                provider="freshservice",
+                run_token="scheduler-owner",
+                run_started_at=claimed_at,
+                recent_since_at=claimed_at - timedelta(days=3),
+                recent_cycle_started_at=claimed_at,
+                recent_page=11,
+                recent_workspace_index=1,
+                last_status="running",
+            ))
+            db.commit()
+        adapter = _BatchedFreshserviceAdapter([], [])
+        batch = {
+            "new": 0, "updated": 0, "errors": 0, "fetched": 0,
+            "deferred": 1, "recent_pages": 0,
+        }
+        with (
+            patch.object(sync, "SessionLocal", self.session_factory),
+            patch.object(sync, "sync_tickets_from_external", return_value=batch),
+        ):
+            result = sync.fetch_tickets_by_days(adapter, days=14)
+        self.assertTrue(result["queued"])
+        with self.session_factory() as db:
+            state = db.query(SyncStateRecord).one()
+            self.assertEqual(state.run_token, "scheduler-owner")
+            self.assertEqual(state.recent_page, 11)
+            self.assertEqual(state.recent_workspace_index, 1)
+
+    def test_manual_cursor_conditional_update_refuses_a_claim_that_wins_the_race(self):
+        """A winner between inspection and mutation cannot be overwritten."""
+        state = MagicMock(
+            id=17,
+            run_token=None,
+            run_started_at=None,
+        )
+        locked = MagicMock()
+        locked.one_or_none.return_value = state
+        lookup = MagicMock()
+        lookup.filter.return_value.with_for_update.return_value = locked
+        mutation = MagicMock()
+        mutation.filter.return_value.update.return_value = 0
+        db = MagicMock()
+        db.query.side_effect = [lookup, mutation]
+        adapter = _BatchedFreshserviceAdapter([], [])
+
+        self.assertFalse(sync._queue_freshservice_manual_recent_sync(
+            db, adapter, "legacy", days=14, now=datetime(2026, 1, 1)
+        ))
+        locked.one_or_none.assert_called_once_with()
+        mutation.filter.assert_called_once()
+        mutation.filter.return_value.update.assert_called_once()
+        db.rollback.assert_called_once_with()
+        db.commit.assert_not_called()
+
     def test_page_persistence_renews_claim_before_committing_cursor(self):
         checkpoints = []
         original = sync._require_freshservice_run_owner
 
-        def tracked_checkpoint(db, state, token, *, renew):
+        def tracked_checkpoint(db, state, token, *, renew, lease_seconds):
             checkpoints.append(renew)
-            return original(db, state, token, renew=renew)
+            return original(
+                db,
+                state,
+                token,
+                renew=renew,
+                lease_seconds=lease_seconds,
+            )
 
         adapter = _BatchedFreshserviceAdapter(
             [self._ticket("recent", self.now, self.now)],
@@ -537,7 +630,9 @@ class FreshserviceBatchedSyncTests(unittest.TestCase):
         calls = 0
         original = sync._require_freshservice_run_owner
 
-        def lose_claim_before_publish(db, state, token, *, renew):
+        def lose_claim_before_publish(
+            db, state, token, *, renew, lease_seconds
+        ):
             nonlocal calls
             calls += 1
             if calls == 3:
@@ -553,7 +648,13 @@ class FreshserviceBatchedSyncTests(unittest.TestCase):
                 }, synchronize_session=False)
                 db.commit()
                 raise sync._FreshserviceRunClaimLost("claim replaced")
-            return original(db, state, token, renew=renew)
+            return original(
+                db,
+                state,
+                token,
+                renew=renew,
+                lease_seconds=lease_seconds,
+            )
 
         adapter = _BatchedFreshserviceAdapter(
             [self._ticket("must-not-publish", self.now, self.now)],
@@ -596,6 +697,144 @@ class FreshserviceBatchedSyncTests(unittest.TestCase):
             state = db.query(SyncStateRecord).one()
             self.assertEqual(state.run_token, "replacement-run")
             self.assertEqual(state.last_status, "running")
+
+    def test_expired_unreplaced_owner_cannot_verify_or_renew_its_lease(self):
+        """A paused replica must yield at expiry before a successor claims."""
+        lease_seconds = 120
+        with self.session_factory() as db:
+            db.add(SyncStateRecord(
+                binding_id="legacy",
+                provider="freshservice",
+                run_token="expired-owner",
+                run_started_at=datetime.utcnow() - timedelta(
+                    seconds=lease_seconds + 1
+                ),
+                last_status="running",
+            ))
+            db.commit()
+
+            state = db.query(SyncStateRecord).one()
+            for renew in (False, True):
+                with self.assertRaises(sync._FreshserviceRunClaimLost):
+                    sync._require_freshservice_run_owner(
+                        db,
+                        state,
+                        "expired-owner",
+                        renew=renew,
+                        lease_seconds=lease_seconds,
+                    )
+                db.rollback()
+
+            state = db.query(SyncStateRecord).one()
+            self.assertEqual(state.run_token, "expired-owner")
+            self.assertLess(
+                state.run_started_at,
+                datetime.utcnow() - timedelta(seconds=lease_seconds),
+            )
+
+    def test_expired_unreplaced_owner_cannot_publish_fetched_page(self):
+        """Expiry during remote I/O fences the old owner before its DB write."""
+        session_factory = self.session_factory
+
+        class LeaseExpiringAdapter(_BatchedFreshserviceAdapter):
+            async def fetch_ticket_page(self, **kwargs):
+                with session_factory() as other_db:
+                    state = other_db.query(SyncStateRecord).one()
+                    state.run_started_at = datetime.utcnow() - timedelta(
+                        seconds=901
+                    )
+                    other_db.commit()
+                return await super().fetch_ticket_page(**kwargs)
+
+        result = self._run(LeaseExpiringAdapter(
+            [self._ticket("must-not-publish-after-expiry", self.now, self.now)],
+            [],
+        ))
+
+        self.assertEqual(result["deferred"], 1)
+        with self.session_factory() as db:
+            self.assertEqual(db.query(TicketRecord).count(), 0)
+            state = db.query(SyncStateRecord).one()
+            self.assertIsNotNone(state.run_token)
+            self.assertLess(
+                state.run_started_at,
+                datetime.utcnow() - timedelta(seconds=900),
+            )
+
+    def test_hydration_refresh_cannot_publish_throttle_for_replacement_owner(self):
+        """A long derived refresh cannot commit its throttle state after expiry."""
+        with self.session_factory() as db:
+            db.add(SyncStateRecord(
+                binding_id="legacy",
+                provider="freshservice",
+                run_token="hydration-owner",
+                run_started_at=datetime.utcnow(),
+                last_status="running",
+            ))
+            db.add(TicketRecord(
+                id="hydration-ticket",
+                subject="Hydration",
+                description="old provider description",
+                reporter="requester@example.com",
+                priority="P3",
+                status="Open",
+                external_source="freshservice",
+                binding_id="legacy",
+                external_id="hydration-external",
+                external_updated_at=self.now,
+                external_created_at=self.now,
+            ))
+            db.commit()
+
+            state = db.query(SyncStateRecord).one()
+            adapter = _BatchedFreshserviceAdapter([], [], remaining=0)
+
+            async def fetch_ticket_details(_external_id):
+                return self._ticket(
+                    "hydration-external", self.now, self.now
+                ).model_copy(update={
+                    "description": "new provider description",
+                })
+
+            adapter.fetch_ticket_details = fetch_ticket_details
+
+            def checkpoint(renew):
+                return sync._require_freshservice_run_owner(
+                    db,
+                    state,
+                    "hydration-owner",
+                    renew=renew,
+                    lease_seconds=120,
+                )
+
+            def replace_owner(_db, _ticket):
+                with self.session_factory() as replacement_db:
+                    replacement = replacement_db.query(SyncStateRecord).one()
+                    replacement.run_token = "replacement-after-refresh"
+                    replacement.run_started_at = datetime.utcnow()
+                    replacement.last_status = "running"
+                    replacement.next_retry_at = None
+                    replacement_db.commit()
+                return 0
+
+            with patch.object(
+                sync, "refresh_ticket_documents_if_indexed", side_effect=replace_owner
+            ):
+                with self.assertRaises(sync._FreshserviceRunClaimLost):
+                    sync._hydrate_freshservice_conversations(
+                        db,
+                        state=state,
+                        adapter=adapter,
+                        binding_id="legacy",
+                        limit=1,
+                        claim_checkpoint=checkpoint,
+                    )
+
+        with self.session_factory() as db:
+            state = db.query(SyncStateRecord).one()
+            self.assertEqual(state.run_token, "replacement-after-refresh")
+            self.assertEqual(state.last_status, "running")
+            self.assertIsNone(state.next_retry_at)
 
     def test_rate_limit_handler_cannot_overwrite_a_replacement_sync_claim(self):
         session_factory = self.session_factory

@@ -9,6 +9,13 @@ _SECRET_KEY = (
     r"secret[_-]?access[_-]?key|password|passwd|token|secret|authorization)"
 )
 
+# This JSON contains the complete AES-256-GCM keyring used to decrypt every
+# persisted sensitive setting.  Its name intentionally ends in ``KEYS_JSON``
+# rather than the conventional credential suffixes matched below, so keep it
+# on an explicit exact-redaction allowlist.  The active KID is an identifier,
+# not secret material.
+_EXACT_SECRET_ENV_NAMES = frozenset({"TICKETY_SETTINGS_ENCRYPTION_KEYS_JSON"})
+
 
 _REDACTIONS = [
     (
@@ -78,6 +85,7 @@ def configured_secret_values() -> tuple[str, ...]:
         for key, value in os.environ.items()
         if (
             key in _SENSITIVE_KEYS
+            or key in _EXACT_SECRET_ENV_NAMES
             or re.search(r"(?:^|_)(?:API_?KEY|KEY|SECRET|TOKEN|PASSWORD)$", key)
         )
         and value

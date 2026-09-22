@@ -15,7 +15,10 @@ from app.backend.database import (
     ExternalUserRecord,
     ExternalAttachmentRecord,
     ExternalConversationRecord,
+    NotificationOutboxRecord,
     RecognitionRecord,
+    RequirementSourceRecord,
+    RequirementWorkspaceRecord,
     SessionRecord,
     TicketCategoryRecord,
     TicketRecord,
@@ -318,7 +321,7 @@ class RouteAuthorizationTests(unittest.TestCase):
     def test_only_admin_can_purge_a_deactivated_user(self):
         with self.session_factory() as db:
             db.add_all([
-                SessionRecord(token="inactive-session", user_id="inactive"),
+                SessionRecord(token_hash=main.session_token_digest("inactive-session"), user_id="inactive"),
                 RecognitionRecord(user_id="inactive", recognition_key="inactive-award"),
                 ChangeRecord(
                     id="approved-change",
@@ -359,7 +362,7 @@ class RouteAuthorizationTests(unittest.TestCase):
         self.assertEqual(response.json()["anonymized_decided_approvals"], 1)
         with self.session_factory() as db:
             self.assertIsNone(db.get(UserRecord, "inactive"))
-            self.assertIsNone(db.get(SessionRecord, "inactive-session"))
+            self.assertIsNone(db.get(SessionRecord, main.session_token_digest("inactive-session")))
             self.assertEqual(
                 db.query(RecognitionRecord).filter(RecognitionRecord.user_id == "inactive").count(),
                 0,
@@ -386,6 +389,91 @@ class RouteAuthorizationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         with self.session_factory() as db:
             self.assertIsNotNone(db.get(UserRecord, "agent"))
+
+    def test_purge_removes_unexpired_notification_outbox_records_before_replay(self):
+        """A purged recipient can never receive a durable replay payload."""
+        with self.session_factory() as db:
+            db.add(NotificationOutboxRecord(
+                dispatch_order=1,
+                recipient_user_id="inactive",
+                event_type=main._NOTIFICATION_OUTBOX_EVENT_TYPE,
+                payload_json='{"event_id": 1, "ticket_id": "ticket-1"}',
+                dedupe_key="purge-outbox-record",
+                expires_at=datetime.utcnow() + timedelta(hours=1),
+            ))
+            db.commit()
+
+        self._as_role("admin")
+        response = self.client.delete("/users/inactive/purge")
+        self.assertEqual(response.status_code, 200, response.text)
+
+        with self.session_factory() as db:
+            self.assertEqual(
+                db.query(NotificationOutboxRecord).filter(
+                    NotificationOutboxRecord.recipient_user_id == "inactive",
+                ).count(),
+                0,
+            )
+
+        # Replay has its own session factory in production. Point it to this
+        # test transaction's database to prove it cannot recover the payload.
+        with patch.object(main, "SessionLocal", self.session_factory):
+            replay, has_more = main._notification_outbox_replay_after(
+                "inactive", cursor=0, limit=100,
+            )
+        self.assertEqual(replay, [])
+        self.assertFalse(has_more)
+
+    def test_purge_removes_user_operational_records_and_anonymizes_source_review(self):
+        """Non-FK user identifiers cannot survive or be inherited after purge."""
+        reviewed_at = datetime.utcnow()
+        with self.session_factory() as db:
+            db.add_all([
+                main.AIUsageEventRecord(
+                    actor_id="inactive", task="full_analysis", created_at=reviewed_at,
+                ),
+                main.AIRequestBucketRecord(
+                    actor_id="inactive",
+                    window_kind="day",
+                    window_start=reviewed_at.replace(hour=0, minute=0, second=0, microsecond=0),
+                    request_count=17,
+                ),
+                RequirementWorkspaceRecord(
+                    id="purge-workspace",
+                    owner_id="inactive",
+                    title="Purge review source",
+                    objective="Verify permanent account privacy cleanup.",
+                    request_type="enhancement",
+                ),
+                RequirementSourceRecord(
+                    id="purge-source",
+                    workspace_id="purge-workspace",
+                    title="Reviewed source",
+                    kind="document",
+                    content="This source has enough content for the model.",
+                    content_sha256="a" * 64,
+                    context_reviewed_at=reviewed_at,
+                    context_reviewed_by="inactive",
+                ),
+            ])
+            db.commit()
+
+        self._as_role("admin")
+        response = self.client.delete("/users/inactive/purge")
+        self.assertEqual(response.status_code, 200, response.text)
+
+        with self.session_factory() as db:
+            self.assertEqual(
+                db.query(main.AIUsageEventRecord).filter_by(actor_id="inactive").count(),
+                0,
+            )
+            self.assertEqual(
+                db.query(main.AIRequestBucketRecord).filter_by(actor_id="inactive").count(),
+                0,
+            )
+            source = db.get(RequirementSourceRecord, "purge-source")
+            self.assertEqual(source.context_reviewed_at, reviewed_at)
+            self.assertIsNone(source.context_reviewed_by)
 
     def test_last_active_admin_cannot_be_deactivated(self):
         self._as_role("admin")

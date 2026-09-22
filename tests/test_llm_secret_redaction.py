@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 from app.backend import llm_manager
 from app.backend.llm_manager import LLMManager
-from app.backend.privacy import redact_data, redact_text
+from app.backend.privacy import configured_secret_values, redact_data, redact_text
 
 
 class ExactSecretPrivacyTests(unittest.TestCase):
@@ -28,15 +28,33 @@ class ExactSecretPrivacyTests(unittest.TestCase):
         self.assertNotIn(secret, serialized)
         self.assertIn("[secret]", serialized)
 
+    def test_settings_keyring_json_is_an_exact_deployment_secret(self):
+        keyring = '{"rotation-2026":"QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI="}'
+        with patch.dict(
+            os.environ,
+            {
+                "TICKETY_SETTINGS_ENCRYPTION_ACTIVE_KID": "rotation-2026",
+                "TICKETY_SETTINGS_ENCRYPTION_KEYS_JSON": keyring,
+            },
+            clear=True,
+        ):
+            exact_secrets = configured_secret_values()
+            redacted = redact_text(f"unlabeled keyring: {keyring}", exact_secrets)
+
+        self.assertIn(keyring, exact_secrets)
+        self.assertNotIn(keyring, redacted)
+        self.assertIn("[secret]", redacted)
+
 
 class LLMExactSecretBoundaryTests(unittest.IsolatedAsyncioTestCase):
     async def test_provider_secret_is_removed_from_prompt_and_returned_output(self):
         secret = "quartzFable9Zebra"
         foreign_secret = "opaqueWebhookValue7Kite"
+        keyring = '{"rotation-2026":"QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI="}'
         response = SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({
-                "summary": f"The configured values were {secret} and {foreign_secret}.",
-                "nested": [secret, foreign_secret],
+                "summary": f"The configured values were {secret}, {foreign_secret}, and {keyring}.",
+                "nested": [secret, foreign_secret, keyring],
             })))],
             usage=SimpleNamespace(
                 prompt_tokens=10,
@@ -53,6 +71,7 @@ class LLMExactSecretBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 "CUSTOM_API_BASE": "https://provider.example/v1",
                 "LLM_ALLOW_PRIVATE_ENDPOINTS": "true",
                 "WEBHOOK_SECRET": foreign_secret,
+                "TICKETY_SETTINGS_ENCRYPTION_KEYS_JSON": keyring,
                 "LLM_PERSIST_METRICS": "false",
                 "LLM_ENFORCE_PROVIDER_LIMITS": "false",
             },
@@ -64,18 +83,21 @@ class LLMExactSecretBoundaryTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(llm_manager, "acompletion", completion):
                 with redirect_stdout(output):
                     result = await manager.analyze(
-                        f"Analyze these unlabeled values: {secret} {foreign_secret}"
+                        f"Analyze these unlabeled values: {secret} {foreign_secret} {keyring}"
                     )
 
         serialized = json.dumps(result, sort_keys=True)
         self.assertNotIn(secret, serialized)
         self.assertNotIn(foreign_secret, serialized)
+        self.assertNotIn(keyring, serialized)
         self.assertIn("[secret]", serialized)
         self.assertNotIn(secret, output.getvalue())
         self.assertNotIn(foreign_secret, output.getvalue())
+        self.assertNotIn(keyring, output.getvalue())
         sent_messages = completion.await_args.kwargs["messages"]
         self.assertNotIn(secret, json.dumps(sent_messages))
         self.assertNotIn(foreign_secret, json.dumps(sent_messages))
+        self.assertNotIn(keyring, json.dumps(sent_messages))
 
     async def test_fetched_provider_output_is_redacted_before_save_and_return(self):
         secret = "quartzFable9Zebra"

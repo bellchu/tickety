@@ -13,10 +13,20 @@ test("desktop ticket columns expose persistent pointer and keyboard resizing", (
   assert.match(source, /onPointerDown=/);
   assert.match(source, /event\.key !== "ArrowLeft"/);
   assert.match(source, /COLUMN_WIDTHS_KEY/);
-  assert.match(source, /localStorage\.setItem\(COLUMN_WIDTHS_KEY/);
+  assert.match(source, /userScopedStorageKey\(COLUMN_WIDTHS_KEY, preferenceUserId\)/);
+  assert.match(source, /localStorage\.setItem\(columnWidthsStorageKey/);
   assert.match(source, /<col style=\{\{ width: columnWidths\.routing \}\} \/>/);
   assert.match(source, /priority: 150/);
   assert.match(source, /label="Priority signal"/);
+});
+
+test("ticket queue browser preferences are scoped to the authenticated identity", () => {
+  assert.match(source, /const SAVED_VIEWS_KEY = "tickety\.ticket-queue\.views\.v2"/);
+  assert.match(source, /const COLUMN_WIDTHS_KEY = "tickety\.ticket-queue\.column-widths\.v4"/);
+  assert.match(source, /function userScopedStorageKey\(prefix: string, userId: string \| undefined\)/);
+  assert.match(source, /encodeURIComponent\(userId\)/);
+  assert.match(source, /savedViewsStorageKey/);
+  assert.match(source, /hydratedPreferenceScope !== preferenceUserId/);
 });
 
 test("routing content remains discoverable when space is constrained", () => {

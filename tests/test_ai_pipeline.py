@@ -929,6 +929,225 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(ticket.ai_requested_artifacts)
             self.assertIsNone(ticket.ai_next_attempt_at)
 
+    async def test_policy_filtered_completion_cannot_clobber_successor_claim(self):
+        class ContentFilteredLLM:
+            model_name = "custom/test"
+            is_mock = False
+            allow_synthetic = False
+
+            async def analyze(self, _prompt, *, response_model=None, **_kwargs):
+                if response_model is not TicketSummary:
+                    raise AssertionError(response_model)
+                raise LLMContentFilteredError("content policy")
+
+        old_llm = main.engine.llm
+        main.engine.llm = ContentFilteredLLM()
+        successor_claims = []
+        try:
+            with self.session_factory() as db:
+                ticket = db.get(TicketRecord, "ticket-1")
+                ticket.ai_reasoning = "scope: one user; triage remains useful"
+                db.commit()
+                original_commit = db.commit
+
+                def commit_then_take_over():
+                    original_commit()
+                    if successor_claims:
+                        return
+                    with self.session_factory() as other_db:
+                        current = other_db.get(TicketRecord, "ticket-1")
+                        if not (
+                            current.ai_status == "triage_completed"
+                            and current.ai_claim_id is None
+                            and current.ai_error == "summary:content_filtered"
+                        ):
+                            return
+                        claimed, _, claim_id = main._claim_ticket_analysis(
+                            current, other_db, force=True,
+                        )
+                        self.assertTrue(claimed)
+                        successor_claims.append(claim_id)
+                    # Make the old session observe the successor. Before this
+                    # fix, its later id-only policy-finalization query then
+                    # cleared this claim and changed the ticket back.
+                    db.expire_all()
+
+                with (
+                    patch.object(db, "commit", side_effect=commit_then_take_over),
+                    patch.object(
+                        ticket_vectors,
+                        "refresh_ticket_documents",
+                        new=AsyncMock(return_value=0),
+                    ),
+                    self.assertRaises(LLMUnavailableError),
+                ):
+                    await main._run_ticket_analysis(
+                        ticket,
+                        db,
+                        force=True,
+                        artifacts={"summary"},
+                    )
+        finally:
+            main.engine.llm = old_llm
+
+        self.assertEqual(len(successor_claims), 1)
+        with self.session_factory() as db:
+            ticket = db.get(TicketRecord, "ticket-1")
+            self.assertEqual(ticket.ai_status, "running")
+            self.assertEqual(ticket.ai_claim_id, successor_claims[0])
+            self.assertIsNotNone(ticket.ai_lease_expires_at)
+
+    async def test_failed_artifact_follow_up_cannot_requeue_completed_successor(self):
+        class InvalidSummaryLLM:
+            model_name = "custom/test"
+            is_mock = False
+            allow_synthetic = False
+
+            async def analyze(self, _prompt, *, response_model=None, **_kwargs):
+                if response_model is TicketSummary:
+                    raise LLMInvalidOutputError("invalid summary")
+                raise AssertionError(response_model)
+
+        old_llm = main.engine.llm
+        main.engine.llm = InvalidSummaryLLM()
+        successor_claims = []
+        try:
+            with self.session_factory() as db:
+                ticket = db.get(TicketRecord, "ticket-1")
+                ticket.ai_reasoning = "scope: one user; triage remains useful"
+                ticket.recommended_solution = "{}"
+                db.commit()
+                original_commit = db.commit
+
+                def commit_then_complete_successor():
+                    original_commit()
+                    if successor_claims:
+                        return
+                    with self.session_factory() as other_db:
+                        current = other_db.get(TicketRecord, "ticket-1")
+                        # Before the fix this is the old worker's first terminal
+                        # commit (partial/no claim); after it is the complete
+                        # owner-fenced retry disposition (queued/no claim).
+                        if not (
+                            current.ai_status in {"partial", "queued"}
+                            and current.ai_claim_id is None
+                            and current.ai_error == "summary:invalid_output"
+                        ):
+                            return
+                        claimed, _, claim_id = main._claim_ticket_analysis(
+                            current, other_db, force=True,
+                        )
+                        self.assertTrue(claimed)
+                        current.ai_status = "completed"
+                        current.ai_claim_id = None
+                        current.ai_lease_expires_at = None
+                        current.ai_requested_artifacts = None
+                        current.ai_next_attempt_at = None
+                        current.ai_error = None
+                        other_db.commit()
+                        successor_claims.append(claim_id)
+                    db.expire_all()
+
+                with (
+                    patch.object(db, "commit", side_effect=commit_then_complete_successor),
+                    patch.object(
+                        ticket_vectors,
+                        "refresh_ticket_documents",
+                        new=AsyncMock(return_value=0),
+                    ),
+                    self.assertRaises(LLMUnavailableError),
+                ):
+                    await main._run_ticket_analysis(
+                        ticket,
+                        db,
+                        force=True,
+                        artifacts={"summary"},
+                    )
+        finally:
+            main.engine.llm = old_llm
+
+        self.assertEqual(len(successor_claims), 1)
+        with self.session_factory() as db:
+            ticket = db.get(TicketRecord, "ticket-1")
+            self.assertEqual(ticket.ai_status, "completed")
+            self.assertIsNone(ticket.ai_claim_id)
+            self.assertIsNone(ticket.ai_requested_artifacts)
+            self.assertIsNone(ticket.ai_next_attempt_at)
+
+    async def test_policy_filtered_triage_follow_up_cannot_requeue_completed_successor(self):
+        class RouteThenFilteredTriageLLM:
+            model_name = "custom/test"
+            is_mock = False
+            allow_synthetic = False
+
+            async def analyze(self, _prompt, *, response_model=None, **_kwargs):
+                if response_model is ResolverRoutingAnalysis:
+                    raise LLMInvalidOutputError("invalid route")
+                if response_model is TriageAnalysis:
+                    raise LLMContentFilteredError("content policy")
+                raise AssertionError(response_model)
+
+        old_llm = main.engine.llm
+        main.engine.llm = RouteThenFilteredTriageLLM()
+        successor_claims = []
+        try:
+            with self.session_factory() as db:
+                ticket = db.get(TicketRecord, "ticket-1")
+                original_commit = db.commit
+
+                def commit_then_complete_successor():
+                    original_commit()
+                    if successor_claims:
+                        return
+                    with self.session_factory() as other_db:
+                        current = other_db.get(TicketRecord, "ticket-1")
+                        if not (
+                            current.ai_status in {"partial", "queued"}
+                            and current.ai_claim_id is None
+                            and "route:invalid_output" in (current.ai_error or "")
+                            and "triage:content_filtered" in (current.ai_error or "")
+                        ):
+                            return
+                        claimed, _, claim_id = main._claim_ticket_analysis(
+                            current, other_db, force=True,
+                        )
+                        self.assertTrue(claimed)
+                        current.ai_status = "completed"
+                        current.ai_claim_id = None
+                        current.ai_lease_expires_at = None
+                        current.ai_requested_artifacts = None
+                        current.ai_next_attempt_at = None
+                        current.ai_error = None
+                        other_db.commit()
+                        successor_claims.append(claim_id)
+                    db.expire_all()
+
+                with (
+                    patch.object(db, "commit", side_effect=commit_then_complete_successor),
+                    patch.object(
+                        ticket_vectors,
+                        "refresh_ticket_documents",
+                        new=AsyncMock(return_value=0),
+                    ),
+                    self.assertRaises(LLMContentFilteredError),
+                ):
+                    await main._run_ticket_analysis(
+                        ticket,
+                        db,
+                        force=True,
+                        artifacts={"triage", "route"},
+                    )
+        finally:
+            main.engine.llm = old_llm
+
+        self.assertEqual(len(successor_claims), 1)
+        with self.session_factory() as db:
+            ticket = db.get(TicketRecord, "ticket-1")
+            self.assertEqual(ticket.ai_status, "completed")
+            self.assertIsNone(ticket.ai_claim_id)
+            self.assertIsNone(ticket.ai_requested_artifacts)
+            self.assertIsNone(ticket.ai_next_attempt_at)
+
     async def test_mixed_content_filter_and_transient_retries_only_transient_artifact(self):
         class MixedFailureLLM:
             model_name = "custom/test"
@@ -1206,6 +1425,51 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 "AI_PIPELINE_TIMEOUT_SECONDS": "900",
             }, clear=False):
                 self.assertGreaterEqual(main._analysis_lease_seconds(), 960)
+        finally:
+            main.engine.llm = old_llm
+
+    def test_expired_unreplaced_claim_owner_cannot_renew_its_lease(self):
+        old_llm = main.engine.llm
+        main.engine.llm = SimpleNamespace(model_name="custom/test")
+        try:
+            with self.session_factory() as db:
+                ticket = db.get(TicketRecord, "ticket-1")
+                claimed, _, claim_id = main._claim_ticket_analysis(ticket, db)
+                self.assertTrue(claimed)
+                expired_at = datetime.utcnow() - timedelta(seconds=1)
+                ticket.ai_lease_expires_at = expired_at
+                db.commit()
+
+                with self.assertRaises(HTTPException) as raised:
+                    main._renew_analysis_lease(db, ticket.id, claim_id)
+
+                self.assertEqual(raised.exception.detail, "analysis_claim_lost")
+                db.refresh(ticket)
+                self.assertEqual(ticket.ai_claim_id, claim_id)
+                self.assertEqual(ticket.ai_lease_expires_at, expired_at)
+        finally:
+            main.engine.llm = old_llm
+
+    def test_expired_unreplaced_claim_owner_cannot_verify_before_finalizing(self):
+        old_llm = main.engine.llm
+        main.engine.llm = SimpleNamespace(model_name="custom/test")
+        try:
+            with self.session_factory() as db:
+                ticket = db.get(TicketRecord, "ticket-1")
+                claimed, source_hash, claim_id = main._claim_ticket_analysis(ticket, db)
+                self.assertTrue(claimed)
+                ticket.ai_lease_expires_at = datetime.utcnow() - timedelta(seconds=1)
+                db.commit()
+
+                with self.assertRaises(HTTPException) as raised:
+                    main._ensure_analysis_input_current(
+                        ticket, db, source_hash, claim_id,
+                    )
+
+                self.assertEqual(raised.exception.detail, "analysis_claim_lost")
+                db.refresh(ticket)
+                self.assertEqual(ticket.ai_claim_id, claim_id)
+                self.assertEqual(ticket.ai_status, "running")
         finally:
             main.engine.llm = old_llm
 
@@ -1671,6 +1935,31 @@ class AnalysisLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 "automation_enabled",
                 return_value=False,
             ),
+            patch.object(main, "_auto_process", new=process),
+        ):
+            sync_worker._auto_triage_job()
+
+        process.assert_awaited_once()
+        self.assertTrue(process.await_args.kwargs["force"])
+
+    def test_worker_recovers_analysis_at_exact_lease_expiry(self):
+        now = datetime.utcnow().replace(microsecond=0)
+        with self.session_factory() as db:
+            ticket = db.get(TicketRecord, "ticket-1")
+            ticket.ai_status = "running"
+            ticket.ai_claim_id = "expired-at-boundary"
+            ticket.ai_lease_expires_at = now
+            ticket.ai_requested_artifacts = "triage"
+            db.commit()
+        process = AsyncMock()
+        with (
+            patch.object(sync_worker, "SessionLocal", self.session_factory),
+            patch.object(
+                sync_worker.settings_module,
+                "automation_enabled",
+                return_value=False,
+            ),
+            patch.object(sync_worker, "datetime", SimpleNamespace(utcnow=lambda: now)),
             patch.object(main, "_auto_process", new=process),
         ):
             sync_worker._auto_triage_job()
