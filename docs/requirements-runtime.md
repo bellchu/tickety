@@ -78,7 +78,8 @@ Revision checks reject stale edits and sign-offs. Open blocking questions preven
 agreement and story preparation; resolving them never restores sign-off. Deferred
 requirements also reject sign-off, story creation and AI story refinement. Reusing
 an identical newly captured requirement does not create a history event or withdraw
-its current agreement.
+its current agreement. An unchanged edit also preserves the revision and history,
+but still checks access, source evidence and the submitted revision first.
 
 ## Unsaved drafts
 

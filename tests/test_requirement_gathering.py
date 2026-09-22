@@ -133,6 +133,29 @@ class RequirementGatheringTests(unittest.TestCase):
         self.assertEqual(duplicate.json()["id"], first["id"])
         self.assertEqual(self.client.post(base, json={**payload, "title": "Another requirement"}).status_code, 409)
 
+    def test_unchanged_edit_preserves_draft_and_signed_agreement(self):
+        workspace = self.workspace()
+        source = self.source(workspace)
+        payload = self.payload(source)
+        row = self.client.post(f"{self.path}/{workspace}/items", json=payload).json()
+        route = f"{self.path}/{workspace}/items/{row['id']}"
+        for signed in (False, True):
+            if signed:
+                row = self.client.post(route + "/validate", json={"revision": row["revision"], "reviewer_role": "Product Owner", "validation_note": "Confirmed with the operations owner."}).json()
+                row = self.client.post(route + "/story", json={"revision": row["revision"]}).json()
+            history = self.client.get(route + "/history").json()
+            response = self.client.put(route, json={**payload, "title": " " + payload["title"] + " ", "revision": row["revision"]})
+            self.assertEqual(response.status_code, 200, response.text)
+            result = response.json()
+            self.assertTrue(result.pop("unchanged"))
+            self.assertEqual(result, row)
+            self.assertEqual(self.client.get(route + "/history").json(), history)
+        self.assertEqual(self.client.put(route, json={**payload, "revision": 1}).status_code, 409)
+        changed = self.client.put(route, json={**payload, "acceptance_criteria": ["Given an invoice, confirm receipt within twenty seconds."], "revision": row["revision"]}).json()
+        self.assertEqual(changed["revision"], row["revision"] + 1)
+        self.assertEqual(changed["status"], "draft")
+        self.assertIsNone(changed["story"])
+
     def test_source_and_workspace_boundaries(self):
         workspace = self.workspace()
         source = self.source(workspace)
@@ -156,7 +179,7 @@ class RequirementGatheringTests(unittest.TestCase):
         source = self.source(workspace)
         row = self.client.post(f"{self.path}/{workspace}/items", json=self.payload(source)).json()
         item = f"{self.path}/{workspace}/items/{row['id']}"
-        self.assertEqual(self.client.put(item, json={**self.payload(source), "revision": 1}).status_code, 200)
+        self.assertEqual(self.client.put(item, json={**self.payload(source), "revision": 1, "benefit": "Track processing outcomes"}).status_code, 200)
         self.assertEqual(self.client.put(item, json={**self.payload(source), "revision": 1}).status_code, 409)
         self.assertEqual(self.client.post(item + "/validate", json={"revision": 1, "reviewer_role": "Product Owner", "validation_note": "Reviewed against the operations SOP."}).status_code, 409)
 

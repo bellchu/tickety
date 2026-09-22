@@ -171,7 +171,8 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
     }, () => {
       rememberRequirementEditor(editorClient, userId, id, null);
       setShowForm(false); setEditing(undefined);
-      if (saved?.reused) {
+      if (saved?.unchanged) setNotice("No business content changed. The existing agreement, story and revision were preserved.");
+      else if (saved?.reused) {
         setFilter("all"); setSearch("");
         setNotice(`This requirement already exists as ${saved.reference}. Its saved agreement and history were preserved.`);
       }

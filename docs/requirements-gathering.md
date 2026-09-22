@@ -64,7 +64,8 @@ Technical Business Analyst or DTL; this label does not grant application permiss
 The signed-in reviewer, note, time and revision are recorded. Automated checks and
 AI never replace that person's decision.
 
-Editing a requirement withdraws its current sign-off and story. Concurrent edits
+Saving changed business content withdraws its current sign-off and story. Saving
+without changes preserves agreement, story and revision. Concurrent edits
 use revision checks: stale work receives a conflict instead of overwriting newer
 changes. Use **History** to compare earlier wording, agreement and stories. Copying
 old wording into a new edit still requires fresh sign-off; history itself is read-only.

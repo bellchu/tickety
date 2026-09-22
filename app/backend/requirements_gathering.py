@@ -331,8 +331,11 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
     def update_requirement(workspace_id: str, requirement_id: str, data: RequirementUpdate, db: Session = Depends(get_db), user: UserRecord = Depends(require_user)):
         row = requirement(db, workspace_id, requirement_id, user, data.revision)
         check_source(db, workspace_id, data)
+        values = data.model_dump(exclude={"acceptance_criteria", "revision"})
+        if all(getattr(row, key) == value for key, value in values.items()) and json.loads(row.acceptance_json) == data.acceptance_criteria:
+            return {**requirement_out(row), "unchanged": True}
         before = requirement_out(row)
-        for key, value in data.model_dump(exclude={"acceptance_criteria", "revision"}).items():
+        for key, value in values.items():
             setattr(row, key, value)
         row.acceptance_json = json.dumps(data.acceptance_criteria)
         invalidate_agreement(row)
