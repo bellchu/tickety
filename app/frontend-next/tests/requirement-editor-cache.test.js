@@ -63,3 +63,21 @@ test('source previews retain warnings independently of the requirement editor', 
   client.clear();
   assert.equal(readSource(client, 'alice', 'one'), undefined);
 });
+
+test('decision question and answer drafts coexist with source and editor drafts', () => {
+  const client = new QueryClient();
+  const { readRequirementDecisionDraft: readDecision, rememberRequirementDecisionDraft: rememberDecision } = loaded.exports;
+  const decision = { question: 'Who handles failures?', owner: 'Operations lead', requirementId: 'r1', blocking: false, resolving: 'q2', resolution: 'Keep failed submissions in the queue.' };
+  remember(client, 'alice', 'one', draft);
+  rememberDecision(client, 'alice', 'one', decision);
+  assert.deepEqual(readDecision(client, 'alice', 'one'), decision);
+  assert.equal(readDecision(client, 'bob', 'one'), undefined);
+  assert.equal(readDecision(client, 'alice', 'two'), undefined);
+  rememberDecision(client, 'alice', 'one', { ...decision, question: '', owner: '', requirementId: '', blocking: true });
+  assert.equal(readDecision(client, 'alice', 'one').resolution, decision.resolution);
+  rememberDecision(client, 'alice', 'one', null);
+  assert.deepEqual(read(client, 'alice', 'one'), draft);
+  rememberDecision(client, 'alice', 'one', decision);
+  client.clear();
+  assert.equal(readDecision(client, 'alice', 'one'), undefined);
+});

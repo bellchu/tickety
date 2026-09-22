@@ -1,6 +1,6 @@
 "use client";
 
-import { readRequirementEditor, rememberRequirementEditor, readRequirementSourceDraft } from "@/lib/requirement-editor-cache";
+import { readRequirementEditor, rememberRequirementEditor, readRequirementSourceDraft, readRequirementDecisionDraft } from "@/lib/requirement-editor-cache";
 import { requirementErrorMessage } from "@/lib/requirement-errors";
 
 import { Suspense, useEffect, useState, type FormEvent } from "react";
@@ -105,7 +105,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
   const [restored] = useState(() => readRequirementEditor(editorClient, userId, id));
   const query = useQuery({ queryKey: ["requirement-workspace", id], queryFn: () => api.getRequirementWorkspace(id) });
   const [historyItem, setHistoryItem] = useState<string | null>(null);
-  const [decisionsOpen, setDecisionsOpen] = useState(false);
+  const [decisionsOpen, setDecisionsOpen] = useState(() => Boolean(readRequirementDecisionDraft(editorClient, userId, id)));
   const [questionSeed, setQuestionSeed] = useState<{ question: string; requirementId: string | null } | null>(null);
   const [sourceFormOpen, setSourceFormOpen] = useState(() => Boolean(readRequirementSourceDraft(editorClient, userId, id)));
   const [sourceViewing, setSourceViewing] = useState("");
@@ -205,7 +205,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
       <div className="max-w-2xl"><p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-cyan-200">Worth your attention</p><h2 className="mt-2 text-lg font-medium">{focus.title}</h2><p className="mt-2 text-sm leading-6 text-slate-200">{focus.reason}</p></div>
       <Button className="shrink-0" variant="secondary" trailingIcon={<ArrowUpRight size={15} />} disabled={Boolean(pending)} onClick={followFocus}>{focus.label}</Button>
     </section>
-    <DecisionLog workspaceId={id} requirements={detail.requirements} decisions={detail.decisions || []} open={decisionsOpen} onToggle={() => setDecisionsOpen(!decisionsOpen)} seed={questionSeed} onSeedUsed={() => setQuestionSeed(null)} onSaved={() => query.refetch()} />
+    <DecisionLog workspaceId={id} userId={userId} requirements={detail.requirements} decisions={detail.decisions || []} open={decisionsOpen} onToggle={() => setDecisionsOpen(!decisionsOpen)} seed={questionSeed} onSeedUsed={() => setQuestionSeed(null)} onSaved={() => query.refetch()} />
     <ErrorMessage error={error || query.error} />{notice && <p role="status" className="text-sm text-moss-700">{notice}</p>}
     <div className="grid items-start gap-6 xl:grid-cols-[300px_minmax(0,1fr)]">
       <aside className="min-w-0 space-y-4" aria-label="Business context">
