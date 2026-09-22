@@ -100,6 +100,11 @@ that material, including deferred needs. The source selector combines with searc
 and readiness filters. **Show all sources** removes only the source restriction;
 exports and initiative-wide readiness still cover the complete saved workspace.
 
+**Read in original source** highlights the saved quotation. If the same wording
+appears more than once, use **Previous occurrence** and **Next occurrence** to compare
+the surrounding text. The requirement records the quotation, not a unique position;
+these navigation controls do not change its evidence or your selected passage.
+
 If original source text fails to load, use **Retry loading source** beside the
 error in the evidence panel or requirement editor. This reloads that source while
 keeping your draft text. The initiative's **Refresh** action reloads the saved
