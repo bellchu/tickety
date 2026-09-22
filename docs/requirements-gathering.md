@@ -237,3 +237,8 @@ are cleared by a full reload or sign-out.
 History shows the range of records currently displayed. **Latest changes** returns
 to the newest entries from any older page. When refreshed workspace data reveals
 a new requirement revision, the history panel starts at the latest entries.
+
+The initiative list shows total captured requirements, in-scope drafts awaiting
+agreement, and prepared stories. Deferred needs remain in the total but do not
+inflate the active draft or story counts. Prepared stories still require delivery
+review; these counts are a progress overview, not a release approval.

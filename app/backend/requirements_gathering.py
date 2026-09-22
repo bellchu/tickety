@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session, defer
 
 from .database import (
@@ -201,7 +202,17 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
             query = query.filter_by(owner_id=user.id)
         total = query.count()
         rows = query.order_by(RequirementWorkspaceRecord.created_at.desc(), RequirementWorkspaceRecord.id).offset(offset).limit(limit).all()
-        return {"items": rows, "total": total, "offset": offset, "limit": limit}
+        summaries = {}
+        if rows:
+            counts = db.query(
+                BusinessRequirementRecord.workspace_id,
+                func.count(BusinessRequirementRecord.id),
+                func.sum(case(((BusinessRequirementRecord.priority != "wont") & (BusinessRequirementRecord.status == "draft"), 1), else_=0)),
+                func.sum(case(((BusinessRequirementRecord.priority != "wont") & BusinessRequirementRecord.story_json.isnot(None), 1), else_=0)),
+            ).filter(BusinessRequirementRecord.workspace_id.in_([row.id for row in rows])).group_by(BusinessRequirementRecord.workspace_id).all()
+            summaries = {workspace_id: {"requirements": count, "drafts": drafts, "stories": stories}
+                         for workspace_id, count, drafts, stories in counts}
+        return {"items": rows, "total": total, "offset": offset, "limit": limit, "summaries": summaries}
 
     @router.post("", status_code=201)
     def create_workspace(data: WorkspaceCreate, db: Session = Depends(get_db), user: UserRecord = Depends(require_user)):

@@ -57,6 +57,30 @@ class RequirementGatheringTests(unittest.TestCase):
     def payload(self, source):
         return {"source_id": source, "title": "Acknowledge receipt", "actor": "finance analyst", "action": "receive an invoice acknowledgement", "benefit": "I can confirm successful submission", "evidence_quote": "Every invoice must receive an acknowledgement within 30 seconds.", "acceptance_criteria": ["Given a valid invoice, when submitted, then acknowledgement appears within 30 seconds."], "priority": "must"}
 
+    def test_workspace_summaries_are_page_scoped_and_do_not_read_requirement_text(self):
+        workspace = self.workspace()
+        source = self.source(workspace)
+        self.client.post(f"{self.path}/{workspace}/items", json=self.payload(source))
+        self.client.post(f"{self.path}/{workspace}/items", json={**self.payload(source), "title": "Deferred", "priority": "wont"})
+        prepared = self.client.post(f"{self.path}/{workspace}/items", json={**self.payload(source), "title": "Prepared story"}).json()
+        route = f"{self.path}/{workspace}/items/{prepared['id']}"
+        signed = self.client.post(route + "/validate", json={"revision": prepared["revision"], "reviewer_role": "Product Owner", "validation_note": "Confirmed with the business owner."}).json()
+        self.assertEqual(self.client.post(route + "/story", json={"revision": signed["revision"]}).status_code, 200)
+        statements = []
+        def capture(connection, cursor, statement, parameters, context, executemany):
+            statements.append(statement)
+        event.listen(self.engine, "before_cursor_execute", capture)
+        try:
+            response = self.client.get(self.path + "?limit=1").json()
+        finally:
+            event.remove(self.engine, "before_cursor_execute", capture)
+        self.assertEqual(response["summaries"][workspace], {"requirements": 3, "drafts": 1, "stories": 1})
+        self.assertEqual(len([s for s in statements if s.lstrip().upper().startswith("SELECT")]), 3)
+        self.assertFalse(any("evidence_quote" in s or "acceptance_json" in s for s in statements))
+        self.assertEqual(self.client.get(self.path + "?offset=1").json()["summaries"], {})
+        self.user = UserRecord(id="other", name="Other", role="agent", is_active=True)
+        self.assertEqual(self.client.get(self.path).json()["summaries"], {})
+
     def test_complete_workflow_and_edit_invalidates_validation_and_story(self):
         workspace = self.workspace()
         source = self.source(workspace)
