@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { loadPureTs } = require('./helpers/load-pure-ts');
-const parse = loadPureTs('requirement-criteria.ts').parseRequirementCriteria;
+const parse = loadPureTs('requirement-criteria.ts', { './requirement-text': loadPureTs('requirement-text.ts') }).parseRequirementCriteria;
 
 test('incomplete drafts may omit criteria and empty entries are ignored', () => {
   assert.deepEqual(parse([' ', '\r\n ']), { criteria: [], issue: null });
@@ -31,4 +31,10 @@ test('saved and suggested multiline criteria retain their boundaries during edit
   assert.equal(parse(edited).criteria.length, 2);
   assert.equal(parse(edited).criteria[0], original[0]);
   assert.equal(original[1], 'If delivery fails,\nretain the request for retry.');
+});
+
+test('unsupported control characters are located before submitting criteria', () => {
+  const result = parse(['Confirm the receipt.', 'Keep the\0request for retry.']);
+  assert.match(result.issue, /Criterion 2.*unsupported control character/);
+  assert.equal(result.criteria[1], 'Keep the\0request for retry.');
 });
