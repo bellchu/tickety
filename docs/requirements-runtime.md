@@ -207,3 +207,16 @@ test also verifies that an unavailable snapshot remains readable but not copyabl
 The recommendation export uses the same guarded callback; that specific recommendation
 was not displayed by the synthetic initiative during this browser check. This guard
 does not detect changes made in another tab after the last successful fetch.
+
+### Suggested decision navigation
+
+With an open blocking question in a synthetic local initiative, switch the decision
+register to **Recorded decisions** and enter a search that matches nothing. Click
+**Review this business question** in the suggested focus. The register must return
+to **Open questions**, clear the search and display the target with **Suggested
+business question**. This sequence passed against the production build at commit
+`95d3c5e`; production route verification also passed. Component tests additionally
+cover a target beyond the first 20 records and preservation of another answer draft.
+The browser check did not exercise the deferred-history message or a nonempty scope
+filter. Its synthetic REQ-002 question remains open pending approval to record the
+verification result; the attempted resolution was blocked by automatic approval.
