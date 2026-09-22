@@ -4,7 +4,7 @@ const { QueryClient } = require('@tanstack/react-query');
 const { loadPureTs } = require('./helpers/load-pure-ts');
 const library = loadPureTs('requirement-editor-cache.ts');
 const { readRequirementEditor: read, rememberRequirementEditor: remember, hasRequirementEditorDrafts: hasDrafts } = library;
-const draft = { draft: { title: 'Unsaved outcome' }, criteria: 'Confirm receipt', baseline: 'original', assumptions: ['Check deadline'], editing: { id: 'r1', revision: 7 }, showForm: true, reviewing: null, reviewerRole: 'Product Owner', reviewNote: '' };
+const draft = { draft: { title: 'Unsaved outcome' }, criteria: ['Confirm receipt'], baseline: 'original', assumptions: ['Check deadline'], editing: { id: 'r1', revision: 7 }, showForm: true, reviewing: null, reviewerRole: 'Product Owner', reviewNote: '' };
 
 test('navigation restores edits and original revision without crossing users or initiatives', () => {
   const client = new QueryClient();
@@ -79,7 +79,7 @@ test('decision question and answer drafts coexist with source and editor drafts'
 
 test('late save completion cannot clear a newer draft after navigation', () => {
   const cases = [
-    [undefined, library.rememberRequirementEditor, library.readRequirementEditor, draft, { ...draft, criteria: 'Newer acceptance wording' }],
+    [undefined, library.rememberRequirementEditor, library.readRequirementEditor, draft, { ...draft, criteria: ['Newer acceptance wording'] }],
     ['source', library.rememberRequirementSourceDraft, library.readRequirementSourceDraft, { title: 'Original', content: 'Original material' }, { title: 'Newer', content: 'New material' }],
     ['decision', library.rememberRequirementDecisionDraft, library.readRequirementDecisionDraft, { question: 'Original question' }, { question: 'Newer question' }],
   ];

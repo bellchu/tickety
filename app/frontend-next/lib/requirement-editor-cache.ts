@@ -3,7 +3,7 @@ import type { BusinessRequirement, RequirementDraft, SourceKind } from "./requir
 
 export interface RequirementEditorDraft {
   draft: RequirementDraft;
-  criteria: string;
+  criteria: string[];
   baseline: string;
   assumptions: string[];
   editing?: BusinessRequirement;

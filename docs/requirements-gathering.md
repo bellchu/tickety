@@ -97,8 +97,11 @@ Vague-wording findings name the affected capability or numbered criterion and th
 terms to clarify. Replace words such as “fast” with the stakeholder's agreed,
 observable outcome; do not invent a target merely to clear the check. These checks
 support the review, while the stakeholder confirms business meaning and exceptions.
-The editor accepts up to 20 criteria, one per line, with 10–1,000 characters each;
-it identifies invalid lines before saving. Empty criteria remain allowed for drafts.
+The editor accepts up to 20 criteria, with 10–1,000 characters each. Use **Add
+acceptance criterion** for another outcome; line breaks within an entry remain part
+of that criterion. Saved criteria, AI suggestions and restored drafts retain those
+boundaries. Validation identifies the criterion needing attention before saving;
+empty entries are omitted, so incomplete drafts may still have no criteria.
 
 Saving a new requirement whose source and all business fields exactly match an
 existing one reuses that record. The interface names it; its sign-off, story and

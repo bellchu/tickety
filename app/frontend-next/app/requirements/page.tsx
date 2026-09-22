@@ -154,7 +154,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
   const [sourceFilter, setSourceFilter] = useState("");
   const [draftAssumptions, setDraftAssumptions] = useState<string[]>(restored?.assumptions || []);
   const [draft, setDraft] = useState<RequirementDraft>(restored?.draft || { ...blankDraft });
-  const [criteria, setCriteria] = useState(restored?.criteria || "");
+  const [criteria, setCriteria] = useState<string[]>(restored?.criteria || []);
   const evidenceBounds = useMemo(() => requirementTextBounds(draft.evidence_quote, 4000), [draft.evidence_quote]);
   const parsedCriteria = useMemo(() => parseRequirementCriteria(criteria), [criteria]);
   const [draftBaseline, setDraftBaseline] = useState(restored?.baseline || "");
@@ -235,7 +235,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
   function edit(row?: BusinessRequirement) {
     setEditing(row);
     const nextDraft = row ? { source_id: row.source_id, title: row.title, actor: row.actor, action: row.action, benefit: row.benefit, evidence_quote: row.evidence_quote, acceptance_criteria: row.acceptance_criteria, priority: row.priority } : { ...blankDraft, source_id: detail?.sources[0]?.id || "" };
-    const nextCriteria = row?.acceptance_criteria.join("\n") || "";
+    const nextCriteria = row?.acceptance_criteria || [];
     setDraft(nextDraft); setCriteria(nextCriteria);
     setDraftBaseline(JSON.stringify([nextDraft, nextCriteria]));
     setShowForm(true); setReviewing(null); setDraftAssumptions([]); setError(null);
@@ -246,7 +246,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
       edit();
       const empty = { ...blankDraft, source_id: sourceId };
       setDraft({ ...empty, evidence_quote: excerpt });
-      setDraftBaseline(JSON.stringify([empty, ""]));
+      setDraftBaseline(JSON.stringify([empty, []]));
       setNotice("");
     });
   }
@@ -356,13 +356,13 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
       {gathered.discarded_candidates > 0 && <p className="text-sm text-amber-800">{gathered.discarded_candidates} suggestions were excluded because their evidence could not be matched to the source.</p>}
       {gathered.candidates.length === 0 && <p className="text-sm">No verifiable requirements were found. You can gather a requirement manually.</p>}
       {gathered.questions.length > 0 && <div><h3 className="text-sm font-semibold">Questions for stakeholders</h3><ul className="list-disc pl-5 text-sm">{gathered.questions.map((question, index) => <li key={index}>{question}<Button size="sm" variant="ghost" onClick={() => trackQuestion(question, null)}>Track question</Button></li>)}</ul></div>}
-      {gathered.candidates.map((candidate, index) => <article key={index} className="space-y-3 rounded-lg border border-linen-400 p-4"><h3 className="font-semibold">{candidate.title}</h3><p className="text-sm text-ink-500">{candidate.action}</p><blockquote className="border-l-2 border-clay-300 pl-3 text-sm">{candidate.evidence_quote}</blockquote>{candidate.assumptions.length > 0 && <div className="text-sm text-amber-800"><strong>Assumptions to confirm</strong><ul className="list-disc pl-5">{candidate.assumptions.map((assumption, index) => <li key={index}>{assumption}</li>)}</ul></div>}<Button variant="secondary" disabled={Boolean(pending)} onClick={() => switchEditor(() => { edit(); const { assumptions: _assumptions, ...fields } = candidate; setDraft({ ...fields, source_id: gathered.source_id }); setCriteria(candidate.acceptance_criteria.join("\n")); setDraftAssumptions(candidate.assumptions); setGathered(null); })}>Review draft</Button></article>)}
+      {gathered.candidates.map((candidate, index) => <article key={index} className="space-y-3 rounded-lg border border-linen-400 p-4"><h3 className="font-semibold">{candidate.title}</h3><p className="text-sm text-ink-500">{candidate.action}</p><blockquote className="border-l-2 border-clay-300 pl-3 text-sm">{candidate.evidence_quote}</blockquote>{candidate.assumptions.length > 0 && <div className="text-sm text-amber-800"><strong>Assumptions to confirm</strong><ul className="list-disc pl-5">{candidate.assumptions.map((assumption, index) => <li key={index}>{assumption}</li>)}</ul></div>}<Button variant="secondary" disabled={Boolean(pending)} onClick={() => switchEditor(() => { edit(); const { assumptions: _assumptions, ...fields } = candidate; setDraft({ ...fields, source_id: gathered.source_id }); setCriteria(candidate.acceptance_criteria); setDraftAssumptions(candidate.assumptions); setGathered(null); })}>Review draft</Button></article>)}
     </section>}
     {assistance && <AIRequirementReview assistance={assistance} current={assistanceItem} busy={Boolean(pending)}
       onDismiss={() => setAssistance(null)}
       onQuestion={trackQuestion}
       onReanalyze={() => assistanceItem && run(`reanalyze-${assistanceItem.id}`, async () => { const mode = assistance.result.mode; const result = await api.assistRequirement(id, assistanceItem, mode); setAssistance({ item: assistanceItem, result }); }, undefined, false)}
-      onRefine={() => switchEditor(() => { const { item, result } = assistance; edit(item); setDraft({ source_id: item.source_id, title: item.title, evidence_quote: item.evidence_quote, priority: item.priority, actor: result.suggestions.actor || item.actor, action: result.suggestions.action || item.action, benefit: result.suggestions.benefit || item.benefit, acceptance_criteria: result.suggestions.acceptance_criteria || item.acceptance_criteria }); setCriteria((result.suggestions.acceptance_criteria || item.acceptance_criteria).join("\n")); setDraftAssumptions(result.suggestions.assumptions || []); setAssistance(null); })}
+      onRefine={() => switchEditor(() => { const { item, result } = assistance; edit(item); setDraft({ source_id: item.source_id, title: item.title, evidence_quote: item.evidence_quote, priority: item.priority, actor: result.suggestions.actor || item.actor, action: result.suggestions.action || item.action, benefit: result.suggestions.benefit || item.benefit, acceptance_criteria: result.suggestions.acceptance_criteria || item.acceptance_criteria }); setCriteria(result.suggestions.acceptance_criteria || item.acceptance_criteria); setDraftAssumptions(result.suggestions.assumptions || []); setAssistance(null); })}
     />}
       {reviewing && <form className={panelStyle} aria-busy={pending === reviewing.id} onSubmit={event => { event.preventDefault(); if (reviewIssue) return; void run(reviewing.id, () => api.validateBusinessRequirement(id, reviewing, { reviewer_role: reviewerRole, validation_note: reviewNote }), () => { rememberRequirementEditor(editorClient, userId, id, null); setReviewing(null); }); }}>
         <fieldset disabled={pending === reviewing.id} className="space-y-4">
@@ -402,7 +402,15 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
         <div className="grid gap-4 md:grid-cols-2"><Field label="As a… (stakeholder or user role)"><RequirementInput maxLength={200} className={inputStyle} value={draft.actor} onChange={event => setDraft({ ...draft, actor: event.target.value })} placeholder="finance analyst" /></Field><Field label="Priority"><select className={inputStyle} value={draft.priority} onChange={event => setDraft({ ...draft, priority: event.target.value as RequirementPriority })}>{Object.entries(priorities).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field></div>
         <Field label="I want to… (required capability)"><RequirementTextarea maxLength={4000} className={inputStyle} value={draft.action} onChange={event => setDraft({ ...draft, action: event.target.value })} /></Field>
         <Field label="So that… (business outcome)"><RequirementTextarea maxLength={4000} className={inputStyle} value={draft.benefit} onChange={event => setDraft({ ...draft, benefit: event.target.value })} /></Field>
-        <Field label="Acceptance criteria · one per line"><textarea rows={4} aria-invalid={Boolean(parsedCriteria.issue)} aria-describedby="requirement-criteria-help" className={inputStyle} value={criteria} onChange={event => setCriteria(event.target.value)} placeholder="Given a valid request, when it is submitted, then a receipt appears within 30 seconds." /></Field>
+        <section className="space-y-3" aria-label="Acceptance criteria editor">
+          <h3 className="text-sm font-medium">Acceptance criteria</h3>
+          <p className="text-xs text-ink-500">Keep one observable outcome per criterion. Line breaks within a criterion stay together.</p>
+          {criteria.map((criterion, index) => <div key={index} className="rounded-lg border border-linen-400 p-3">
+            <Field label={`Criterion ${index + 1}`}><textarea rows={3} aria-describedby="requirement-criteria-help" className={inputStyle} value={criterion} onChange={event => setCriteria(criteria.map((value, position) => position === index ? event.target.value : value))} placeholder="Given a valid request, when it is submitted, then a receipt appears within the agreed time." /></Field>
+            <Button size="sm" variant="ghost" onClick={() => setCriteria(criteria.filter((_, position) => position !== index))}>Remove criterion {index + 1}</Button>
+          </div>)}
+          <Button size="sm" variant="secondary" disabled={criteria.length >= 20} onClick={() => setCriteria([...criteria, ""])}>Add acceptance criterion</Button>
+        </section>
         <p id="requirement-criteria-help" className={`text-xs ${parsedCriteria.issue ? "text-rust-600" : "text-ink-500"}`}>{parsedCriteria.issue || `${parsedCriteria.criteria.length} / 20 criteria · 10–1,000 characters each. You can leave this empty while drafting.`}</p>
         <div className="flex gap-2"><Button type="submit" pending={pending === "requirement"} disabled={Boolean(pending) || editOutdated || source.isError || !evidenceBounds.valid || Boolean(parsedCriteria.issue)}>Save draft</Button><Button variant="ghost" disabled={Boolean(pending)} onClick={() => switchEditor(() => setShowForm(false))}>Cancel</Button></div>
         </fieldset>
