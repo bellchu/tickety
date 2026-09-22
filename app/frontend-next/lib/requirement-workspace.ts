@@ -4,6 +4,10 @@ export const requirementPriorityLabels: Record<RequirementPriority, string> = { 
 
 export type DecisionFilter = "open" | "blocking" | "current" | "exploratory" | "recorded" | "all";
 
+function searchableText(value: string) {
+  return value.trim().replace(/\s+/g, " ").toLocaleLowerCase();
+}
+
 /** Put unresolved approval gates first, retaining recorded order within both groups. */
 export function prioritizeBlockingDecisions(items: RequirementDecision[]) {
   return [...items].sort((left, right) =>
@@ -12,7 +16,7 @@ export function prioritizeBlockingDecisions(items: RequirementDecision[]) {
 }
 
 export function filterDecisions(items: RequirementDecision[], filter: DecisionFilter, search: string, editingId = "", requirementId = "", requirements: BusinessRequirement[] = []) {
-  const query = search.trim().toLocaleLowerCase();
+  const query = searchableText(search);
   const current = filter === "current" ? new Set(currentScopeBlockers(requirements, items)) : null;
   function matchesStatus(item: RequirementDecision): boolean {
     switch (filter) {
@@ -27,7 +31,7 @@ export function filterDecisions(items: RequirementDecision[], filter: DecisionFi
   const matching = items.filter(item => {
     if (item.id === editingId) return true;
     if (requirementId && item.requirement_id && item.requirement_id !== requirementId) return false;
-    return matchesStatus(item) && (!query || [item.question, item.owner_role, item.resolution || ""].some(value => value.toLocaleLowerCase().includes(query)));
+    return matchesStatus(item) && (!query || [item.question, item.owner_role, item.resolution || ""].some(value => searchableText(value).includes(query)));
   });
   // Triage open work by its effect on agreement, preserving order within each group.
   return filter === "open" ? prioritizeBlockingDecisions(matching) : matching;
@@ -59,13 +63,13 @@ export function blockedRequirementIds(items: BusinessRequirement[], decisions: R
 }
 
 export function filterRequirements(items: BusinessRequirement[], search: string, filter: RequirementFilter, decisions: RequirementDecision[] = [], sourceId = "") {
-  const query = search.trim().replace(/\s+/g, " ").toLocaleLowerCase();
+  const query = searchableText(search);
   const blockedIds = blockedRequirementIds(items, decisions);
   return items.filter(item => {
     if (sourceId && item.source_id !== sourceId) return false;
     const matchesText = !query || [item.reference, item.title, item.actor, item.action, item.benefit, item.evidence_quote,
       ...(item.acceptance_criteria || []), item.story?.reference, item.story?.title, item.story?.statement]
-      .some(value => value?.replace(/\s+/g, " ").toLocaleLowerCase().includes(query));
+      .some(value => value && searchableText(value).includes(query));
     const blocked = blockedIds.has(item.id);
     const matchesFilter = filter === "all"
       || (filter === "deferred" && item.priority === "wont")

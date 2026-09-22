@@ -257,3 +257,14 @@ test('current delivery decision filter composes with search and scope while pres
   assert.deepEqual(select('no match', 'd2', 'active'), ['d2']);
   assert.deepEqual(library.filterDecisions(rows, 'blocking', '', '', '', requirements).map(row => row.id), ['d0', 'd1', 'd2', 'd3']);
 });
+
+test('decision search treats wrapped questions, owners and answers as continuous phrases', () => {
+  const rows = [
+    { id: 'question', status: 'open', blocking: true, question: 'Who owns\nthe retry queue?', owner_role: 'Operations\tlead' },
+    { id: 'answer', status: 'resolved', blocking: true, question: 'Which deadline?', owner_role: 'Sponsor', resolution: 'Retry within\r\nfive minutes.' },
+  ];
+  for (const [search, expected] of [['  OWNS   THE retry ', 'question'], ['operations lead', 'question'], ['within five\nminutes', 'answer']]) {
+    assert.deepEqual(library.filterDecisions(rows, 'all', search).map(row => row.id), [expected]);
+  }
+  assert.equal(rows[1].resolution, 'Retry within\r\nfive minutes.');
+});
