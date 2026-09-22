@@ -186,3 +186,7 @@ and export do not create Jira tickets or send messages to a delivery system.
 
 See [runtime boundaries](requirements-runtime.md) for import limits, audit behavior,
 AI admission and capacity constraints.
+
+When a save conflicts with newer server work, the workspace refreshes its saved
+data without discarding your draft. Review the updated version or decision before
+trying again; the application does not automatically replay the failed write.

@@ -19,7 +19,7 @@ import { Field, inputStyle, panelStyle, kinds, priorities } from "@/components/r
 import { DecisionLog } from "@/components/requirements/DecisionLog";
 import { RequirementCard } from "@/components/requirements/RequirementCard";
 import { reviewUnavailableReason, sourceRequirementCounts, blockedRequirementIds, filterRequirements, workspaceFocus, type RequirementFilter } from "@/lib/requirement-workspace";
-import { api } from "@/lib/api";
+import { api, APIError } from "@/lib/api";
 import type { BusinessRequirement, GatherSuggestions, RequirementAssistance, RequirementDraft, RequirementPriority, RequirementWorkspaceDetail } from "@/lib/requirements-types";
 import { Button, ConfirmDialog } from "@/components/ui";
 import { PageFrame, PageHeader } from "@/components/layout/PageLayout";
@@ -179,7 +179,10 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
     const isCurrent = captureRequirementDraftSave(editorClient, userId, id);
     setPending(label); setError(null); setNotice("");
     try { await operation(); setNotice(refresh ? "Saved." : "Ready for review."); if (isCurrent()) success?.(); if (refresh) await query.refetch(); }
-    catch (caught) { setError(caught); }
+    catch (caught) {
+      setError(caught);
+      if (caught instanceof APIError && caught.status === 409) await query.refetch({ throwOnError: false });
+    }
     finally { setPending(""); }
   }
 

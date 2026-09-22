@@ -8,7 +8,7 @@ import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { captureRequirementDraftSave, readRequirementDecisionDraft, rememberRequirementDecisionDraft } from "@/lib/requirement-editor-cache";
 import { Button, ConfirmDialog } from "@/components/ui";
-import { api } from "@/lib/api";
+import { api, APIError } from "@/lib/api";
 import { formatLocalDateTime } from "@/lib/date-time";
 import type { BusinessRequirement, RequirementDecision } from "@/lib/requirements-types";
 
@@ -61,7 +61,12 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
     const isCurrent = captureRequirementDraftSave(client, userId, workspaceId, "decision");
     setPending(true); setError("");
     try { await operation(); if (isCurrent()) done(); await onSaved(); }
-    catch (caught) { setError(requirementErrorMessage(caught)); }
+    catch (caught) {
+      setError(requirementErrorMessage(caught));
+      if (caught instanceof APIError && caught.status === 409) {
+        try { await onSaved(); } catch { /* Keep the original conflict and the draft available. */ }
+      }
+    }
     finally { setPending(false); }
   }
   const outstanding = decisions.filter(item => item.status === "open");
