@@ -223,3 +223,8 @@ The BRD readiness summary separates blocking questions linked only to deferred
 requirements from those affecting current scope. Questions with unavailable scope
 remain counted as needing scope confirmation; the complete decision register and
 overall blocker count remain in the brief.
+
+Use **Agreed · needs a story** to find signed-off, in-scope requirements awaiting
+story preparation. The view excludes requirements with blocking questions and
+works with source search and business-priority ordering. Creating a story moves
+the requirement into **Delivery ready**; editing it returns it to human review.

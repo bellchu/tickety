@@ -186,3 +186,15 @@ test('decision window bounds long registers while keeping a distant active answe
   assert.deepEqual(window(matches, 20).map(x => x.id), ['d199']);
   assert.equal(rows.length, 200);
 });
+
+test('agreed view isolates signed-off requirements still awaiting story preparation', () => {
+  const signed = { ...item, status: 'validated', priority: 'must' };
+  const rows = [signed, { ...signed, id: 'story', story: { reference: 'US-002' } },
+    { ...signed, id: 'deferred', priority: 'wont' }, { ...signed, id: 'draft', status: 'draft' },
+    { ...signed, id: 'blocked' }, { ...signed, id: 'other-source', source_id: 's2' }];
+  const decisions = [{ requirement_id: 'blocked', status: 'open', blocking: true }];
+  assert.deepEqual(filterRequirements(rows, '', 'agreed', decisions).map(x => x.id), ['r1', 'other-source']);
+  assert.deepEqual(filterRequirements(rows, 'receipt', 'agreed', decisions, 's1').map(x => x.id), ['r1']);
+  assert.equal(filterRequirements(rows, '', 'agreed', [{ requirement_id: null, status: 'open', blocking: true }]).length, 0);
+  assert.equal(filterRequirements([{ ...signed, status: 'draft' }], '', 'agreed').length, 0);
+});

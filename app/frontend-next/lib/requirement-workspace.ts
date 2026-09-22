@@ -13,7 +13,7 @@ export function filterDecisions(items: RequirementDecision[], filter: DecisionFi
   });
 }
 
-export type RequirementFilter = "all" | "questions" | "review" | "delivery" | "deferred";
+export type RequirementFilter = "all" | "questions" | "review" | "agreed" | "delivery" | "deferred";
 
 export function sourceRequirementCounts(items: BusinessRequirement[]): Map<string, number> {
   const counts = new Map<string, number>();
@@ -44,6 +44,7 @@ export function filterRequirements(items: BusinessRequirement[], search: string,
       || (filter === "deferred" && item.priority === "wont")
       || (filter === "questions" && item.priority !== "wont" && (blocked || item.quality_issues.length > 0))
       || (filter === "review" && item.priority !== "wont" && item.status === "draft" && !blocked && item.quality_issues.length === 0)
+      || (filter === "agreed" && item.priority !== "wont" && item.status === "validated" && !item.story && !blocked)
       || (filter === "delivery" && item.priority !== "wont" && item.story !== null);
     return matchesText && matchesFilter;
   });
