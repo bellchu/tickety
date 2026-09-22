@@ -14,7 +14,9 @@ export function requirementChangeSummary(before: BusinessRequirement | null, aft
   if (business.length) notes.push(`Changed: ${business.join(", ")}.`);
   if (before.priority !== "wont" && after.priority === "wont") notes.push("Removed from current delivery scope.");
   if (before.priority === "wont" && after.priority !== "wont") notes.push("Returned to current delivery scope.");
-  if (before.status === "validated" && after.status !== "validated") notes.push("Previous agreement withdrawn; a new sign-off is required.");
+  if (before.status === "validated" && after.status !== "validated") notes.push(after.priority === "wont"
+    ? "Previous agreement withdrawn; a new sign-off is required if this requirement returns to delivery scope."
+    : "Previous agreement withdrawn; a new sign-off is required.");
   if (before.status !== "validated" && after.status === "validated") notes.push("Business agreement recorded.");
   if (before.story && !after.story) notes.push("Previous user story withdrawn.");
   if (!before.story && after.story) notes.push("User story prepared from the agreed requirement.");
