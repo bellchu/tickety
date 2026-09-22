@@ -178,7 +178,9 @@ including the answer owner, resolution, recorder and time. This preserves the
 business rationale behind scope and exception handling for the delivery team.
 Unrelated decisions and deferred or unsigned stories are excluded.
 
-**Export BRD** includes the objective, evidence register, requirements, capabilities,
+**Export BRD** opens with scope and readiness counts so recipients can distinguish
+drafts, signed-off requirements awaiting stories, prepared stories and deferred
+needs. It includes the objective, evidence register, requirements, capabilities,
 acceptance criteria, clarifications, decisions, sign-offs and eligible stories. Copy
 and export do not create Jira tickets or send messages to a delivery system.
 

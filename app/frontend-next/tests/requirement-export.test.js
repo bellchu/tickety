@@ -105,3 +105,17 @@ test('story handoff preserves relevant business decisions and their attribution'
   assert.ok(output.includes('No open questions are recorded'));
   assert.ok(library.requirementStoryText({ ...detail, decisions: [] }, row).includes('No business decisions are recorded'));
 });
+
+
+test('brief readiness distinguishes drafts, agreed work, prepared stories and deferred scope', () => {
+  const base = { reference: 'REQ-001', title: 'Need', revision: 1, actor: 'Analyst', action: 'Confirm receipt', benefit: 'Avoid delays', source_id: 's', evidence_quote: 'Confirm receipt within thirty seconds.', acceptance_criteria: [], quality_issues: [], story: null };
+  const requirements = [
+    { ...base, status: 'draft', priority: 'must' },
+    { ...base, status: 'validated', priority: 'should' },
+    { ...base, status: 'validated', priority: 'could', story: { reference: 'US-003', title: 'Receipt', statement: 'Confirm receipt', requirement_reference: 'REQ-003', validated_revision: 1 } },
+    { ...base, status: 'draft', priority: 'wont' },
+  ];
+  const output = library.requirementBrief({ workspace: { id: 'w', title: 'Intake', objective: 'Reduce delays', request_type: 'enhancement' }, sources: [], requirements, decisions: [] });
+  for (const line of ['Included in this initiative: 3 requirements', 'Drafts awaiting agreement: 1', 'Signed off, awaiting story preparation: 1', 'User stories prepared for delivery-team review: 1', 'Deferred — not this time: 1', 'Inclusion is not sign-off']) assert.ok(output.includes(line), line);
+  assert.ok(output.indexOf('## Scope and readiness') < output.indexOf('## Evidence register'));
+});

@@ -16,11 +16,24 @@ function evidenceBlock(value: string): string {
 
 export function requirementBrief(detail: RequirementWorkspaceDetail): string {
   const { workspace, requirements, sources } = detail;
+  const included = requirements.filter(item => item.priority !== "wont");
+  const drafts = included.filter(item => item.status === "draft").length;
+  const agreed = included.filter(item => item.status === "validated" && !item.story).length;
+  const stories = included.filter(item => item.story).length;
+  const blockers = (detail.decisions || []).filter(item => item.status === "open" && item.blocking).length;
   const lines = [
     `# Business requirements: ${inline(workspace.title)}`, "",
     `Initiative ID: ${workspace.id}`,
     `Request type: ${workspace.request_type === "enhancement" ? "Enhancement" : "Approved project / request"}`, "",
     "## Business objective", prose(workspace.objective), "",
+    "## Scope and readiness",
+    `- Included in this initiative: ${included.length} requirements`,
+    `- Drafts awaiting agreement: ${drafts}`,
+    `- Signed off, awaiting story preparation: ${agreed}`,
+    `- User stories prepared for delivery-team review: ${stories}`,
+    `- Deferred — not this time: ${requirements.length - included.length}`,
+    `- Open blocking business questions: ${blockers}`,
+    "", "This brief is a snapshot of recorded work. Inclusion is not sign-off; prepared stories still need delivery-team review and planning.", "",
     "## Evidence register",
     ...sources.map(source => `- ${inline(source.title)} (${source.kind}) — ${source.id}; SHA-256: ${source.content_sha256}`), "",
     "## Documented requirements and functional specification",
@@ -44,8 +57,6 @@ export function requirementBrief(detail: RequirementWorkspaceDetail): string {
       `Status: ${item.status} | Blocks sign-off: ${item.blocking ? "Yes" : "No"}`);
     if (item.resolution) lines.push(`Decision: ${prose(item.resolution)}`, `Recorded by ${item.resolved_by || "Former member"} at ${item.resolved_at}`);
   }
-  const blockers = (detail.decisions || []).filter(item => item.status === "open" && item.blocking).length;
-  const stories = requirements.filter(item => item.priority !== "wont" && item.story).length;
   lines.push("", "## Development handoff", `${stories} user stories prepared for delivery-team review; ${blockers} blocking business questions remain. No external development tickets have been created.`, "");
   return lines.join("\n");
 }
