@@ -37,8 +37,8 @@ export function RequirementCard({
           <span className="font-mono text-ink-400">{item.reference}</span>
           <span className={`rounded-full px-2.5 py-1 font-medium ${item.status === "validated" ? "bg-moss-500/10 text-moss-700" : needsClarity ? "bg-amber-50 text-amber-800" : "bg-linen-200 text-ink-500"}`}>{status}</span>
         </div>
-        <h3 className="text-lg font-semibold leading-6 text-ink-700">{item.title}</h3>
-        <p className="text-sm leading-6 text-ink-500">{item.action || "The required capability still needs to be clarified."}</p>
+        <h3 className="break-words text-lg font-semibold leading-6 text-ink-700">{item.title}</h3>
+        <p className="whitespace-pre-wrap break-words text-sm leading-6 text-ink-500">{item.action || "The required capability still needs to be clarified."}</p>
         <p className="whitespace-pre-wrap break-words text-sm leading-6 text-ink-600"><strong className="font-medium">Business outcome:</strong> {item.benefit || "The expected business outcome still needs to be agreed."}</p>
         <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-ink-400">
           <span>{item.actor || "Stakeholder to confirm"}</span>
@@ -51,7 +51,7 @@ export function RequirementCard({
           <ul className="mt-1 list-disc space-y-1 pl-5">{item.quality_issues.map(issue => <li key={issue}>{issue}</li>)}</ul>
         </div>}
         <details className="text-sm">
-          <summary className="cursor-pointer font-medium text-ink-600">Evidence & acceptance criteria</summary>
+          <summary className="cursor-pointer font-medium text-ink-600">Evidence & acceptance criteria ({item.acceptance_criteria.length})</summary>
           <div className="mt-3 space-y-3 text-ink-500">
             <blockquote className="whitespace-pre-wrap break-words border-l-2 border-clay-300 pl-3 italic">“{item.evidence_quote}”</blockquote>
             <Button size="sm" variant="ghost" onClick={onEvidence}>Read in original source</Button>
@@ -73,7 +73,7 @@ export function RequirementCard({
       </div>
       {!deferred && item.story && <details className="border-t border-linen-400 bg-linen-50 px-5 py-4" open>
         <summary className="cursor-pointer text-sm font-semibold text-ink-700">{item.story.reference} · User story</summary>
-        <p className="mt-3 text-sm leading-6 text-ink-600">{item.story.statement}</p>
+        <p className="mt-3 whitespace-pre-wrap break-words text-sm leading-6 text-ink-600">{item.story.statement}</p>
         <p className="mt-2 text-xs text-ink-500">Based on {item.story.requirement_reference} · Signed-off revision {item.story.validated_revision}</p>
         <details className="mt-3 text-sm">
           <summary className="cursor-pointer font-medium text-ink-700">Acceptance criteria for delivery ({item.story.acceptance_criteria.length})</summary>
