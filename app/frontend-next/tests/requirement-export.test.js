@@ -155,3 +155,15 @@ test('brief distinguishes deferred blockers without losing global or unknown-sco
   assert.ok(output.includes('Scope: missing'));
   assert.ok(output.includes('3 blocking business questions remain'));
 });
+
+test('brief filenames identify initiatives and remain safe across filesystem conventions', () => {
+  const filename = library.requirementBriefFilename;
+  assert.equal(filename({ title: 'Supplier onboarding', id: 'w1' }), 'requirements-Supplier-onboarding-w1.md');
+  assert.notEqual(filename({ title: 'Same name', id: 'w1' }), filename({ title: 'Same name', id: 'w2' }));
+  assert.equal(filename({ title: '../CON: "scope"\\file?', id: 'w1' }), 'requirements-CON-scope-file-w1.md');
+  assert.equal(filename({ title: '采购需求', id: 'w1' }), 'requirements-采购需求-w1.md');
+  assert.equal(filename({ title: '...', id: 'w1' }), 'requirements-untitled-w1.md');
+  const long = filename({ title: '采购'.repeat(200), id: '12345678-1234-1234-1234-123456789012' });
+  assert.ok(Buffer.byteLength(long, 'utf8') < 255);
+  assert.ok(!/[\\/:*?"<>|]/.test(long));
+});

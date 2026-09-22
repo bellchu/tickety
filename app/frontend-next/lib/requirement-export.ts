@@ -1,5 +1,11 @@
 import type { BusinessRequirement, RequirementWorkspaceDetail } from "./requirements-types";
 
+export function requirementBriefFilename(workspace: { title: string; id: string }): string {
+  const title = Array.from(workspace.title.normalize("NFKC").replace(/[^\p{L}\p{N}]+/gu, "-")).slice(0, 40).join("").replace(/^-+|-+$/g, "") || "untitled";
+  const id = workspace.id.replace(/[^a-zA-Z0-9-]/g, "").slice(0, 36);
+  return `requirements-${title}${id ? `-${id}` : ""}.md`;
+}
+
 function prose(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/[\\`*_[\]<>#|~]/g, "\\$&")
     .replace(/^( {0,3})([-=])([- =]*)$/gm, "$1\\$2$3")

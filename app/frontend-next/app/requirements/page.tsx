@@ -11,7 +11,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ClipboardList, Download, FileText, Plus, Sparkles, ArrowUpRight } from "lucide-react";
-import { requirementBrief, requirementStoryText } from "@/lib/requirement-export";
+import { requirementBriefFilename, requirementBrief, requirementStoryText } from "@/lib/requirement-export";
 import { RequirementHistoryPanel } from "@/components/requirements/RequirementHistoryPanel";
 import { CrossReviewPanel } from "@/components/requirements/CrossReviewPanel";
 import { SourceExplorer } from "@/components/requirements/SourceExplorer";
@@ -37,7 +37,7 @@ function exportBrief(detail: RequirementWorkspaceDetail) {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = "business-requirements.md";
+  anchor.download = requirementBriefFilename(detail.workspace);
   anchor.click();
   URL.revokeObjectURL(url);
 }
