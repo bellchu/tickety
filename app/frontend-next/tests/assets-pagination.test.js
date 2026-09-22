@@ -1,28 +1,14 @@
+const { loadPureTs } = require("./helpers/load-pure-ts");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
-const ts = require("typescript");
 
 const root = path.join(__dirname, "..");
 const read = (...parts) => fs.readFileSync(path.join(root, ...parts), "utf8");
 
 function loadApi() {
-  const filename = path.join(root, "lib", "api.ts");
-  const output = ts.transpileModule(read("lib", "api.ts"), {
-    compilerOptions: {
-      module: ts.ModuleKind.CommonJS,
-      target: ts.ScriptTarget.ES2020,
-    },
-    fileName: filename,
-  }).outputText;
-  const loaded = { exports: {} };
-  const compile = new Function("require", "exports", "module", output);
-  compile((specifier) => {
-    if (specifier === "@tanstack/react-query") return { QueryClient: class QueryClient {} };
-    throw new Error(`Unexpected module: ${specifier}`);
-  }, loaded.exports, loaded);
-  return loaded.exports;
+  return loadPureTs("api.ts", { "@tanstack/react-query": { QueryClient: class QueryClient {} } });
 }
 
 test("asset API encodes server filters and preserves response-header pagination", async () => {
