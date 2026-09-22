@@ -24,6 +24,7 @@ export function prioritizeBlockingDecisions(items: RequirementDecision[]) {
 
 export function filterDecisions(items: RequirementDecision[], filter: DecisionFilter, search: string, editingId = "", requirementId = "", requirements: BusinessRequirement[] = []) {
   const query = searchableText(search);
+  const related = new Map(query ? requirements.map(item => [item.id, [item.reference, item.title]]) : []);
   const current = filter === "current" ? new Set(currentScopeBlockers(requirements, items)) : null;
   function matchesStatus(item: RequirementDecision): boolean {
     switch (filter) {
@@ -38,7 +39,7 @@ export function filterDecisions(items: RequirementDecision[], filter: DecisionFi
   const matching = items.filter(item => {
     if (item.id === editingId) return true;
     if (requirementId && item.requirement_id && item.requirement_id !== requirementId) return false;
-    return matchesStatus(item) && (!query || [item.question, item.owner_role, item.resolution || ""].some(value => searchableText(value).includes(query)));
+    return matchesStatus(item) && (!query || [item.question, item.owner_role, item.resolution || "", ...(related.get(item.requirement_id || "") || [])].some(value => searchableText(value).includes(query)));
   });
   // Triage open work by its effect on agreement, preserving order within each group.
   return filter === "open" ? prioritizeBlockingDecisions(matching) : matching;

@@ -191,7 +191,10 @@ Check the requirement wording and acceptance criteria against the answer before
 signing off; the answer itself does not update or sign off a requirement.
 
 Filter the register to open, blocking, exploratory or recorded decisions, and search
-by question, answer owner or resolution. An answer being edited stays visible across
+by question, answer owner, resolution or linked requirement reference/title. For
+example, `REQ-002` finds questions directly linked to that requirement; initiative-wide
+questions remain available through the affected requirement selector. Search still
+respects the selected status and scope. An answer being edited stays visible across
 filters. Questions linked to deferred requirements display **Not this time**.
 Use **Current delivery blockers** to exclude questions linked only to deferred
 requirements; global blockers and unknown scope remain included. **All sign-off

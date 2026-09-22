@@ -297,3 +297,20 @@ test('readiness filtering skips long-text search for excluded requirements', () 
   assert.deepEqual(filterRequirements([excluded, current], 'matching evidence', 'all').map(row => row.id), ['later', 'r1']);
   assert.equal(excludedTextReads, 1);
 });
+
+
+test('decision search follows linked requirement references and titles without widening scope', () => {
+  const requirements = [{ ...item, title: 'Supplier\nreceipt' }, { ...item, id: 'r2', reference: 'REQ-002', title: 'Retry receipt' }];
+  const decisions = [
+    { id: 'd1', question: 'Who confirms the target?', owner_role: 'Operations', requirement_id: 'r1', status: 'open', blocking: true },
+    { id: 'd2', question: 'Who confirms the retry?', owner_role: 'Operations', requirement_id: 'r2', status: 'resolved', blocking: true },
+    { id: 'global', question: 'Who approves the scope?', owner_role: 'Owner', requirement_id: null, status: 'open', blocking: true },
+  ];
+  const select = (query, view = 'all', scope = '', editing = '') => library.filterDecisions(decisions, view, query, editing, scope, requirements).map(row => row.id);
+  assert.deepEqual(select('req-001'), ['d1']);
+  assert.deepEqual(select('Supplier receipt'), ['d1']);
+  assert.deepEqual(select('REQ-002', 'recorded'), ['d2']);
+  assert.deepEqual(select('REQ-002', 'open'), []);
+  assert.deepEqual(select('REQ-001', 'all', 'r2'), []);
+  assert.deepEqual(select('REQ-002', 'all', '', 'd1'), ['d1', 'd2']);
+});

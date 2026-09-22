@@ -125,7 +125,7 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
       {error && <p role="alert" className="text-sm text-rust-600">{error}</p>}
       <h3 className="text-sm font-semibold">Decision register</h3>
       <div className="grid gap-3 md:grid-cols-2">
-        <label className="space-y-1 text-sm">Find questions, owners or decisions<input type="search" className={inputStyle} value={search} onChange={event => setSearch(event.target.value)} /></label>
+        <label className="space-y-1 text-sm">Find questions, owners, decisions or requirements<input type="search" className={inputStyle} value={search} onChange={event => setSearch(event.target.value)} /></label>
         <label className="space-y-1 text-sm">Show decisions<select className={inputStyle} value={view} onChange={event => setView(event.target.value as DecisionFilter)}>
           <option value="open">Open questions</option><option value="current">Current delivery blockers</option><option value="blocking">All sign-off blockers</option><option value="exploratory">Exploratory questions</option><option value="recorded">Recorded decisions</option><option value="all">All questions & decisions</option>
         </select></label>
