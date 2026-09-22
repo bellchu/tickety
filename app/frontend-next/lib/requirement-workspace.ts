@@ -14,12 +14,20 @@ export function prioritizeBlockingDecisions(items: RequirementDecision[]) {
 export function filterDecisions(items: RequirementDecision[], filter: DecisionFilter, search: string, editingId = "", requirementId = "", requirements: BusinessRequirement[] = []) {
   const query = search.trim().toLocaleLowerCase();
   const current = filter === "current" ? new Set(currentScopeBlockers(requirements, items)) : null;
+  function matchesStatus(item: RequirementDecision): boolean {
+    switch (filter) {
+      case "all": return true;
+      case "current": return current?.has(item) ?? false;
+      case "recorded": return item.status === "resolved";
+      case "open": return item.status === "open";
+      case "blocking": return item.status === "open" && item.blocking;
+      case "exploratory": return item.status === "open" && !item.blocking;
+    }
+  }
   const matching = items.filter(item => {
     if (item.id === editingId) return true;
     if (requirementId && item.requirement_id && item.requirement_id !== requirementId) return false;
-    const matchesStatus = filter === "all" || (filter === "current" ? current!.has(item) : filter === "recorded" ? item.status === "resolved"
-      : item.status === "open" && (filter === "open" || (filter === "blocking" ? item.blocking : !item.blocking)));
-    return matchesStatus && (!query || [item.question, item.owner_role, item.resolution || ""].some(value => value.toLocaleLowerCase().includes(query)));
+    return matchesStatus(item) && (!query || [item.question, item.owner_role, item.resolution || ""].some(value => value.toLocaleLowerCase().includes(query)));
   });
   // Triage open work by its effect on agreement, preserving order within each group.
   return filter === "open" ? prioritizeBlockingDecisions(matching) : matching;
