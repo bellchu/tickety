@@ -3,8 +3,13 @@ const test = require('node:test');
 const React = require('react');
 const { loadComponentTs, loadPureTs } = require('./helpers/load-pure-ts');
 const parse = loadPureTs('requirement-criteria.ts', { './requirement-text': loadPureTs('requirement-text.ts') }).parseRequirementCriteria;
+let hooks;
 const { AcceptanceCriteriaEditor: Editor } = loadComponentTs('requirements/AcceptanceCriteriaEditor.tsx', {
-  react: { memo: component => component }, 'react/jsx-runtime': require('react/jsx-runtime'),
+  react: {
+    memo: component => component,
+    useRef: initial => hooks.refs[hooks.cursor++] ||= { current: initial },
+    useEffect: effect => { hooks.effects.push(effect); },
+  }, 'react/jsx-runtime': require('react/jsx-runtime'),
   '@/components/ui': { Button: 'button' }, './fields': { Field: 'label', inputStyle: '' },
 });
 function descendants(node, type) {
@@ -13,11 +18,23 @@ function descendants(node, type) {
 }
 function editor(initial) {
   let criteria = initial;
+  const state = { refs: [], cursor: 0, effects: [] };
+  let focused = null;
+  let focusCalls = 0;
   return {
+    get focused() { return focused; },
+    get focusCalls() { return focusCalls; },
     get criteria() { return criteria; },
     render() {
       const validation = parse(criteria);
-      return Editor({ criteria, issue: validation.issue, invalidIndex: validation.invalidIndex, count: validation.criteria.length, onChange: next => { criteria = next; } });
+      hooks = state; state.cursor = 0; state.effects = [];
+      const tree = Editor({ criteria, issue: validation.issue, invalidIndex: validation.invalidIndex, count: validation.criteria.length, onChange: next => { criteria = next; } });
+      state.refs[0].current = {
+        querySelectorAll: () => criteria.map((_, index) => ({ focus: () => { focused = index; focusCalls++; } })),
+        querySelector: () => ({ focus: () => { focused = 'add'; focusCalls++; } }),
+      };
+      state.effects.forEach(effect => effect());
+      return tree;
     },
   };
 }
@@ -53,4 +70,31 @@ test('validation marks the original input position and clears after correction',
   fields[2].props.onChange({ target: { value: 'Record the receipt timestamp.' } });
   fields = descendants(form.render(), 'textarea');
   assert.deepEqual(fields.map(field => field.props['aria-invalid']), [false, false, false]);
+});
+
+
+test('add and remove move focus to a useful entry without stealing focus during typing', () => {
+  const form = editor(['Return a receipt.', 'Record the timestamp.']);
+  let tree = form.render();
+  assert.equal(form.focused, null);
+  descendants(tree, 'button').at(-1).props.onClick();
+  tree = form.render();
+  assert.equal(form.focused, 2);
+  descendants(tree, 'button')[2].props.onClick();
+  tree = form.render();
+  assert.equal(form.focused, 1);
+  descendants(tree, 'button')[0].props.onClick();
+  tree = form.render();
+  assert.equal(form.focused, 0);
+  descendants(tree, 'button')[0].props.onClick();
+  tree = form.render();
+  assert.equal(form.focused, 'add');
+  descendants(tree, 'button').at(-1).props.onClick();
+  tree = form.render();
+  assert.equal(form.focused, 0);
+  const callsBeforeTyping = form.focusCalls;
+  descendants(tree, 'textarea')[0].props.onChange({ target: { value: 'Return the receipt.' } });
+  form.render();
+  assert.equal(form.focused, 0);
+  assert.equal(form.focusCalls, callsBeforeTyping);
 });
