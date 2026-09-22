@@ -1,24 +1,23 @@
 "use client";
 
-import { Suspense, useState, type FormEvent, type ReactNode } from "react";
+import { Suspense, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ClipboardList, Download, FileText, Plus, Sparkles, ArrowUpRight } from "lucide-react";
 import { requirementBrief } from "@/lib/requirement-export";
 import { RequirementHistoryPanel } from "@/components/requirements/RequirementHistoryPanel";
+import { SourceIntakeForm } from "@/components/requirements/SourceIntakeForm";
+import { Field, inputStyle, panelStyle, kinds } from "@/components/requirements/fields";
 import { DecisionLog } from "@/components/requirements/DecisionLog";
 import { RequirementCard } from "@/components/requirements/RequirementCard";
 import { filterRequirements, workspaceFocus, type RequirementFilter } from "@/lib/requirement-workspace";
 import { api } from "@/lib/api";
-import type { BusinessRequirement, GatherSuggestions, RequirementAssistance, RequirementDraft, RequirementPriority, RequirementWorkspaceDetail, SourceKind } from "@/lib/requirements-types";
+import type { BusinessRequirement, GatherSuggestions, RequirementAssistance, RequirementDraft, RequirementPriority, RequirementWorkspaceDetail } from "@/lib/requirements-types";
 import { Button } from "@/components/ui";
 import { PageFrame, PageHeader } from "@/components/layout/PageLayout";
 import { formatLocalDateTime } from "@/lib/date-time";
 
-const inputStyle = "mt-1 w-full rounded-lg border border-linen-500 bg-white px-3 py-2 text-sm text-ink-700 focus:outline-none focus:ring-2 focus:ring-clay-400";
-const panelStyle = "rounded-xl border border-linen-400 bg-white p-5 shadow-sm";
-const kinds: Record<SourceKind, string> = { document: "Business document", email: "Email", sop: "SOP", transcript: "Meeting transcript" };
 const priorities: Record<RequirementPriority, string> = { must: "Must have", should: "Should have", could: "Could have", wont: "Not this time" };
 const blankDraft: RequirementDraft = { source_id: "", title: "", actor: "", action: "", benefit: "", evidence_quote: "", acceptance_criteria: [], priority: "should" };
 const message = (error: unknown) => {
@@ -26,9 +25,6 @@ const message = (error: unknown) => {
   return ({ ai_unavailable: "AI is unavailable. Check the configured provider in Settings; your saved work is unchanged.", invalid_ai_output: "The AI response could not be verified. Your saved work is unchanged.", ai_rate_limit_exceeded: "AI request limit reached. Please wait a minute before trying again.", ai_daily_budget_exceeded: "Today's AI budget has been reached. You can continue working manually." } as Record<string, string>)[text] || text;
 };
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
-  return <label className="block text-sm font-medium text-ink-600">{label}{children}</label>;
-}
 
 function ErrorMessage({ error }: { error: unknown }) {
   return error ? <p role="alert" className="rounded-lg border border-rust-400/30 bg-rust-400/10 p-3 text-sm text-rust-600">{message(error)}</p> : null;
@@ -115,11 +111,6 @@ function Workspace({ id, canAI, onBack }: { id: string; canAI: boolean; onBack: 
   const [filter, setFilter] = useState<RequirementFilter>("all");
   const [search, setSearch] = useState("");
   const [draftAssumptions, setDraftAssumptions] = useState<string[]>([]);
-  const [sourceTitle, setSourceTitle] = useState("");
-  const [sourceKind, setSourceKind] = useState<SourceKind>("document");
-  const [importWarnings, setImportWarnings] = useState<string[]>([]);
-  const [importing, setImporting] = useState(false);
-  const [content, setContent] = useState("");
   const [draft, setDraft] = useState<RequirementDraft>({ ...blankDraft });
   const [criteria, setCriteria] = useState("");
   const [editing, setEditing] = useState<BusinessRequirement | undefined>();
@@ -151,41 +142,18 @@ function Workspace({ id, canAI, onBack }: { id: string; canAI: boolean; onBack: 
     setShowForm(true); setReviewing(null); setDraftAssumptions([]); setError(null);
   }
 
-  async function saveSource(event: FormEvent) {
-    event.preventDefault();
+  async function saveSource(data: Parameters<typeof api.addRequirementSource>[1]) {
     let saved: Awaited<ReturnType<typeof api.addRequirementSource>> | undefined;
-    await run("source", async () => { saved = await api.addRequirementSource(id, { title: sourceTitle, kind: sourceKind, content }); }, () => {
-      setSourceTitle(""); setContent(""); setImportWarnings([]); setSourceFormOpen(false);
+    await run("source", async () => { saved = await api.addRequirementSource(id, data); }, () => {
+      setSourceFormOpen(false);
       if (saved) {
         setSourceViewing(saved.id);
         setNotice(saved.reused ? `This content is already saved as “${saved.title}”. The existing evidence was reused.` : "Source saved.");
       }
     });
+    return Boolean(saved);
   }
 
-  async function importText(file?: File) {
-    if (!file) return;
-    setError(null); setImportWarnings([]); setImporting(true);
-    try {
-      if (!/\.(txt|md|eml|docx|pdf|vtt|srt)$/i.test(file.name)) throw new Error("Choose a TXT, Markdown, EML, DOCX, PDF, VTT or SRT file. Text files must use UTF-8.");
-      if (file.size > 400000) throw new Error("Choose a file smaller than 400 KB.");
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      if (/\.(eml|docx|pdf)$/i.test(file.name)) {
-        let binary = "";
-        for (let offset = 0; offset < bytes.length; offset += 8192) binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
-        const isEmail = /\.eml$/i.test(file.name);
-        const preview = isEmail ? api.previewRequirementEmail : /\.pdf$/i.test(file.name) ? api.previewRequirementPdf : api.previewRequirementDocx;
-        const result = await preview(id, btoa(binary));
-        setContent(result.content); setSourceTitle(result.title || file.name); setSourceKind(isEmail ? "email" : "document"); setImportWarnings(result.warnings);
-        return;
-      }
-      const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-      if (text.length > 100000 || text.includes("\0")) throw new Error("Source text must contain at most 100,000 characters and no NUL characters.");
-      setContent(text); setSourceTitle(file.name);
-      if (/\.(vtt|srt)$/i.test(file.name)) setSourceKind("transcript");
-    } catch (caught) { setError(caught); }
-    finally { setImporting(false); }
-  }
 
   if (!detail) return <PageFrame><Button variant="ghost" onClick={onBack}>Back to initiatives</Button><ErrorMessage error={query.error} />{query.isPending ? <p role="status">Loading initiative…</p> : <Button onClick={() => query.refetch()}>Retry</Button>}</PageFrame>;
   const focus = workspaceFocus(detail);
@@ -219,18 +187,7 @@ function Workspace({ id, canAI, onBack }: { id: string; canAI: boolean; onBack: 
     <div className="grid items-start gap-6 xl:grid-cols-[300px_minmax(0,1fr)]">
       <aside className="min-w-0 space-y-4" aria-label="Business context">
         <div className="flex items-center justify-between"><div><h2 className="font-semibold text-ink-700">Context & evidence</h2><p className="mt-1 text-xs text-ink-400">{detail.sources.length} sources · Add context whenever it changes</p></div><Button className="shrink-0 whitespace-nowrap" variant="ghost" size="sm" leadingIcon={<Plus size={14} />} onClick={() => setSourceFormOpen(!sourceFormOpen)}>Add</Button></div>
-        {(sourceFormOpen || detail.sources.length === 0) && <>
-      <form className={`${panelStyle} space-y-4`} onSubmit={saveSource}>
-        <h2 className="text-lg font-semibold">Add supporting material</h2><p className="text-sm text-ink-500">Paste source material or import a document or email. Sources are preserved so every requirement can point back to its evidence.</p>
-        <Field label="Import source file"><input type="file" disabled={importing || Boolean(pending)} accept=".txt,.md,.eml,.docx,.pdf,.vtt,.srt" onChange={event => { void importText(event.target.files?.[0]); event.target.value = ""; }} className="mt-2 block w-full text-sm" /></Field>
-        {importing && <p role="status" className="text-xs">Preparing source preview…</p>}
-        {importWarnings.map(warning => <p key={warning} className="text-xs text-amber-800">{warning}</p>)}
-        <Field label="Source title"><input required maxLength={200} className={inputStyle} value={sourceTitle} onChange={event => setSourceTitle(event.target.value)} /></Field>
-        <Field label="Source type"><select className={inputStyle} value={sourceKind} onChange={event => setSourceKind(event.target.value as SourceKind)}>{Object.entries(kinds).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field>
-        <Field label="Source text"><textarea required minLength={10} maxLength={100000} rows={7} className={inputStyle} value={content} onChange={event => setContent(event.target.value)} /></Field><p className="text-xs text-ink-400">{content.length.toLocaleString()} / 100,000 characters · Text, EML, DOCX and PDF · 400 KB file limit.</p>
-        <Button type="submit" pending={pending === "source"} disabled={importing || Boolean(pending)}>Save source</Button>
-      </form>
-        </>}
+        <SourceIntakeForm workspaceId={id} open={sourceFormOpen || detail.sources.length === 0} pending={pending} onSave={saveSource} />
         {detail.sources.map(item => <div key={item.id} className="space-y-3 rounded-xl border border-linen-400 bg-white p-4">
           <button className="w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-clay-400" onClick={() => setSourceViewing(sourceViewing === item.id ? "" : item.id)}>
             <span className="text-[10px] font-semibold uppercase tracking-wide text-clay-700">{kinds[item.kind]}</span><h3 className="mt-1 text-sm font-semibold text-ink-700">{item.title}</h3>
