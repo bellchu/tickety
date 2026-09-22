@@ -1,26 +1,9 @@
+const { loadPureTs } = require("./helpers/load-pure-ts");
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const path = require("node:path");
 const test = require("node:test");
-const ts = require("typescript");
 
-function loadHelpers() {
-  const filename = path.join(__dirname, "..", "lib", "analysis-errors.ts");
-  const source = fs.readFileSync(filename, "utf8");
-  const output = ts.transpileModule(source, {
-    compilerOptions: {
-      module: ts.ModuleKind.CommonJS,
-      target: ts.ScriptTarget.ES2020,
-    },
-    fileName: filename,
-  }).outputText;
-  const loaded = { exports: {} };
-  const compile = new Function("exports", "module", output);
-  compile(loaded.exports, loaded);
-  return loaded.exports;
-}
 
-const { analysisErrorDetails, persistedAnalysisErrorDetails } = loadHelpers();
+const { analysisErrorDetails, persistedAnalysisErrorDetails } = loadPureTs("analysis-errors.ts");
 
 test("partial analysis errors identify the failed artifact and safe cause", () => {
   assert.equal(
