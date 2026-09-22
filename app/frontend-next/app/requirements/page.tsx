@@ -25,7 +25,7 @@ import { DecisionLog } from "@/components/requirements/DecisionLog";
 import { AIRequirementReview } from "@/components/requirements/AIRequirementReview";
 import { AcceptanceCriteriaEditor } from "@/components/requirements/AcceptanceCriteriaEditor";
 import { RequirementCard } from "@/components/requirements/RequirementCard";
-import { type SourceReviewFilter, filterSources, orderRequirements, type RequirementOrder, reviewUnavailableReason, sourceRequirementCounts, blockedRequirementIds, filterRequirements, workspaceFocus, type RequirementFilter } from "@/lib/requirement-workspace";
+import { requirementRequestTypeLabels, type SourceReviewFilter, filterSources, orderRequirements, type RequirementOrder, reviewUnavailableReason, sourceRequirementCounts, blockedRequirementIds, filterRequirements, workspaceFocus, type RequirementFilter } from "@/lib/requirement-workspace";
 import { api, APIError } from "@/lib/api";
 import type { SourceKind, BusinessRequirement, GatherSuggestions, RequirementAssistance, RequirementDraft, RequirementPriority, RequirementWorkspaceDetail } from "@/lib/requirements-types";
 import { Button, ConfirmDialog } from "@/components/ui";
@@ -98,7 +98,7 @@ function RequirementsContent() {
       <fieldset disabled={pending} className="space-y-4">
       <h2 className="text-lg font-semibold">Start an initiative</h2>
       <Field label="Initiative name"><RequirementInput required maxLength={200} value={title} onChange={event => setTitle(event.target.value)} className={inputStyle} placeholder="For example: simplify supplier onboarding" /></Field>
-      <Field label="Request type"><select className={inputStyle} value={requestType} onChange={event => setRequestType(event.target.value as "approved_project" | "enhancement")}><option value="approved_project">Approved project / request</option><option value="enhancement">Enhancement</option></select></Field>
+      <Field label="Request type"><select className={inputStyle} value={requestType} onChange={event => setRequestType(event.target.value as "approved_project" | "enhancement")}>{Object.entries(requirementRequestTypeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field>
       <Field label="Business objective"><RequirementTextarea required minLength={10} maxLength={4000} rows={3} value={objective} onChange={event => setObjective(event.target.value)} className={inputStyle} placeholder="What outcome should improve, and for whom?" /></Field>
       <p className="text-xs text-ink-500">Visible to you and workspace administrators.</p>
       <ErrorMessage error={error} /><Button type="submit" pending={pending}>Create initiative</Button>
@@ -312,7 +312,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
     <ConfirmDialog open={Boolean(transition)} onOpenChange={open => { if (!open) setTransition(null); }} title="Discard unsaved changes?" description="Your current requirement edits or sign-off note have not been saved. Keep editing, or discard them to continue." cancelLabel="Keep editing" confirmLabel="Discard and continue" destructive onConfirm={() => { const action = transition; setTransition(null); action?.(); }} />
     <Button variant="ghost" leadingIcon={<ArrowLeft size={16} />} onClick={onBack}>All initiatives</Button>
     <PageHeader eyebrow="Business workspace" title={detail.workspace.title} description={detail.workspace.objective}
-      meta={`${detail.workspace.request_type === "enhancement" ? "Enhancement" : "Approved project / request"} · ${detail.requirements.length} requirements · ${deliveryReady} delivery ready`}
+      meta={`${requirementRequestTypeLabels[detail.workspace.request_type]} · ${detail.requirements.length} requirements · ${deliveryReady} delivery ready`}
       actions={<><Button variant="ghost" pending={query.isFetching} disabled={Boolean(pending) || query.isFetching} onClick={() => query.refetch()}>Refresh</Button><Button variant="secondary" disabled={!canDeliverSnapshot} leadingIcon={<Download size={16} />} onClick={exportCurrentBrief}>Export BRD</Button></>} />
     <section className="flex flex-col gap-5 rounded-xl border border-clay-300/40 bg-gradient-to-r from-[#06243A] to-[#103E50] p-5 text-white sm:flex-row sm:items-center sm:justify-between" aria-label="Suggested focus">
       <div className="max-w-2xl"><p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-cyan-200">Worth your attention</p><h2 className="mt-2 text-lg font-medium">{focus.title}</h2><p className="mt-2 text-sm leading-6 text-slate-200">{focus.reason}</p></div>

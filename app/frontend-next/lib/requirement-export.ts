@@ -1,4 +1,4 @@
-import { currentScopeBlockers, filterDecisions, orderRequirements, requirementPriorityLabels, requirementSourceKindLabels } from "./requirement-workspace";
+import { currentScopeBlockers, filterDecisions, orderRequirements, requirementPriorityLabels, requirementSourceKindLabels, requirementRequestTypeLabels } from "./requirement-workspace";
 import type { BusinessRequirement, RequirementWorkspaceDetail } from "./requirements-types";
 
 export function requirementBriefFilename(workspace: { title: string; id: string }): string {
@@ -42,7 +42,7 @@ export function requirementBrief(detail: RequirementWorkspaceDetail): string {
   const lines = [
     `# Business requirements: ${inline(workspace.title)}`, "",
     `Initiative ID: ${workspace.id}`,
-    `Request type: ${workspace.request_type === "enhancement" ? "Enhancement" : "Approved project / request"}`, "",
+    `Request type: ${requirementRequestTypeLabels[workspace.request_type]}`, "",
     "## Business objective", prose(workspace.objective), "",
     "## Scope and readiness",
     `- Included in this initiative: ${included.length} requirements`,

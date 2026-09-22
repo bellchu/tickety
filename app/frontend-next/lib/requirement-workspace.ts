@@ -1,8 +1,10 @@
-import type { BusinessRequirement, RequirementSource, SourceKind, RequirementDecision, RequirementPriority, RequirementWorkspaceDetail } from "./requirements-types";
+import type { BusinessRequirement, RequirementSource, SourceKind, RequirementDecision, RequirementPriority, RequirementWorkspace, RequirementWorkspaceDetail } from "./requirements-types";
 
 export const requirementPriorityLabels: Record<RequirementPriority, string> = { must: "Must have", should: "Should have", could: "Could have", wont: "Not this time" };
 
 export const requirementSourceKindLabels: Record<SourceKind, string> = { document: "Business document", email: "Email", sop: "SOP", transcript: "Meeting transcript" };
+
+export const requirementRequestTypeLabels: Record<RequirementWorkspace["request_type"], string> = { approved_project: "Approved project / request", enhancement: "Enhancement" };
 
 export type DecisionFilter = "open" | "blocking" | "current" | "exploratory" | "recorded" | "all";
 
