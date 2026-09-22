@@ -33,12 +33,12 @@ const decisions = Array.from({ length: 200 }, (_, index) => ({
   id: `d${index}`, requirement_id: 'r1', question: `Business question ${index}`,
   owner_role: 'Sponsor', status: 'open', blocking: true,
 }));
-function render({ open = true, scope = '', draft, pending = false, records = decisions, decisionRequest, requirements = [{ id: 'r1', reference: 'REQ-001', title: 'Receipt' }] } = {}) {
+function render({ component = DecisionLog, open = true, scope = '', draft, pending = false, records = decisions, decisionRequest, requirements = [{ id: 'r1', reference: 'REQ-001', title: 'Receipt' }] } = {}) {
   const client = new query.QueryClient();
   if (draft) drafts.rememberRequirementDecisionDraft(client, 'owner', 'w1', draft);
   try {
     return renderToStaticMarkup(React.createElement(query.QueryClientProvider, { client },
-      React.createElement(DecisionLog, {
+      React.createElement(component, {
         workspaceId: 'w1', userId: 'owner', requirements,
         decisions: records, open, scope, pending, decisionRequest, onFindRequirements() {}, onPendingChange() {}, seed: null, onToggle() {}, onScopeChange() {}, onSeedUsed() {}, async onSaved() {},
       })));
@@ -237,4 +237,18 @@ test('collapsed decision summary separates deferred blockers from current or unk
   assert.ok(html.includes('1 relate only to deferred requirements'));
   assert.ok(!html.includes('<article'));
   assert.ok(!render({ records: [] }).includes('affect current scope'));
+});
+
+
+test('closed decision log keeps summary counts without evaluating the hidden register', () => {
+  let scans = 0;
+  const component = loadDecisionLog({ '@/lib/requirement-workspace': {
+    ...workspace, filterDecisions(...args) { scans++; return workspace.filterDecisions(...args); },
+  } });
+  const html = render({ component, open: false });
+  assert.equal(scans, 0);
+  assert.ok(html.includes('200 open'));
+  assert.ok(html.includes('200 blocking'));
+  assert.ok(render({ component }).includes('Business question 0'));
+  assert.equal(scans, 1);
 });

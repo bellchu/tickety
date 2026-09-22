@@ -81,9 +81,10 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
   }
   const outstanding = useMemo(() => decisions.filter(item => item.status === "open"), [decisions]);
   const visibleDecisions = useMemo(() => {
+    if (!open) return [];
     const matching = filterDecisions(decisions, view, search, resolving, scope, requirements);
     return decisionRequest?.id ? matching.sort((left, right) => Number(right.id === decisionRequest.id) - Number(left.id === decisionRequest.id)) : matching;
-  }, [decisions, view, search, resolving, scope, decisionRequest, requirements]);
+  }, [open, decisions, view, search, resolving, scope, decisionRequest, requirements]);
   const requirementNames = useMemo(() => new Map(requirements.map(item => [item.id, `${item.reference}${item.priority === "wont" ? " · Not this time" : ""}`])), [requirements]);
   const blockers = useMemo(() => outstanding.filter(item => item.blocking).length, [outstanding]);
   const currentBlockers = useMemo(() => currentScopeBlockers(requirements, decisions).length, [requirements, decisions]);
