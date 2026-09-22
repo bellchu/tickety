@@ -16,9 +16,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Collection, Dict, List, Literal, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-import httpx
-
-from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query, Path, Request, Response, Cookie, Body, Header
+from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query, Path, Request, Response, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from sqlalchemy.orm import Session, aliased
@@ -177,7 +175,7 @@ from .prompts import (
     RAG_SYSTEM_PROMPT, REPLY_SYSTEM_PROMPT, RESOLUTION_SYSTEM_PROMPT,
     ROUTING_SYSTEM_PROMPT, SUMMARY_SYSTEM_PROMPT, TRIAGE_SYSTEM_PROMPT,
     RECOGNITIONS, TIER_THRESHOLDS, PRIORITY_POINTS,
-    MOMENTUM_BONUS_CAP, MOMENTUM_RESET_HOURS,
+    MOMENTUM_BONUS_CAP,
 )
 from .integrations.registry import get_adapter
 from .integrations.sync import (
@@ -192,7 +190,6 @@ from .integrations.sync import (
     sync_tickets_from_external,
     ticket_created_within_filter,
 )
-from .integrations.freshservice import FreshserviceAdapter
 from .integrations.bindings import (
     BindingValidationError,
     activate_binding,
