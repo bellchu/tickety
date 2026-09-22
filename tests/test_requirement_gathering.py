@@ -311,6 +311,16 @@ class RequirementGatheringTests(unittest.TestCase):
         self.assertEqual(self.client.put(item, json={**self.payload(source), "revision": 1}).status_code, 409)
         self.assertEqual(self.client.post(item + "/validate", json={"revision": 1, "reviewer_role": "Product Owner", "validation_note": "Reviewed against the operations SOP."}).status_code, 409)
 
+    def test_quality_feedback_identifies_vague_fields_and_criterion_numbers(self):
+        from app.backend.requirements_gathering import quality_issues
+        row = SimpleNamespace(actor="Analyst", action="Provide FAST and fast acknowledgement", benefit="Track intake")
+        criteria = ["Receipt appears within thirty seconds.", "The retry process is easy and seamless."]
+        self.assertEqual(quality_issues(row, criteria), [
+            "Replace vague terms in required capability (fast); acceptance criterion 2 (easy, seamless) with an observable condition or measurable target."
+        ])
+        row.action = "Provide an acknowledgement"
+        self.assertEqual(quality_issues(row, criteria[:1]), [])
+
     def test_incomplete_or_vague_requirement_cannot_be_validated(self):
         workspace = self.workspace()
         source = self.source(workspace)

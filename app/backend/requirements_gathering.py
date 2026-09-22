@@ -113,9 +113,16 @@ def quality_issues(row: BusinessRequirementRecord, criteria: list[str] | None = 
         criteria = json.loads(row.acceptance_json)
     if not criteria:
         issues.append("Add at least one testable acceptance criterion.")
-    text = " ".join([row.action, *criteria])
-    if re.search(r"\b(asap|user.friendly|fast|easy|seamless|appropriate|etc)\b", text, re.I):
-        issues.append("Replace vague terms with an observable condition or measurable target.")
+    vague_locations = []
+    fields = [("required capability", row.action)]
+    fields.extend((f"acceptance criterion {index}", criterion) for index, criterion in enumerate(criteria, 1))
+    for label, text in fields:
+        matches = re.finditer(r"\b(asap|user.friendly|fast|easy|seamless|appropriate|etc)\b", text, re.I)
+        terms = list(dict.fromkeys(match.group().casefold() for match in matches))
+        if terms:
+            vague_locations.append(f"{label} ({', '.join(terms)})")
+    if vague_locations:
+        issues.append(f"Replace vague terms in {'; '.join(vague_locations)} with an observable condition or measurable target.")
     if len({item.casefold() for item in criteria}) != len(criteria):
         issues.append("Remove duplicate acceptance criteria.")
     return issues
