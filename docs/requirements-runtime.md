@@ -164,3 +164,23 @@ navigation/unmount: the pre-fix component failed to retain the completed preview
 The fixed test passes and also covers newer drafts, sign-out and failures with or
 without an existing draft. This is tab-memory protection, not persistence across
 a full browser reload; returning and editing a draft can supersede the old import.
+
+### Browser smoke check: decision review and Unicode input
+
+Verified against the local production build after `30dcfea`, using the synthetic
+Supplier onboarding pilot (REQ-002 revision 6):
+
+1. Open **Review the requirement**. Confirm evidence and acceptance criteria are
+   followed by **Business decisions to consider** with two recorded global decisions.
+2. Expand the supplier acknowledgement failure question. Its answer owner and
+   recorded Operations-queue/retry rationale must be readable in the review form.
+   Cancel without signing off.
+3. Open **Add supporting material**. Enter a synthetic title and five emoji in
+   **Source text**. The counter must show 5 and **Save source** must be disabled.
+4. Append five more emoji. The counter must show 10 and saving must become available.
+5. Clear both test fields without saving. The counter must return to 0, saving must
+   be disabled and the unsaved-material notice must disappear. Close the form.
+
+This sequence passed in the browser. No business record or sign-off was changed.
+It verifies rendered interaction, supplementing the component and boundary tests;
+it does not exercise provider analysis, file uploads or a Dev deployment.
