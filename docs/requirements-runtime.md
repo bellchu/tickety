@@ -383,3 +383,11 @@ recount the full body. A local Node microbenchmark of 500 validations after warm
 measured about 0.22 ms for 100,000 ASCII characters and 0.46 ms for 100,000 emoji
 code points per validation. These are helper timings, not browser interaction or
 end-to-end import measurements. No optimization was justified by that result.
+
+### Empty requirement view recovery
+
+The local production preview was filtered by a nonmatching search, **Not this time**
+and the unlinked supplier email. **Show all requirements** reset search, readiness
+and source together, restoring REQ-001 and REQ-002. The action only changes view
+state; it does not invoke editor transitions or write business records. Build,
+production-route verification, typecheck and lint passed for this change.
