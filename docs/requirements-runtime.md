@@ -265,3 +265,16 @@ and focused the exact highlighted quotation labelled **Evidence for REQ-001**.
 This read-only check confirms evidence navigation cannot be trapped by the type
 filter. The production build and route checks passed. Automated source-filter
 coverage combines type, normalized title search and unlinked-only selection.
+
+### Cross-review scope selection
+
+In the local production preview, open **Cross-check scope**, select REQ-001,
+then search for REQ-002 and select it. Searching for an unmatched phrase must show
+zero matching candidates while keeping both selected requirements and their remove
+controls visible. **Review selected requirements** remains enabled for the two
+selected items. Removing REQ-001 from the selected list leaves one selected item
+and disables review, even though neither item matches the current search.
+This browser check passed; both temporary selections and the search were cleared
+before closing the panel. No AI call or business write was made. Automated coverage
+also verifies the submitted identifiers stay exactly equal to the retained selection.
+The production build and route verification passed for this version.
