@@ -151,8 +151,8 @@ points. Business names, roles, objectives, questions, answers and sign-off notes
 shared Unicode-aware controls backed by native custom validity. Optional draft
 fields remain optional, required whitespace-only fields are rejected, and overlong
 text remains available for editing. Initiative search uses the same Unicode-aware control; its query is trimmed before
-submission and remains limited to 200 characters. Acceptance criteria are bounded per line, without a second
-UTF-16 cap on the entire textarea.
+submission and remains limited to 200 characters. Acceptance criteria are bounded
+per entry without native UTF-16 truncation of their textareas.
 
 ### File import navigation regression
 
@@ -227,3 +227,20 @@ then disappeared when **Decisions affecting** selected REQ-001. Returning to all
 requirements restored the scope. The collapsed summary showed one current blocker
 and zero deferred blockers. No business records were written. Deferred, unknown-scope
 and active-answer combinations are covered by the automated filter/component tests.
+
+### Structured acceptance criteria
+
+Criteria remain an array through saved requirement editing, AI draft adoption,
+refinement and tab-memory draft recovery. Newlines belong to an individual criterion;
+they are never used to reconstruct array boundaries. Up to 20 entries can be edited,
+with nonempty entries checked against the API's Unicode character and NUL limits.
+Validation reports the original entry position even when earlier entries are empty.
+
+Repeatable browser check: edit an existing synthetic requirement, add a criterion
+and enter three lines. Its count must increase by one, not three. Replace that entry
+with `short`: the corresponding textarea must have `aria-invalid=true` and **Save
+draft** must be disabled. Replace it with a valid sentence: the error marker clears
+and saving becomes available if the other fields are valid. Remove the temporary
+entry and cancel. These checks passed locally without saving or changing the
+original requirement. Component regressions cover editing/removing a middle entry,
+retaining neighboring multiline values, the 20-entry limit and correction of errors.
