@@ -209,6 +209,35 @@ class RequirementGatheringTests(unittest.TestCase):
         self.assertIsNone(response.json()["validated_at"])
         self.assertIsNone(response.json()["story"])
 
+    def test_multiline_criteria_survive_signoff_story_and_later_revision(self):
+        workspace = self.workspace()
+        source = self.source(workspace)
+        criteria = [
+            "Given a valid invoice,\nwhen submitted,\nthen acknowledge it within 30 seconds.",
+            "If delivery is unavailable,\nretain the invoice reference for retry.",
+        ]
+        payload = {**self.payload(source), "acceptance_criteria": criteria}
+        created = self.client.post(f"{self.path}/{workspace}/items", json=payload)
+        self.assertEqual(created.status_code, 201, created.text)
+        row = created.json()
+        route = f"{self.path}/{workspace}/items/{row['id']}"
+        self.assertEqual(row["acceptance_criteria"], criteria)
+        signed = self.client.post(route + "/validate", json={
+            "revision": row["revision"], "reviewer_role": "Product Owner",
+            "validation_note": "Confirmed receipt and retry outcomes with finance.",
+        })
+        self.assertEqual(signed.status_code, 200, signed.text)
+        story = self.client.post(route + "/story", json={"revision": signed.json()["revision"]})
+        self.assertEqual(story.status_code, 200, story.text)
+        self.assertEqual(story.json()["story"]["acceptance_criteria"], criteria)
+        updated = self.client.put(route, json={**payload, "title": "Clarified invoice acknowledgement", "revision": story.json()["revision"]})
+        self.assertEqual(updated.status_code, 200, updated.text)
+        self.assertEqual(updated.json()["acceptance_criteria"], criteria)
+        self.assertIsNone(updated.json()["story"])
+        history = self.client.get(route + "/history").json()["items"]
+        self.assertEqual(history[0]["before"]["story"]["acceptance_criteria"], criteria)
+        self.assertEqual(history[0]["after"]["acceptance_criteria"], criteria)
+
     def test_repeated_requirement_capture_preserves_signed_story_and_history(self):
         workspace = self.workspace()
         source = self.source(workspace)
