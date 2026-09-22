@@ -1,9 +1,9 @@
-import { filterDecisions } from "@/lib/requirement-workspace";
+import { filterDecisions, prioritizeBlockingDecisions } from "@/lib/requirement-workspace";
 import type { RequirementDecision } from "@/lib/requirements-types";
 
 /** Read-only context; recording an answer never substitutes for human sign-off. */
 export function SignOffDecisions({ requirementId, decisions }: { requirementId: string; decisions: RequirementDecision[] }) {
-  const related = filterDecisions(decisions, "all", "", "", requirementId);
+  const related = prioritizeBlockingDecisions(filterDecisions(decisions, "all", "", "", requirementId));
   const blockers = related.filter(item => item.status === "open" && item.blocking).length;
   const exploratory = related.filter(item => item.status === "open" && !item.blocking).length;
   const recorded = related.length - blockers - exploratory;
@@ -11,7 +11,7 @@ export function SignOffDecisions({ requirementId, decisions }: { requirementId: 
     <h3 className="text-sm font-semibold">Business decisions to consider</h3>
     {related.length ? <>
       <p className="text-xs text-ink-500">{recorded} recorded · {blockers} blocking · {exploratory} exploratory</p>
-      <p className="text-sm text-ink-500">Check that the requirement and acceptance criteria reflect these answers. Whole-initiative decisions apply here too. Exploratory questions remain open without blocking agreement.</p>
+      <p className="text-sm text-ink-500">Check that the requirement and acceptance criteria reflect these answers. Unanswered blocking questions appear first. Whole-initiative decisions apply here too. Exploratory questions remain open without blocking agreement.</p>
       <div className="max-h-72 space-y-2 overflow-y-auto">
         {related.map(item => <details key={item.id} className="rounded-lg bg-linen-50 p-3 text-sm">
           <summary className="cursor-pointer font-medium text-ink-700">{item.question}<span className="ml-2 text-xs font-normal text-ink-500">{item.status === "resolved" ? "Decision recorded" : item.blocking ? "Blocks sign-off" : "Exploratory"}</span></summary>

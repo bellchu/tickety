@@ -38,3 +38,17 @@ test('sign-off context includes global and scoped decisions with distinct unreso
 test('an empty decision register does not imply that all assumptions were resolved', () => {
   assert.ok(render([]).includes('Confirm any unresolved assumptions with the stakeholder.'));
 });
+
+test('sign-off puts late blockers ahead of historical answers without changing saved order', () => {
+  const records = [
+    { id: 'old', requirement_id: 'r1', question: 'Earlier answer', status: 'resolved', blocking: true, resolution: 'Agreed approach' },
+    { id: 'explore', requirement_id: null, question: 'Future exploration', status: 'open', blocking: false },
+    { id: 'block', requirement_id: 'r1', question: 'Late blocking question', status: 'open', blocking: true },
+    { id: 'global', requirement_id: null, question: 'Global blocking question', status: 'open', blocking: true },
+  ];
+  const html = render(records);
+  assert.ok(html.indexOf('Late blocking question') < html.indexOf('Global blocking question'));
+  assert.ok(html.indexOf('Global blocking question') < html.indexOf('Earlier answer'));
+  assert.ok(html.indexOf('Earlier answer') < html.indexOf('Future exploration'));
+  assert.deepEqual(records.map(item => item.id), ['old', 'explore', 'block', 'global']);
+});

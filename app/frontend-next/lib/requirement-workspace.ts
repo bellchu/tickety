@@ -2,6 +2,13 @@ import type { BusinessRequirement, RequirementDecision, RequirementWorkspaceDeta
 
 export type DecisionFilter = "open" | "blocking" | "exploratory" | "recorded" | "all";
 
+/** Put unresolved approval gates first, retaining recorded order within both groups. */
+export function prioritizeBlockingDecisions(items: RequirementDecision[]) {
+  return [...items].sort((left, right) =>
+    Number(right.status === "open" && right.blocking) - Number(left.status === "open" && left.blocking),
+  );
+}
+
 export function filterDecisions(items: RequirementDecision[], filter: DecisionFilter, search: string, editingId = "", requirementId = "") {
   const query = search.trim().toLocaleLowerCase();
   const matching = items.filter(item => {
@@ -12,9 +19,7 @@ export function filterDecisions(items: RequirementDecision[], filter: DecisionFi
     return matchesStatus && (!query || [item.question, item.owner_role, item.resolution || ""].some(value => value.toLocaleLowerCase().includes(query)));
   });
   // Triage open work by its effect on agreement, preserving order within each group.
-  return filter === "open" ? matching.sort((left, right) =>
-    Number(right.status === "open" && right.blocking) - Number(left.status === "open" && left.blocking),
-  ) : matching;
+  return filter === "open" ? prioritizeBlockingDecisions(matching) : matching;
 }
 
 export type RequirementFilter = "all" | "questions" | "review" | "agreed" | "delivery" | "deferred";
