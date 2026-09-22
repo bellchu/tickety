@@ -132,7 +132,8 @@ test('evidence register maps sources to requirements without losing deferred or 
   const register = brief.split('## Evidence register')[1].split('## Documented requirements')[0];
   assert.ok(register.includes('Supports: REQ-001, REQ-002 (deferred)'));
   assert.ok(register.includes('Background interview'));
-  assert.ok(register.includes('Supporting context — no linked requirements recorded.'));
+  assert.ok(register.includes('Awaiting exploration — no linked requirements or background review recorded.'));
+  assert.ok(brief.includes('Evidence sources awaiting exploration: 1'));
   assert.ok(register.includes('digest-one'));
   assert.ok(register.includes('digest-two'));
 });
@@ -210,6 +211,7 @@ test('brief surfaces current-scope blockers before deferred and recorded decisio
 
 test('evidence register retains explicit background review attribution', () => {
   const brief = library.requirementBrief({ workspace: { id: 'w', title: 'Context', objective: 'Review evidence', request_type: 'enhancement' }, requirements: [], decisions: [], sources: [{ id: 's', title: 'Background', kind: 'document', content_sha256: 'digest', context_reviewed_at: '2026-09-22T00:00:00Z', context_reviewed_by: 'reviewer' }] });
+  assert.ok(brief.includes('Evidence sources awaiting exploration: 0'));
   assert.ok(brief.includes('Kept as background by reviewer at 2026-09-22T00:00:00Z; still available for exploration.'));
   assert.ok(brief.includes('Supporting context — no linked requirements recorded.'));
 });

@@ -333,7 +333,9 @@ drafts, signed-off requirements awaiting stories, prepared stories and deferred
 needs. Requirement sections follow business priority, with deferred needs last and
 recorded order preserved within each priority. Export does not reorder saved work.
 The evidence register lists the requirements supported by each source, marks
-deferred links and retains unlinked background material. It includes the objective,
+deferred links and distinguishes explicitly reviewed background material from
+unlinked sources awaiting exploration. The readiness overview counts those
+remaining sources so recipients can see the discovery work still outstanding. It includes the objective,
 requirements, capabilities,
 acceptance criteria, clarifications, decisions, sign-offs and eligible stories. Copy
 and export do not create Jira tickets or send messages to a delivery system.

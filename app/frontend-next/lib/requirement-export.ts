@@ -46,6 +46,7 @@ export function requirementBrief(detail: RequirementWorkspaceDetail): string {
     "## Business objective", prose(workspace.objective), "",
     "## Scope and readiness",
     `- Included in this initiative: ${included.length} requirements`,
+    `- Evidence sources awaiting exploration: ${sources.filter(source => !sourceLinks.has(source.id) && !source.context_reviewed_at).length}`,
     `- Drafts awaiting agreement: ${drafts}`,
     `- Signed off, awaiting story preparation: ${agreed}`,
     `- User stories prepared for delivery-team review: ${stories}`,
@@ -58,7 +59,7 @@ export function requirementBrief(detail: RequirementWorkspaceDetail): string {
     ...sources.flatMap(source => [
       `- ${inline(source.title)} (${requirementSourceKindLabels[source.kind]}) — ${source.id}; SHA-256: ${source.content_sha256}`,
       ...(source.context_reviewed_at ? [`  Kept as background by ${inline(source.context_reviewed_by || "Former member")} at ${inline(source.context_reviewed_at)}; still available for exploration.`] : []),
-      `  ${sourceLinks.has(source.id) ? `Supports: ${sourceLinks.get(source.id)!.join(", ")}` : "Supporting context — no linked requirements recorded."}`,
+      `  ${sourceLinks.has(source.id) ? `Supports: ${sourceLinks.get(source.id)!.join(", ")}` : source.context_reviewed_at ? "Supporting context — no linked requirements recorded." : "Awaiting exploration — no linked requirements or background review recorded."}`,
     ]), "",
     "## Documented requirements and functional specification",
     "Requirements follow recorded business priority: must have, should have, could have, then deferred. Equal priorities retain recorded order.",
