@@ -21,6 +21,13 @@ Detail = Annotated[str, StringConstraints(strip_whitespace=True, max_length=4000
 Criterion = Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=1000)]
 
 
+SOURCE_SUMMARY_FIELDS = ("id", "title", "kind", "content_sha256", "created_at", "context_reviewed_at", "context_reviewed_by")
+
+
+def source_summary(source: RequirementSourceRecord) -> dict:
+    return {field: getattr(source, field) for field in SOURCE_SUMMARY_FIELDS}
+
+
 class InputModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -261,7 +268,7 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
         row = workspace(db, workspace_id, user)
         sources = db.query(RequirementSourceRecord).options(defer(RequirementSourceRecord.content)).filter_by(workspace_id=row.id).order_by(RequirementSourceRecord.created_at, RequirementSourceRecord.id).all()
         requirements = db.query(BusinessRequirementRecord).filter_by(workspace_id=row.id).order_by(BusinessRequirementRecord.created_at, BusinessRequirementRecord.id).all()
-        return {"workspace": row, "sources": [{field: getattr(source, field) for field in ("id", "title", "kind", "content_sha256", "created_at", "context_reviewed_at", "context_reviewed_by")} for source in sources], "requirements": [requirement_out(item) for item in requirements], "decisions": db.query(RequirementDecisionRecord).filter_by(workspace_id=row.id).order_by(RequirementDecisionRecord.created_at, RequirementDecisionRecord.id).all()}
+        return {"workspace": row, "sources": [source_summary(source) for source in sources], "requirements": [requirement_out(item) for item in requirements], "decisions": db.query(RequirementDecisionRecord).filter_by(workspace_id=row.id).order_by(RequirementDecisionRecord.created_at, RequirementDecisionRecord.id).all()}
 
     def has_blocking_decision(db, workspace_id, requirement_id):
         matching = db.query(RequirementDecisionRecord.id).filter(
@@ -343,7 +350,7 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
         for source in existing:
             if source.content == data.content:
                 response.status_code = 200
-                return {**{field: getattr(source, field) for field in ("id", "workspace_id", "title", "kind", "content", "content_sha256", "created_at", "context_reviewed_at", "context_reviewed_by")}, "reused": True}
+                return {**source_summary(source), "workspace_id": source.workspace_id, "content": source.content, "reused": True}
         if db.query(RequirementSourceRecord).filter_by(workspace_id=workspace_id).count() >= 50:
             raise HTTPException(409, "This workspace already has 50 sources. Create another workspace.")
         row = RequirementSourceRecord(id=str(uuid4()), workspace_id=workspace_id, content_sha256=digest, **data.model_dump())
@@ -363,7 +370,7 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
     @router.put("/{workspace_id}/sources/{source_id}/context-review")
     def review_source_context(workspace_id: str, source_id: str, data: SourceContextReview, db: Session = Depends(get_db), user: UserRecord = Depends(require_user)):
         workspace(db, workspace_id, user, lock=True)
-        row = db.query(RequirementSourceRecord).filter_by(id=source_id, workspace_id=workspace_id).first()
+        row = db.query(RequirementSourceRecord).options(defer(RequirementSourceRecord.content)).filter_by(id=source_id, workspace_id=workspace_id).first()
         if row is None:
             raise HTTPException(404, "Source not found")
         if data.reviewed and row.context_reviewed_at is None:
@@ -373,8 +380,8 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
             row.context_reviewed_at = None
             row.context_reviewed_by = None
         db.commit()
-        db.refresh(row)
-        return row
+        db.refresh(row, attribute_names=list(SOURCE_SUMMARY_FIELDS))
+        return source_summary(row)
 
     @router.post("/{workspace_id}/items", status_code=201)
     def add_requirement(workspace_id: str, data: RequirementInput, response: Response, db: Session = Depends(get_db), user: UserRecord = Depends(require_user)):

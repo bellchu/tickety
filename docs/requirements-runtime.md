@@ -325,3 +325,10 @@ inspection confirmed the background action on the unlinked email and preserved
 REQ-001's delivery-ready state. No source was marked through the browser; write,
 undo, privacy and idempotency behavior is covered by isolated API tests. This is
 local SQLite evidence, not a PostgreSQL Dev rollout or live marking acceptance.
+
+Source-context marking now reads and returns the same metadata projection used by
+the workspace summary. It does not fetch or transmit the immutable source body.
+A 100,000-character source regression failed before this change and passes after
+it: SQL capture excludes the content column and the marking response stays below
+1,000 bytes. The full requirement suite passes 51 tests, including reversible
+marking, source reuse, privacy and preservation of signed-off delivery content.

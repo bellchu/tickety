@@ -313,6 +313,26 @@ class RequirementGatheringTests(unittest.TestCase):
         self.assertEqual(changed["status"], "draft")
         self.assertIsNone(changed["story"])
 
+    def test_source_context_review_does_not_read_or_return_large_source_content(self):
+        workspace = self.workspace()
+        base = f"{self.path}/{workspace}"
+        source = self.client.post(base + "/sources", json={"title": "Large context", "kind": "document", "content": "a" * 100000}).json()
+        statements = []
+        def capture(connection, cursor, statement, parameters, context, many):
+            if statement.lstrip().upper().startswith("SELECT") and "FROM requirement_sources" in statement:
+                statements.append(statement)
+        event.listen(self.engine, "before_cursor_execute", capture)
+        try:
+            response = self.client.put(f"{base}/sources/{source['id']}/context-review", json={"reviewed": True})
+        finally:
+            event.remove(self.engine, "before_cursor_execute", capture)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertNotIn("content", response.json())
+        self.assertLess(len(response.content), 1000)
+        self.assertTrue(statements)
+        for statement in statements:
+            self.assertNotIn("requirement_sources.content AS", statement.split("FROM")[0])
+
     def test_source_context_review_is_reversible_private_and_preserves_delivery(self):
         workspace = self.workspace()
         source = self.source(workspace)
@@ -330,7 +350,8 @@ class RequirementGatheringTests(unittest.TestCase):
         marked = reviewed.json()
         self.assertEqual(marked["context_reviewed_by"], "owner")
         self.assertIsNotNone(marked["context_reviewed_at"])
-        self.assertEqual(marked["content"], original["content"])
+        self.assertNotIn("content", marked)
+        self.assertEqual(self.client.get(source_route).json()["content"], original["content"])
         self.assertEqual(marked["content_sha256"], original["content_sha256"])
         repeated = self.client.put(review_route, json={"reviewed": True}).json()
         self.assertEqual(repeated["context_reviewed_at"], marked["context_reviewed_at"])
