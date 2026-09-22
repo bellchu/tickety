@@ -68,7 +68,7 @@ export function requirementBrief(detail: RequirementWorkspaceDetail): string {
       "Evidence:", evidenceBlock(row.evidence_quote), "", "Acceptance criteria:",
       ...row.acceptance_criteria.map(bullet));
     if (row.quality_issues.length) lines.push("Open clarification items:", ...row.quality_issues.map(bullet));
-    if (row.validated_at) lines.push(`Signed off by user ${row.validated_by || "Deleted account"} as ${row.reviewer_role} at ${row.validated_at}.`, `Review note: ${prose(row.validation_note || "")}`);
+    if (row.validated_at) lines.push(`Signed off by user ${inline(row.validated_by || "Deleted account")} as ${inline(row.reviewer_role || "Unrecorded capacity")} at ${inline(row.validated_at)}.`, `Review note: ${prose(row.validation_note || "")}`);
     if (row.story && row.priority !== "wont") lines.push("", `#### ${row.story.reference}: ${inline(row.story.title)}`, prose(row.story.statement),
       `Traces to ${row.story.requirement_reference}, validated revision ${row.story.validated_revision}.`);
   }
@@ -77,7 +77,7 @@ export function requirementBrief(detail: RequirementWorkspaceDetail): string {
     const scope = item.requirement_id ? requirementsById.get(item.requirement_id)?.reference || item.requirement_id : "Whole initiative";
     lines.push("", `### ${inline(item.question)}`, `Scope: ${scope} | Answer owner: ${inline(item.owner_role || "Unassigned")}`,
       `Status: ${item.status} | Blocks sign-off: ${item.blocking ? "Yes" : "No"}`);
-    if (item.resolution) lines.push(`Decision: ${prose(item.resolution)}`, `Recorded by ${item.resolved_by || "Former member"} at ${item.resolved_at}`);
+    if (item.resolution) lines.push(`Decision: ${prose(item.resolution)}`, `Recorded by ${inline(item.resolved_by || "Former member")} at ${inline(item.resolved_at || "Unrecorded")}`);
   }
   lines.push("", "## Development handoff", `${stories} user stories prepared for delivery-team review; ${blockers} blocking business questions remain. ${currentBlockers} affect current scope or need scope confirmation; ${deferredBlockers} relate only to deferred requirements. No external development tickets have been created.`, "");
   return lines.join("\n");
@@ -105,8 +105,8 @@ export function requirementStoryText(detail: RequirementWorkspaceDetail, row: Bu
     `Source: ${inline(source?.title || "Source unavailable")} (${row.source_id})`,
     ...(source ? [`Evidence text SHA-256: ${source.content_sha256}`] : []),
     "Evidence excerpt:", evidenceBlock(row.evidence_quote),
-    `Signed off by: ${row.validated_by || "Former member"} as ${row.reviewer_role || "Unrecorded capacity"}`,
-    `Sign-off time: ${row.validated_at || "Unrecorded"}`,
+    `Signed off by: ${inline(row.validated_by || "Former member")} as ${inline(row.reviewer_role || "Unrecorded capacity")}`,
+    `Sign-off time: ${inline(row.validated_at || "Unrecorded")}`,
     `Review note: ${prose(row.validation_note || "Unrecorded")}`, "",
     "## Recorded business decisions",
     ...decisions.flatMap(item => [

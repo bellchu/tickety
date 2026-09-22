@@ -167,3 +167,18 @@ test('brief filenames identify initiatives and remain safe across filesystem con
   assert.ok(Buffer.byteLength(long, 'utf8') < 255);
   assert.ok(!/[\\/:*?"<>|]/.test(long));
 });
+
+test('sign-off identity remains inline literal text in both delivery exports', () => {
+  const row = { id: 'r1', reference: 'REQ-001', title: 'Receipt', status: 'validated', priority: 'must', revision: 2,
+    source_id: 's1', actor: 'Analyst', action: 'Confirm receipt', benefit: 'Track intake', evidence_quote: 'Confirm receipt.',
+    acceptance_criteria: [], quality_issues: [], validated_at: '2026-09-22',
+    validated_by: 'Reviewer\n# Misleading section', reviewer_role: '[Owner](https://example.test)\n## Another section',
+    story: { reference: 'US-001', title: 'Receipt', statement: 'Confirm receipt.', acceptance_criteria: [], requirement_reference: 'REQ-001', validated_revision: 2 } };
+  const detail = { workspace: { id: 'w', title: 'Intake', objective: 'Reduce delays', request_type: 'enhancement' }, sources: [], requirements: [row], decisions: [] };
+  for (const output of [library.requirementBrief(detail), library.requirementStoryText(detail, row)]) {
+    assert.ok(output.includes('Reviewer \\# Misleading section'));
+    assert.ok(output.includes('\\[Owner\\](https://example.test) \\#\\# Another section'));
+    assert.ok(!output.includes('\n# Misleading section'));
+    assert.ok(!output.includes('\n## Another section'));
+  }
+});
