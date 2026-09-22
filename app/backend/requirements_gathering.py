@@ -103,12 +103,13 @@ class AssistanceInput(RevisionInput):
     mode: Literal["review", "story"]
 
 
-def quality_issues(row: BusinessRequirementRecord) -> list[str]:
+def quality_issues(row: BusinessRequirementRecord, criteria: list[str] | None = None) -> list[str]:
     issues = []
     for field, label in (("actor", "stakeholder or user role"), ("action", "required capability"), ("benefit", "business outcome")):
         if not getattr(row, field, "").strip():
             issues.append(f"Add the {label}.")
-    criteria = json.loads(row.acceptance_json)
+    if criteria is None:
+        criteria = json.loads(row.acceptance_json)
     if not criteria:
         issues.append("Add at least one testable acceptance criterion.")
     text = " ".join([row.action, *criteria])
@@ -132,6 +133,7 @@ def invalidate_agreement(row):
 
 
 def requirement_out(row):
+    criteria = json.loads(row.acceptance_json)
     return {
         **{field: getattr(row, field) for field in (
             "id", "workspace_id", "source_id", "title", "actor", "action", "benefit",
@@ -139,8 +141,8 @@ def requirement_out(row):
             "validated_at", "created_at", "updated_at", "reviewer_role", "validation_note",
         )},
         "reference": f"REQ-{row.number:03d}",
-        "acceptance_criteria": json.loads(row.acceptance_json),
-        "quality_issues": quality_issues(row),
+        "acceptance_criteria": criteria,
+        "quality_issues": quality_issues(row, criteria),
         "story": json.loads(row.story_json) if row.story_json else None,
     }
 
@@ -207,13 +209,14 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
         requirements = db.query(BusinessRequirementRecord).filter_by(workspace_id=row.id).order_by(BusinessRequirementRecord.created_at, BusinessRequirementRecord.id).all()
         return {"workspace": row, "sources": [{field: getattr(source, field) for field in ("id", "title", "kind", "content_sha256", "created_at")} for source in sources], "requirements": [requirement_out(item) for item in requirements], "decisions": db.query(RequirementDecisionRecord).filter_by(workspace_id=row.id).order_by(RequirementDecisionRecord.created_at, RequirementDecisionRecord.id).all()}
 
-    def unresolved_decisions(db, workspace_id, requirement_id):
-        return db.query(RequirementDecisionRecord).filter(
+    def has_blocking_decision(db, workspace_id, requirement_id):
+        matching = db.query(RequirementDecisionRecord.id).filter(
             RequirementDecisionRecord.workspace_id == workspace_id,
             RequirementDecisionRecord.status == "open",
             RequirementDecisionRecord.blocking.is_(True),
             (RequirementDecisionRecord.requirement_id.is_(None)) | (RequirementDecisionRecord.requirement_id == requirement_id),
-        ).count()
+        )
+        return db.query(matching.exists()).scalar()
 
     @router.post("/{workspace_id}/decisions", status_code=201)
     def add_decision(workspace_id: str, data: DecisionInput, db: Session = Depends(get_db), user: UserRecord = Depends(require_user)):
@@ -336,7 +339,7 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
         ensure_delivery_scope(row)
         if row.status != "draft":
             raise HTTPException(409, "This requirement is already signed off. Edit it to start a new review.")
-        if unresolved_decisions(db, workspace_id, row.id):
+        if has_blocking_decision(db, workspace_id, row.id):
             raise HTTPException(409, "Resolve the blocking business questions before sign-off")
         issues = quality_issues(row)
         if issues:
@@ -356,7 +359,7 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
         ensure_delivery_scope(row)
         if row.status != "validated" or not row.validated_at:
             raise HTTPException(409, "Validate the requirement before creating its user story")
-        if unresolved_decisions(db, workspace_id, row.id):
+        if has_blocking_decision(db, workspace_id, row.id):
             raise HTTPException(409, "Resolve the blocking business questions before preparing delivery")
         if row.story_json is None:
             before = requirement_out(row)

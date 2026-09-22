@@ -504,9 +504,36 @@ class RequirementGatheringTests(unittest.TestCase):
         self.assertEqual(response.status_code, 429)
         manager.analyze.assert_not_called()
 
+    def test_requirement_serialization_parses_criteria_once_and_preserves_quality_feedback(self):
+        from app.backend.requirements_gathering import requirement_out
+        values = self.payload("source")
+        criteria = values.pop("acceptance_criteria")
+        criteria.append(criteria[0].upper())
+        row = BusinessRequirementRecord(id="requirement", workspace_id="workspace", number=1,
+                                        acceptance_json=json.dumps(criteria), **values)
+        original_loads = json.loads
+        with patch("app.backend.requirements_gathering.json.loads", wraps=original_loads) as loads:
+            result = requirement_out(row)
+        loads.assert_called_once_with(row.acceptance_json)
+        self.assertEqual(result["acceptance_criteria"], criteria)
+        self.assertIn("Remove duplicate acceptance criteria.", result["quality_issues"])
+        row.acceptance_json = "[]"
+        self.assertIn("Add at least one testable acceptance criterion.", requirement_out(row)["quality_issues"])
+
     def test_workspace_overview_does_not_load_document_bodies(self):
         workspace = self.workspace()
-        self.source(workspace)
+        source = self.source(workspace)
+        from app.backend.database import RequirementSourceRecord, RequirementDecisionRecord
+        values = self.payload(source)
+        criteria = values.pop("acceptance_criteria")
+        with self.sessions() as db:
+            db.add_all([RequirementSourceRecord(id=f"material-{i}", workspace_id=workspace, title=f"Material {i}",
+                        kind="document", content="x" * 100000, content_sha256="0" * 64) for i in range(49)])
+            db.add_all([BusinessRequirementRecord(id=f"requirement-{i}", workspace_id=workspace, number=i + 1,
+                        acceptance_json=json.dumps(criteria), **values) for i in range(200)])
+            db.add_all([RequirementDecisionRecord(id=f"decision-{i}", workspace_id=workspace,
+                        question="Which team owns this outcome?", owner_role="Operations", blocking=False) for i in range(200)])
+            db.commit()
         statements = []
         def record(_conn, _cursor, statement, _parameters, _context, _many):
             statements.append(statement)
@@ -519,7 +546,11 @@ class RequirementGatheringTests(unittest.TestCase):
         source_queries = [sql for sql in statements if "FROM requirement_sources" in sql]
         self.assertEqual(len(source_queries), 1)
         self.assertNotIn("requirement_sources.content AS", source_queries[0])
-        self.assertNotIn("content", response.json()["sources"][0])
+        self.assertTrue(all("content" not in item for item in response.json()["sources"]))
+        self.assertEqual(len(response.json()["sources"]), 50)
+        self.assertEqual(len(response.json()["requirements"]), 200)
+        self.assertEqual(len(response.json()["decisions"]), 200)
+        self.assertEqual(len([sql for sql in statements if sql.lstrip().upper().startswith("SELECT")]), 4)
 
     def test_ai_malformed_output_is_rejected_without_saving(self):
         self.user.role = "admin"
