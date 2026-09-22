@@ -9,6 +9,9 @@ function pendingImport(client) {
   let finish, fail;
   const request = new Promise((resolve, reject) => { finish = resolve; fail = reject; });
   const dependencies = {
+    './BoundedText': loadComponentTs('requirements/BoundedText.tsx', {
+      'react/jsx-runtime': require('react/jsx-runtime'), '@/lib/requirement-text': loadPureTs('requirement-text.ts'),
+    }),
     react: { ...React, useEffect() {}, useMemo: compute => compute(), useState: initial => [typeof initial === 'function' ? initial() : initial, () => {}] },
     'react/jsx-runtime': require('react/jsx-runtime'),
     '@tanstack/react-query': { useQueryClient: () => client },

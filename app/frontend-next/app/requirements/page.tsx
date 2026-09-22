@@ -1,5 +1,7 @@
 "use client";
 
+import { RequirementInput, RequirementTextarea } from "@/components/requirements/BoundedText";
+
 import { captureRequirementDraftSave, readRequirementEditor, rememberRequirementEditor, readRequirementSourceDraft, readRequirementDecisionDraft } from "@/lib/requirement-editor-cache";
 import { invalidateRequirementOverviews } from "@/lib/requirement-workspace-query";
 import { requirementSourceQuery } from "@/lib/requirement-source-query";
@@ -94,9 +96,9 @@ function RequirementsContent() {
     {creating && <form onSubmit={create} aria-busy={pending} className={panelStyle}>
       <fieldset disabled={pending} className="space-y-4">
       <h2 className="text-lg font-semibold">Start an initiative</h2>
-      <Field label="Initiative name"><input required maxLength={200} value={title} onChange={event => setTitle(event.target.value)} className={inputStyle} placeholder="For example: simplify supplier onboarding" /></Field>
+      <Field label="Initiative name"><RequirementInput required maxLength={200} value={title} onChange={event => setTitle(event.target.value)} className={inputStyle} placeholder="For example: simplify supplier onboarding" /></Field>
       <Field label="Request type"><select className={inputStyle} value={requestType} onChange={event => setRequestType(event.target.value as "approved_project" | "enhancement")}><option value="approved_project">Approved project / request</option><option value="enhancement">Enhancement</option></select></Field>
-      <Field label="Business objective"><textarea required minLength={10} maxLength={4000} rows={3} value={objective} onChange={event => setObjective(event.target.value)} className={inputStyle} placeholder="What outcome should improve, and for whom?" /></Field>
+      <Field label="Business objective"><RequirementTextarea required minLength={10} maxLength={4000} rows={3} value={objective} onChange={event => setObjective(event.target.value)} className={inputStyle} placeholder="What outcome should improve, and for whom?" /></Field>
       <p className="text-xs text-ink-500">Visible to you and workspace administrators.</p>
       <ErrorMessage error={error} /><Button type="submit" pending={pending}>Create initiative</Button>
       </fieldset>
@@ -371,7 +373,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
         <SignOffDecisions requirementId={reviewing.id} decisions={detail.decisions || []} />
         {reviewIssue && <div role="alert" className="space-y-2 rounded-lg bg-amber-50 p-3 text-sm text-amber-800"><p>{reviewIssue}</p>{currentReview && currentReview.revision !== reviewing.revision && <Button variant="secondary" size="sm" disabled={Boolean(pending)} onClick={() => setReviewing(currentReview)}>Review current version</Button>}</div>}
         <Field label="Review capacity"><select className={inputStyle} value={reviewerRole} onChange={event => setReviewerRole(event.target.value)}>{["Product Owner", "Business Stakeholder", "Technical Business Analyst", "DTL"].map(role => <option key={role}>{role}</option>)}</select></Field>
-        <Field label="Sign-off note"><textarea required minLength={10} maxLength={4000} className={inputStyle} value={reviewNote} onChange={event => setReviewNote(event.target.value)} placeholder="What was confirmed, and with whom?" /></Field>
+        <Field label="Sign-off note"><RequirementTextarea required minLength={10} maxLength={4000} className={inputStyle} value={reviewNote} onChange={event => setReviewNote(event.target.value)} placeholder="What was confirmed, and with whom?" /></Field>
         <div className="flex gap-2"><Button type="submit" pending={pending === reviewing.id} disabled={Boolean(pending) || Boolean(reviewIssue)}>Sign off requirement</Button><Button variant="ghost" disabled={Boolean(pending)} onClick={() => switchEditor(() => setReviewing(null))}>Cancel</Button></div>
         </fieldset>
       </form>}
@@ -390,11 +392,11 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
         {source.data?.content && <details className="rounded-lg bg-linen-100 p-3" open><summary className="cursor-pointer text-sm font-medium">Read source and copy an exact excerpt</summary><pre className="mt-3 max-h-52 overflow-auto whitespace-pre-wrap break-words font-sans text-sm leading-6 text-ink-500">{source.data.content}</pre></details>}
         <p className="text-xs text-ink-500">Evidence: {evidenceBounds.length.toLocaleString()} / 4,000 characters. Use at least 10 characters from the original source.</p>
         <Field label="Exact evidence excerpt"><textarea required aria-invalid={Boolean(draft.evidence_quote) && !evidenceBounds.valid} rows={3} className={inputStyle} value={draft.evidence_quote} onChange={event => setDraft({ ...draft, evidence_quote: event.target.value })} /></Field>
-        <Field label="Requirement title"><input required maxLength={200} className={inputStyle} value={draft.title} onChange={event => setDraft({ ...draft, title: event.target.value })} /></Field>
-        <div className="grid gap-4 md:grid-cols-2"><Field label="As a… (stakeholder or user role)"><input maxLength={200} className={inputStyle} value={draft.actor} onChange={event => setDraft({ ...draft, actor: event.target.value })} placeholder="finance analyst" /></Field><Field label="Priority"><select className={inputStyle} value={draft.priority} onChange={event => setDraft({ ...draft, priority: event.target.value as RequirementPriority })}>{Object.entries(priorities).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field></div>
-        <Field label="I want to… (required capability)"><textarea maxLength={4000} className={inputStyle} value={draft.action} onChange={event => setDraft({ ...draft, action: event.target.value })} /></Field>
-        <Field label="So that… (business outcome)"><textarea maxLength={4000} className={inputStyle} value={draft.benefit} onChange={event => setDraft({ ...draft, benefit: event.target.value })} /></Field>
-        <Field label="Acceptance criteria · one per line"><textarea rows={4} maxLength={20020} aria-invalid={Boolean(parsedCriteria.issue)} aria-describedby="requirement-criteria-help" className={inputStyle} value={criteria} onChange={event => setCriteria(event.target.value)} placeholder="Given a valid request, when it is submitted, then a receipt appears within 30 seconds." /></Field>
+        <Field label="Requirement title"><RequirementInput required maxLength={200} className={inputStyle} value={draft.title} onChange={event => setDraft({ ...draft, title: event.target.value })} /></Field>
+        <div className="grid gap-4 md:grid-cols-2"><Field label="As a… (stakeholder or user role)"><RequirementInput maxLength={200} className={inputStyle} value={draft.actor} onChange={event => setDraft({ ...draft, actor: event.target.value })} placeholder="finance analyst" /></Field><Field label="Priority"><select className={inputStyle} value={draft.priority} onChange={event => setDraft({ ...draft, priority: event.target.value as RequirementPriority })}>{Object.entries(priorities).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field></div>
+        <Field label="I want to… (required capability)"><RequirementTextarea maxLength={4000} className={inputStyle} value={draft.action} onChange={event => setDraft({ ...draft, action: event.target.value })} /></Field>
+        <Field label="So that… (business outcome)"><RequirementTextarea maxLength={4000} className={inputStyle} value={draft.benefit} onChange={event => setDraft({ ...draft, benefit: event.target.value })} /></Field>
+        <Field label="Acceptance criteria · one per line"><textarea rows={4} aria-invalid={Boolean(parsedCriteria.issue)} aria-describedby="requirement-criteria-help" className={inputStyle} value={criteria} onChange={event => setCriteria(event.target.value)} placeholder="Given a valid request, when it is submitted, then a receipt appears within 30 seconds." /></Field>
         <p id="requirement-criteria-help" className={`text-xs ${parsedCriteria.issue ? "text-rust-600" : "text-ink-500"}`}>{parsedCriteria.issue || `${parsedCriteria.criteria.length} / 20 criteria · 10–1,000 characters each. You can leave this empty while drafting.`}</p>
         <div className="flex gap-2"><Button type="submit" pending={pending === "requirement"} disabled={Boolean(pending) || editOutdated || source.isError || !evidenceBounds.valid || Boolean(parsedCriteria.issue)}>Save draft</Button><Button variant="ghost" disabled={Boolean(pending)} onClick={() => switchEditor(() => setShowForm(false))}>Cancel</Button></div>
         </fieldset>

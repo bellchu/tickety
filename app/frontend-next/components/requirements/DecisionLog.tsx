@@ -1,5 +1,7 @@
 "use client";
 
+import { RequirementTextarea, RequirementInput } from "./BoundedText";
+
 import { inputStyle } from "./fields";
 import { decisionWindow, filterDecisions, type DecisionFilter } from "@/lib/requirement-workspace";
 import { requirementErrorMessage } from "@/lib/requirement-errors";
@@ -92,8 +94,8 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
         <h3 className="text-sm font-semibold">Raise a business question</h3>
         {hasQuestion && <p role="status" className="text-xs text-amber-800">Unsaved question · Kept in this tab while you browse.</p>}
         <fieldset disabled={pending} className="contents">
-        <label className="space-y-1 text-sm">Question or assumption to resolve<textarea className={inputStyle} required minLength={10} maxLength={4000} value={question} onChange={event => setQuestion(event.target.value)} /></label>
-        <div className="grid gap-3 md:grid-cols-2"><label className="space-y-1 text-sm">Who needs to provide the answer?<input className={inputStyle} required maxLength={200} placeholder="For example: Procurement lead" value={owner} onChange={event => setOwner(event.target.value)} /></label>
+        <label className="space-y-1 text-sm">Question or assumption to resolve<RequirementTextarea className={inputStyle} required minLength={10} maxLength={4000} value={question} onChange={event => setQuestion(event.target.value)} /></label>
+        <div className="grid gap-3 md:grid-cols-2"><label className="space-y-1 text-sm">Who needs to provide the answer?<RequirementInput className={inputStyle} required maxLength={200} placeholder="For example: Procurement lead" value={owner} onChange={event => setOwner(event.target.value)} /></label>
         <label className="space-y-1 text-sm">Affected scope<select className={inputStyle} value={requirementId} onChange={event => setRequirementId(event.target.value)}><option value="">Whole initiative</option>{requirements.map(item => <option key={item.id} value={item.id}>{item.reference} · {item.title}</option>)}</select></label></div>
         <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={blocking} onChange={event => setBlocking(event.target.checked)} />Must be answered before sign-off</label>
         {blocking && <p className="text-xs text-amber-800">This reopens affected requirements and withdraws their current stories. Recording an answer will still require a new sign-off.</p>}
@@ -129,7 +131,7 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
         {affectedRequirementsLink(item.requirement_id)}
         {item.status === "resolved" ? <><p className="whitespace-pre-wrap text-sm text-ink-600">{item.resolution}</p><p className="text-xs text-ink-400">Recorded by {item.resolved_by || "Former member"} · {formatLocalDateTime(item.resolved_at!)}</p></> : resolving === item.id ? <form className="space-y-3" onSubmit={event => { event.preventDefault(); void save(() => api.resolveRequirementDecision(workspaceId, item.id, resolution), () => { clearAnswer(); setRecordedScope(item.requirement_id); }); }}>
           {hasAnswer && <p role="status" className="text-xs text-amber-800">Unsaved answer · Kept in this tab while you browse.</p>}
-          <label className="block space-y-1 text-sm">Decision and rationale<textarea disabled={pending} required minLength={10} maxLength={4000} className={inputStyle} value={resolution} onChange={event => setResolution(event.target.value)} placeholder="What was decided, with whom, and why? Update the requirement separately if its scope changes." /></label>
+          <label className="block space-y-1 text-sm">Decision and rationale<RequirementTextarea disabled={pending} required minLength={10} maxLength={4000} className={inputStyle} value={resolution} onChange={event => setResolution(event.target.value)} placeholder="What was decided, with whom, and why? Update the requirement separately if its scope changes." /></label>
           <div className="flex gap-2"><Button type="submit" pending={pending} disabled={pending}>Record decision</Button><Button variant="ghost" disabled={pending} onClick={() => changeAnswer("")}>Cancel</Button></div>
         </form> : <Button variant="secondary" size="sm" disabled={pending} onClick={() => changeAnswer(item.id)}>Record an answer</Button>}
       </article>)}

@@ -147,8 +147,12 @@ five emoji were accepted despite the ten-character minimum, and 100,000 ASCII
 characters surrounded by spaces were rejected. The import regression test now
 checks all three cases. Shared bounds tests cover the 4,000, 12,000 and 100,000
 limits, short input and NUL rejection. Acceptance criteria already counted code
-points. Other short text fields still use native browser length constraints;
-this change does not claim to normalize every input in the application.
+points. Business names, roles, objectives, questions, answers and sign-off notes now use
+shared Unicode-aware controls backed by native custom validity. Optional draft
+fields remain optional, required whitespace-only fields are rejected, and overlong
+text remains available for editing. The initiative search box still uses its native
+query-length limit. Acceptance criteria are bounded per line, without a second
+UTF-16 cap on the entire textarea.
 
 ### File import navigation regression
 

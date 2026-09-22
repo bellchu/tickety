@@ -9,6 +9,9 @@ const workspace = loadPureTs('requirement-workspace.ts');
 
 function loadDecisionLog(overrides = {}) {
   const dependencies = {
+    './BoundedText': loadComponentTs('requirements/BoundedText.tsx', {
+      'react/jsx-runtime': require('react/jsx-runtime'), '@/lib/requirement-text': loadPureTs('requirement-text.ts'),
+    }),
     react: React, 'react/jsx-runtime': require('react/jsx-runtime'),
     '@tanstack/react-query': query, './fields': { inputStyle: '' },
     '@/lib/requirement-workspace': workspace, '@/lib/requirement-editor-cache': drafts,

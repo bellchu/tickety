@@ -1,5 +1,7 @@
 "use client";
 
+import { RequirementInput } from "./BoundedText";
+
 import { requirementTextBounds } from "@/lib/requirement-text";
 
 import { prepareRequirementSource } from "@/lib/requirement-source-import";
@@ -67,7 +69,7 @@ export function SourceIntakeForm({ workspaceId, userId, open, pending, onSave }:
         <Field label="Import source file"><input type="file" disabled={importing || Boolean(pending)} accept=".txt,.md,.eml,.docx,.pdf,.vtt,.srt" onChange={event => { void importText(event.target.files?.[0]); event.target.value = ""; }} className="mt-2 block w-full text-sm" /></Field>
         {importing && <p role="status" className="text-xs">Preparing source preview…</p>}
         {importWarnings.map(warning => <p key={warning} className="text-xs text-amber-800">{warning}</p>)}
-        <Field label="Source title"><input disabled={importing || Boolean(pending)} required maxLength={200} className={inputStyle} value={sourceTitle} onChange={event => setSourceTitle(event.target.value)} /></Field>
+        <Field label="Source title"><RequirementInput disabled={importing || Boolean(pending)} required maxLength={200} className={inputStyle} value={sourceTitle} onChange={event => setSourceTitle(event.target.value)} /></Field>
         <Field label="Source type"><select disabled={importing || Boolean(pending)} className={inputStyle} value={sourceKind} onChange={event => setSourceKind(event.target.value as SourceKind)}>{Object.entries(kinds).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field>
         <Field label="Source text"><textarea disabled={importing || Boolean(pending)} required aria-invalid={Boolean(content) && !bounds.valid} rows={7} className={inputStyle} value={content} onChange={event => setContent(event.target.value)} /></Field><p className="text-xs text-ink-400">{bounds.length.toLocaleString()} / 100,000 characters · Text, EML, DOCX and PDF · 400 KB file limit.</p>
         <p className="text-xs text-ink-500">Use 10–100,000 characters after trimming spaces, without NUL characters.</p>
