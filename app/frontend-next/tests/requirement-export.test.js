@@ -72,3 +72,20 @@ test('copied stories include signed criteria, provenance and only relevant open 
   assert.throws(() => library.requirementStoryText(detail, { ...row, priority: 'wont' }), /in-scope/);
   assert.throws(() => library.requirementStoryText(detail, { ...row, status: 'draft' }), /signed-off/);
 });
+
+test('exports keep multiline evidence literal and user text inside its own structure', () => {
+  const evidence = 'Original excerpt\n```\n## Quoted heading\n<script>example</script>\n```';
+  const row = { id: 'r1', reference: 'REQ-001', title: 'Title\n## Not a new section', actor: 'Analyst', action: 'Confirm receipt', benefit: 'Avoid delays', source_id: 's1', evidence_quote: evidence,
+    acceptance_criteria: ['Confirm receipt\n- include timestamp'], quality_issues: [], priority: 'must', status: 'validated', revision: 2,
+    validated_by: 'reviewer', reviewer_role: 'Product Owner', validated_at: '2026-09-22', validation_note: '<b>Reviewed</b>',
+    story: { reference: 'US-001', title: '[Receipt](https://example.test)', statement: 'As an analyst, I want receipt.', acceptance_criteria: ['Confirm receipt\n- include timestamp'], requirement_reference: 'REQ-001', validated_revision: 2 } };
+  const detail = { workspace: { id: 'w1', title: 'Intake\n# Extra heading', objective: 'Context\n---\n## Quoted title\n~~~\nSample text', request_type: 'enhancement' }, sources: [{ id: 's1', title: 'SOP', kind: 'sop', content_sha256: 'digest' }], requirements: [row], decisions: [] };
+  for (const output of [library.requirementBrief(detail), library.requirementStoryText(detail, row)]) {
+    assert.ok(output.includes('````text\n' + evidence + '\n````'));
+    assert.ok(output.includes('- Confirm receipt\n  \\- include timestamp'));
+    assert.ok(output.includes('\\<b\\>Reviewed\\</b\\>'));
+    assert.ok(!output.includes('\n# Extra heading'));
+    assert.ok(!output.includes('\n~~~'));
+    assert.ok(!output.includes('\n---\n'));
+  }
+});

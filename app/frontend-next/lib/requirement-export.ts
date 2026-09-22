@@ -1,34 +1,48 @@
 import type { BusinessRequirement, RequirementWorkspaceDetail } from "./requirements-types";
 
+function prose(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/[\\`*_[\]<>#|~]/g, "\\$&")
+    .replace(/^( {0,3})([-=])([- =]*)$/gm, "$1\\$2$3")
+    .replace(/^(\s*)([-+])(?=\s)/gm, "$1\\$2")
+    .replace(/^(\s*\d+)([.)])(?=\s)/gm, "$1\\$2");
+}
+function inline(value: string): string { return prose(value.replace(/[\r\n]+/g, " ")); }
+function bullet(value: string): string { return `- ${prose(value).replace(/\r?\n/g, "\n  ")}`; }
+function evidenceBlock(value: string): string {
+  const longest = Math.max(0, ...(value.match(/`+/g) || []).map(run => run.length));
+  const fence = "`".repeat(Math.max(3, longest + 1));
+  return `${fence}text\n${value}\n${fence}`;
+}
+
 export function requirementBrief(detail: RequirementWorkspaceDetail): string {
   const { workspace, requirements, sources } = detail;
   const lines = [
-    `# Business requirements: ${workspace.title}`, "",
+    `# Business requirements: ${inline(workspace.title)}`, "",
     `Initiative ID: ${workspace.id}`,
     `Request type: ${workspace.request_type === "enhancement" ? "Enhancement" : "Approved project / request"}`, "",
-    "## Business objective", workspace.objective, "",
+    "## Business objective", prose(workspace.objective), "",
     "## Evidence register",
-    ...sources.map(source => `- ${source.title} (${source.kind}) — ${source.id}; SHA-256: ${source.content_sha256}`), "",
+    ...sources.map(source => `- ${inline(source.title)} (${source.kind}) — ${source.id}; SHA-256: ${source.content_sha256}`), "",
     "## Documented requirements and functional specification",
   ];
   for (const row of requirements) {
-    lines.push("", `### ${row.reference}: ${row.title}`, `Status: ${row.status} | Priority: ${row.priority} | Revision: ${row.revision}`,
+    lines.push("", `### ${row.reference}: ${inline(row.title)}`, `Status: ${row.status} | Priority: ${row.priority} | Revision: ${row.revision}`,
       `Delivery scope: ${row.priority === "wont" ? "Deferred — not this time" : "Included"}`,
-      `Stakeholder: ${row.actor || "To confirm"}`, `Required capability: ${row.action || "To clarify"}`,
-      `Business outcome: ${row.benefit || "To agree"}`, `Source: ${row.source_id}`,
-      "Evidence:", row.evidence_quote, "", "Acceptance criteria:",
-      ...row.acceptance_criteria.map(item => `- ${item}`));
-    if (row.quality_issues.length) lines.push("Open clarification items:", ...row.quality_issues.map(item => `- ${item}`));
-    if (row.validated_at) lines.push(`Signed off by user ${row.validated_by || "Deleted account"} as ${row.reviewer_role} at ${row.validated_at}.`, `Review note: ${row.validation_note}`);
-    if (row.story && row.priority !== "wont") lines.push("", `#### ${row.story.reference}: ${row.story.title}`, row.story.statement,
+      `Stakeholder: ${inline(row.actor || "To confirm")}`, `Required capability: ${prose(row.action || "To clarify")}`,
+      `Business outcome: ${prose(row.benefit || "To agree")}`, `Source: ${row.source_id}`,
+      "Evidence:", evidenceBlock(row.evidence_quote), "", "Acceptance criteria:",
+      ...row.acceptance_criteria.map(bullet));
+    if (row.quality_issues.length) lines.push("Open clarification items:", ...row.quality_issues.map(bullet));
+    if (row.validated_at) lines.push(`Signed off by user ${row.validated_by || "Deleted account"} as ${row.reviewer_role} at ${row.validated_at}.`, `Review note: ${prose(row.validation_note || "")}`);
+    if (row.story && row.priority !== "wont") lines.push("", `#### ${row.story.reference}: ${inline(row.story.title)}`, prose(row.story.statement),
       `Traces to ${row.story.requirement_reference}, validated revision ${row.story.validated_revision}.`);
   }
   lines.push("", "## Questions and business decisions");
   for (const item of detail.decisions || []) {
     const scope = item.requirement_id ? requirements.find(row => row.id === item.requirement_id)?.reference || item.requirement_id : "Whole initiative";
-    lines.push("", `### ${item.question}`, `Scope: ${scope} | Answer owner: ${item.owner_role}`,
+    lines.push("", `### ${inline(item.question)}`, `Scope: ${scope} | Answer owner: ${inline(item.owner_role || "Unassigned")}`,
       `Status: ${item.status} | Blocks sign-off: ${item.blocking ? "Yes" : "No"}`);
-    if (item.resolution) lines.push(`Decision: ${item.resolution}`, `Recorded by ${item.resolved_by || "Former member"} at ${item.resolved_at}`);
+    if (item.resolution) lines.push(`Decision: ${prose(item.resolution)}`, `Recorded by ${item.resolved_by || "Former member"} at ${item.resolved_at}`);
   }
   const blockers = (detail.decisions || []).filter(item => item.status === "open" && item.blocking).length;
   const stories = requirements.filter(item => item.priority !== "wont" && item.story).length;
@@ -45,20 +59,20 @@ export function requirementStoryText(detail: RequirementWorkspaceDetail, row: Bu
   const source = detail.sources.find(item => item.id === row.source_id);
   const questions = (detail.decisions || []).filter(item => item.status === "open" && (!item.requirement_id || item.requirement_id === row.id));
   const lines = [
-    `# ${story.reference}: ${story.title}`, "", story.statement, "",
-    "## Acceptance criteria", ...story.acceptance_criteria.map(item => `- ${item}`), "",
-    "## Business context", detail.workspace.objective, "",
+    `# ${story.reference}: ${inline(story.title)}`, "", prose(story.statement), "",
+    "## Acceptance criteria", ...story.acceptance_criteria.map(bullet), "",
+    "## Business context", prose(detail.workspace.objective), "",
     "## Traceability",
-    `Initiative: ${detail.workspace.title} (${detail.workspace.id})`,
+    `Initiative: ${inline(detail.workspace.title)} (${detail.workspace.id})`,
     `Requirement: ${story.requirement_reference}; signed-off revision ${story.validated_revision}`,
-    `Source: ${source?.title || "Source unavailable"} (${row.source_id})`,
+    `Source: ${inline(source?.title || "Source unavailable")} (${row.source_id})`,
     ...(source ? [`Evidence text SHA-256: ${source.content_sha256}`] : []),
-    `Evidence excerpt: ${row.evidence_quote}`,
+    "Evidence excerpt:", evidenceBlock(row.evidence_quote),
     `Signed off by: ${row.validated_by || "Former member"} as ${row.reviewer_role || "Unrecorded capacity"}`,
     `Sign-off time: ${row.validated_at || "Unrecorded"}`,
-    `Review note: ${row.validation_note || "Unrecorded"}`, "",
+    `Review note: ${prose(row.validation_note || "Unrecorded")}`, "",
     "## Open business questions",
-    ...questions.map(item => `- ${item.blocking ? "Blocks sign-off" : "Exploratory"}: ${item.question} (Answer owner: ${item.owner_role})`),
+    ...questions.map(item => bullet(`${item.blocking ? "Blocks sign-off" : "Exploratory"}: ${item.question} (Answer owner: ${item.owner_role || "Unassigned"})`)),
     ...(questions.length ? [] : ["No open questions are recorded for this requirement or its initiative."]), "",
     "Prepared for delivery-team review. No external development ticket has been created.",
   ];
