@@ -1,16 +1,24 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const ts = require('typescript');
+const compiled = new Map();
 
 // Type-only imports are erased; runtime helpers must be explicitly supplied.
 // Undeclared dependencies fail rather than loading application services implicitly.
 function loadTs(source, dependencies) {
-  const output = ts.transpileModule(fs.readFileSync(source, 'utf8'), {
-    fileName: source,
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
-  }).outputText;
+  const content = fs.readFileSync(source, 'utf8');
+  let entry = compiled.get(source);
+  if (!entry || entry.content !== content) {
+    const output = ts.transpileModule(content, {
+      fileName: source,
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
+    }).outputText;
+    entry = { content, execute: new Function('exports', 'module', 'require', output) };
+    compiled.set(source, entry);
+  }
+  // Share compilation only: exports, module state and injected dependencies stay fresh.
   const loaded = { exports: {} };
-  new Function('exports', 'module', 'require', output)(loaded.exports, loaded, name => {
+  entry.execute(loaded.exports, loaded, name => {
     if (!(name in dependencies)) throw new Error(`Unexpected dependency: ${name}`);
     return dependencies[name];
   });
