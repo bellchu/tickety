@@ -1,5 +1,6 @@
 "use client";
 
+import { priorities } from "./fields";
 import { CheckCircle2, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui";
 import { formatLocalDateTime } from "@/lib/date-time";
@@ -38,7 +39,7 @@ export function RequirementCard({
         <p className="text-sm leading-6 text-ink-500">{item.action || "The required capability still needs to be clarified."}</p>
         <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-ink-400">
           <span>{item.actor || "Stakeholder to confirm"}</span>
-          <span>{({ must: "Must have", should: "Should have", could: "Could have", wont: "Not this time" })[item.priority]}</span>
+          <span>{priorities[item.priority]}</span>
           <span>{sourceTitle}</span>
         </div>
         {deferred && <p className="text-sm text-ink-500">Preserved for future consideration. Change the priority to bring this requirement back into delivery scope.</p>}

@@ -14,7 +14,7 @@ import { RequirementHistoryPanel } from "@/components/requirements/RequirementHi
 import { CrossReviewPanel } from "@/components/requirements/CrossReviewPanel";
 import { SourceExplorer } from "@/components/requirements/SourceExplorer";
 import { SourceIntakeForm } from "@/components/requirements/SourceIntakeForm";
-import { Field, inputStyle, panelStyle, kinds } from "@/components/requirements/fields";
+import { Field, inputStyle, panelStyle, kinds, priorities } from "@/components/requirements/fields";
 import { DecisionLog } from "@/components/requirements/DecisionLog";
 import { RequirementCard } from "@/components/requirements/RequirementCard";
 import { sourceRequirementCounts, blockedRequirementIds, filterRequirements, workspaceFocus, type RequirementFilter } from "@/lib/requirement-workspace";
@@ -24,7 +24,6 @@ import { Button, ConfirmDialog } from "@/components/ui";
 import { PageFrame, PageHeader } from "@/components/layout/PageLayout";
 import { formatLocalDateTime } from "@/lib/date-time";
 
-const priorities: Record<RequirementPriority, string> = { must: "Must have", should: "Should have", could: "Could have", wont: "Not this time" };
 const blankDraft: RequirementDraft = { source_id: "", title: "", actor: "", action: "", benefit: "", evidence_quote: "", acceptance_criteria: [], priority: "should" };
 function ErrorMessage({ error }: { error: unknown }) {
   return error ? <p role="alert" className="rounded-lg border border-rust-400/30 bg-rust-400/10 p-3 text-sm text-rust-600">{requirementErrorMessage(error)}</p> : null;

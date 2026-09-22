@@ -1,5 +1,6 @@
 "use client";
 
+import { inputStyle } from "./fields";
 import { filterDecisions, type DecisionFilter } from "@/lib/requirement-workspace";
 import { requirementErrorMessage } from "@/lib/requirement-errors";
 
@@ -11,7 +12,6 @@ import { api } from "@/lib/api";
 import { formatLocalDateTime } from "@/lib/date-time";
 import type { BusinessRequirement, RequirementDecision } from "@/lib/requirements-types";
 
-const input = "w-full rounded-lg border border-linen-500 bg-white px-3 py-2 text-sm text-ink-700";
 export function DecisionLog({ workspaceId, userId, requirements, decisions, open, onToggle, seed, onSeedUsed, onSaved }: {
   workspaceId: string; userId: string; requirements: BusinessRequirement[]; decisions: RequirementDecision[];
   open: boolean; onToggle: () => void;
@@ -75,9 +75,9 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
         <h3 className="text-sm font-semibold">Raise a business question</h3>
         {hasQuestion && <p role="status" className="text-xs text-amber-800">Unsaved question · Kept in this tab while you browse.</p>}
         <fieldset disabled={pending} className="contents">
-        <label className="space-y-1 text-sm">Question or assumption to resolve<textarea className={input} required minLength={10} maxLength={4000} value={question} onChange={event => setQuestion(event.target.value)} /></label>
-        <div className="grid gap-3 md:grid-cols-2"><label className="space-y-1 text-sm">Who needs to provide the answer?<input className={input} required maxLength={200} placeholder="For example: Procurement lead" value={owner} onChange={event => setOwner(event.target.value)} /></label>
-        <label className="space-y-1 text-sm">Affected scope<select className={input} value={requirementId} onChange={event => setRequirementId(event.target.value)}><option value="">Whole initiative</option>{requirements.map(item => <option key={item.id} value={item.id}>{item.reference} · {item.title}</option>)}</select></label></div>
+        <label className="space-y-1 text-sm">Question or assumption to resolve<textarea className={inputStyle} required minLength={10} maxLength={4000} value={question} onChange={event => setQuestion(event.target.value)} /></label>
+        <div className="grid gap-3 md:grid-cols-2"><label className="space-y-1 text-sm">Who needs to provide the answer?<input className={inputStyle} required maxLength={200} placeholder="For example: Procurement lead" value={owner} onChange={event => setOwner(event.target.value)} /></label>
+        <label className="space-y-1 text-sm">Affected scope<select className={inputStyle} value={requirementId} onChange={event => setRequirementId(event.target.value)}><option value="">Whole initiative</option>{requirements.map(item => <option key={item.id} value={item.id}>{item.reference} · {item.title}</option>)}</select></label></div>
         <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={blocking} onChange={event => setBlocking(event.target.checked)} />Must be answered before sign-off</label>
         {blocking && <p className="text-xs text-amber-800">This reopens affected requirements and withdraws their current stories. Recording an answer will still require a new sign-off.</p>}
         <p className="text-xs text-ink-500">The answer owner is recorded for follow-up; this does not send a notification or grant access.</p>
@@ -87,14 +87,14 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
       </form>
       {hasAnswer && !outstanding.some(item => item.id === resolving) && <div className="space-y-2 rounded-lg bg-amber-50 p-3 text-sm">
         <p>The question for your unsaved answer is no longer open. Copy any useful notes before discarding this draft.</p>
-        <textarea aria-label="Unsubmitted decision notes" readOnly className={input} value={resolution} />
+        <textarea aria-label="Unsubmitted decision notes" readOnly className={inputStyle} value={resolution} />
         <Button variant="ghost" disabled={pending} onClick={() => setTransition(() => clearAnswer)}>Discard answer draft</Button>
       </div>}
       {error && <p role="alert" className="text-sm text-rust-600">{error}</p>}
       <h3 className="text-sm font-semibold">Decision register</h3>
       <div className="grid gap-3 md:grid-cols-2">
-        <label className="space-y-1 text-sm">Find questions, owners or decisions<input type="search" className={input} value={search} onChange={event => setSearch(event.target.value)} /></label>
-        <label className="space-y-1 text-sm">Show decisions<select className={input} value={view} onChange={event => setView(event.target.value as DecisionFilter)}>
+        <label className="space-y-1 text-sm">Find questions, owners or decisions<input type="search" className={inputStyle} value={search} onChange={event => setSearch(event.target.value)} /></label>
+        <label className="space-y-1 text-sm">Show decisions<select className={inputStyle} value={view} onChange={event => setView(event.target.value as DecisionFilter)}>
           <option value="open">Open questions</option><option value="blocking">Blocks sign-off</option><option value="exploratory">Exploratory questions</option><option value="recorded">Recorded decisions</option><option value="all">All questions & decisions</option>
         </select></label>
       </div>
@@ -104,7 +104,7 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
         <h4 className="text-sm font-semibold">{item.question}</h4>
         {item.status === "resolved" ? <><p className="whitespace-pre-wrap text-sm text-ink-600">{item.resolution}</p><p className="text-xs text-ink-400">Recorded by {item.resolved_by || "Former member"} · {formatLocalDateTime(item.resolved_at!)}</p></> : resolving === item.id ? <form className="space-y-3" onSubmit={event => { event.preventDefault(); void save(() => api.resolveRequirementDecision(workspaceId, item.id, resolution), clearAnswer); }}>
           {hasAnswer && <p role="status" className="text-xs text-amber-800">Unsaved answer · Kept in this tab while you browse.</p>}
-          <label className="block space-y-1 text-sm">Decision and rationale<textarea disabled={pending} required minLength={10} maxLength={4000} className={input} value={resolution} onChange={event => setResolution(event.target.value)} placeholder="What was decided, with whom, and why? Update the requirement separately if its scope changes." /></label>
+          <label className="block space-y-1 text-sm">Decision and rationale<textarea disabled={pending} required minLength={10} maxLength={4000} className={inputStyle} value={resolution} onChange={event => setResolution(event.target.value)} placeholder="What was decided, with whom, and why? Update the requirement separately if its scope changes." /></label>
           <div className="flex gap-2"><Button type="submit" pending={pending} disabled={pending}>Record decision</Button><Button variant="ghost" disabled={pending} onClick={() => changeAnswer("")}>Cancel</Button></div>
         </form> : <Button variant="secondary" size="sm" disabled={pending} onClick={() => changeAnswer(item.id)}>Record an answer</Button>}
       </article>)}

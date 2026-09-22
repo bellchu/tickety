@@ -1,5 +1,6 @@
 "use client";
 
+import { priorities } from "./fields";
 import { requirementChanges, requirementChangeSummary } from "@/lib/requirement-history";
 import { requirementErrorMessage } from "@/lib/requirement-errors";
 
@@ -13,7 +14,7 @@ import type { BusinessRequirement } from "@/lib/requirements-types";
 const labels: Record<string, string> = { created: "Requirement captured", edited: "Requirement revised", signed_off: "Business sign-off", story_created: "Story prepared", blocked: "Reopened by a blocking question" };
 function value(item: unknown, field: keyof BusinessRequirement): string {
   if (item === null || item === undefined || item === "") return "—";
-  if (field === "priority") return ({ must: "Must have", should: "Should have", could: "Could have", wont: "Not this time" } as Record<string, string>)[String(item)] || String(item);
+  if (field === "priority") return (priorities as Record<string, string>)[String(item)] || String(item);
   if (field === "status") return item === "validated" ? "Signed off" : "Draft";
   if (field === "validated_at") return formatLocalDateTime(String(item));
   if (Array.isArray(item)) return item.join("\n");
