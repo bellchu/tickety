@@ -1,26 +1,9 @@
+const { loadPureTs } = require("./helpers/load-pure-ts");
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const path = require("node:path");
 const test = require("node:test");
-const ts = require("typescript");
 
 function loadApi() {
-  const filename = path.join(__dirname, "..", "lib", "api.ts");
-  const source = fs.readFileSync(filename, "utf8");
-  const output = ts.transpileModule(source, {
-    compilerOptions: {
-      module: ts.ModuleKind.CommonJS,
-      target: ts.ScriptTarget.ES2020,
-    },
-    fileName: filename,
-  }).outputText;
-  const loaded = { exports: {} };
-  const compile = new Function("require", "exports", "module", output);
-  compile((specifier) => {
-    if (specifier === "@tanstack/react-query") return { QueryClient: class QueryClient {} };
-    throw new Error(`Unexpected module: ${specifier}`);
-  }, loaded.exports, loaded);
-  return loaded.exports;
+  return loadPureTs("api.ts", { "@tanstack/react-query": { QueryClient: class QueryClient {} } });
 }
 
 test("deleteCategory keeps HTTP failures on the API error path", async () => {
