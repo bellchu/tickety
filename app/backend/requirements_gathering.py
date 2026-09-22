@@ -157,6 +157,15 @@ def record_history(db, row, user, action, before=None):
     ))
 
 
+def analysis_fields(row):
+    """Business content shared by review prompts, without agreement/account metadata."""
+    return {
+        "title": row.title, "actor": row.actor, "action": row.action,
+        "benefit": row.benefit, "evidence_quote": row.evidence_quote,
+        "acceptance_criteria": json.loads(row.acceptance_json),
+    }
+
+
 def create_router(require_user, require_ai_user, get_llm, reserve_ai):
     router = APIRouter(prefix="/requirements", tags=["Requirement gathering"])
 
@@ -416,11 +425,9 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
         if len(rows) != len(data.requirement_ids):
             raise HTTPException(422, "Choose requirements from this workspace")
         snapshots = [{"id": row.id, "reference": f"REQ-{row.number:03d}", "revision": row.revision} for row in rows]
-        fields = {f"REQ-{row.number:03d}": json.dumps({
-            "title": row.title, "priority": row.priority, "actor": row.actor,
-            "action": row.action, "benefit": row.benefit, "evidence_quote": row.evidence_quote,
-            "acceptance_criteria": json.loads(row.acceptance_json),
-        }, ensure_ascii=False) for row in rows}
+        fields = {f"REQ-{row.number:03d}": json.dumps(
+            {"title": row.title, "priority": row.priority, **analysis_fields(row)}, ensure_ascii=False,
+        ) for row in rows}
         llm = get_llm()
         prompt = prepare_prompt(llm, objective=initiative.objective, **fields)
         db.rollback()
@@ -461,11 +468,7 @@ def create_router(require_user, require_ai_user, get_llm, reserve_ai):
         if data.mode == "story" and row.status != "validated":
             raise HTTPException(409, "Sign off the requirement before requesting story refinement")
         llm = get_llm()
-        prompt = prepare_prompt(llm, requirement=json.dumps({
-            "title": row.title, "actor": row.actor, "action": row.action,
-            "benefit": row.benefit, "evidence_quote": row.evidence_quote,
-            "acceptance_criteria": json.loads(row.acceptance_json),
-        }, ensure_ascii=False))
+        prompt = prepare_prompt(llm, requirement=json.dumps(analysis_fields(row), ensure_ascii=False))
         # Release the row lock before any provider work. Suggestions cannot write
         # data, and applying a suggestion still requires the captured revision.
         db.rollback()

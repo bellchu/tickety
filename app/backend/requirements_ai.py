@@ -89,7 +89,8 @@ async def suggest(llm, prompt, model, instruction):
 async def gather(llm, prompt, original_content):
     result = await suggest(llm, prompt, GatherSuggestions,
         "Extract up to eight distinct business requirements. Every evidence_quote must be an exact continuous excerpt from content. Only use the text actually supplied; truncated input is partial. Leave unsupported actor, action or benefit fields empty. List any proposed acceptance targets as assumptions; never disguise an assumption as sourced fact. List missing stakeholder decisions in questions.")
-    sent_content = json.loads(prompt)["content"]
+    sent = json.loads(prompt)
+    sent_content = sent["content"]
     accepted = []
     for candidate in result["candidates"]:
         quote = candidate["evidence_quote"]
@@ -99,5 +100,5 @@ async def gather(llm, prompt, original_content):
         **result,
         "candidates": accepted,
         "discarded_candidates": len(result["candidates"]) - len(accepted),
-        "source_truncated": json.loads(prompt)["content_truncated"],
+        "source_truncated": sent["content_truncated"],
     }
