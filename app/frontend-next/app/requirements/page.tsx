@@ -1,5 +1,7 @@
 "use client";
 
+import { requirementErrorMessage } from "@/lib/requirement-errors";
+
 import { Suspense, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -22,14 +24,8 @@ import { formatLocalDateTime } from "@/lib/date-time";
 
 const priorities: Record<RequirementPriority, string> = { must: "Must have", should: "Should have", could: "Could have", wont: "Not this time" };
 const blankDraft: RequirementDraft = { source_id: "", title: "", actor: "", action: "", benefit: "", evidence_quote: "", acceptance_criteria: [], priority: "should" };
-const message = (error: unknown) => {
-  const text = error instanceof Error ? error.message : "Something went wrong. Please try again.";
-  return ({ ai_unavailable: "AI is unavailable. Check the configured provider in Settings; your saved work is unchanged.", invalid_ai_output: "The AI response could not be verified. Your saved work is unchanged.", ai_rate_limit_exceeded: "AI request limit reached. Please wait a minute before trying again.", ai_daily_budget_exceeded: "Today's AI budget has been reached. You can continue working manually." } as Record<string, string>)[text] || text;
-};
-
-
 function ErrorMessage({ error }: { error: unknown }) {
-  return error ? <p role="alert" className="rounded-lg border border-rust-400/30 bg-rust-400/10 p-3 text-sm text-rust-600">{message(error)}</p> : null;
+  return error ? <p role="alert" className="rounded-lg border border-rust-400/30 bg-rust-400/10 p-3 text-sm text-rust-600">{requirementErrorMessage(error)}</p> : null;
 }
 
 function exportBrief(detail: RequirementWorkspaceDetail) {

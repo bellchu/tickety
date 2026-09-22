@@ -1,5 +1,7 @@
 "use client";
 
+import { requirementErrorMessage } from "@/lib/requirement-errors";
+
 import { useState } from "react";
 import { api } from "@/lib/api";
 import type { SourceKind } from "@/lib/requirements-types";
@@ -44,7 +46,7 @@ export function SourceIntakeForm({ workspaceId, open, pending, onSave }: {
 
   if (!open) return null;
   return <>
-    {Boolean(error) && <p role="alert" className="rounded-lg bg-rust-400/10 p-3 text-sm text-rust-600">{error instanceof Error ? error.message : "Could not prepare the source preview."}</p>}
+    {Boolean(error) && <p role="alert" className="rounded-lg bg-rust-400/10 p-3 text-sm text-rust-600">{requirementErrorMessage(error)}</p>}
       <form className={`${panelStyle} space-y-4`} onSubmit={async event => { event.preventDefault(); setError(null); if (await onSave({ title: sourceTitle, kind: sourceKind, content })) { setSourceTitle(""); setContent(""); setImportWarnings([]); } }}>
         <h2 className="text-lg font-semibold">Add supporting material</h2><p className="text-sm text-ink-500">Paste source material or import a document or email. Sources are preserved so every requirement can point back to its evidence.</p>
         <Field label="Import source file"><input type="file" disabled={importing || Boolean(pending)} accept=".txt,.md,.eml,.docx,.pdf,.vtt,.srt" onChange={event => { void importText(event.target.files?.[0]); event.target.value = ""; }} className="mt-2 block w-full text-sm" /></Field>

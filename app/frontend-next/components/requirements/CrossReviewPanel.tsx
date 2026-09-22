@@ -1,5 +1,7 @@
 "use client";
 
+import { requirementErrorMessage } from "@/lib/requirement-errors";
+
 import { useState } from "react";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui";
@@ -16,7 +18,7 @@ export function CrossReviewPanel({ workspaceId, items, onQuestion }: { workspace
     if (pending) return;
     setPending(true); setError(""); setResult(null);
     try { setResult(await api.crossReviewRequirements(workspaceId, selected)); }
-    catch (caught) { setError(caught instanceof Error ? (caught.message === "ai_unavailable" ? "AI is unavailable. Check your configured provider in Settings." : caught.message) : "The cross-check could not be completed."); }
+    catch (caught) { setError(requirementErrorMessage(caught)); }
     finally { setPending(false); }
   }
   return <section className="space-y-3 rounded-xl border border-linen-400 bg-white p-4" aria-label="Cross-requirement review">

@@ -1,5 +1,7 @@
 "use client";
 
+import { requirementErrorMessage } from "@/lib/requirement-errors";
+
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
@@ -29,7 +31,7 @@ export function RequirementHistoryPanel({ workspaceId, itemId, revision, onClose
     <div className="flex items-center justify-between"><h2 className="font-semibold">Requirement history</h2><Button variant="ghost" onClick={onClose}>Close history</Button></div>
     <p className="text-xs text-ink-500">Historical evidence is read-only. To restore earlier wording, edit the current requirement and obtain a new sign-off.</p>
     {query.isPending && <p role="status">Loading history…</p>}
-    {query.isError && <div role="alert"><p className="text-sm text-rust-600">{query.error.message}</p><Button variant="secondary" onClick={() => query.refetch()}>Retry history</Button></div>}
+    {query.isError && <div role="alert"><p className="text-sm text-rust-600">{requirementErrorMessage(query.error)}</p><Button variant="secondary" onClick={() => query.refetch()}>Retry history</Button></div>}
     {query.data?.total === 0 && <p className="text-sm text-ink-500">No history has been recorded yet. Changes made before history tracking was introduced are not reconstructed.</p>}
     {query.data?.items.map(event => <details key={event.id} className="rounded-lg border border-linen-400 p-4">
       <summary className="cursor-pointer text-sm font-semibold">{event.after.reference} · Revision {event.revision} · {labels[event.action] || event.action}</summary>

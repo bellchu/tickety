@@ -1,5 +1,7 @@
 "use client";
 
+import { requirementErrorMessage } from "@/lib/requirement-errors";
+
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui";
 import { api } from "@/lib/api";
@@ -29,7 +31,7 @@ export function DecisionLog({ workspaceId, requirements, decisions, open, onTogg
     if (pending) return;
     setPending(true); setError("");
     try { await operation(); done(); await onSaved(); }
-    catch (caught) { setError(caught instanceof Error ? caught.message : "Could not save the decision."); }
+    catch (caught) { setError(requirementErrorMessage(caught)); }
     finally { setPending(false); }
   }
   const outstanding = decisions.filter(item => item.status === "open");
