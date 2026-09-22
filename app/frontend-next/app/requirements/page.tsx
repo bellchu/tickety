@@ -210,8 +210,9 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
 
   function switchEditor(action: () => void) {
     if (pending) return;
-    if (unsaved) setTransition(() => action);
-    else action();
+    const apply = () => { setNotice(""); action(); };
+    if (unsaved) setTransition(() => apply);
+    else apply();
   }
   function signOff(row: BusinessRequirement) {
     switchEditor(() => { setReviewing(row); setShowForm(false); setReviewNote(""); });

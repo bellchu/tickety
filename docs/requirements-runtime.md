@@ -255,3 +255,13 @@ the same initiative restored both entries with their original line boundaries.
 Removing the temporary second entry focused **Criterion 1**. The editor was then
 cancelled without saving; no requirement, sign-off or business decision was changed.
 The production build and route verification also passed for this check.
+
+### Evidence type filters and traceability
+
+In the local production preview, selecting **Email** reduced the source register
+from two entries to one and hid the SOP. Expanding REQ-001 and choosing **Read in
+original source** reset the type filter to **All source types**, reopened the SOP,
+and focused the exact highlighted quotation labelled **Evidence for REQ-001**.
+This read-only check confirms evidence navigation cannot be trapped by the type
+filter. The production build and route checks passed. Automated source-filter
+coverage combines type, normalized title search and unlinked-only selection.
