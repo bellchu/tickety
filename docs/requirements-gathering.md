@@ -5,6 +5,21 @@ initiative with a concrete business objective. A real, active operations session
 is required, including in demo mode. An initiative is visible to its creator and
 active administrators. Its bookmarkable `?initiative=` address does not grant access.
 
+## Find and compare initiatives
+
+The initiative list shows total captured requirements, in-scope drafts awaiting
+agreement, and prepared stories. Deferred needs remain in the total but do not
+inflate the active draft or story counts. Prepared stories still require delivery
+review; these counts are a progress overview, not a release approval.
+
+Search initiatives by name or business objective from the overview. Submit the
+search to inspect all matching initiatives you can access, including those beyond
+the current page. Search text is treated literally; clearing it restores the full
+list and returns to the first page.
+The overview also identifies signed-off requirements still awaiting story
+preparation and deferred needs, so these do not disappear between the draft and
+prepared-story counts. All counts come from one grouped query per overview page.
+
 ## Choose the next useful action
 
 The workspace connects evidence, business questions, agreed requirements and
@@ -47,6 +62,22 @@ identical confirmed text into the same initiative reuses the original source,
 including its title, type and requirement links, even at the source limit. Similar
 wording is not merged; another initiative has its own private sources.
 
+While reading a saved source, select or paste an exact 10–4,000-character passage
+and choose **Draft a requirement from this passage**. The draft carries the source
+and excerpt; describe the stakeholder, business outcome and acceptance criteria
+before saving. This action is available without AI and protects existing unsaved
+edits before replacing them.
+
+Use **View linked requirements** on a source to inspect the needs captured from
+that material, including deferred needs. The source selector combines with search
+and readiness filters. **Show all sources** removes only the source restriction;
+exports and initiative-wide readiness still cover the complete saved workspace.
+
+Selected evidence passages remain in tab memory when you close a material or
+browse another initiative. Each material has its own passage; **Clear passage**
+removes it. These selections are not saved to the server or browser storage and
+are cleared by a full reload or sign-out.
+
 ## Shape and review a requirement
 
 Each requirement links to one exact excerpt from a saved source. Add a stakeholder,
@@ -76,6 +107,28 @@ summarizes changed business fields, scope changes and withdrawn agreement or sto
 before you expand the detailed comparison. Copying
 old wording into a new edit still requires fresh sign-off; history itself is read-only.
 
+Requirement search includes the stakeholder, outcome, evidence excerpt, acceptance
+criteria and prepared story, including its reference. Wrapped text is searchable as
+a continuous phrase. Search combines with the selected readiness or deferred-scope
+view; it does not change delivery eligibility. Choose **Business priority** to discuss
+must-have needs first, followed by should-have, could-have and deferred needs. Equal
+priorities retain their recorded order. Return to **Recorded order** at any time;
+sorting does not update priorities or saved records. Suggested focus also uses recorded
+priority when choosing among reviewable requirements or signed-off requirements
+awaiting a story. Blocking questions and unclear requirements still take precedence.
+
+The sign-off form displays the exact revision being reviewed, its priority, business
+outcome, acceptance criteria and evidence excerpt. Compare those commitments with
+the source before recording your review capacity and confirmation note. When a
+refresh reveals a changed revision, signing is disabled until you choose **Review
+current version**; your note is retained for you to reassess. Newly blocked, deferred
+or already signed requirements remain unavailable for sign-off. The server also
+checks the revision and business gates when the request arrives.
+
+History shows the range of records currently displayed. **Latest changes** returns
+to the newest entries from any older page. When refreshed workspace data reveals
+a new requirement revision, the history panel starts at the latest entries.
+
 ## Resolve business questions
 
 A question records an answer owner and either one affected requirement or the whole
@@ -101,29 +154,18 @@ exploration starts at initiative scope. Choose the owner, affected scope
 and blocking status before saving. Replacing an unfinished question, or switching
 away from an unfinished answer, asks whether to keep or discard the draft.
 
-Requirement search includes the stakeholder, outcome, evidence excerpt, acceptance
-criteria and prepared story, including its reference. Wrapped text is searchable as
-a continuous phrase. Search combines with the selected readiness or deferred-scope
-view; it does not change delivery eligibility. Choose **Business priority** to discuss
-must-have needs first, followed by should-have, could-have and deferred needs. Equal
-priorities retain their recorded order. Return to **Recorded order** at any time;
-sorting does not update priorities or saved records. Suggested focus also uses recorded
-priority when choosing among reviewable requirements or signed-off requirements
-awaiting a story. Blocking questions and unclear requirements still take precedence.
+**Related decisions** on a requirement opens its decision register scope. This
+includes whole-initiative decisions as well as those linked to that requirement.
+Use the status filter to inspect recorded answers or outstanding questions; an
+answer currently being edited remains visible when the scope changes.
 
-While reading a saved source, select or paste an exact 10–4,000-character passage
-and choose **Draft a requirement from this passage**. The draft carries the source
-and excerpt; describe the stakeholder, business outcome and acceptance criteria
-before saving. This action is available without AI and protects existing unsaved
-edits before replacing them.
+Long decision registers initially display 20 matching records. **Show more records**
+expands the list; searches always cover the full register. An answer being edited
+remains visible even outside the displayed batch, and filtering never clears its draft.
 
-The sign-off form displays the exact revision being reviewed, its priority, business
-outcome, acceptance criteria and evidence excerpt. Compare those commitments with
-the source before recording your review capacity and confirmation note. When a
-refresh reveals a changed revision, signing is disabled until you choose **Review
-current version**; your note is retained for you to reassess. Newly blocked, deferred
-or already signed requirements remain unavailable for sign-off. The server also
-checks the revision and business gates when the request arrives.
+The open-question view lists sign-off blockers before exploratory questions,
+preserving recorded order within each group. The all-records and recorded-decision
+views retain their original order for historical review.
 
 ## Use AI where it helps
 
@@ -147,6 +189,11 @@ AI suggestions are not proof of completeness or consistency. All assistance uses
 the configured provider, redaction and per-user budgets. Provider failures or budget
 limits leave manual work available; the product does not substitute synthetic answers.
 
+Single-requirement AI reviews and story refinements retain their analyzed revision.
+When refreshed data reveals a newer version, suggestions remain readable but cannot
+be tracked or applied. Use **Analyze current version** to replace them; story
+refinement requires the current requirement to be in scope and signed off.
+
 ## Move between tasks without losing drafts
 
 Unsaved requirement edits, sign-off notes, material text and decision drafts are kept
@@ -165,6 +212,12 @@ button to check saved records before retrying. That refresh retains the editor; 
 full browser reload does not. Restored edits retain their original revision checks.
 If another person has already resolved a question, unsubmitted answer notes remain
 available to copy or discard rather than overwriting the recorded decision.
+
+When a save conflicts with newer server work, the workspace refreshes its saved
+data without discarding your draft. An outdated requirement editor shows both
+revision numbers and offers change history plus **Load latest saved version**. Copy
+useful wording before loading; replacing unsaved edits requires confirmation.
+Review the updated version or decision before trying again; the application does not automatically replay the failed write.
 
 ## Keep delivery scope and traceability clear
 
@@ -191,66 +244,15 @@ requirements, capabilities,
 acceptance criteria, clarifications, decisions, sign-offs and eligible stories. Copy
 and export do not create Jira tickets or send messages to a delivery system.
 
-See [runtime boundaries](requirements-runtime.md) for import limits, audit behavior,
-AI admission and capacity constraints.
-
-When a save conflicts with newer server work, the workspace refreshes its saved
-data without discarding your draft. An outdated requirement editor shows both
-revision numbers and offers change history plus **Load latest saved version**. Copy
-useful wording before loading; replacing unsaved edits requires confirmation.
-Review the updated version or decision before trying again; the application does not automatically replay the failed write.
-
-Single-requirement AI reviews and story refinements retain their analyzed revision.
-When refreshed data reveals a newer version, suggestions remain readable but cannot
-be tracked or applied. Use **Analyze current version** to replace them; story
-refinement requires the current requirement to be in scope and signed off.
-
-Use **View linked requirements** on a source to inspect the needs captured from
-that material, including deferred needs. The source selector combines with search
-and readiness filters. **Show all sources** removes only the source restriction;
-exports and initiative-wide readiness still cover the complete saved workspace.
-
-**Related decisions** on a requirement opens its decision register scope. This
-includes whole-initiative decisions as well as those linked to that requirement.
-Use the status filter to inspect recorded answers or outstanding questions; an
-answer currently being edited remains visible when the scope changes.
-
-Long decision registers initially display 20 matching records. **Show more records**
-expands the list; searches always cover the full register. An answer being edited
-remains visible even outside the displayed batch, and filtering never clears its draft.
+Use **Agreed · needs a story** to find signed-off, in-scope requirements awaiting
+story preparation. The view excludes requirements with blocking questions and
+works with source search and business-priority ordering. Creating a story moves
+the requirement into **Delivery ready**; editing it returns it to human review.
 
 The BRD readiness summary separates blocking questions linked only to deferred
 requirements from those affecting current scope. Questions with unavailable scope
 remain counted as needing scope confirmation; the complete decision register and
 overall blocker count remain in the brief.
 
-Use **Agreed · needs a story** to find signed-off, in-scope requirements awaiting
-story preparation. The view excludes requirements with blocking questions and
-works with source search and business-priority ordering. Creating a story moves
-the requirement into **Delivery ready**; editing it returns it to human review.
-
-Selected evidence passages remain in tab memory when you close a material or
-browse another initiative. Each material has its own passage; **Clear passage**
-removes it. These selections are not saved to the server or browser storage and
-are cleared by a full reload or sign-out.
-
-History shows the range of records currently displayed. **Latest changes** returns
-to the newest entries from any older page. When refreshed workspace data reveals
-a new requirement revision, the history panel starts at the latest entries.
-
-The initiative list shows total captured requirements, in-scope drafts awaiting
-agreement, and prepared stories. Deferred needs remain in the total but do not
-inflate the active draft or story counts. Prepared stories still require delivery
-review; these counts are a progress overview, not a release approval.
-
-Search initiatives by name or business objective from the overview. Submit the
-search to inspect all matching initiatives you can access, including those beyond
-the current page. Search text is treated literally; clearing it restores the full
-list and returns to the first page.
-The overview also identifies signed-off requirements still awaiting story
-preparation and deferred needs, so these do not disappear between the draft and
-prepared-story counts. All counts come from one grouped query per overview page.
-
-The open-question view lists sign-off blockers before exploratory questions,
-preserving recorded order within each group. The all-records and recorded-decision
-views retain their original order for historical review.
+See [runtime boundaries](requirements-runtime.md) for import limits, audit behavior,
+AI admission and capacity constraints.
