@@ -93,3 +93,8 @@ is browser-dependent; this is not durable autosave.
 Save completion clears only the in-memory draft version captured when that request
 started. A later edit restored after navigation survives an older request finishing;
 this does not cancel the earlier server write or bypass requirement revision checks.
+
+Saved source bodies share an account-scoped query cache between reading and editing.
+Because saved sources are immutable, cached bodies do not refetch on focus or reopen;
+normal inactive-query eviction and sign-out cache clearing still apply. Closed
+requirement editors do not initiate source-body queries.

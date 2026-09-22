@@ -1,6 +1,7 @@
 "use client";
 
 import { captureRequirementDraftSave, readRequirementEditor, rememberRequirementEditor, readRequirementSourceDraft, readRequirementDecisionDraft } from "@/lib/requirement-editor-cache";
+import { requirementSourceQuery } from "@/lib/requirement-source-query";
 import { parseRequirementCriteria } from "@/lib/requirement-criteria";
 import { requirementErrorMessage } from "@/lib/requirement-errors";
 
@@ -133,8 +134,8 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
   const [reviewNote, setReviewNote] = useState(restored?.reviewNote || "");
   const [gathered, setGathered] = useState<GatherSuggestions | null>(null);
   const [assistance, setAssistance] = useState<{ item: BusinessRequirement; result: RequirementAssistance } | null>(null);
-  const source = useQuery({ queryKey: ["requirement-source", id, draft.source_id], queryFn: () => api.getRequirementSource(id, draft.source_id), enabled: Boolean(draft.source_id) });
-  const evidence = useQuery({ queryKey: ["requirement-source", id, sourceViewing], queryFn: () => api.getRequirementSource(id, sourceViewing), enabled: Boolean(sourceViewing) });
+  const source = useQuery(requirementSourceQuery(userId, id, draft.source_id, api.getRequirementSource, showForm));
+  const evidence = useQuery(requirementSourceQuery(userId, id, sourceViewing, api.getRequirementSource));
   const detail = query.data;
   const sourceCounts = useMemo(() => sourceRequirementCounts(detail?.requirements || []), [detail?.requirements]);
   const overview = useMemo(() => detail ? {
