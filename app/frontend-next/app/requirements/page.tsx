@@ -307,6 +307,14 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
         <fieldset disabled={pending === reviewing.id} className="space-y-4">
         <h2 className="font-semibold">Sign off {reviewing.reference}: {reviewing.title}</h2>
         <p className="text-sm text-ink-500">Confirm that the requirement reflects the source, the expected outcome is agreed, and the acceptance criteria can be tested. Your signed-in account is recorded.</p>
+        <section className="space-y-3 rounded-lg border border-linen-400 bg-linen-50 p-4" aria-label="Requirement being signed off">
+          <p className="text-xs text-ink-500">Reviewing revision {reviewing.revision} · {priorities[reviewing.priority]}</p>
+          <p className="text-sm leading-6">As a {reviewing.actor}, I want to {reviewing.action}, so that {reviewing.benefit}.</p>
+          <h3 className="text-sm font-semibold">Acceptance criteria to agree</h3>
+          <ul className="list-disc space-y-2 pl-5 text-sm">{reviewing.acceptance_criteria.map((criterion, index) => <li key={index} className="whitespace-pre-wrap">{criterion}</li>)}</ul>
+          <h3 className="text-sm font-semibold">Evidence · {sourceNames.get(reviewing.source_id) || "Source unavailable"}</h3>
+          <blockquote className="whitespace-pre-wrap border-l-2 border-clay-300 pl-3 text-sm leading-6 text-ink-500">{reviewing.evidence_quote}</blockquote>
+        </section>
         <Field label="Review capacity"><select className={inputStyle} value={reviewerRole} onChange={event => setReviewerRole(event.target.value)}>{["Product Owner", "Business Stakeholder", "Technical Business Analyst", "DTL"].map(role => <option key={role}>{role}</option>)}</select></Field>
         <Field label="Sign-off note"><textarea required minLength={10} maxLength={4000} className={inputStyle} value={reviewNote} onChange={event => setReviewNote(event.target.value)} placeholder="What was confirmed, and with whom?" /></Field>
         <div className="flex gap-2"><Button type="submit" pending={pending === reviewing.id} disabled={Boolean(pending)}>Sign off requirement</Button><Button variant="ghost" disabled={Boolean(pending)} onClick={() => switchEditor(() => setReviewing(null))}>Cancel</Button></div>

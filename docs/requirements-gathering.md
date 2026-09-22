@@ -112,6 +112,10 @@ and excerpt; describe the stakeholder, business outcome and acceptance criteria
 before saving. This action is available without AI and protects existing unsaved
 edits before replacing them.
 
+The sign-off form displays the exact revision being reviewed, its priority, business
+outcome, acceptance criteria and evidence excerpt. Compare those commitments with
+the source before recording your review capacity and confirmation note.
+
 ## Use AI where it helps
 
 - **Explore with AI** proposes up to eight requirements from one source. Unverifiable
