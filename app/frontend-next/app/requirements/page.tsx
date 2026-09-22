@@ -1,9 +1,10 @@
 "use client";
 
 import { readRequirementEditor, rememberRequirementEditor, readRequirementSourceDraft, readRequirementDecisionDraft } from "@/lib/requirement-editor-cache";
+import { parseRequirementCriteria } from "@/lib/requirement-criteria";
 import { requirementErrorMessage } from "@/lib/requirement-errors";
 
-import { Suspense, useEffect, useState, type FormEvent } from "react";
+import { Suspense, useEffect, useMemo, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -114,6 +115,7 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
   const [draftAssumptions, setDraftAssumptions] = useState<string[]>(restored?.assumptions || []);
   const [draft, setDraft] = useState<RequirementDraft>(restored?.draft || { ...blankDraft });
   const [criteria, setCriteria] = useState(restored?.criteria || "");
+  const parsedCriteria = useMemo(() => parseRequirementCriteria(criteria), [criteria]);
   const [draftBaseline, setDraftBaseline] = useState(restored?.baseline || "");
   const [transition, setTransition] = useState<(() => void) | null>(null);
   const [editing, setEditing] = useState<BusinessRequirement | undefined>(restored?.editing);
@@ -165,9 +167,10 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
   }
 
   async function saveDraft() {
+    if (parsedCriteria.issue) { setError(new Error(parsedCriteria.issue)); return; }
     let saved: Awaited<ReturnType<typeof api.saveBusinessRequirement>> | undefined;
     await run("requirement", async () => {
-      saved = await api.saveBusinessRequirement(id, { ...draft, acceptance_criteria: criteria.split("\n").map(line => line.trim()).filter(Boolean) }, editing);
+      saved = await api.saveBusinessRequirement(id, { ...draft, acceptance_criteria: parsedCriteria.criteria }, editing);
     }, () => {
       rememberRequirementEditor(editorClient, userId, id, null);
       setShowForm(false); setEditing(undefined);
@@ -282,8 +285,9 @@ function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; 
         <div className="grid gap-4 md:grid-cols-2"><Field label="As a… (stakeholder or user role)"><input maxLength={200} className={inputStyle} value={draft.actor} onChange={event => setDraft({ ...draft, actor: event.target.value })} placeholder="finance analyst" /></Field><Field label="Priority"><select className={inputStyle} value={draft.priority} onChange={event => setDraft({ ...draft, priority: event.target.value as RequirementPriority })}>{Object.entries(priorities).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field></div>
         <Field label="I want to… (required capability)"><textarea maxLength={4000} className={inputStyle} value={draft.action} onChange={event => setDraft({ ...draft, action: event.target.value })} /></Field>
         <Field label="So that… (business outcome)"><textarea maxLength={4000} className={inputStyle} value={draft.benefit} onChange={event => setDraft({ ...draft, benefit: event.target.value })} /></Field>
-        <Field label="Acceptance criteria · one per line"><textarea rows={4} maxLength={20020} className={inputStyle} value={criteria} onChange={event => setCriteria(event.target.value)} placeholder="Given a valid request, when it is submitted, then a receipt appears within 30 seconds." /></Field>
-        <div className="flex gap-2"><Button type="submit" pending={pending === "requirement"} disabled={Boolean(pending) || source.isError}>Save draft</Button><Button variant="ghost" disabled={Boolean(pending)} onClick={() => switchEditor(() => setShowForm(false))}>Cancel</Button></div>
+        <Field label="Acceptance criteria · one per line"><textarea rows={4} maxLength={20020} aria-invalid={Boolean(parsedCriteria.issue)} aria-describedby="requirement-criteria-help" className={inputStyle} value={criteria} onChange={event => setCriteria(event.target.value)} placeholder="Given a valid request, when it is submitted, then a receipt appears within 30 seconds." /></Field>
+        <p id="requirement-criteria-help" className={`text-xs ${parsedCriteria.issue ? "text-rust-600" : "text-ink-500"}`}>{parsedCriteria.issue || `${parsedCriteria.criteria.length} / 20 criteria · 10–1,000 characters each. You can leave this empty while drafting.`}</p>
+        <div className="flex gap-2"><Button type="submit" pending={pending === "requirement"} disabled={Boolean(pending) || source.isError || Boolean(parsedCriteria.issue)}>Save draft</Button><Button variant="ghost" disabled={Boolean(pending)} onClick={() => switchEditor(() => setShowForm(false))}>Cancel</Button></div>
       </form>}
 
         {visibleItems.length === 0 && <div className={`${panelStyle} py-10 text-center`}><FileText className="mx-auto text-ink-300" /><h3 className="mt-3 font-semibold">{detail.requirements.length ? "No requirements match this view" : "Give the business need a clear shape"}</h3><p className="mx-auto mt-2 max-w-md text-sm leading-6 text-ink-500">{detail.requirements.length ? "Try a different search or show all work." : "Explore your material, capture an outcome, or start with a question. Your evidence and decisions will stay connected here."}</p></div>}

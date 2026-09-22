@@ -53,6 +53,8 @@ Each requirement links to one exact excerpt from a saved source. Add a stakehold
 capability, business outcome, priority and observable acceptance criteria. Incomplete
 work can be saved as a draft with a stable initiative-local reference such as
 `REQ-001`. Quality checks flag missing detail, vague wording and duplicate criteria.
+The editor accepts up to 20 criteria, one per line, with 10–1,000 characters each;
+it identifies invalid lines before saving. Empty criteria remain allowed for drafts.
 
 Saving a new requirement whose source and all business fields exactly match an
 existing one reuses that record. The interface names it; its sign-off, story and
