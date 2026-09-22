@@ -1,5 +1,6 @@
 "use client";
 
+import { readRequirementEditor, rememberRequirementEditor } from "@/lib/requirement-editor-cache";
 import { requirementErrorMessage } from "@/lib/requirement-errors";
 
 import { Suspense, useEffect, useState, type FormEvent } from "react";
@@ -78,7 +79,7 @@ function RequirementsContent() {
 
   if (auth.isPending) return <p role="status">Checking access…</p>;
   if (!allowed) return <PageFrame><PageHeader title="Requirements" description="Sign in with an active operations account to work with business requirements." /><ErrorMessage error={auth.error} /></PageFrame>;
-  if (selected) return <Workspace key={selected} id={selected} canAI={auth.data?.app_mode === "production" || auth.data?.role.toLowerCase() === "admin"} onBack={() => setSelected(null)} />;
+  if (selected) return <Workspace key={`${auth.data.id}:${selected}`} userId={auth.data.id} id={selected} canAI={auth.data?.app_mode === "production" || auth.data?.role.toLowerCase() === "admin"} onBack={() => setSelected(null)} />;
 
   return <PageFrame>
     <PageHeader eyebrow="Business operations" icon={<ClipboardList size={16} />} title="Business requirements, in context" description="A shared place to understand the need, resolve uncertainty, and shape work worth delivering." actions={<Button leadingIcon={<Plus size={16} />} onClick={() => setCreating(!creating)}>New initiative</Button>} />
@@ -99,7 +100,9 @@ function RequirementsContent() {
   </PageFrame>;
 }
 
-function Workspace({ id, canAI, onBack }: { id: string; canAI: boolean; onBack: () => void }) {
+function Workspace({ id, userId, canAI, onBack }: { id: string; userId: string; canAI: boolean; onBack: () => void }) {
+  const editorClient = useQueryClient();
+  const [restored] = useState(() => readRequirementEditor(editorClient, userId, id));
   const query = useQuery({ queryKey: ["requirement-workspace", id], queryFn: () => api.getRequirementWorkspace(id) });
   const [historyItem, setHistoryItem] = useState<string | null>(null);
   const [decisionsOpen, setDecisionsOpen] = useState(false);
@@ -108,19 +111,19 @@ function Workspace({ id, canAI, onBack }: { id: string; canAI: boolean; onBack: 
   const [sourceViewing, setSourceViewing] = useState("");
   const [filter, setFilter] = useState<RequirementFilter>("all");
   const [search, setSearch] = useState("");
-  const [draftAssumptions, setDraftAssumptions] = useState<string[]>([]);
-  const [draft, setDraft] = useState<RequirementDraft>({ ...blankDraft });
-  const [criteria, setCriteria] = useState("");
-  const [draftBaseline, setDraftBaseline] = useState("");
+  const [draftAssumptions, setDraftAssumptions] = useState<string[]>(restored?.assumptions || []);
+  const [draft, setDraft] = useState<RequirementDraft>(restored?.draft || { ...blankDraft });
+  const [criteria, setCriteria] = useState(restored?.criteria || "");
+  const [draftBaseline, setDraftBaseline] = useState(restored?.baseline || "");
   const [transition, setTransition] = useState<(() => void) | null>(null);
-  const [editing, setEditing] = useState<BusinessRequirement | undefined>();
-  const [showForm, setShowForm] = useState(false);
+  const [editing, setEditing] = useState<BusinessRequirement | undefined>(restored?.editing);
+  const [showForm, setShowForm] = useState(restored?.showForm || false);
   const [pending, setPending] = useState("");
   const [error, setError] = useState<unknown>(null);
-  const [notice, setNotice] = useState("");
-  const [reviewing, setReviewing] = useState<BusinessRequirement | null>(null);
-  const [reviewerRole, setReviewerRole] = useState("Product Owner");
-  const [reviewNote, setReviewNote] = useState("");
+  const [notice, setNotice] = useState(restored ? "Unsaved work restored in this tab. Review it before saving." : "");
+  const [reviewing, setReviewing] = useState<BusinessRequirement | null>(restored?.reviewing || null);
+  const [reviewerRole, setReviewerRole] = useState(restored?.reviewerRole || "Product Owner");
+  const [reviewNote, setReviewNote] = useState(restored?.reviewNote || "");
   const [gathered, setGathered] = useState<GatherSuggestions | null>(null);
   const [assistance, setAssistance] = useState<{ item: BusinessRequirement; result: RequirementAssistance } | null>(null);
   const source = useQuery({ queryKey: ["requirement-source", id, draft.source_id], queryFn: () => api.getRequirementSource(id, draft.source_id), enabled: Boolean(draft.source_id) });
@@ -129,11 +132,11 @@ function Workspace({ id, canAI, onBack }: { id: string; canAI: boolean; onBack: 
   const dirty = showForm && JSON.stringify([draft, criteria]) !== draftBaseline;
   const unsaved = dirty || Boolean(reviewing && reviewNote.trim());
   useEffect(() => {
-    if (!unsaved) return;
-    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
-    window.addEventListener("beforeunload", warn);
-    return () => window.removeEventListener("beforeunload", warn);
-  }, [unsaved]);
+    rememberRequirementEditor(editorClient, userId, id, unsaved ? {
+      draft, criteria, baseline: draftBaseline, assumptions: draftAssumptions,
+      editing, showForm, reviewing, reviewerRole, reviewNote,
+    } : null);
+  }, [editorClient, userId, id, unsaved, draft, criteria, draftBaseline, draftAssumptions, editing, showForm, reviewing, reviewerRole, reviewNote]);
 
   function switchEditor(action: () => void) {
     if (pending) return;
@@ -194,7 +197,7 @@ function Workspace({ id, canAI, onBack }: { id: string; canAI: boolean; onBack: 
 
   return <PageFrame width="wide">
     <ConfirmDialog open={Boolean(transition)} onOpenChange={open => { if (!open) setTransition(null); }} title="Discard unsaved changes?" description="Your current requirement edits or sign-off note have not been saved. Keep editing, or discard them to continue." cancelLabel="Keep editing" confirmLabel="Discard and continue" destructive onConfirm={() => { const action = transition; setTransition(null); action?.(); }} />
-    <Button variant="ghost" leadingIcon={<ArrowLeft size={16} />} onClick={() => switchEditor(onBack)}>All initiatives</Button>
+    <Button variant="ghost" leadingIcon={<ArrowLeft size={16} />} onClick={onBack}>All initiatives</Button>
     <PageHeader eyebrow="Business workspace" title={detail.workspace.title} description={detail.workspace.objective}
       meta={`${detail.workspace.request_type === "enhancement" ? "Enhancement" : "Approved project / request"} · ${detail.requirements.length} requirements · ${deliveryReady} delivery ready`}
       actions={<><Button variant="ghost" disabled={Boolean(pending)} onClick={() => query.refetch()}>Refresh</Button><Button variant="secondary" leadingIcon={<Download size={16} />} onClick={() => exportBrief(detail)}>Export BRD</Button></>} />
@@ -244,16 +247,16 @@ function Workspace({ id, canAI, onBack }: { id: string; canAI: boolean; onBack: 
       {assistance.result.suggestions.questions?.map((question, index) => <p key={index} className="text-sm">{question}</p>)}
       {assistance.result.mode === "story" && <><p className="text-sm">As a {assistance.result.suggestions.actor}, I want to {assistance.result.suggestions.action}, so that {assistance.result.suggestions.benefit}.</p><ul className="list-disc pl-5 text-sm">{assistance.result.suggestions.acceptance_criteria?.map((criterion, index) => <li key={index}>{criterion}</li>)}</ul>{Boolean(assistance.result.suggestions.assumptions?.length) && <div className="text-sm text-amber-800"><strong>Assumptions to confirm</strong><ul className="list-disc pl-5">{assistance.result.suggestions.assumptions?.map((assumption, index) => <li key={index}>{assumption}</li>)}</ul></div>}<p className="text-xs text-ink-500">Saving this refinement creates a revised draft and requires a new sign-off.</p><Button variant="secondary" disabled={Boolean(pending)} onClick={() => switchEditor(() => { const { item, result } = assistance; edit(item); setDraft({ source_id: item.source_id, title: item.title, evidence_quote: item.evidence_quote, priority: item.priority, actor: result.suggestions.actor || item.actor, action: result.suggestions.action || item.action, benefit: result.suggestions.benefit || item.benefit, acceptance_criteria: result.suggestions.acceptance_criteria || item.acceptance_criteria }); setCriteria((result.suggestions.acceptance_criteria || item.acceptance_criteria).join("\n")); setDraftAssumptions(result.suggestions.assumptions || []); setAssistance(null); })}>Review as a new revision</Button></>}
     </section>}
-      {reviewing && <form className={`${panelStyle} space-y-4`} onSubmit={event => { event.preventDefault(); void run(reviewing.id, () => api.validateBusinessRequirement(id, reviewing, { reviewer_role: reviewerRole, validation_note: reviewNote }), () => setReviewing(null)); }}>
+      {reviewing && <form className={`${panelStyle} space-y-4`} onSubmit={event => { event.preventDefault(); void run(reviewing.id, () => api.validateBusinessRequirement(id, reviewing, { reviewer_role: reviewerRole, validation_note: reviewNote }), () => { rememberRequirementEditor(editorClient, userId, id, null); setReviewing(null); }); }}>
         <h2 className="font-semibold">Sign off {reviewing.reference}: {reviewing.title}</h2>
         <p className="text-sm text-ink-500">Confirm that the requirement reflects the source, the expected outcome is agreed, and the acceptance criteria can be tested. Your signed-in account is recorded.</p>
         <Field label="Review capacity"><select className={inputStyle} value={reviewerRole} onChange={event => setReviewerRole(event.target.value)}>{["Product Owner", "Business Stakeholder", "Technical Business Analyst", "DTL"].map(role => <option key={role}>{role}</option>)}</select></Field>
         <Field label="Sign-off note"><textarea required minLength={10} maxLength={4000} className={inputStyle} value={reviewNote} onChange={event => setReviewNote(event.target.value)} placeholder="What was confirmed, and with whom?" /></Field>
         <div className="flex gap-2"><Button type="submit" pending={pending === reviewing.id} disabled={Boolean(pending)}>Sign off requirement</Button><Button variant="ghost" disabled={Boolean(pending)} onClick={() => switchEditor(() => setReviewing(null))}>Cancel</Button></div>
       </form>}
-      {showForm && <form className={`${panelStyle} space-y-4`} onSubmit={event => { event.preventDefault(); void run("requirement", () => api.saveBusinessRequirement(id, { ...draft, acceptance_criteria: criteria.split("\n").map(line => line.trim()).filter(Boolean) }, editing), () => { setShowForm(false); setEditing(undefined); }); }}>
+      {showForm && <form className={`${panelStyle} space-y-4`} onSubmit={event => { event.preventDefault(); void run("requirement", () => api.saveBusinessRequirement(id, { ...draft, acceptance_criteria: criteria.split("\n").map(line => line.trim()).filter(Boolean) }, editing), () => { rememberRequirementEditor(editorClient, userId, id, null); setShowForm(false); setEditing(undefined); }); }}>
         <h2 className="text-lg font-semibold">{editing ? "Edit requirement" : "Gather a requirement"}</h2>
-        {dirty && <p role="status" className="text-xs text-amber-800">Unsaved changes</p>}
+        {dirty && <p role="status" className="text-xs text-amber-800">Unsaved changes · Kept in this tab while you browse. Save before refreshing or closing.</p>}
         {draftAssumptions.length > 0 && <div className="rounded-lg bg-amber-50 p-3 text-sm text-amber-800"><strong>Resolve these assumptions while reviewing</strong><ul className="list-disc pl-5">{draftAssumptions.map((item, index) => <li key={index}>{item}<Button size="sm" variant="ghost" onClick={() => { setQuestionSeed({ question: item, requirementId: editing?.id || null }); setDecisionsOpen(true); }}>Track assumption</Button></li>)}</ul></div>}
         {editing?.status === "validated" && <p className="text-sm text-amber-700">Saving changes resets validation and removes the existing user story. Review the updated requirement again.</p>}
         <Field label="Evidence source"><select required value={draft.source_id} onChange={event => setDraft({ ...draft, source_id: event.target.value, evidence_quote: "" })} className={inputStyle}>{detail.sources.map(item => <option key={item.id} value={item.id}>{item.title}</option>)}</select></Field>
