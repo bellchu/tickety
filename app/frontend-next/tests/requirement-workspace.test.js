@@ -71,3 +71,20 @@ test('source coverage includes deferred evidence and counts multiple linked requ
   assert.equal(counts.has('unlinked'), false);
   assert.equal(library.sourceRequirementCounts([]).size, 0);
 });
+
+
+test('decision views separate blockers, exploration and recorded answers while retaining an active draft', () => {
+  const decisions = [
+    { id: 'a', status: 'open', blocking: true, question: 'Who owns failures?', owner_role: 'Operations', resolution: null },
+    { id: 'b', status: 'open', blocking: false, question: 'Additional channels?', owner_role: 'Sponsor', resolution: null },
+    { id: 'c', status: 'resolved', blocking: true, question: 'Which deadline?', owner_role: 'Sponsor', resolution: 'Five minutes' },
+  ];
+  const ids = (view, search = '', editing = '') => library.filterDecisions(decisions, view, search, editing).map(item => item.id);
+  assert.deepEqual(ids('open'), ['a', 'b']);
+  assert.deepEqual(ids('blocking'), ['a']);
+  assert.deepEqual(ids('exploratory'), ['b']);
+  assert.deepEqual(ids('recorded', '  FIVE  '), ['c']);
+  assert.deepEqual(ids('all', 'sponsor'), ['b', 'c']);
+  assert.deepEqual(ids('recorded', 'missing', 'a'), ['a']);
+  assert.deepEqual(ids('open', 'missing'), []);
+});

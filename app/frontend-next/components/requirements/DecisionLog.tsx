@@ -1,5 +1,6 @@
 "use client";
 
+import { filterDecisions, type DecisionFilter } from "@/lib/requirement-workspace";
 import { requirementErrorMessage } from "@/lib/requirement-errors";
 
 import { useEffect, useState } from "react";
@@ -28,7 +29,8 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
   const [resolution, setResolution] = useState(restored?.resolution || "");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
-  const [showHistory, setShowHistory] = useState(false);
+  const [view, setView] = useState<DecisionFilter>("open");
+  const [search, setSearch] = useState("");
   const hasQuestion = Boolean(question || owner || requirementId || !blocking);
   const hasAnswer = Boolean(resolving && resolution);
   useEffect(() => {
@@ -62,6 +64,8 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
     finally { setPending(false); }
   }
   const outstanding = decisions.filter(item => item.status === "open");
+  const visibleDecisions = filterDecisions(decisions, view, search, resolving);
+  const requirementNames = new Map(requirements.map(item => [item.id, `${item.reference}${item.priority === "wont" ? " · Not this time" : ""}`]));
   const blockers = outstanding.filter(item => item.blocking).length;
   return <section className="rounded-xl border border-linen-400 bg-white p-5" aria-label="Business decision log">
     <ConfirmDialog open={Boolean(transition)} onOpenChange={open => { if (!open) setTransition(null); }} title="Replace unsaved decision work?" description="The current question or answer will be discarded. Saved decisions are unchanged." cancelLabel="Keep editing" confirmLabel="Discard and continue" destructive onConfirm={() => { const action = transition; setTransition(null); action?.(); }} />
@@ -87,9 +91,16 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
         <Button variant="ghost" disabled={pending} onClick={() => setTransition(() => clearAnswer)}>Discard answer draft</Button>
       </div>}
       {error && <p role="alert" className="text-sm text-rust-600">{error}</p>}
-      <div className="flex items-center justify-between"><h3 className="text-sm font-semibold">Decision register</h3><label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={showHistory} onChange={event => setShowHistory(event.target.checked)} />Include recorded decisions</label></div>
-      {decisions.filter(item => showHistory || item.status === "open").map(item => <article key={item.id} className="space-y-3 rounded-lg border border-linen-400 p-4">
-        <div className="flex flex-wrap justify-between gap-2 text-xs text-ink-500"><span>{item.requirement_id ? requirements.find(row => row.id === item.requirement_id)?.reference : "Whole initiative"} · {item.owner_role}</span><span>{item.status === "resolved" ? "Decision recorded" : item.blocking ? "Blocks sign-off" : "Exploratory"}</span></div>
+      <h3 className="text-sm font-semibold">Decision register</h3>
+      <div className="grid gap-3 md:grid-cols-2">
+        <label className="space-y-1 text-sm">Find questions, owners or decisions<input type="search" className={input} value={search} onChange={event => setSearch(event.target.value)} /></label>
+        <label className="space-y-1 text-sm">Show decisions<select className={input} value={view} onChange={event => setView(event.target.value as DecisionFilter)}>
+          <option value="open">Open questions</option><option value="blocking">Blocks sign-off</option><option value="exploratory">Exploratory questions</option><option value="recorded">Recorded decisions</option><option value="all">All questions & decisions</option>
+        </select></label>
+      </div>
+      {resolving && <p className="text-xs text-ink-500">The question you are answering stays visible while you filter.</p>}
+      {visibleDecisions.map(item => <article key={item.id} className="space-y-3 rounded-lg border border-linen-400 p-4">
+        <div className="flex flex-wrap justify-between gap-2 text-xs text-ink-500"><span>{item.requirement_id ? requirementNames.get(item.requirement_id) || "Requirement unavailable" : "Whole initiative"} · {item.owner_role}</span><span>{item.status === "resolved" ? "Decision recorded" : item.blocking ? "Blocks sign-off" : "Exploratory"}</span></div>
         <h4 className="text-sm font-semibold">{item.question}</h4>
         {item.status === "resolved" ? <><p className="whitespace-pre-wrap text-sm text-ink-600">{item.resolution}</p><p className="text-xs text-ink-400">Recorded by {item.resolved_by || "Former member"} · {formatLocalDateTime(item.resolved_at!)}</p></> : resolving === item.id ? <form className="space-y-3" onSubmit={event => { event.preventDefault(); void save(() => api.resolveRequirementDecision(workspaceId, item.id, resolution), clearAnswer); }}>
           {hasAnswer && <p role="status" className="text-xs text-amber-800">Unsaved answer · Kept in this tab while you browse.</p>}
@@ -97,7 +108,7 @@ export function DecisionLog({ workspaceId, userId, requirements, decisions, open
           <div className="flex gap-2"><Button type="submit" pending={pending} disabled={pending}>Record decision</Button><Button variant="ghost" disabled={pending} onClick={() => changeAnswer("")}>Cancel</Button></div>
         </form> : <Button variant="secondary" size="sm" disabled={pending} onClick={() => changeAnswer(item.id)}>Record an answer</Button>}
       </article>)}
-      {!outstanding.length && !showHistory && <p className="text-sm text-ink-500">No open business questions are tracked.</p>}
+      {!visibleDecisions.length && <p role="status" className="text-sm text-ink-500">{decisions.length ? "No questions or decisions match this view. Change the filter or search to see more." : "No business questions are tracked yet."}</p>}
     </div>}
   </section>;
 }

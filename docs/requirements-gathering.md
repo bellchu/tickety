@@ -86,6 +86,10 @@ retains its author, time and rationale; an earlier resolution cannot be overwrit
 Changed circumstances require a new question. Answering a blocker does not restore
 sign-off automatically: update the requirement if needed and obtain a fresh review.
 
+Filter the register to open, blocking, exploratory or recorded decisions, and search
+by question, answer owner or resolution. An answer being edited stays visible across
+filters. Questions linked to deferred requirements display **Not this time**.
+
 AI questions can prefill the log for human review. Choose the owner, affected scope
 and blocking status before saving. Replacing an unfinished question, or switching
 away from an unfinished answer, asks whether to keep or discard the draft.
